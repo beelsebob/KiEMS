@@ -160,17 +160,11 @@ private:
 };
 
 // ---- points -> outline ----
-// TODO(gerber2ems bug, preserved intentionally): this should almost certainly connect each point
-// to the *next* one, i.e. `points[(idx + 1) % points.size()]`. As written, `idx % points.size()`
-// is always just `idx` again (idx never reaches points.size() inside this loop), so every segment
-// degenerates to a zero-length point-to-itself segment, meaning AperturePolygon and aperture-macro
-// outline primitives currently contribute no real copper. Kept bug-for-bug to match the Python
-// tool's current behaviour per explicit instruction; tracked as a follow-up fix.
 std::vector<TraceSegment> _pointsToOutline(const std::vector<Position>& points) {
     std::vector<TraceSegment> segments;
     segments.reserve(points.size());
     for (std::size_t idx = 0; idx < points.size(); ++idx) {
-        TraceSegment s(points[idx], points[idx % points.size()], "", 0, PlotMode::Linear);
+        TraceSegment s(points[idx], points[(idx + 1) % points.size()], "", 0, PlotMode::Linear);
         if (s.dominantX()) {
             s.setNormal(s.start().y() < 0);
         } else {
