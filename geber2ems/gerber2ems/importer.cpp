@@ -8,6 +8,10 @@
 #include <sstream>
 #include <string_view>
 
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
 #include <nlohmann/json.hpp>
 
 #include "config.hpp"
@@ -15,11 +19,35 @@
 #include "gerber_composite.hpp"
 #include "logging.hpp"
 
+extern char** environ;
+
 namespace gerber2ems {
 
 using namespace gerber2ems::constants;
 
 namespace {
+
+/// Runs `argv[0]` with the given arguments and waits for it to exit, letting its stdout/stderr
+/// pass through to ours (unlike gerbv's old invocation, kicad-cli's own diagnostics are useful to
+/// the user directly). Uses posix_spawnp (no shell) so filenames never need escaping.
+std::int32_t _runProcess(const std::vector<std::string>& args) {
+    std::vector<char*> argv;
+    argv.reserve(args.size() + 1);
+    for (const auto& arg : args) {
+        argv.push_back(const_cast<char*>(arg.c_str()));
+    }
+    argv.push_back(nullptr);
+
+    pid_t pid = 0;
+    const int rc = posix_spawnp(&pid, argv[0], nullptr, nullptr, argv.data(), environ);
+    if (rc != 0) {
+        logError("Failed to spawn process: " + args[0]);
+        return -1;
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return WIFEXITED(status) ? static_cast<std::int32_t>(WEXITSTATUS(status)) : -1;
+}
 
 // ---- small filesystem helpers ----
 
@@ -52,6 +80,30 @@ std::vector<std::string> _splitDot(const std::string& s) {
 }
 
 } // namespace
+
+void exportKicadPcb(const std::filesystem::path& kicadPcbPath) {
+    logInfo("Exporting gerbers/drill/position files from " + kicadPcbPath.string() + " via kicad-cli");
+    const std::filesystem::path fabDir = std::filesystem::current_path() / "fab";
+    std::filesystem::create_directories(fabDir);
+
+    const std::string pcb = kicadPcbPath.string();
+    const std::string fabOut = (fabDir.string() + "/");
+    const std::string posOut = (fabDir / "positions-pos.csv").string();
+
+    const std::int32_t drillStatus =
+        _runProcess({"kicad-cli", "pcb", "export", "drill", "--format", "excellon", "--excellon-separate-th", "-o",
+                     fabOut, pcb});
+    const std::int32_t gerberStatus = _runProcess({"kicad-cli", "pcb", "export", "gerbers", "--no-protel-ext",
+                                                    "--use-drill-file-origin", "-o", fabOut, pcb});
+    const std::int32_t posStatus = _runProcess({"kicad-cli", "pcb", "export", "pos", "--format", "csv",
+                                                 "--use-drill-file-origin", "--units", "mm", "-o", posOut, pcb});
+
+    if (drillStatus != 0 || gerberStatus != 0 || posStatus != 0) {
+        logError("kicad-cli export failed (drill/gerbers/pos exit codes: " + std::to_string(drillStatus) + "/" +
+                  std::to_string(gerberStatus) + "/" + std::to_string(posStatus) + ")");
+        std::exit(1);
+    }
+}
 
 std::pair<double, double> getDimensions() {
     const std::filesystem::path fabDir = std::filesystem::current_path() / "fab";

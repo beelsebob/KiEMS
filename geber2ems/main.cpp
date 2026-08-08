@@ -52,7 +52,9 @@ void printUsage() {
                  "  --oversampling N           [s] Field dump time-oversampling (default: 4)\n"
                  "  -t, --transparent          [p] Export graphs with transparent background\n"
                  "  --plot-phase               [p] Plot phase on S-param graphs\n"
-                 "  -i, --input INPUT          [p] Directory with input S-param files\n"
+                 "  -i, --input INPUT          [p] Directory with input S-param files, OR a .kicad_pcb\n"
+                 "                                 file to export gerbers/drill/position files from\n"
+                 "                                 (via kicad-cli) into ./fab/ before running\n"
                  "  -o, --output OUTPUT        [p] Directory where results will be placed\n"
                  "  -d, --debug                Enable debug logging\n"
                  "  -l, --log LEVEL            Set log level (DEBUG, INFO, WARNING, ERROR)\n";
@@ -272,6 +274,9 @@ void postprocess() {
 
 int main(int argc, char** argv) {
     const Arguments args = parseArguments(argc, argv);
+    if (args.input().extension() == ".kicad_pcb") {
+        exportKicadPcb(args.input());
+    }
     Config::load(args);
     setupLogging(args);
     if (args.updateConfig()) {
