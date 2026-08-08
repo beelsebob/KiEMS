@@ -1,11 +1,12 @@
-#include "libkicad.hpp"
+#include "libkicad_generators.hpp"
+#include "libkicad_result.hpp"
 
+#include <cstdint>
 #include <memory>
 
-// KiCad and wx headers are built without this project's strict warning settings and are not
-// ours to fix; silence their diagnostics for the duration of these includes (and, since some of
-// their inline/template bodies are only checked at the point we use them below, for the rest of
-// this file too).
+// KiCad and wx headers aren't built against this project's strict warning settings and aren't
+// ours to fix; silence their diagnostics for the includes and the rest of this file, since some
+// of their inline/template bodies are only checked where we actually use them below.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Weverything"
 
@@ -27,130 +28,129 @@
 
 #pragma clang diagnostic pop
 
-namespace
-{
+namespace libkicad::detail {
+
+namespace {
+
 // PGM_BASE has exactly one pure-virtual method; a minimal, non-mock, real subclass covers it.
-class MINIMAL_PGM : public PGM_BASE
-{
+class MinimalPgm : public PGM_BASE {
 public:
-    void MacOpenFile( const wxString& ) override {}
+    void MacOpenFile(const wxString&) override {}
 };
 
-bool ensureWxInitialized()
-{
+bool _ensureWxInitialized() {
     static bool initialized = false;
-
-    if( initialized )
+    if (initialized) {
         return true;
+    }
 
-    wxApp::SetInstance( new wxAppConsole() );
+    wxApp::SetInstance(new wxAppConsole());
     int argc = 0;
-
-    if( !wxInitialize( argc, static_cast<char**>( nullptr ) ) )
+    bool wxInitOk = wxInitialize(argc, static_cast<char**>(nullptr));
+    if (!wxInitOk) {
         return false;
+    }
 
-    SetPgm( new MINIMAL_PGM() );
+    SetPgm(new MinimalPgm());
 
-    // Real initialization (not a stub): sets up the process-wide SETTINGS_MANAGER that
-    // LIBRARY_MANAGER and friends reach via Pgm().GetSettingsManager() -- skipping this leaves
+    // Real initialization, not a stub: sets up the process-wide SETTINGS_MANAGER that
+    // LIBRARY_MANAGER and friends reach via Pgm().GetSettingsManager(). Skipping this leaves
     // that unique_ptr null and crashes the first time anything follows that path.
-    if( !Pgm().InitPgm( /* aHeadless = */ true ) )
+    bool pgmInitOk = Pgm().InitPgm(/* aHeadless = */ true);
+    if (!pgmInitOk) {
         return false;
+    }
 
     initialized = true;
     return true;
 }
+
+RawPadCountsResult _fail(std::string error) {
+    RawPadCountsResult result;
+    result.ok = false;
+    result.error = std::move(error);
+    return result;
+}
+
 } // namespace
 
-LibKicadPadQueryResult LibKicadCountPads( const std::string& projectPath, const std::string& boardPath )
-{
-    LibKicadPadQueryResult result;
+RawPadCountsResult countPadsRaw(const std::string& projectPath, const std::string& boardPath) {
+    ensureGeneratorsRegistered();
 
-    if( !ensureWxInitialized() )
-    {
-        result.errorMessage = "wxInitialize failed";
-        return result;
+    bool wxInitialized = _ensureWxInitialized();
+    if (!wxInitialized) {
+        return _fail("wxInitialize failed");
     }
 
     SETTINGS_MANAGER& settingsManager = Pgm().GetSettingsManager();
-    wxString wxProjectPath = wxString::FromUTF8( projectPath );
+    wxString wxProjectPath = wxString::FromUTF8(projectPath);
 
-    if( !settingsManager.LoadProject( wxProjectPath ) )
-    {
-        result.errorMessage = "LoadProject failed";
-        return result;
+    bool projectLoaded = settingsManager.LoadProject(wxProjectPath);
+    if (!projectLoaded) {
+        return _fail("LoadProject failed");
     }
 
-    PROJECT* project = settingsManager.GetProject( wxProjectPath );
-
-    if( !project )
-    {
-        result.errorMessage = "GetProject returned null";
-        return result;
+    PROJECT* project = settingsManager.GetProject(wxProjectPath);
+    if (!project) {
+        return _fail("GetProject returned null");
     }
 
     // Bypass PCB_IO_MGR's format registry (which unconditionally links in every foreign-format
     // importer, per pcbnew/pcb_io/pcb_io_mgr.cpp's static REGISTER_PLUGIN globals) and go
-    // straight to the one real KiCad-format plugin we need. This is still the exact same
+    // straight to the one real KiCad-format plugin needed. This is still the exact same
     // LoadBoard() implementation PCB_IO_MGR would have dispatched to for KICAD_SEXP.
     PCB_IO_KICAD_SEXPR plugin;
-    wxString wxBoardPath = wxString::FromUTF8( boardPath );
-    std::unique_ptr<BOARD> board( plugin.LoadBoard( wxBoardPath, nullptr, nullptr, project ) );
-
-    if( !board )
-    {
-        result.errorMessage = "LoadBoard failed";
-        return result;
+    wxString wxBoardPath = wxString::FromUTF8(boardPath);
+    std::unique_ptr<BOARD> board(plugin.LoadBoard(wxBoardPath, nullptr, nullptr, project));
+    if (!board) {
+        return _fail("LoadBoard failed");
     }
 
-    result.footprintCount = static_cast<int>( board->Footprints().size() );
-    result.trackCount = static_cast<int>( board->Tracks().size() );
-    result.zoneCount = static_cast<int>( board->Zones().size() );
+    PadCounts counts;
+    counts.footprintCount = static_cast<std::int32_t>(board->Footprints().size());
+    counts.trackCount = static_cast<std::int32_t>(board->Tracks().size());
+    counts.zoneCount = static_cast<std::int32_t>(board->Zones().size());
 
-    auto context = std::make_shared<HEADLESS_PCB_CONTEXT>( std::move( board ), project, nullptr );
-
-    if( !context->GetBoard() )
-    {
-        result.errorMessage = "HEADLESS_PCB_CONTEXT has no board";
-        return result;
+    auto context = std::make_shared<HEADLESS_PCB_CONTEXT>(std::move(board), project, nullptr);
+    if (!context->GetBoard()) {
+        return _fail("HEADLESS_PCB_CONTEXT has no board");
     }
 
-    API_HANDLER_PCB handler( context, nullptr );
+    API_HANDLER_PCB handler(context, nullptr);
 
     // Drive the query purely via protobuf -- exactly what the real API server does with a
     // message that arrived over the wire.
     kiapi::common::commands::GetItems getItems;
-    getItems.mutable_header()->mutable_document()->set_type( kiapi::common::types::DocumentType::DOCTYPE_PCB );
-    getItems.mutable_header()->mutable_document()->set_board_filename( wxFileName( wxBoardPath ).GetFullName().ToStdString() );
-    getItems.add_types( kiapi::common::types::KOT_PCB_PAD );
+    getItems.mutable_header()->mutable_document()->set_type(kiapi::common::types::DocumentType::DOCTYPE_PCB);
+    getItems.mutable_header()->mutable_document()->set_board_filename(
+            wxFileName(wxBoardPath).GetFullName().ToStdString());
+    getItems.add_types(kiapi::common::types::KOT_PCB_PAD);
 
     kiapi::common::ApiRequest request;
-    request.mutable_header()->set_client_name( "libkicad-smoketest" );
-
-    if( !request.mutable_message()->PackFrom( getItems ) )
-    {
-        result.errorMessage = "Failed to pack GetItems into request";
-        return result;
+    request.mutable_header()->set_client_name("libkicad-smoketest");
+    bool packed = request.mutable_message()->PackFrom(getItems);
+    if (!packed) {
+        return _fail("Failed to pack GetItems into request");
     }
 
-    API_RESULT apiResult = handler.Handle( request );
-
-    if( !apiResult.has_value() )
-    {
-        result.errorMessage = "Handle() failed: status=" + std::to_string( apiResult.error().status() )
-                               + " message=" + apiResult.error().error_message();
-        return result;
+    API_RESULT apiResult = handler.Handle(request);
+    if (!apiResult.has_value()) {
+        return _fail("Handle() failed: status=" + std::to_string(apiResult.error().status()) +
+                      " message=" + apiResult.error().error_message());
     }
 
     kiapi::common::commands::GetItemsResponse itemsResponse;
-
-    if( !apiResult.value().message().UnpackTo( &itemsResponse ) )
-    {
-        result.errorMessage = "Failed to unpack GetItemsResponse";
-        return result;
+    bool unpacked = apiResult.value().message().UnpackTo(&itemsResponse);
+    if (!unpacked) {
+        return _fail("Failed to unpack GetItemsResponse");
     }
 
-    result.padCount = itemsResponse.items_size();
-    result.success = true;
+    counts.padCount = static_cast<std::int32_t>(itemsResponse.items_size());
+
+    RawPadCountsResult result;
+    result.ok = true;
+    result.counts = counts;
     return result;
 }
+
+} // namespace libkicad::detail
