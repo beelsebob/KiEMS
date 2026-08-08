@@ -372,13 +372,13 @@ void Simulation::addDumpBoxes() {
             }
             offset -= layer.thickness();
         } else if (layer.kind() == LayerKind::Metal) {
-            // NOTE mirrors the Python source's comparison exactly: since metalIdx is only ever
-            // incremented after this check, `metalIdx == metalCount` never actually triggers, so
-            // "cu-outer" only ever captures the first (top) metal layer, never the last (bottom)
-            // one. This looks like an off-by-one bug (presumably meant `metalCount - 1`), but is
-            // preserved to match gerber2ems's current behaviour.
-            const bool exportInner = contains("cu-inner") && metalIdx != 0 && metalIdx != metalCount;
-            const bool exportOuter = contains("cu-outer") && (metalIdx == 0 || metalIdx == metalCount);
+            // NOTE deliberate deviation from the Python source, whose equivalent comparison is
+            // `metal_idx == metal_count`. Since metal_idx is only ever incremented after this check,
+            // that condition never actually triggers, so "cu-outer" only ever captured the first
+            // (top) metal layer, never the last (bottom) one. Compare against `metalCount - 1`
+            // instead so the last metal layer is correctly recognised as the bottom outer layer.
+            const bool exportInner = contains("cu-inner") && metalIdx != 0 && metalIdx != metalCount - 1;
+            const bool exportOuter = contains("cu-outer") && (metalIdx == 0 || metalIdx == metalCount - 1);
             if (exportInner || exportOuter) {
                 addSingleDumpBox("e_field_" + normName, offset);
             }
