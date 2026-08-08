@@ -185,11 +185,11 @@ std::optional<std::vector<std::complex<double>>> Postprocessor::getImpedance(std
         logError("Port no. " + std::to_string(port) + " doesn't exist");
         return std::nullopt;
     }
-    // NOTE: mirrors the Python source's condition exactly, which appears inverted (it errors out
-    // precisely when the impedance *was* successfully calculated, and would otherwise silently
-    // return the all-NaN placeholder). This method isn't called anywhere in gerber2ems's own CLI
-    // flow, so the bug is unreachable there, but is preserved here rather than silently fixed.
-    if (isValid(_impedances[static_cast<std::size_t>(port)])) {
+    // NOTE deliberate deviation from the Python source, whose equivalent condition is inverted (it
+    // errors out precisely when the impedance *was* successfully calculated, and would otherwise
+    // silently return the all-NaN placeholder). This method isn't called anywhere in gerber2ems's
+    // own CLI flow, so the bug is unreachable there, but the correct condition is used here.
+    if (!isValid(_impedances[static_cast<std::size_t>(port)])) {
         logError("Impedance for port " + std::to_string(port) + " wasn't calculated");
         return std::nullopt;
     }
