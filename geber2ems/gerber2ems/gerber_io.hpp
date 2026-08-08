@@ -9,6 +9,7 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace gerber2ems {
@@ -167,10 +168,25 @@ public:
                                         double scaleFactor = 1, const std::string& mirror = "N",
                                         double postRot = 0);
 
+    /// Returns finely-tessellated closed polygon loops (points per loop, no repeated closing vertex)
+    /// approximating this aperture's true shape with the given transform applied -- for the
+    /// Clipper2-based copper compositor. Unlike contours() (a flat, often-coarse segment chain used
+    /// only for grid-line-placement heuristics), this reconstructs the shape from its actual
+    /// geometric definition: exact for straight-edged shapes, tessellated to `tessellationTolerance`
+    /// (a chord/sagitta length, in the same units as coordinates) for curved ones. Transform
+    /// parameters mirror contours() exactly. Every shape returns exactly one loop except
+    /// ApertureMacro, whose sub-primitives may union into more than one disjoint region.
+    std::vector<std::vector<Position>> toPolygon(std::optional<Position> pos = std::nullopt, double rot = 0,
+                                                  double scaleFactor = 1, const std::string& mirror = "N",
+                                                  double postRot = 0, double tessellationTolerance = 1);
+
 protected:
     /// Returns the untransformed contours of this aperture. Non-const because ApertureMacro's
     /// override mutates its own instantiation args as a side effect (mirroring the Python source).
     virtual std::vector<TraceSegment> _contours() { return {}; }
+
+    /// Returns the untransformed polygon loop(s) for this aperture. See toPolygon().
+    virtual std::vector<std::vector<Position>> _toPolygon(double /*tessellationTolerance*/) { return {}; }
 
 private:
     std::optional<double> _holeDiameter;
@@ -184,6 +200,7 @@ public:
 
 protected:
     std::vector<TraceSegment> _contours() override;
+    std::vector<std::vector<Position>> _toPolygon(double tessellationTolerance) override;
 
 private:
     double _diameter;
@@ -198,6 +215,7 @@ public:
 
 protected:
     std::vector<TraceSegment> _contours() override;
+    std::vector<std::vector<Position>> _toPolygon(double tessellationTolerance) override;
 
 private:
     double _width;
@@ -211,6 +229,7 @@ public:
 
 protected:
     std::vector<TraceSegment> _contours() override;
+    std::vector<std::vector<Position>> _toPolygon(double tessellationTolerance) override;
 };
 
 /// Aperture shape that is a regular polygon.
@@ -227,6 +246,7 @@ public:
 
 protected:
     std::vector<TraceSegment> _contours() override;
+    std::vector<std::vector<Position>> _toPolygon(double tessellationTolerance) override;
 
 private:
     double _diameter;
@@ -247,6 +267,7 @@ public:
 
 protected:
     std::vector<TraceSegment> _contours() override;
+    std::vector<std::vector<Position>> _toPolygon(double tessellationTolerance) override;
 
 private:
     std::string _name;
@@ -255,6 +276,12 @@ private:
     std::vector<std::function<double(const std::vector<double>&)>> _variables;
     // Commands that create the shape of the aperture.
     std::vector<std::function<std::vector<TraceSegment>(const std::vector<double>&)>> _commands;
+    // Parallel to _commands: produces each primitive's own closed polygon loop directly (rather than
+    // via the TraceSegment-chain representation _commands uses), for toPolygon(). All sub-primitives
+    // are treated as additive regardless of their own exposure parameter -- macro-internal
+    // exposure/polarity compositing is an explicitly deferred, documented limitation matching this
+    // project's existing behaviour for macro shapes generally.
+    std::vector<std::function<std::vector<Position>(const std::vector<double>&, double)>> _polygonCommands;
 };
 
 /// An aperture as specified in a gerber file: a shape plus its intended function (e.g. Via,
@@ -274,6 +301,23 @@ private:
     std::shared_ptr<ApertureType> _data;
 };
 
+/// One copper-affecting paint operation, in original file order, tagged with the dark/clear
+/// polarity active at the moment it was parsed. Captured alongside (not instead of) the existing
+/// per-net `traces` map and flat `pads` list -- those remain net-/flash-order-only and are what
+/// grid_gen.cpp keeps using unchanged; `copperOps` exists specifically so a copper-region compositor
+/// can reproduce Gerber's actual dark/clear paint-order semantics, which the per-net/flat structures
+/// discard (cross-net and trace-vs-pad interleaving order isn't otherwise recoverable).
+struct CopperOp {
+    enum class Kind { Stroke, Pad, Zone };
+
+    Kind kind;
+    bool additive; // Polarity active when this operation was parsed (dark = true, clear = false).
+    // Stroke: a single drawn segment (already tessellated if it was an arc -- see _tessellateArc).
+    // Pad: a flashed aperture.
+    // Zone: a closed loop of segments forming one filled region (G36...G37), already force-closed.
+    std::variant<TraceSegment, Pad, std::vector<TraceSegment>> payload;
+};
+
 /// Parsed representation of a gerber file.
 class GerberFile {
 public:
@@ -284,6 +328,7 @@ public:
     const std::unordered_map<std::string, Aperture>& apertures() const { return _apertures; }
     const std::unordered_map<std::string, Trace>& traces() const { return _traces; }
     const std::vector<Pad>& pads() const { return _pads; }
+    const std::vector<CopperOp>& copperOps() const { return _copperOps; }
 
     /// Returns the trace for `net`, or an empty Trace if none exists (mirrors dict.get(net, Trace([]))).
     Trace traceForNet(const std::string& net) const;
@@ -305,6 +350,7 @@ private:
     std::unordered_map<std::string, Trace> _traces;
     std::vector<Pad> _pads;
     std::unordered_map<std::string, ApertureMacro> _apMacros;
+    std::vector<CopperOp> _copperOps;
 };
 
 } // namespace gerber2ems

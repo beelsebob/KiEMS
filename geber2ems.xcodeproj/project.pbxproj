@@ -211,6 +211,7 @@
 					"-lmatplot",
 					"-lpng16",
 					"-lz",
+					"-lClipper2",
 				);
 				SDKROOT = macosx;
 				SYSTEM_HEADER_SEARCH_PATHS = (
@@ -298,6 +299,7 @@
 					"-lmatplot",
 					"-lpng16",
 					"-lz",
+					"-lClipper2",
 				);
 				SDKROOT = macosx;
 				SYSTEM_HEADER_SEARCH_PATHS = (

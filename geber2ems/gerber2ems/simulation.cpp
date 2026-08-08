@@ -130,13 +130,16 @@ void Simulation::addGrid() {
 
 void Simulation::addContours(const std::vector<Triangle>& contours, double zHeight, std::int32_t layerIndex) {
     logDebug("Adding contours on z=" + std::to_string(zHeight));
-    const double pcbHeight = Config::sharedConfig().pcbHeight();
+    // Triangle vertices are already in native (x, y) board space -- see Triangle's doc comment.
+    // The old raster pipeline needed a row/column swap plus a Y-flip here to undo its PNG's pixel
+    // convention; the vector compositor produces triangles directly in board space, so neither is
+    // needed any more.
     for (const auto& tri : contours) {
         std::vector<double> xs;
         std::vector<double> ys;
         for (const Position& point : {tri.a, tri.b, tri.c}) {
-            xs.push_back(point.y());
-            ys.push_back(pcbHeight - point.x());
+            xs.push_back(point.x());
+            ys.push_back(point.y());
         }
         addPolygon(*_gerberMaterials[static_cast<std::size_t>(layerIndex)], xs, ys, axisIndex("z"), zHeight, 1);
     }
@@ -148,7 +151,7 @@ void Simulation::addGerbers() {
     std::vector<std::string> filenames;
     for (const auto& lc : Config::sharedConfig().layers()) {
         if (lc.kind() == LayerKind::Metal) {
-            filenames.push_back(lc.file() + ".png");
+            filenames.push_back(lc.file());
         }
     }
 

@@ -192,10 +192,8 @@ void geometry() {
     Simulation sim;
     importStackup();
     importPortPositions();
-    processGbrsToPngs();
 
-    const std::string topLayerName = Config::sharedConfig().getMetals().front().file();
-    const auto [width, height] = getDimensions(topLayerName + ".png");
+    const auto [width, height] = getDimensions();
     Config::sharedConfig().setPcbHeight(height);
     Config::sharedConfig().setPcbWidth(width);
 

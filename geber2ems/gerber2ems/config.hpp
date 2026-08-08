@@ -333,6 +333,13 @@ public:
 
     const Frequency& frequency() const { return _frequency; }
     std::int32_t maxSteps() const { return _maxSteps; }
+    /// Copper-geometry fidelity control, in microns: the maximum chord/sagitta deviation allowed
+    /// when tessellating curves (arcs, round pads/vias) into straight polygon edges, and the
+    /// point-simplification tolerance applied to the resulting copper regions before triangulation.
+    /// Smaller values produce more accurate (and more finely triangulated) curved geometry. Named
+    /// "pixel_size" in config JSON for backwards compatibility: this used to be the raster DPI
+    /// control for the tool's old gerbv-based rendering pipeline, which the same fidelity/cost
+    /// trade-off maps onto directly now that geometry is reconstructed as vectors instead.
     std::int32_t pixelSize() const { return _pixelSize; }
     const Via& via() const { return _via; }
     const Grid& grid() const { return _grid; }

@@ -1,12 +1,18 @@
 #include "gerber_io.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
+#include <numbers>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
 
+#include <clipper2/clipper.h>
+
+#include "config.hpp"
 #include "constants.hpp"
 #include "logging.hpp"
 
@@ -173,6 +179,114 @@ std::vector<TraceSegment> _pointsToOutline(const std::vector<Position>& points) 
         segments.push_back(s);
     }
     return segments;
+}
+
+// ---- arc tessellation ----
+//
+// Real G02/G03 draws are tessellated into a chain of straight sub-segments at parse time, rather
+// than adding an arc-geometry field to TraceSegment, so every downstream consumer keeps working
+// against plain start/stop/width/mode/normal segments unchanged. Only the G75 (multi-quadrant)
+// convention is supported -- G74 (single-quadrant) is legacy/deprecated and unused by every real
+// board this parser has been validated against; callers should reject it explicitly.
+//
+// Appends points tracing a circular arc around `center` at `radius`, sweeping from `startAngle`
+// through `startAngle + sweep` (radians; positive = counter-clockwise), choosing enough segments
+// that the chord-to-arc deviation (sagitta = radius * (1 - cos(segmentAngle / 2))) stays within
+// `toleranceLength`. Does not include the arc's own starting point (callers already have it, e.g.
+// from the previous arc/point in a chain) but does include the exact end point.
+void _appendArcPoints(std::vector<Position>& out, const Position& center, double radius, double startAngle,
+                       double sweep, double toleranceLength) {
+    const double clampedTolerance = std::min(toleranceLength, radius * 0.9);
+    const double maxSegAngle = clampedTolerance > 0
+                                    ? 2.0 * std::acos(std::max(-1.0, 1.0 - clampedTolerance / radius))
+                                    : std::numbers::pi / 32.0;
+    std::int32_t segments = static_cast<std::int32_t>(std::ceil(std::abs(sweep) / std::max(maxSegAngle, 1e-6)));
+    segments = std::clamp(segments, 1, 720);
+    out.reserve(out.size() + static_cast<std::size_t>(segments));
+    for (std::int32_t k = 1; k <= segments; ++k) {
+        const double angle = startAngle + sweep * (static_cast<double>(k) / static_cast<double>(segments));
+        out.emplace_back(center.x() + radius * std::cos(angle), center.y() + radius * std::sin(angle));
+    }
+}
+
+// Returns points approximating the arc from `start` to `stop` (start excluded; `stop` itself is
+// always the final entry, snapped exactly to the literal file value even if it doesn't land exactly
+// on the idealised circle, so downstream segment chaining -- e.g. zone-loop closure -- stays exact).
+std::vector<Position> _tessellateArc(const Position& start, const Position& stop, const Position& center,
+                                      bool clockwise, double toleranceLength) {
+    const double sx = start.x() - center.x();
+    const double sy = start.y() - center.y();
+    const double ex = stop.x() - center.x();
+    const double ey = stop.y() - center.y();
+    const double radius = std::hypot(sx, sy);
+
+    // Zero-radius arc: degenerate to a direct line (avoids a divide-by-zero below).
+    if (radius < 1e-9) {
+        return {stop};
+    }
+
+    const double startAngle = std::atan2(sy, sx);
+    const double endAngle = std::atan2(ey, ex);
+    // Full-circle draw: start and stop coincide even though the radius is nonzero. A naive angle
+    // difference would give ~0 sweep instead of a full turn, so this is special-cased explicitly.
+    const bool isFullCircle = std::hypot(ex - sx, ey - sy) < std::max(radius, 1.0) * 1e-6;
+
+    double sweep;
+    if (isFullCircle) {
+        sweep = clockwise ? -2.0 * std::numbers::pi : 2.0 * std::numbers::pi;
+    } else {
+        sweep = endAngle - startAngle;
+        if (clockwise && sweep >= 0) {
+            sweep -= 2.0 * std::numbers::pi;
+        } else if (!clockwise && sweep <= 0) {
+            sweep += 2.0 * std::numbers::pi;
+        }
+    }
+
+    std::vector<Position> points;
+    _appendArcPoints(points, center, radius, startAngle, sweep, toleranceLength);
+    points.back() = stop; // snap the idealised end point to the literal file value
+    return points;
+}
+
+// Widens a straight segment into a flat-ended (butt-capped) rectangle polygon of the given width,
+// matching the Gerber spec's definition of aperture-macro line primitives (codes 20/21), which are
+// always flat-ended -- unlike file-level D01 draws, which the parser restricts to circular
+// (round-capped) apertures only (see the "is not circular aperture" check in _processDrawingLine).
+std::vector<Position> _widenSegmentFlat(const Position& start, const Position& stop, double width) {
+    const double dx = stop.x() - start.x();
+    const double dy = stop.y() - start.y();
+    const double len = std::hypot(dx, dy);
+    if (len < 1e-9) {
+        return {};
+    }
+    const double nx = -dy / len * width / 2.0;
+    const double ny = dx / len * width / 2.0;
+    return {Position(start.x() + nx, start.y() + ny), Position(stop.x() + nx, stop.y() + ny),
+            Position(stop.x() - nx, stop.y() - ny), Position(start.x() - nx, start.y() - ny)};
+}
+
+// ---- small Clipper2 conversions (used only for compositing an aperture macro's own sub-primitives
+// together in ApertureMacro::_toPolygon; the copper-layer compositor has its own, separately-scaled
+// conversion) ----
+
+Clipper2Lib::Path64 _positionsToPath64(const std::vector<Position>& points) {
+    Clipper2Lib::Path64 path;
+    path.reserve(points.size());
+    for (const auto& p : points) {
+        path.emplace_back(static_cast<std::int64_t>(std::llround(p.x())),
+                           static_cast<std::int64_t>(std::llround(p.y())));
+    }
+    return path;
+}
+
+std::vector<Position> _path64ToPositions(const Clipper2Lib::Path64& path) {
+    std::vector<Position> points;
+    points.reserve(path.size());
+    for (const auto& pt : path) {
+        points.emplace_back(static_cast<double>(pt.x), static_cast<double>(pt.y));
+    }
+    return points;
 }
 
 // ---- aperture macro expression parsing ----
@@ -381,6 +495,28 @@ std::vector<TraceSegment> ApertureType::contours(std::optional<Position> pos, do
     return cont;
 }
 
+std::vector<std::vector<Position>> ApertureType::toPolygon(std::optional<Position> pos, double rot,
+                                                            double scaleFactor, const std::string& mirror,
+                                                            double postRot, double tessellationTolerance) {
+    std::vector<std::vector<Position>> loops = _toPolygon(tessellationTolerance);
+    const Position actualPos = pos.value_or(Position(0, 0));
+    for (auto& loop : loops) {
+        for (auto& p : loop) {
+            if (mirror.find('X') != std::string::npos) {
+                p.mirrorX();
+            }
+            if (mirror.find('Y') != std::string::npos) {
+                p.mirrorY();
+            }
+            p.rotate(rot);
+            p.scale(scaleFactor);
+            p.move(actualPos);
+            p.rotate(postRot);
+        }
+    }
+    return loops;
+}
+
 // ---- ApertureCircle ----
 
 std::vector<TraceSegment> ApertureCircle::_contours() {
@@ -397,6 +533,13 @@ std::vector<TraceSegment> ApertureCircle::_contours() {
         TraceSegment(points[2], points[3], "", 0, PlotMode::CircularClockwise),
         TraceSegment(points[3], points[0], "", 0, PlotMode::CircularClockwise),
     };
+}
+
+std::vector<std::vector<Position>> ApertureCircle::_toPolygon(double tessellationTolerance) {
+    std::vector<Position> points;
+    _appendArcPoints(points, Position(0, 0), _diameter / 2, 0.0, 2.0 * std::numbers::pi, tessellationTolerance);
+    points.pop_back(); // last point duplicates the first (angle 2pi == angle 0)
+    return {points};
 }
 
 // ---- ApertureRect ----
@@ -416,6 +559,17 @@ std::vector<TraceSegment> ApertureRect::_contours() {
         TraceSegment(points[2], points[3], "", 0, PlotMode::Linear, true),
         TraceSegment(points[3], points[0], "", 0, PlotMode::Linear, false),
     };
+}
+
+std::vector<std::vector<Position>> ApertureRect::_toPolygon(double /*tessellationTolerance*/) {
+    const double halfWidth = _width / 2;
+    const double halfHeight = _height / 2;
+    return {{
+        Position(halfWidth, halfHeight),
+        Position(-halfWidth, halfHeight),
+        Position(-halfWidth, -halfHeight),
+        Position(halfWidth, -halfHeight),
+    }};
 }
 
 // ---- ApertureObround ----
@@ -441,6 +595,40 @@ std::vector<TraceSegment> ApertureObround::_contours() {
     };
 }
 
+// Reconstructed from the Gerber spec's actual obround definition (straight sides + semicircular
+// caps of radius = half the shorter dimension), rather than by reinterpreting _contours()'s output
+// above -- that coarse 4-arc-segment approximation exists only for grid_gen's heuristic mesh-density
+// placement and was never meant to be exact.
+std::vector<std::vector<Position>> ApertureObround::_toPolygon(double tessellationTolerance) {
+    const double halfWidth = width() / 2;
+    const double halfHeight = height() / 2;
+    std::vector<Position> points;
+    if (width() <= height()) {
+        // Straight sides at x=+-halfWidth; semicircular caps (radius halfWidth) top and bottom.
+        const double capOffset = halfHeight - halfWidth;
+        points.emplace_back(halfWidth, capOffset);
+        _appendArcPoints(points, Position(0, capOffset), halfWidth, 0.0, std::numbers::pi, tessellationTolerance);
+        points.emplace_back(-halfWidth, -capOffset);
+        _appendArcPoints(points, Position(0, -capOffset), halfWidth, std::numbers::pi, std::numbers::pi,
+                          tessellationTolerance);
+    } else {
+        // Straight sides at y=+-halfHeight; semicircular caps (radius halfHeight) left and right.
+        const double capOffset = halfWidth - halfHeight;
+        points.emplace_back(capOffset, halfHeight);
+        _appendArcPoints(points, Position(capOffset, 0), halfHeight, std::numbers::pi / 2.0, -std::numbers::pi,
+                          tessellationTolerance);
+        points.emplace_back(-capOffset, -halfHeight);
+        _appendArcPoints(points, Position(-capOffset, 0), halfHeight, -std::numbers::pi / 2.0, -std::numbers::pi,
+                          tessellationTolerance);
+        // The traversal above is correct but clockwise (unlike every other aperture shape's
+        // counter-clockwise convention here); reverse it for consistency. Harmless either way for
+        // Clipper2's NonZero fill rule, but consistent winding avoids surprises for any future code
+        // that assumes it (e.g. direct shoelace-based orientation checks).
+        std::reverse(points.begin(), points.end());
+    }
+    return {points};
+}
+
 // ---- AperturePolygon ----
 
 std::vector<TraceSegment> AperturePolygon::_contours() {
@@ -453,6 +641,18 @@ std::vector<TraceSegment> AperturePolygon::_contours() {
         points.emplace_back(d2 * std::cos(angle), d2 * std::sin(angle));
     }
     return _pointsToOutline(points);
+}
+
+std::vector<std::vector<Position>> AperturePolygon::_toPolygon(double /*tessellationTolerance*/) {
+    std::vector<Position> points;
+    points.reserve(static_cast<std::size_t>(_vertices));
+    const double d2 = _diameter;
+    for (std::int32_t i = 0; i < _vertices; ++i) {
+        const double angleDegrees = _rotation + 360.0 * static_cast<double>(i) / static_cast<double>(_vertices);
+        const double angle = angleDegrees * (M_PI / 180.0);
+        points.emplace_back(d2 * std::cos(angle), d2 * std::sin(angle));
+    }
+    return {points};
 }
 
 // ---- ApertureMacro ----
@@ -493,6 +693,20 @@ ApertureMacro::ApertureMacro(const std::vector<std::string>& definitionLines) {
                 return ap.contours(Position(param.at(2) * _fileFormatScale(), param.at(3) * _fileFormatScale()), 0, 1,
                                     "N", rot);
             });
+            _polygonCommands.push_back(
+                [sline](const std::vector<double>& args, double tessellationTolerance) -> std::vector<Position> {
+                    std::vector<double> param;
+                    param.reserve(sline.size());
+                    for (const auto& p : sline) {
+                        param.push_back(p(args));
+                    }
+                    ApertureCircle ap(param.at(1) * _fileFormatScale());
+                    const double rot = param.size() > 4 ? param[4] : 0;
+                    // A circle's toPolygon() always yields exactly one loop.
+                    return ap.toPolygon(Position(param.at(2) * _fileFormatScale(), param.at(3) * _fileFormatScale()),
+                                         0, 1, "N", rot, tessellationTolerance)
+                        .front();
+                });
         } else if (op == "20") {
             // line start/stop/width
             _commands.push_back([sline](const std::vector<double>& args) -> std::vector<TraceSegment> {
@@ -508,6 +722,22 @@ ApertureMacro::ApertureMacro(const std::vector<std::string>& definitionLines) {
                 trace.rotate(param.at(6));
                 return {trace};
             });
+            _polygonCommands.push_back(
+                [sline](const std::vector<double>& args, double /*tessellationTolerance*/) -> std::vector<Position> {
+                    std::vector<double> param;
+                    param.reserve(sline.size());
+                    for (const auto& p : sline) {
+                        param.push_back(p(args));
+                    }
+                    std::vector<Position> poly = _widenSegmentFlat(
+                        Position(param.at(2) * _fileFormatScale(), param.at(3) * _fileFormatScale()),
+                        Position(param.at(4) * _fileFormatScale(), param.at(5) * _fileFormatScale()),
+                        param.at(1) * _fileFormatScale());
+                    for (auto& p : poly) {
+                        p.rotate(param.at(6));
+                    }
+                    return poly;
+                });
         } else if (op == "21") {
             // line center/width/length
             _commands.push_back([sline](const std::vector<double>& args) -> std::vector<TraceSegment> {
@@ -524,6 +754,23 @@ ApertureMacro::ApertureMacro(const std::vector<std::string>& definitionLines) {
                 trace.rotate(param.at(5));
                 return {trace};
             });
+            _polygonCommands.push_back(
+                [sline](const std::vector<double>& args, double /*tessellationTolerance*/) -> std::vector<Position> {
+                    std::vector<double> param;
+                    param.reserve(sline.size());
+                    for (const auto& p : sline) {
+                        param.push_back(p(args));
+                    }
+                    const double len2 = _fileFormatScale() * param.at(1) / 2;
+                    std::vector<Position> poly = _widenSegmentFlat(
+                        Position(param.at(3) * _fileFormatScale() - len2, param.at(4) * _fileFormatScale()),
+                        Position(param.at(3) * _fileFormatScale() + len2, param.at(4) * _fileFormatScale()),
+                        param.at(2) * _fileFormatScale());
+                    for (auto& p : poly) {
+                        p.rotate(param.at(5));
+                    }
+                    return poly;
+                });
         } else if (op == "4") {
             // outline
             _commands.push_back([sline](const std::vector<double>& args) -> std::vector<TraceSegment> {
@@ -544,6 +791,24 @@ ApertureMacro::ApertureMacro(const std::vector<std::string>& definitionLines) {
                 }
                 return contours;
             });
+            _polygonCommands.push_back(
+                [sline](const std::vector<double>& args, double /*tessellationTolerance*/) -> std::vector<Position> {
+                    std::vector<double> param;
+                    param.reserve(sline.size());
+                    for (const auto& p : sline) {
+                        param.push_back(p(args));
+                    }
+                    std::vector<Position> points;
+                    const auto vertexCount = static_cast<std::size_t>(param.at(1));
+                    for (std::size_t i = 0; i <= vertexCount; ++i) {
+                        points.emplace_back(param.at(2 + i * 2) * _fileFormatScale(),
+                                             param.at(3 + i * 2) * _fileFormatScale());
+                    }
+                    for (auto& p : points) {
+                        p.rotate(param.back());
+                    }
+                    return points;
+                });
         } else if (op == "5") {
             // polygon
             _commands.push_back([sline](const std::vector<double>& args) -> std::vector<TraceSegment> {
@@ -556,6 +821,19 @@ ApertureMacro::ApertureMacro(const std::vector<std::string>& definitionLines) {
                 return ap.contours(Position(param.at(2) * _fileFormatScale(), param.at(3) * _fileFormatScale()), 0, 1,
                                     "N", param.at(5));
             });
+            _polygonCommands.push_back(
+                [sline](const std::vector<double>& args, double tessellationTolerance) -> std::vector<Position> {
+                    std::vector<double> param;
+                    param.reserve(sline.size());
+                    for (const auto& p : sline) {
+                        param.push_back(p(args));
+                    }
+                    AperturePolygon ap(param.at(4) * _fileFormatScale(), static_cast<std::int32_t>(param.at(1)), 0);
+                    // A regular polygon's toPolygon() always yields exactly one loop.
+                    return ap.toPolygon(Position(param.at(2) * _fileFormatScale(), param.at(3) * _fileFormatScale()),
+                                         0, 1, "N", param.at(5), tessellationTolerance)
+                        .front();
+                });
         } else if (op == "7") {
             // Thermal relief -- TODO, matches the Python source (unimplemented, silently skipped).
         } else {
@@ -584,6 +862,45 @@ std::vector<TraceSegment> ApertureMacro::_contours() {
     return contours;
 }
 
+std::vector<std::vector<Position>> ApertureMacro::_toPolygon(double tessellationTolerance) {
+    // Unlike _contours(), evaluates variables into a local copy rather than mutating `_args`: every
+    // pad flashing this aperture shares the same ApertureMacro instance (see Aperture's shared_ptr),
+    // so toPolygon() must be safely callable more than once (and alongside contours()) on it.
+    std::vector<double> localArgs = _args;
+    for (const auto& variable : _variables) {
+        std::vector<double> callArgs;
+        callArgs.reserve(localArgs.size() + 1);
+        callArgs.push_back(0.0);
+        callArgs.insert(callArgs.end(), localArgs.begin(), localArgs.end());
+        localArgs.push_back(variable(callArgs));
+    }
+
+    // Union every sub-primitive's own polygon together. All sub-primitives are treated as additive
+    // regardless of their own exposure parameter (see _polygonCommands' declaration) -- so the result
+    // may still be more than one disjoint loop (e.g. a macro whose primitives don't all overlap),
+    // which is why this returns every resulting loop rather than picking just one.
+    Clipper2Lib::Paths64 accumulated;
+    for (const auto& command : _polygonCommands) {
+        std::vector<double> callArgs;
+        callArgs.reserve(localArgs.size() + 1);
+        callArgs.push_back(0.0);
+        callArgs.insert(callArgs.end(), localArgs.begin(), localArgs.end());
+        const std::vector<Position> poly = command(callArgs, tessellationTolerance);
+        if (poly.size() < 3) {
+            continue; // degenerate (e.g. a zero-length macro line primitive)
+        }
+        accumulated =
+            Clipper2Lib::Union(accumulated, {_positionsToPath64(poly)}, Clipper2Lib::FillRule::NonZero);
+    }
+
+    std::vector<std::vector<Position>> loops;
+    loops.reserve(accumulated.size());
+    for (const auto& path : accumulated) {
+        loops.push_back(_path64ToPositions(path));
+    }
+    return loops;
+}
+
 // ---- GerberFile ----
 
 /// Temporary state of the gerber file parser. Purely internal (never visible outside GerberFile),
@@ -603,7 +920,10 @@ struct GerberFile::ParserState {
     FileFormat fformat;
     bool zone = false; // Plotting zone (started by G37, ends with G36)
     std::vector<TraceSegment> zoneContours;
+    bool zoneHasGap = false; // A D02 (move) happened mid-zone: a second sub-contour, unsupported.
+    bool zoneAdditive = true; // Polarity snapshotted at G36 (region open); see the G37 handler.
     std::vector<std::string> apMacro; // Body of the currently-parsed aperture macro
+    bool multiQuadrant = false;       // Set by G75; G74 (single-quadrant) is rejected outright.
 };
 
 GerberFile::GerberFile(const std::filesystem::path& path) {
@@ -732,17 +1052,43 @@ void GerberFile::_processNormalLine(const std::string& line, ParserState& parser
         }
     } else if (split[0] == "G36") {
         parser.zoneContours.clear();
+        parser.zoneHasGap = false;
+        parser.zoneAdditive = parser.additive;
         parser.zone = true;
     } else if (split[0] == "G37") {
+        if (parser.zoneHasGap) {
+            // Spec-legal (a D02 move mid-region starts a second sub-contour, e.g. a hole), but this
+            // parser has no representation for multiple sub-contours in one region -- naively
+            // chaining the flat segment list would splice a bogus edge across the gap. Not exercised
+            // by any real board this tool has been validated against; rejected rather than silently
+            // producing corrupt geometry.
+            logError("Zone region has multiple sub-contours (a D02 move mid-region), which isn't supported: " +
+                      line);
+            std::exit(1);
+        }
+        if (parser.additive != parser.zoneAdditive) {
+            // Gerber doesn't really support an intra-region polarity change; cheap insurance against
+            // a malformed file silently picking an arbitrary polarity for this region.
+            logWarning("Zone region's polarity changed between G36 and G37; using the polarity active at G36: " +
+                        line);
+        }
         const Position sStart = parser.zoneContours.front().start();
         const Position sEnd = parser.zoneContours.back().stop();
         parser.zoneContours.emplace_back(sStart, sEnd, "", 0, PlotMode::Linear);
         Trace trace = traceForNet(parser.net);
         trace.addSegments(parser.zoneContours);
         _traces.insert_or_assign(parser.net, trace);
+        _copperOps.push_back(CopperOp{CopperOp::Kind::Zone, parser.zoneAdditive, parser.zoneContours});
         parser.zoneContours.clear();
         parser.zone = false;
-    } else if (split[0].size() >= 3 && (split[0].compare(0, 3, "G04") == 0 || split[0].compare(0, 3, "G75") == 0)) {
+    } else if (split[0] == "G74") {
+        // Single-quadrant arc mode: legacy/deprecated, and unused by every real board this parser
+        // has been validated against. Rejected outright rather than silently mis-tessellating arcs.
+        logError("Single-quadrant arc interpolation mode (G74) is not supported: " + line);
+        std::exit(1);
+    } else if (split[0] == "G75") {
+        parser.multiQuadrant = true;
+    } else if (split[0].size() >= 3 && split[0].compare(0, 3, "G04") == 0) {
         _unparsed += line;
     } else if (_startsWith(split[0], "G")) {
         parser.plotMode = static_cast<PlotMode>(split[0].at(2) - '0');
@@ -759,18 +1105,40 @@ void GerberFile::_processDrawingLine(const std::string& line, ParserState& parse
     const auto [y1, afterY] = _partition(afterX, 'D');
     const auto [y2, afterJ] = _partition(y1, 'J');
     const auto [y, afterI] = _partition(y2, 'I');
-    (void)afterJ;
-    (void)afterI;
     const std::string& op = afterY;
 
     const Position pos = parser.fformat.parsePosition(x, y);
     const std::int32_t opi = static_cast<std::int32_t>(std::stoi(op));
 
     if (opi == 1) {
+        // A chain of straight sub-segments approximating this draw: just [pos] for a linear draw;
+        // several interior points plus pos for a tessellated arc. See _tessellateArc for why arcs
+        // are flattened at parse time instead of carrying arc geometry on TraceSegment.
+        std::vector<Position> subPoints{pos};
+        if (parser.plotMode != PlotMode::Linear) {
+            if (afterI.empty() || afterJ.empty()) {
+                logWarning("Circular interpolation draw without an I/J offset, treating as linear: " + line);
+            } else if (!parser.multiQuadrant) {
+                logError("Arc interpolation used without multi-quadrant mode (G75) declared: " + line);
+                std::exit(1);
+            } else {
+                const double i = parser.fformat.xFormat().parse(afterI) * _fileFormatScale();
+                const double j = parser.fformat.yFormat().parse(afterJ) * _fileFormatScale();
+                const Position center(parser.pos.x() + i, parser.pos.y() + j);
+                const bool clockwise = parser.plotMode == PlotMode::CircularClockwise;
+                const double tolerance =
+                    static_cast<double>(Config::sharedConfig().pixelSize()) * constants::unitMultiplier;
+                subPoints = _tessellateArc(parser.pos, pos, center, clockwise, tolerance);
+            }
+        }
+
         if (parser.zone) {
-            parser.zoneContours.emplace_back(parser.pos, pos, "", 0, parser.plotMode);
+            Position segStart = parser.pos;
+            for (const Position& p : subPoints) {
+                parser.zoneContours.emplace_back(segStart, p, "", 0, PlotMode::Linear);
+                segStart = p;
+            }
         } else {
-            Trace trace = traceForNet(parser.net);
             const std::string apName = parser.aperture;
             const auto it = _apertures.find(apName);
             if (it == _apertures.end()) {
@@ -782,11 +1150,21 @@ void GerberFile::_processDrawingLine(const std::string& line, ParserState& parse
                 logError("Aperture `" + apName + "` used for line: `" + line + "` is not circular aperture!");
                 return;
             }
-            trace.addSegment(TraceSegment(parser.pos, pos, apName, circle->diameter(), parser.plotMode));
+            Trace trace = traceForNet(parser.net);
+            Position segStart = parser.pos;
+            for (const Position& p : subPoints) {
+                TraceSegment seg(segStart, p, apName, circle->diameter(), PlotMode::Linear);
+                trace.addSegment(seg);
+                _copperOps.push_back(CopperOp{CopperOp::Kind::Stroke, parser.additive, seg});
+                segStart = p;
+            }
             _traces.insert_or_assign(parser.net, trace);
         }
         parser.pos = pos;
     } else if (opi == 2) {
+        if (parser.zone && !parser.zoneContours.empty()) {
+            parser.zoneHasGap = true;
+        }
         parser.pos = pos;
     } else if (opi == 3) {
         const auto it = _apertures.find(parser.aperture);
@@ -794,8 +1172,10 @@ void GerberFile::_processDrawingLine(const std::string& line, ParserState& parse
         if (it != _apertures.end() && it->second.function() == "ComponentPad") {
             pinRef = parser.refpin;
         }
-        _pads.emplace_back(parser.aperture, parser.net, pos, pinRef, parser.additive, parser.mirror, parser.rotation,
-                            parser.scale);
+        Pad pad(parser.aperture, parser.net, pos, pinRef, parser.additive, parser.mirror, parser.rotation,
+                parser.scale);
+        _pads.push_back(pad);
+        _copperOps.push_back(CopperOp{CopperOp::Kind::Pad, parser.additive, pad});
     }
 }
 
