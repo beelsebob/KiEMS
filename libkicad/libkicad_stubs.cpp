@@ -10,6 +10,13 @@
 #include <cstdlib>
 #include <cstdio>
 
+// This entire file is glue code defining real KiCad class members (base-class initializers,
+// wx/std types in signatures, ...), so there's no clean boundary between "our code" and "KiCad's
+// headers" to scope diagnostics around -- silence KiCad/wx's own warnings for the whole file
+// rather than "our" code, which is these stub bodies, all directly built from their declarations.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Weverything"
+
 #include <board_loader.h>
 #include <pcb_edit_frame.h>
 #include <netlist_reader/board_netlist_updater.h>
@@ -17,14 +24,16 @@
 #include <tools/pcb_selection_tool.h>
 #include <project_pcb.h>
 #include <3d_cache/3d_cache.h>
-#include <pcb_base_frame.h>
 #include <3d_viewer/eda_3d_viewer_frame.h>
 #include <3d_viewer/eda_3d_viewer_settings.h>
 #include <navlib/nl_pcbnew_plugin.h>
 #include <navlib/nl_pcbnew_plugin_impl.h>
 #include <3d_navlib/nl_3d_viewer_plugin.h>
+#include <3d_canvas/board_adapter.h>
+#include <3d_rendering/track_ball.h>
+#include <pcb_io/odbpp/pcb_io_odbpp.h>
+#include <pcb_io/ipc2581/pcb_io_ipc2581.h>
 #include <zone_filler.h>
-#include <footprint_library_adapter.h>
 #include <tools/zone_filler_tool.h>
 #include <tools/drc_tool.h>
 #include <drc/rule_editor/drc_re_rule_loader.h>
@@ -121,9 +130,67 @@ void LoadNetlistFootprints( BOARD*, NETLIST&, REPORTER& )
 }
 
 // -- pcb_selection_tool.h ------------------------------------------------------------------------
+// The destructor (declared before Init() in the class body, non-inline) is PCB_SELECTION_TOOL's
+// real key function -- its typeinfo is a plain data symbol that dyld binds eagerly at load time
+// (unlike the lazily-resolved function pointers -Wl,-undefined,dynamic_lookup covers elsewhere in
+// this file), so it has to actually resolve, even though nothing here ever touches it at runtime.
+// Its m_priv member is a pimpl (std::unique_ptr<PRIV>) whose real definition lives only in
+// pcb_selection_tool.cpp, which we don't build, so the implicit member cleanup in our destructor
+// needs *some* complete PRIV type to call delete on. We never actually construct a
+// PCB_SELECTION_TOOL (only its typeinfo is referenced, for dynamic_cast/typeid checks in code we
+// never execute), so m_priv is always null here regardless of layout -- an empty stand-in type is
+// safe precisely because "delete"-ing a null pointer never touches it.
+class PCB_SELECTION_TOOL::PRIV
+{
+};
+
+PCB_SELECTION_TOOL::~PCB_SELECTION_TOOL()
+{
+}
+
 bool PCB_SELECTION_TOOL::Init()
 {
     return false;
+}
+
+// Defining the destructor as the key function means PCB_SELECTION_TOOL's vtable is emitted here
+// too, and unlike lazily-bound function calls, a vtable is data that dyld resolves eagerly at
+// load -- every non-pure virtual override needs a real symbol, not just Init()/GetSelection().
+void PCB_SELECTION_TOOL::Reset( TOOL_BASE::RESET_REASON )
+{
+}
+
+void PCB_SELECTION_TOOL::setTransitions()
+{
+}
+
+void PCB_SELECTION_TOOL::EnterGroup()
+{
+}
+
+void PCB_SELECTION_TOOL::ExitGroup( bool )
+{
+}
+
+bool PCB_SELECTION_TOOL::ctrlClickHighlights()
+{
+    return false;
+}
+
+void PCB_SELECTION_TOOL::select( EDA_ITEM* )
+{
+}
+
+void PCB_SELECTION_TOOL::unselect( EDA_ITEM* )
+{
+}
+
+void PCB_SELECTION_TOOL::highlight( EDA_ITEM*, int, SELECTION* )
+{
+}
+
+void PCB_SELECTION_TOOL::unhighlight( EDA_ITEM*, int, SELECTION* )
+{
 }
 
 PCB_SELECTION& PCB_SELECTION_TOOL::GetSelection()
@@ -167,21 +234,65 @@ void S3D_CACHE::CleanCacheDir( int )
 {
 }
 
-// -- pcb_base_frame.h / 3d_viewer -----------------------------------------------------------------
-// PCB_BASE_FRAME::CreateAndShow3D_Frame/Update3DView/Get3DViewerFrame (defined in pcb_base_frame.cpp,
-// which we don't build) construct and drive a real EDA_3D_VIEWER_FRAME. Turns out unavoidable: some
-// other pcbcommon.a member (pcb_viewer_tools.cpp, an interactive tool unrelated to GetItems) also
-// needs PCB_BASE_FRAME::CreateAndShow3D_Frame, which forces pcb_base_frame.cpp.o into the link
-// regardless, so its downstream 3D-viewer/SpaceMouse-navigation classes need real (if trivial)
-// definitions too.
-void PCB_BASE_FRAME::SetDisplayOptions( const PCB_DISPLAY_OPTIONS&, bool )
+// -- 3d_viewer / navlib ---------------------------------------------------------------------------
+// Note: pcb_base_frame.cpp.o and footprint_library_adapter.cpp.o (real KiCad code, defining
+// PCB_BASE_FRAME::SetDisplayOptions/GetPcbNewSettings and FOOTPRINT_LIBRARY_ADAPTER) end up in the
+// link regardless of anything here -- something else in pcbcommon.a needs them -- so we don't stub
+// those ourselves (that would just be a duplicate-symbol clash). -Wl,-undefined,dynamic_lookup on
+// the smoketest target covers plain function calls those pull in that we never reach at runtime
+// (e.g. PCB_IO_MGR's foreign-format importers), but it does NOT cover typeinfo/vtable data symbols
+// -- those get bound eagerly at process load regardless of whether the code behind them ever runs,
+// so PCB_BASE_FRAME::Get3DViewerFrame()'s dynamic_cast<EDA_3D_VIEWER_FRAME*> forces us to actually
+// define that class's vtable (and everything reachable from defining it) below, the same way
+// PCB_SELECTION_TOOL's did above.
+BOARD_ADAPTER::BOARD_ADAPTER()
 {
 }
 
-PCBNEW_SETTINGS* PCB_BASE_FRAME::GetPcbNewSettings() const
+BOARD_ADAPTER::~BOARD_ADAPTER()
 {
-    return nullptr;
 }
+
+TRACK_BALL::TRACK_BALL( float aInitialDistance ) : CAMERA( aInitialDistance )
+{
+}
+
+// TRACK_BALL's destructor is inline, so its key function is Drag() (the first out-of-line
+// virtual) -- same vtable-is-data-and-needs-every-slot story as PCB_SELECTION_TOOL above.
+void TRACK_BALL::Drag( const wxPoint& )
+{
+}
+
+void TRACK_BALL::Pan( const wxPoint& )
+{
+}
+
+void TRACK_BALL::Pan( const SFVEC3F& )
+{
+}
+
+void TRACK_BALL::Pan_T1( const SFVEC3F& )
+{
+}
+
+void TRACK_BALL::Reset_T1()
+{
+}
+
+void TRACK_BALL::SetT0_and_T1_current_T()
+{
+}
+
+void TRACK_BALL::Interpolate( float )
+{
+}
+
+// Minimal (empty) event table: DECLARE_EVENT_TABLE() in the header requires GetEventTable()/
+// GetEventHashTable() to be defined somewhere, and the real eda_3d_viewer_frame.cpp (which we
+// don't build) supplies them via BEGIN_EVENT_TABLE/END_EVENT_TABLE. An empty table is a real,
+// legitimate definition, not a stand-in -- it just binds no extra handlers.
+BEGIN_EVENT_TABLE( EDA_3D_VIEWER_FRAME, KIWAY_PLAYER )
+END_EVENT_TABLE()
 
 EDA_3D_VIEWER_FRAME::EDA_3D_VIEWER_FRAME( KIWAY* aKiway, PCB_BASE_FRAME* aParent,
                                            const wxString& aTitle, long aStyle ) :
@@ -205,6 +316,44 @@ void EDA_3D_VIEWER_FRAME::Redraw()
 {
 }
 
+void EDA_3D_VIEWER_FRAME::LoadSettings( APP_SETTINGS_BASE* )
+{
+}
+
+void EDA_3D_VIEWER_FRAME::SaveSettings( APP_SETTINGS_BASE* )
+{
+}
+
+void EDA_3D_VIEWER_FRAME::doReCreateMenuBar()
+{
+}
+
+void EDA_3D_VIEWER_FRAME::setupUIConditions()
+{
+}
+
+void EDA_3D_VIEWER_FRAME::handleIconizeEvent( wxIconizeEvent& )
+{
+}
+
+void EDA_3D_VIEWER_FRAME::ShowChangedLanguage()
+{
+}
+
+void EDA_3D_VIEWER_FRAME::CommonSettingsChanged( int )
+{
+}
+
+bool EDA_3D_VIEWER_FRAME::TryBefore( wxEvent& )
+{
+    return false;
+}
+
+APP_SETTINGS_BASE* EDA_3D_VIEWER_FRAME::config() const
+{
+    return nullptr;
+}
+
 EDA_3D_VIEWER_SETTINGS::EDA_3D_VIEWER_SETTINGS() : APP_SETTINGS_BASE( "3d_viewer_libkicad_stub", 0 )
 {
 }
@@ -219,24 +368,46 @@ NL_PCBNEW_PLUGIN::NL_PCBNEW_PLUGIN( PCB_DRAW_PANEL_GAL* )
     notImplemented( "NL_PCBNEW_PLUGIN::NL_PCBNEW_PLUGIN" );
 }
 
+NL_PCBNEW_PLUGIN::~NL_PCBNEW_PLUGIN()
+{
+}
+
 void NL_PCBNEW_PLUGIN::SetFocus( bool )
 {
 }
 
-// -- footprint_library_adapter.h -----------------------------------------------------------------
-// PROJECT_PCB (project_pcb.cpp, which we need for the S3D_CACHE accessors above) constructs one of
-// these; its real definition lives in footprint_library_adapter.cpp, which we don't build, and
-// pulling it in would in turn need PCB_IO_MGR's full format-plugin registry (pcb_io_mgr.cpp's
-// static REGISTER_PLUGIN globals unconditionally reference all 15 foreign CAD importers -- see the
-// comment on BOARD_LOADER::SaveBoard above). Stubbing just this constructor/destructor avoids that
-// whole branch.
-FOOTPRINT_LIBRARY_ADAPTER::FOOTPRINT_LIBRARY_ADAPTER( LIBRARY_MANAGER& aManager ) :
-        LIBRARY_MANAGER_ADAPTER( aManager )
+// -- pcb_io/odbpp, pcb_io/ipc2581 -----------------------------------------------------------------
+// Unlike the other 13 foreign-format importers PCB_IO_MGR's static registry references (whose
+// constructors are out-of-line, so `new PCB_IO_X()` inside the registry's lambda is just a lazy
+// function call that -Wl,-undefined,dynamic_lookup can defer), these two have inline constructors
+// -- the lambda inlines them directly, embedding a compile-time reference to the vtable itself,
+// which needs eager resolution just like the typeinfo/vtable cases above.
+PCB_IO_ODBPP::~PCB_IO_ODBPP()
 {
 }
 
-FOOTPRINT_LIBRARY_ADAPTER::~FOOTPRINT_LIBRARY_ADAPTER()
+std::vector<FOOTPRINT*> PCB_IO_ODBPP::GetImportedCachedLibraryFootprints()
 {
+    notImplemented( "PCB_IO_ODBPP::GetImportedCachedLibraryFootprints" );
+}
+
+void PCB_IO_ODBPP::SaveBoard( const wxString&, BOARD*, const std::map<std::string, UTF8>* )
+{
+    notImplemented( "PCB_IO_ODBPP::SaveBoard" );
+}
+
+PCB_IO_IPC2581::~PCB_IO_IPC2581()
+{
+}
+
+std::vector<FOOTPRINT*> PCB_IO_IPC2581::GetImportedCachedLibraryFootprints()
+{
+    notImplemented( "PCB_IO_IPC2581::GetImportedCachedLibraryFootprints" );
+}
+
+void PCB_IO_IPC2581::SaveBoard( const wxString&, BOARD*, const std::map<std::string, UTF8>* )
+{
+    notImplemented( "PCB_IO_IPC2581::SaveBoard" );
 }
 
 // -- zone_filler.h / zone_filler_tool.h -------------------------------------------------------------
@@ -366,3 +537,5 @@ KIFACE_BASE& Kiface()
     static LIBKICAD_STUB_KIFACE instance;
     return instance;
 }
+
+#pragma clang diagnostic pop

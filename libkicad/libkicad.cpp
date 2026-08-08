@@ -2,6 +2,13 @@
 
 #include <memory>
 
+// KiCad and wx headers are built without this project's strict warning settings and are not
+// ours to fix; silence their diagnostics for the duration of these includes (and, since some of
+// their inline/template bodies are only checked at the point we use them below, for the rest of
+// this file too).
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Weverything"
+
 #include <wx/app.h>
 #include <wx/init.h>
 #include <wx/filename.h>
@@ -17,6 +24,8 @@
 #include <api/common/commands/base_commands.pb.h>
 #include <api/common/envelope.pb.h>
 #include <api/common/types/base_types.pb.h>
+
+#pragma clang diagnostic pop
 
 namespace
 {
@@ -41,6 +50,13 @@ bool ensureWxInitialized()
         return false;
 
     SetPgm( new MINIMAL_PGM() );
+
+    // Real initialization (not a stub): sets up the process-wide SETTINGS_MANAGER that
+    // LIBRARY_MANAGER and friends reach via Pgm().GetSettingsManager() -- skipping this leaves
+    // that unique_ptr null and crashes the first time anything follows that path.
+    if( !Pgm().InitPgm( /* aHeadless = */ true ) )
+        return false;
+
     initialized = true;
     return true;
 }
@@ -56,7 +72,7 @@ LibKicadPadQueryResult LibKicadCountPads( const std::string& projectPath, const 
         return result;
     }
 
-    SETTINGS_MANAGER settingsManager;
+    SETTINGS_MANAGER& settingsManager = Pgm().GetSettingsManager();
     wxString wxProjectPath = wxString::FromUTF8( projectPath );
 
     if( !settingsManager.LoadProject( wxProjectPath ) )
