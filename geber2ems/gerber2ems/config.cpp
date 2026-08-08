@@ -444,17 +444,21 @@ nlohmann::json Config::_getCfgJson(const std::filesystem::path& cfgPath, bool up
 
         jsonCfg["ports"] = ports;
 
+        // NOTE deliberate deviation from the Python source, which subtracts 1 again here on top of
+        // the `number - 1` already applied by getPortsFromFile above -- since getPortsFromFile here
+        // returns the unshifted refdes number directly, these entries must match that convention
+        // without a further shift.
         if (ports.size() == 2 || ports.size() == 3) {
             jsonCfg["traces"] = nlohmann::json::array(
-                {nlohmann::json{{"start", std::get<0>(portsPnp[portsPnp.size() - 1]) - 1},
-                                 {"stop", std::get<0>(portsPnp[portsPnp.size() - 2]) - 1}}});
+                {nlohmann::json{{"start", std::get<0>(portsPnp[portsPnp.size() - 1])},
+                                 {"stop", std::get<0>(portsPnp[portsPnp.size() - 2])}}});
         }
         if (ports.size() >= 4) {
             jsonCfg["differential_pairs"] = nlohmann::json::array(
-                {nlohmann::json{{"start_p", std::get<0>(portsPnp[portsPnp.size() - 1]) - 1},
-                                 {"stop_p", std::get<0>(portsPnp[portsPnp.size() - 2]) - 1},
-                                 {"start_n", std::get<0>(portsPnp[portsPnp.size() - 3]) - 1},
-                                 {"stop_n", std::get<0>(portsPnp[portsPnp.size() - 4]) - 1}}});
+                {nlohmann::json{{"start_p", std::get<0>(portsPnp[portsPnp.size() - 1])},
+                                 {"stop_p", std::get<0>(portsPnp[portsPnp.size() - 2])},
+                                 {"start_n", std::get<0>(portsPnp[portsPnp.size() - 3])},
+                                 {"stop_n", std::get<0>(portsPnp[portsPnp.size() - 4])}}});
         }
     }
     return jsonCfg;
