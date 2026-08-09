@@ -6,17 +6,15 @@
 #include <limits>
 #include <map>
 #include <regex>
-#include <sstream>
 #include <string_view>
 
 #include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include <nlohmann/json.hpp>
-
 #include "config.hpp"
 #include "constants.hpp"
+#include "libkicad_query.hpp"
 #include "logging.hpp"
 
 extern char** environ;
@@ -67,16 +65,6 @@ std::vector<std::filesystem::path> _globSuffix(const std::filesystem::path& dir,
         }
     }
     return result;
-}
-
-std::vector<std::string> _splitDot(const std::string& s) {
-    std::vector<std::string> parts;
-    std::stringstream ss(s);
-    std::string part;
-    while (std::getline(ss, part, '.')) {
-        parts.push_back(part);
-    }
-    return parts;
 }
 
 } // namespace
@@ -169,32 +157,27 @@ std::expected<std::vector<ViaHole>, std::string> getVias(const PathsConfig& path
 }
 
 std::expected<void, std::string> importStackup(const PathsConfig& paths, EMSConfig& config) {
-    // Deliberately not under fab/: everything in fab/ is regenerated wholesale by exportKicadPcb()
-    // (kicad-cli's own gerber/drill/pos export), but the stackup has no kicad-cli export equivalent
-    // -- it's user-maintained (exported by hand from KiCad's Board Setup > Board Stackup dialog),
-    // so it lives beside simulation.json instead, alongside the other input the user controls.
-    std::ifstream file(paths.stackupFile);
-    if (!file.is_open()) {
-        return std::unexpected("Couldn't open stackup file: " + paths.stackupFile.string());
-    }
-    nlohmann::json stackup;
-    try {
-        file >> stackup;
-    } catch (const nlohmann::json::parse_error& error) {
-        return std::unexpected(std::string("JSON decoding failed: ") + error.what());
+    // Queries the live board's own Board Setup > Board Stackup data (via libkicad_query, which
+    // shells out to libkicad_smoketest -- see its module comment) rather than a hand-maintained
+    // stackup.json: the board file is the actual source of truth, and keeping a second,
+    // easily-stale copy of the same data in sync by hand was never anything but a workaround for
+    // not having this query available yet. Requires fab/board.kicad_pcb (persisted by
+    // exportKicadPcb()), exactly like port_resolution.cpp's own libkicad_query calls.
+    auto stackupResult = libkicad_query::stackup(paths, "Reading board stackup");
+    if (!stackupResult) {
+        return std::unexpected(stackupResult.error());
     }
 
-    const std::string ver = stackup.value("format_version", std::string());
-    const std::vector<std::string> verParts = _splitDot(ver);
-    const std::vector<std::string> stackupParts = _splitDot(std::string(stackupFormatVersion));
-
-    const bool ok = !ver.empty() && verParts.size() >= 2 && stackupParts.size() >= 2 && verParts[0] == stackupParts[0] &&
-                    verParts[1] >= stackupParts[1]; // mirrors the Python source's string comparison
-    if (!ok) {
-        return std::unexpected("Stackup format (" + ver + ") is not supported (supported: " +
-                                std::string(stackupFormatVersion) + ")");
+    std::vector<LayerConfig> layers;
+    layers.reserve(stackupResult->size());
+    for (const auto& layer : *stackupResult) {
+        if (layer.kind == libkicad_query::StackupLayerKind::Copper) {
+            layers.emplace_back(LayerKind::Metal, layer.name, layer.thicknessMm);
+        } else {
+            layers.emplace_back(LayerKind::Substrate, layer.name, layer.thicknessMm, layer.epsilonR);
+        }
     }
-    config.loadStackup(stackup);
+    config.loadStackup(std::move(layers));
     return {};
 }
 

@@ -53,4 +53,13 @@ std::expected<std::vector<PadPosition>, std::string> padsOnNet(const std::string
     return raw.pads;
 }
 
+std::expected<std::vector<StackupLayer>, std::string> stackup(const std::string& projectPath,
+                                                                const std::string& boardPath) {
+    detail::RawStackupResult raw = detail::stackupRaw(projectPath, boardPath);
+    if (!raw.ok) {
+        return std::unexpected(std::move(raw.error));
+    }
+    return raw.layers;
+}
+
 } // namespace libkicad

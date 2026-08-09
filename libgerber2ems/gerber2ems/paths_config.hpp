@@ -14,7 +14,6 @@ namespace gerber2ems {
 struct PathsConfig {
     std::filesystem::path configFile;      // the resolved simulation.json path itself
     std::filesystem::path configDir;       // configFile's parent directory; base for the rest
-    std::filesystem::path stackupFile;     // configDir / "stackup.json"
     std::filesystem::path fabDir;          // configDir / "fab" -- kicad-cli-regenerated gerbers/drill/pos
     std::filesystem::path fabBoardFile;    // configDir / "fab/board.kicad_pcb"
     std::filesystem::path fabProjectFile;  // configDir / "fab/board.kicad_pro"

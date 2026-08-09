@@ -9,7 +9,6 @@ PathsConfig PathsConfig::forConfigFile(std::filesystem::path configFile, std::fi
                                         std::filesystem::path fdtdWorkerPath) {
     PathsConfig paths;
     const std::filesystem::path configDir = configFile.parent_path();
-    paths.stackupFile = configDir / "stackup.json";
     paths.fabDir = configDir / "fab";
     paths.fabBoardFile = configDir / constants::fabBoardFile;
     paths.fabProjectFile = configDir / constants::fabProjectFile;

@@ -44,4 +44,11 @@ std::expected<std::vector<PadPosition>, std::string> padsOnNet(const std::string
                                                                  const std::string& boardPath,
                                                                  const std::string& netName);
 
+/// The board's physical stackup (Board Setup > Board Stackup), top-to-bottom -- solder mask/paste/
+/// silkscreen entries are omitted, only copper and dielectric layers are returned. If the board's
+/// file has no explicit stackup section, this is KiCad's own computed default for its layer count,
+/// not an error.
+std::expected<std::vector<StackupLayer>, std::string> stackup(const std::string& projectPath,
+                                                                const std::string& boardPath);
+
 } // namespace libkicad

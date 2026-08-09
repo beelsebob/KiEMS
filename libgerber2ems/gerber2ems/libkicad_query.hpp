@@ -55,6 +55,26 @@ std::expected<std::vector<PadIdentity>, std::string> padsOnNet(const PathsConfig
 std::expected<PadIdentity, std::string> resolvePin(const PathsConfig& paths, const std::string& footprint,
                                                      const std::string& pin, const std::string& context);
 
+enum class StackupLayerKind {
+    Copper,
+    Core,
+    Prepreg,
+};
+
+/// One layer of the board's physical stackup, as reported by libkicad_smoketest's `stackup` query
+/// mode -- see libkicad_result.hpp's identical StackupLayer for field semantics (this is
+/// gerber2ems_query's own copy of that shape, for the same subprocess-decoupling reason
+/// PadIdentity mirrors libkicad::PadPosition instead of including libkicad's headers directly).
+struct StackupLayer {
+    StackupLayerKind kind = StackupLayerKind::Copper;
+    std::string name;
+    double thicknessMm = 0;
+    double epsilonR = 0;
+};
+
+/// The board's physical stackup, top-to-bottom. See netForFootprintPin for `context`.
+std::expected<std::vector<StackupLayer>, std::string> stackup(const PathsConfig& paths, const std::string& context);
+
 /// Resolves an InvolvedNetConfig entry (net_class / net / footprint+pins) to a list of net names,
 /// per its documented semantics (a footprint+pin entry resolves to that pin's net, deduplicated
 /// across its pins() list).

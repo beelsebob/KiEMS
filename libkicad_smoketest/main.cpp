@@ -24,6 +24,23 @@ void _printPad(const libkicad::PadPosition& pad) {
                << '\n';
 }
 
+std::string _stackupLayerKindName(libkicad::StackupLayerKind kind) {
+    switch (kind) {
+        case libkicad::StackupLayerKind::Copper:
+            return "copper";
+        case libkicad::StackupLayerKind::Core:
+            return "core";
+        case libkicad::StackupLayerKind::Prepreg:
+            return "prepreg";
+    }
+    return "unknown";
+}
+
+void _printStackupLayer(const libkicad::StackupLayer& layer) {
+    std::cout << _stackupLayerKindName(layer.kind) << '\t' << layer.name << '\t' << _formatDouble(layer.thicknessMm)
+               << '\t' << _formatDouble(layer.epsilonR) << '\n';
+}
+
 // Machine-readable query mode used by port_resolution.cpp (invoked as a subprocess, exactly like
 // this project already invokes kicad-cli -- see importer.cpp's _runProcess). libkicad pulls in
 // KiCad's own wx/protobuf/abseil/OpenCASCADE dependency chain, including a *different* build of
@@ -80,10 +97,23 @@ int _runQuery(int argc, char** argv) {
         return 0;
     }
 
+    if (command == "stackup" && argc == 4) {
+        const std::expected<std::vector<libkicad::StackupLayer>, std::string> layers =
+                libkicad::stackup(argv[2], argv[3]);
+        if (!layers.has_value()) {
+            std::cerr << layers.error() << "\n";
+            return 1;
+        }
+        for (const libkicad::StackupLayer& layer : *layers) {
+            _printStackupLayer(layer);
+        }
+        return 0;
+    }
+
     std::cerr << "usage: " << argv[0]
                << " {net-for-pin <project> <board> <footprint> <pin> | nets-in-class <project> <board> "
                   "<net_class> | pads-on-net <project> <board> <net> | resolve-pin <project> <board> "
-                  "<footprint> <pin>}\n";
+                  "<footprint> <pin> | stackup <project> <board>}\n";
     return 2;
 }
 
@@ -106,6 +136,19 @@ int _runSmoketest(int argc, char** argv) {
     std::cout << "Footprints: " << result->footprintCount << ", Tracks: " << result->trackCount
                << ", Zones: " << result->zoneCount << "\n";
     std::cout << "GetItems(PAD) via protobuf handler returned " << result->padCount << " items\n";
+
+    std::expected<std::vector<libkicad::StackupLayer>, std::string> stackup = libkicad::stackup(argv[1], argv[2]);
+    if (!stackup.has_value()) {
+        std::cerr << "FAILED stackup: " << stackup.error() << "\n";
+        return 1;
+    }
+    std::cout << "Stackup has " << stackup->size() << " layer(s)";
+    if (!stackup->empty()) {
+        const libkicad::StackupLayer& first = stackup->front();
+        std::cout << ", e.g. \"" << first.name << "\" (" << _stackupLayerKindName(first.kind) << "), "
+                   << first.thicknessMm << " mm thick";
+    }
+    std::cout << "\n";
 
     if (argc == 6) {
         const std::string footprintRef = argv[3];
@@ -149,7 +192,8 @@ int _runSmoketest(int argc, char** argv) {
     return 0;
 }
 
-const std::vector<std::string> kQueryCommands = {"net-for-pin", "nets-in-class", "pads-on-net", "resolve-pin"};
+const std::vector<std::string> kQueryCommands = {"net-for-pin", "nets-in-class", "pads-on-net", "resolve-pin",
+                                                  "stackup"};
 
 } // namespace
 

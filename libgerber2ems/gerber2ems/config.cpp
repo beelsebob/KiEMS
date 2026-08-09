@@ -268,28 +268,14 @@ void from_json(const nlohmann::json& j, SingleEndedConfig& p) {
     }
 }
 
-LayerKind LayerConfig::_parseKind(const std::string& kind) {
-    if (kind == "core" || kind == "prepreg") {
-        return LayerKind::Substrate;
-    }
-    if (kind == "copper") {
-        return LayerKind::Metal;
-    }
-    return LayerKind::Other;
-}
-
-LayerConfig::LayerConfig(const nlohmann::json& config) {
-    _kind = _parseKind(config.at("type").get<std::string>());
-    _thickness = 0;
-    _name = config.at("name").get<std::string>();
-    if (!config.at("thickness").is_null()) {
-        _thickness = config.at("thickness").get<double>() / 1000 / constants::baseUnit * constants::unitMultiplier;
-    }
+LayerConfig::LayerConfig(LayerKind kind, std::string name, double thicknessMm, double epsilon)
+    : _kind(kind), _thickness(thicknessMm / 1000 / constants::baseUnit * constants::unitMultiplier),
+      _name(std::move(name)) {
     if (_kind == LayerKind::Metal) {
         _file = _name;
         std::replace(_file.begin(), _file.end(), '.', '_');
     } else if (_kind == LayerKind::Substrate) {
-        _epsilon = config.at("epsilon").get<double>();
+        _epsilon = epsilon;
     }
 }
 
@@ -448,18 +434,7 @@ std::optional<std::int32_t> EMSConfig::metalLayerIndexForFileName(const std::str
     return std::nullopt;
 }
 
-void EMSConfig::loadStackup(const nlohmann::json& stackup) {
-    std::vector<LayerConfig> parsed;
-    for (const auto& layer : stackup.at("layers")) {
-        parsed.emplace_back(layer);
-    }
-    _layers.clear();
-    for (auto& layer : parsed) {
-        if (layer.kind() == LayerKind::Metal || layer.kind() == LayerKind::Substrate) {
-            _layers.push_back(std::move(layer));
-        }
-    }
-}
+void EMSConfig::loadStackup(std::vector<LayerConfig> layers) { _layers = std::move(layers); }
 
 bool EMSConfig::_isCfgVersionInvalid(const std::optional<std::string>& version) {
     if (!version.has_value()) {

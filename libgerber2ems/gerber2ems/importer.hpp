@@ -43,8 +43,9 @@ std::expected<void, std::string> exportKicadPcb(const PathsConfig& paths, const 
 /// positions/diameters.
 std::expected<std::vector<ViaHole>, std::string> getVias(const PathsConfig& paths);
 
-/// Imports stackup information from `paths.stackupFile`, next to simulation.json (not under fab/,
-/// which holds only kicad-cli-regenerated output), into `config`.
+/// Imports stackup information (copper/dielectric layer thicknesses and dielectric constants) from
+/// the live board, via libkicad_query, into `config`. Requires fab/board.kicad_pcb (persisted by
+/// exportKicadPcb()).
 std::expected<void, std::string> importStackup(const PathsConfig& paths, EMSConfig& config);
 
 } // namespace gerber2ems

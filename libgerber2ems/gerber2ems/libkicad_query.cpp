@@ -137,6 +137,23 @@ std::expected<std::vector<std::string>, std::string> _query(const PathsConfig& p
     return _splitLines(result->stdOut);
 }
 
+StackupLayer _parseStackupLine(const std::string& line) {
+    const std::vector<std::string> fields = _splitTabs(line);
+    StackupLayer layer;
+    const std::string& kind = fields.at(0);
+    if (kind == "copper") {
+        layer.kind = StackupLayerKind::Copper;
+    } else if (kind == "core") {
+        layer.kind = StackupLayerKind::Core;
+    } else {
+        layer.kind = StackupLayerKind::Prepreg;
+    }
+    layer.name = fields.at(1);
+    layer.thicknessMm = std::stod(fields.at(2));
+    layer.epsilonR = std::stod(fields.at(3));
+    return layer;
+}
+
 } // namespace
 
 std::expected<std::string, std::string> netForFootprintPin(const PathsConfig& paths, const std::string& footprint,
@@ -174,6 +191,16 @@ std::expected<PadIdentity, std::string> resolvePin(const PathsConfig& paths, con
         return std::unexpected(context + ": empty response from libkicad_smoketest");
     }
     return _parsePadLine(lines->front());
+}
+
+std::expected<std::vector<StackupLayer>, std::string> stackup(const PathsConfig& paths, const std::string& context) {
+    auto lines = _query(paths, "stackup", {}, context);
+    if (!lines) return std::unexpected(std::move(lines).error());
+    std::vector<StackupLayer> layers;
+    for (const std::string& line : *lines) {
+        layers.push_back(_parseStackupLine(line));
+    }
+    return layers;
 }
 
 std::expected<std::vector<std::string>, std::string> resolveInvolvedNetNames(const PathsConfig& paths,

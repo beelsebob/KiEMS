@@ -36,7 +36,6 @@ inline const std::filesystem::path fabProjectFile = "fab/board.kicad_pro";
 // Via geometry is approximated using n-sided right prism
 inline constexpr std::int32_t viaPolygon = 12;
 
-inline constexpr std::string_view stackupFormatVersion = "1.0";
 inline constexpr std::string_view configFormatVersion = "2.0";
 
 // Number of frequency-domain sample points S-parameters/impedance/delay are computed and plotted

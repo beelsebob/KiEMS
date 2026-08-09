@@ -17,6 +17,25 @@ struct PadCounts {
     std::int32_t padCount = 0;
 };
 
+/// What a BOARD_STACKUP_ITEM (see KiCad's board_stackup_manager/board_stackup.h) actually is, for
+/// the subset this project cares about -- solder mask/paste/silkscreen entries are filtered out
+/// before ever reaching a StackupLayer (see stackupRaw()).
+enum class StackupLayerKind {
+    Copper,
+    Core,    // rigid dielectric (FR4 etc.)
+    Prepreg, // bonding-film dielectric between core layers
+};
+
+/// One layer of a board's physical stackup (BOARD_DESIGN_SETTINGS::GetStackupDescriptor()), in
+/// top-to-bottom order. thicknessMm/epsilonR come straight off BOARD_STACKUP_ITEM; epsilonR is
+/// meaningless (left at 0) for Copper layers.
+struct StackupLayer {
+    StackupLayerKind kind = StackupLayerKind::Copper;
+    std::string name; // BOARD_STACKUP_ITEM::GetLayerName(), e.g. "F.Cu", "Dielectric 1"
+    double thicknessMm = 0;
+    double epsilonR = 0;
+};
+
 /// One pad on a resolved net: identity (for matching against an ExcitationConfig's footprint+pin),
 /// position/orientation for port placement, and which copper layer it sits on. Position is in
 /// millimetres, relative to the board's auxiliary origin (BOARD_DESIGN_SETTINGS::GetAuxOrigin()) --
@@ -70,6 +89,12 @@ struct RawPadsOnNetResult {
     std::vector<PadPosition> pads;
 };
 
+struct RawStackupResult {
+    bool ok = false;
+    std::string error;
+    std::vector<StackupLayer> layers;
+};
+
 RawPadCountsResult countPadsRaw(const std::string& projectPath, const std::string& boardPath);
 
 RawNetNameResult netForFootprintPinRaw(const std::string& projectPath, const std::string& boardPath,
@@ -83,6 +108,8 @@ RawNetClassMembersResult netsInNetClassRaw(const std::string& projectPath, const
 
 RawPadsOnNetResult padsOnNetRaw(const std::string& projectPath, const std::string& boardPath,
                                  const std::string& netName);
+
+RawStackupResult stackupRaw(const std::string& projectPath, const std::string& boardPath);
 
 } // namespace detail
 } // namespace libkicad

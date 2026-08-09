@@ -30,6 +30,8 @@
 #include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
 #include <api/headless_pcb_context.h>
 #include <api/api_handler_pcb.h>
+#include <board_stackup_manager/board_stackup.h>
+#include <board_stackup_manager/stackup_predefined_prms.h>
 
 #include <api/common/commands/base_commands.pb.h>
 #include <api/common/envelope.pb.h>
@@ -104,6 +106,13 @@ RawPadsOnNetResult _failPadsOnNet(std::string error) {
 
 RawPadResult _failPad(std::string error) {
     RawPadResult result;
+    result.ok = false;
+    result.error = std::move(error);
+    return result;
+}
+
+RawStackupResult _failStackup(std::string error) {
+    RawStackupResult result;
     result.ok = false;
     result.error = std::move(error);
     return result;
@@ -378,6 +387,52 @@ RawPadsOnNetResult padsOnNetRaw(const std::string& projectPath, const std::strin
             padPosition.heightMm = pcbIUScale.IUTomm(pad->GetSizeY());
             result.pads.push_back(std::move(padPosition));
         }
+    }
+    return result;
+}
+
+RawStackupResult stackupRaw(const std::string& projectPath, const std::string& boardPath) {
+    std::string error;
+    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    if (!loaded) {
+        return _failStackup(std::move(error));
+    }
+    BOARD* board = loaded->board;
+
+    RawStackupResult result;
+    result.ok = true;
+    const BOARD_STACKUP& stackup = board->GetDesignSettings().GetStackupDescriptor();
+    for (const BOARD_STACKUP_ITEM* item : stackup.GetList()) {
+        if (!item->IsEnabled()) {
+            continue;
+        }
+        StackupLayer layer;
+        if (item->GetType() == BS_ITEM_TYPE_COPPER) {
+            // BOARD_STACKUP_ITEM::GetLayerName() is never actually populated by the file parser
+            // (only SetBrdLayerId()/SetDielectricLayerId() are, confirmed by reading
+            // pcb_io_kicad_sexpr_parser.cpp's parseBoardStackup()) -- the board's own layer table,
+            // keyed by the copper layer id, is the real source of the "F.Cu"/"In1.Cu"/"B.Cu" names
+            // gerber file matching needs. Same lookup padsOnNetRaw/resolvePinRaw already use for a
+            // pad's copper layer.
+            layer.kind = StackupLayerKind::Copper;
+            layer.name = board->GetLayerName(item->GetBrdLayerId()).ToStdString();
+            layer.thicknessMm = pcbIUScale.IUTomm(item->GetThickness());
+        } else if (item->GetType() == BS_ITEM_TYPE_DIELECTRIC) {
+            layer.kind = item->GetTypeName() == KEY_CORE ? StackupLayerKind::Core : StackupLayerKind::Prepreg;
+            // Dielectric layers have no PCB_LAYER_ID (GetBrdLayerId() is UNDEFINED_LAYER) and, like
+            // GetLayerName() above, no name of their own in the file -- only a 1-based top-to-bottom
+            // index (GetDielectricLayerId()). Synthesize the same "Dielectric N" label the
+            // hand-maintained stackup.json this replaces already used, purely for
+            // Simulation::addDumpBoxes()'s dump-box filenames -- nothing keys lookups off it.
+            layer.name = "Dielectric " + std::to_string(item->GetDielectricLayerId());
+            layer.thicknessMm = pcbIUScale.IUTomm(item->GetThickness());
+            layer.epsilonR = item->GetEpsilonR();
+        } else {
+            // Solder mask/paste/silkscreen -- not part of the layer stack a field simulation cares
+            // about.
+            continue;
+        }
+        result.layers.push_back(std::move(layer));
     }
     return result;
 }

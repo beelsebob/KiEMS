@@ -342,13 +342,16 @@ void from_json(const nlohmann::json& j, SingleEndedConfig& p);
 enum class LayerKind {
     Substrate,
     Metal,
-    Other,
 };
 
-/// Class representing and parsing layer config.
+/// One layer of a resolved board stackup (see libkicad_query::stackup()) -- copper or substrate,
+/// already scaled to simulation units.
 class LayerConfig {
 public:
-    explicit LayerConfig(const nlohmann::json& config);
+    /// `thicknessMm` is scaled to simulation units internally; `epsilon` is ignored (left at 0) for
+    /// `LayerKind::Metal`. For `LayerKind::Metal`, `file()` is derived from `name` by replacing '.'
+    /// with '_' (matching how gerber2ems already names its own Gerber-derived layer files).
+    LayerConfig(LayerKind kind, std::string name, double thicknessMm, double epsilon = 0);
 
     LayerKind kind() const { return _kind; }
     double thickness() const { return _thickness; }
@@ -357,8 +360,6 @@ public:
     double epsilon() const { return _epsilon; }              // only meaningful when kind() == Substrate
 
 private:
-    static LayerKind _parseKind(const std::string& kind);
-
     LayerKind _kind;
     double _thickness = 0;
     std::string _name;
@@ -552,8 +553,9 @@ public:
     /// --update-config behavior).
     static std::expected<EMSConfig, std::string> parse(const std::filesystem::path& cfgPath, bool updateConfig);
 
-    /// Load stackup from json object.
-    void loadStackup(const nlohmann::json& stackup);
+    /// Replaces layers() with `layers` (already resolved by the caller from the live board via
+    /// libkicad_query::stackup() -- see importer.cpp's importStackup()).
+    void loadStackup(std::vector<LayerConfig> layers);
 
     const std::string& formatVersion() const { return _formatVersion; }
 
