@@ -55,7 +55,12 @@ Position _edgeCutsOrigin() {
     }
     double xMin = std::numeric_limits<double>::infinity();
     double yMin = std::numeric_limits<double>::infinity();
-    const GerberFile edgeCuts(*edgeCutsPath);
+    auto edgeCutsResult = GerberFile::load(*edgeCutsPath);
+    if (!edgeCutsResult) {
+        logError(edgeCutsResult.error());
+        std::exit(1);
+    }
+    const GerberFile& edgeCuts = *edgeCutsResult;
     for (const auto& seg : edgeCuts.traceForNet("no-net").segments()) {
         xMin = std::min({seg.start().x(), seg.stop().x(), xMin});
         yMin = std::min({seg.start().y(), seg.stop().y(), yMin});
@@ -99,7 +104,12 @@ public:
         if (!gerberPath.has_value()) {
             return &*_files.emplace(layerFileName, std::nullopt).first->second;
         }
-        return &*_files.emplace(layerFileName, GerberFile(*gerberPath)).first->second;
+        auto gerberResult = GerberFile::load(*gerberPath);
+        if (!gerberResult) {
+            logError(gerberResult.error());
+            std::exit(1);
+        }
+        return &*_files.emplace(layerFileName, std::move(*gerberResult)).first->second;
     }
 
 private:

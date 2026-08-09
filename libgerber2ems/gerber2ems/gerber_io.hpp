@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <expected>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -326,7 +327,9 @@ struct CopperOp {
 /// Parsed representation of a gerber file.
 class GerberFile {
 public:
-    explicit GerberFile(const std::filesystem::path& path);
+    /// Parses the gerber file at `path`. A constructor can't report failure, so parsing happens
+    /// behind this factory instead; the object it returns is always fully parsed.
+    static std::expected<GerberFile, std::string> load(const std::filesystem::path& path);
 
     /// Parts of the file that are currently not supported/interpreted by the parser.
     const std::string& unparsed() const { return _unparsed; }
@@ -343,11 +346,14 @@ public:
     void addApertures(const std::unordered_map<std::string, Aperture>& extra);
 
 private:
+    GerberFile() = default;
+
     struct ParserState; // Definition (and FileFormat/NumberFormat) are parsing-only, kept in the .cpp.
 
+    std::expected<void, std::string> _parse(const std::filesystem::path& path);
     void _processPercentLine(const std::string& line, ParserState& parser);
-    void _processNormalLine(const std::string& line, ParserState& parser);
-    void _processDrawingLine(const std::string& line, ParserState& parser);
+    std::expected<void, std::string> _processNormalLine(const std::string& line, ParserState& parser);
+    std::expected<void, std::string> _processDrawingLine(const std::string& line, ParserState& parser);
     void _handleApertureDefinition(const std::vector<std::string>& split, ParserState& parser);
 
     std::string _unparsed;

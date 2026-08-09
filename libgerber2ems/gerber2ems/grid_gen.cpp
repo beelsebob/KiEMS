@@ -676,7 +676,12 @@ struct GridGenerator::Impl {
             for (const auto& entry : std::filesystem::directory_iterator(fabDir, ec)) {
                 const std::string name = entry.path().filename().string();
                 if (name.size() >= 7 && name.compare(name.size() - 7, 7, "_Cu.gbr") == 0) {
-                    gerbers.emplace_back(entry.path());
+                    auto gerberResult = GerberFile::load(entry.path());
+                    if (!gerberResult) {
+                        logError(gerberResult.error());
+                        std::exit(1);
+                    }
+                    gerbers.push_back(std::move(*gerberResult));
                 }
             }
         }

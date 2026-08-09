@@ -494,13 +494,11 @@ Simulation::getPortParameters(std::int32_t exIndex, const std::vector<double>& f
     std::vector<std::vector<std::complex<double>>> incident;
     std::vector<std::vector<std::complex<double>>> reflected;
     for (std::size_t index = 0; index < _ports.size(); ++index) {
-        try {
-            _ports[index]->calcPort(resultPath, frequencies);
-            logDebug("Found data for port " + std::to_string(index));
-        } catch (const std::exception&) {
-            logError("Port data files do not exist. Did you run simulation step?");
+        if (auto result = _ports[index]->calcPort(resultPath, frequencies); !result) {
+            logError("Port data files do not exist. Did you run simulation step? (" + result.error() + ")");
             std::exit(1);
         }
+        logDebug("Found data for port " + std::to_string(index));
         incident.push_back(_ports[index]->ufInc());
         reflected.push_back(_ports[index]->ufRef());
     }

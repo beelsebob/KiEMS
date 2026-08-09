@@ -926,7 +926,25 @@ struct GerberFile::ParserState {
     bool multiQuadrant = false;       // Set by G75; G74 (single-quadrant) is rejected outright.
 };
 
-GerberFile::GerberFile(const std::filesystem::path& path) {
+std::expected<GerberFile, std::string> GerberFile::load(const std::filesystem::path& path) {
+    // Aperture-macro parsing (ApertureMacro's constructor, elsewhere in this file) still reports
+    // malformed macro definitions via std::runtime_error rather than std::expected -- those are
+    // defensive checks against inputs no real board this parser has been validated against has
+    // ever hit, so converting that whole recursive-descent expression parser to propagate
+    // std::expected wasn't worth doing for this pass. This catch is the boundary that keeps that
+    // decision from leaking a raw exception out of an API that otherwise promises never to throw.
+    try {
+        GerberFile file;
+        if (auto result = file._parse(path); !result) {
+            return std::unexpected(std::move(result).error());
+        }
+        return file;
+    } catch (const std::exception& e) {
+        return std::unexpected("Failed to parse gerber file " + path.string() + ": " + e.what());
+    }
+}
+
+std::expected<void, std::string> GerberFile::_parse(const std::filesystem::path& path) {
     logInfo("Parsing gerber file: " + path.string());
     std::ifstream fileHandle(path);
     std::stringstream buffer;
@@ -939,10 +957,11 @@ GerberFile::GerberFile(const std::filesystem::path& path) {
         const std::string line = it->str();
         if (_startsWith(line, "%")) {
             _processPercentLine(line, parser);
-        } else {
-            _processNormalLine(line, parser);
+        } else if (auto result = _processNormalLine(line, parser); !result) {
+            return result;
         }
     }
+    return {};
 }
 
 Trace GerberFile::traceForNet(const std::string& net) const {
@@ -1029,7 +1048,7 @@ void GerberFile::_processPercentLine(const std::string& line, ParserState& parse
     }
 }
 
-void GerberFile::_processNormalLine(const std::string& line, ParserState& parser) {
+std::expected<void, std::string> GerberFile::_processNormalLine(const std::string& line, ParserState& parser) {
     const std::string sline = _stripChars(line, "%*\n");
     const std::vector<std::string> split = _split(sline, ',');
 
@@ -1039,7 +1058,7 @@ void GerberFile::_processNormalLine(const std::string& line, ParserState& parser
 
     if (parser.unparsedRegion) {
         _unparsed += line;
-        return;
+        return {};
     }
 
     if (!parser.apMacro.empty()) {
@@ -1062,9 +1081,8 @@ void GerberFile::_processNormalLine(const std::string& line, ParserState& parser
             // chaining the flat segment list would splice a bogus edge across the gap. Not exercised
             // by any real board this tool has been validated against; rejected rather than silently
             // producing corrupt geometry.
-            logError("Zone region has multiple sub-contours (a D02 move mid-region), which isn't supported: " +
-                      line);
-            std::exit(1);
+            return std::unexpected(
+                "Zone region has multiple sub-contours (a D02 move mid-region), which isn't supported: " + line);
         }
         if (parser.additive != parser.zoneAdditive) {
             // Gerber doesn't really support an intra-region polarity change; cheap insurance against
@@ -1084,8 +1102,7 @@ void GerberFile::_processNormalLine(const std::string& line, ParserState& parser
     } else if (split[0] == "G74") {
         // Single-quadrant arc mode: legacy/deprecated, and unused by every real board this parser
         // has been validated against. Rejected outright rather than silently mis-tessellating arcs.
-        logError("Single-quadrant arc interpolation mode (G74) is not supported: " + line);
-        std::exit(1);
+        return std::unexpected("Single-quadrant arc interpolation mode (G74) is not supported: " + line);
     } else if (split[0] == "G75") {
         parser.multiQuadrant = true;
     } else if (split[0].size() >= 3 && split[0].compare(0, 3, "G04") == 0) {
@@ -1095,11 +1112,12 @@ void GerberFile::_processNormalLine(const std::string& line, ParserState& parser
     } else if (_startsWith(split[0], "D")) {
         parser.aperture = split[0];
     } else if (_startsWith(split[0], "X")) {
-        _processDrawingLine(sline, parser);
+        return _processDrawingLine(sline, parser);
     }
+    return {};
 }
 
-void GerberFile::_processDrawingLine(const std::string& line, ParserState& parser) {
+std::expected<void, std::string> GerberFile::_processDrawingLine(const std::string& line, ParserState& parser) {
     const std::string sline = _removePrefix(line, "X");
     const auto [x, afterX] = _partition(sline, 'Y');
     const auto [y1, afterY] = _partition(afterX, 'D');
@@ -1119,8 +1137,7 @@ void GerberFile::_processDrawingLine(const std::string& line, ParserState& parse
             if (afterI.empty() || afterJ.empty()) {
                 logWarning("Circular interpolation draw without an I/J offset, treating as linear: " + line);
             } else if (!parser.multiQuadrant) {
-                logError("Arc interpolation used without multi-quadrant mode (G75) declared: " + line);
-                std::exit(1);
+                return std::unexpected("Arc interpolation used without multi-quadrant mode (G75) declared: " + line);
             } else {
                 const double i = parser.fformat.xFormat().parse(afterI) * _fileFormatScale();
                 const double j = parser.fformat.yFormat().parse(afterJ) * _fileFormatScale();
@@ -1143,12 +1160,12 @@ void GerberFile::_processDrawingLine(const std::string& line, ParserState& parse
             const auto it = _apertures.find(apName);
             if (it == _apertures.end()) {
                 logError("Aperture `" + apName + "` used for line: `" + line + "` not defined!");
-                return;
+                return {};
             }
             auto* circle = dynamic_cast<ApertureCircle*>(&it->second.data());
             if (circle == nullptr) {
                 logError("Aperture `" + apName + "` used for line: `" + line + "` is not circular aperture!");
-                return;
+                return {};
             }
             Trace trace = traceForNet(parser.net);
             Position segStart = parser.pos;
@@ -1177,6 +1194,7 @@ void GerberFile::_processDrawingLine(const std::string& line, ParserState& parse
         _pads.push_back(pad);
         _copperOps.push_back(CopperOp{CopperOp::Kind::Pad, parser.additive, parser.net, pad});
     }
+    return {};
 }
 
 } // namespace gerber2ems

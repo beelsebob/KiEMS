@@ -105,7 +105,12 @@ Clipper2Lib::Path64 _realBoardOutline(double originX, double originY) {
         logError("No EdgeCuts gerber in fab dir(" + fabDir.string() + ")");
         std::exit(1);
     }
-    const GerberFile edgeCuts(*edgeCutsPath);
+    auto edgeCutsResult = GerberFile::load(*edgeCutsPath);
+    if (!edgeCutsResult) {
+        logError(edgeCutsResult.error());
+        std::exit(1);
+    }
+    const GerberFile& edgeCuts = *edgeCutsResult;
     const std::vector<Position> loop = _chainSegmentsIntoLoop(edgeCuts.traceForNet("no-net").segments());
     if (loop.size() < 3) {
         logError("Edge_Cuts outline has fewer than 3 points");
@@ -222,7 +227,12 @@ SlicedBoard sliceBoardForSimulation(const SimulationConfig& sim) {
         if (!gerberPath.has_value()) {
             continue; // No copper on this layer at all.
         }
-        const GerberFile gerber(*gerberPath);
+        auto gerberResult = GerberFile::load(*gerberPath);
+        if (!gerberResult) {
+            logError(gerberResult.error());
+            std::exit(1);
+        }
+        const GerberFile& gerber = *gerberResult;
 
         signalPerLayer[layerIndex] =
             compositeOps(gerber, _opsOnNets(gerber, involvedNets), origin.xMin, origin.yMin, tessellationTolerance);

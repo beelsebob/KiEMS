@@ -57,7 +57,12 @@ BoundingBox edgeCutsBoundingBox() {
         logError("No EdgeCuts gerber in fab dir(" + fabDir.string() + ")");
         std::exit(1);
     }
-    GerberFile edgeCuts(*edgeCutsPath);
+    auto edgeCutsResult = GerberFile::load(*edgeCutsPath);
+    if (!edgeCutsResult) {
+        logError(edgeCutsResult.error());
+        std::exit(1);
+    }
+    const GerberFile& edgeCuts = *edgeCutsResult;
     for (const auto& seg : edgeCuts.traceForNet("no-net").segments()) {
         box.xMin = std::min({seg.start().x(), seg.stop().x(), box.xMin});
         box.yMin = std::min({seg.start().y(), seg.stop().y(), box.yMin});
@@ -229,7 +234,12 @@ std::vector<Triangle> triangulate(const Clipper2Lib::Paths64& composited, double
 }
 
 std::vector<Triangle> compositeLayerTriangles(const std::filesystem::path& gerberPath) {
-    const GerberFile gerber(gerberPath);
+    auto gerberResult = GerberFile::load(gerberPath);
+    if (!gerberResult) {
+        logError(gerberResult.error());
+        std::exit(1);
+    }
+    const GerberFile& gerber = *gerberResult;
     const BoundingBox origin = edgeCutsBoundingBox();
     const double tessellationTolerance =
         static_cast<double>(Config::sharedConfig().pixelSize()) * constants::unitMultiplier;

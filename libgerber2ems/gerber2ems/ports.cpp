@@ -14,10 +14,11 @@ namespace gerber2ems {
 
 namespace {
 
-std::pair<std::vector<double>, std::vector<double>> _loadUiFile(const std::filesystem::path& path) {
+std::expected<std::pair<std::vector<double>, std::vector<double>>, std::string> _loadUiFile(
+    const std::filesystem::path& path) {
     std::ifstream file(path);
     if (!file.is_open()) {
-        throw std::runtime_error("Failed to open probe file: " + path.string());
+        return std::unexpected("Failed to open probe file: " + path.string());
     }
     std::vector<double> time;
     std::vector<double> value;
@@ -37,7 +38,7 @@ std::pair<std::vector<double>, std::vector<double>> _loadUiFile(const std::files
             value.push_back(row[1]);
         }
     }
-    return {time, value};
+    return std::pair{std::move(time), std::move(value)};
 }
 
 std::size_t _argminAbsDiff(const std::vector<double>& v, double target) {
@@ -55,8 +56,10 @@ std::size_t _argminAbsDiff(const std::vector<double>& v, double target) {
 
 } // namespace
 
-std::vector<std::complex<double>> dftTimeToFreq(const std::vector<double>& t, const std::vector<double>& val,
-                                                 const std::vector<double>& freq, const std::string& signalType) {
+std::expected<std::vector<std::complex<double>>, std::string> dftTimeToFreq(const std::vector<double>& t,
+                                                                             const std::vector<double>& val,
+                                                                             const std::vector<double>& freq,
+                                                                             const std::string& signalType) {
     std::vector<std::complex<double>> fVal(freq.size(), std::complex<double>(0, 0));
     for (std::size_t nF = 0; nF < freq.size(); ++nF) {
         std::complex<double> sum(0, 0);
@@ -76,7 +79,7 @@ std::vector<std::complex<double>> dftTimeToFreq(const std::vector<double>& t, co
             v /= n;
         }
     } else {
-        throw std::runtime_error("Unknown signal type: " + signalType);
+        return std::unexpected("Unknown signal type: " + signalType);
     }
     for (auto& v : fVal) {
         v *= 2.0;
@@ -84,14 +87,21 @@ std::vector<std::complex<double>> dftTimeToFreq(const std::vector<double>& t, co
     return fVal;
 }
 
-UIData::UIData(const std::vector<std::string>& filenames, const std::filesystem::path& path,
-               const std::vector<double>& freq, const std::string& signalType) {
+std::expected<UIData, std::string> UIData::load(const std::vector<std::string>& filenames,
+                                                  const std::filesystem::path& path, const std::vector<double>& freq,
+                                                  const std::string& signalType) {
+    UIData data;
     for (const auto& fn : filenames) {
-        auto [time, value] = _loadUiFile(path / fn);
-        _freqValue.push_back(dftTimeToFreq(time, value, freq, signalType));
-        _time.push_back(std::move(time));
-        _value.push_back(std::move(value));
+        auto loaded = _loadUiFile(path / fn);
+        if (!loaded) return std::unexpected(std::move(loaded).error());
+        auto& [time, value] = *loaded;
+        auto freqValue = dftTimeToFreq(time, value, freq, signalType);
+        if (!freqValue) return std::unexpected(std::move(freqValue).error());
+        data._freqValue.push_back(std::move(*freqValue));
+        data._time.push_back(std::move(time));
+        data._value.push_back(std::move(value));
     }
+    return data;
 }
 
 Port::Port(ContinuousStructure& csx, std::int32_t portNr, Point3 start, Point3 stop, double excite,
@@ -105,28 +115,31 @@ Port::Port(ContinuousStructure& csx, std::int32_t portNr, Point3 start, Point3 s
       _prefix(std::move(portNamePrefix)),
       _delay(delay) {}
 
-void Port::readUiData(const std::filesystem::path& simPath, const std::vector<double>& freq,
-                       const std::string& signalType) {
-    const UIData uData(_uFilenames, simPath, freq, signalType);
+std::expected<void, std::string> Port::readUiData(const std::filesystem::path& simPath,
+                                                    const std::vector<double>& freq, const std::string& signalType) {
+    auto uData = UIData::load(_uFilenames, simPath, freq, signalType);
+    if (!uData) return std::unexpected(std::move(uData).error());
     _ufTot.assign(freq.size(), std::complex<double>(0, 0));
-    for (const auto& fv : uData.freqValue()) {
+    for (const auto& fv : uData->freqValue()) {
         for (std::size_t i = 0; i < freq.size(); ++i) {
             _ufTot[i] += fv[i];
         }
     }
 
-    const UIData iData(_iFilenames, simPath, freq, signalType);
+    auto iData = UIData::load(_iFilenames, simPath, freq, signalType);
+    if (!iData) return std::unexpected(std::move(iData).error());
     _ifTot.assign(freq.size(), std::complex<double>(0, 0));
-    for (const auto& fv : iData.freqValue()) {
+    for (const auto& fv : iData->freqValue()) {
         for (std::size_t i = 0; i < freq.size(); ++i) {
             _ifTot[i] += fv[i];
         }
     }
+    return {};
 }
 
-void Port::calcPort(const std::filesystem::path& simPath, const std::vector<double>& freq,
-                     std::optional<double> refImpedance, const std::string& signalType) {
-    readUiData(simPath, freq, signalType);
+std::expected<void, std::string> Port::calcPort(const std::filesystem::path& simPath, const std::vector<double>& freq,
+                                                  std::optional<double> refImpedance, const std::string& signalType) {
+    if (auto result = readUiData(simPath, freq, signalType); !result) return result;
     if (refImpedance.has_value()) {
         _zRef.assign(freq.size(), std::complex<double>(*refImpedance, 0));
     }
@@ -144,6 +157,7 @@ void Port::calcPort(const std::filesystem::path& simPath, const std::vector<doub
         _ufRef[i] = _ufTot[i] - _ufInc[i];
         _ifRef[i] = _ifInc[i] - _ifTot[i];
     }
+    return {};
 }
 
 LumpedPort::LumpedPort(ContinuousStructure& csx, std::int32_t portNr, double resistance, Point3 start, Point3 stop,
@@ -194,12 +208,14 @@ LumpedPort::LumpedPort(ContinuousStructure& csx, std::int32_t portNr, double res
     addBox(*iProbe, iStart, iStop);
 }
 
-void LumpedPort::calcPort(const std::filesystem::path& simPath, const std::vector<double>& freq,
-                           std::optional<double> refImpedance, const std::string& signalType) {
+std::expected<void, std::string> LumpedPort::calcPort(const std::filesystem::path& simPath,
+                                                        const std::vector<double>& freq,
+                                                        std::optional<double> refImpedance,
+                                                        const std::string& signalType) {
     if (!refImpedance.has_value()) {
         refImpedance = _resistance;
     }
-    Port::calcPort(simPath, freq, refImpedance, signalType);
+    return Port::calcPort(simPath, freq, refImpedance, signalType);
 }
 
 MSLPort::MSLPort(ContinuousStructure& csx, std::int32_t portNr, CSProperties& metalProp, Point3 start, Point3 stop,
@@ -305,32 +321,37 @@ MSLPort::MSLPort(ContinuousStructure& csx, std::int32_t portNr, CSProperties& me
     }
 }
 
-void MSLPort::readUiData(const std::filesystem::path& simPath, const std::vector<double>& freq,
-                          const std::string& signalType) {
-    const UIData uData(_uFilenames, simPath, freq, signalType);
-    _ufTot = uData.freqValue()[1];
+std::expected<void, std::string> MSLPort::readUiData(const std::filesystem::path& simPath,
+                                                       const std::vector<double>& freq,
+                                                       const std::string& signalType) {
+    auto uData = UIData::load(_uFilenames, simPath, freq, signalType);
+    if (!uData) return std::unexpected(std::move(uData).error());
+    _ufTot = uData->freqValue()[1];
 
-    const UIData iData(_iFilenames, simPath, freq, signalType);
+    auto iData = UIData::load(_iFilenames, simPath, freq, signalType);
+    if (!iData) return std::unexpected(std::move(iData).error());
     _ifTot.resize(freq.size());
     for (std::size_t i = 0; i < freq.size(); ++i) {
-        _ifTot[i] = 0.5 * (iData.freqValue()[0][i] + iData.freqValue()[1][i]);
+        _ifTot[i] = 0.5 * (iData->freqValue()[0][i] + iData->freqValue()[1][i]);
     }
 
     const double unit = _csx.GetGrid()->GetDeltaUnit();
-    const std::vector<std::complex<double>>& et = uData.freqValue()[1];
+    const std::vector<std::complex<double>>& et = uData->freqValue()[1];
     const double uDeltaAbsSum = std::abs(_uDelta[0]) + std::abs(_uDelta[1]);
 
     _zRef.resize(freq.size());
     for (std::size_t i = 0; i < freq.size(); ++i) {
-        const std::complex<double> det = (uData.freqValue()[2][i] - uData.freqValue()[0][i]) / (uDeltaAbsSum * unit);
+        const std::complex<double> det = (uData->freqValue()[2][i] - uData->freqValue()[0][i]) / (uDeltaAbsSum * unit);
         const std::complex<double> ht = _ifTot[i]; // space averaging: Ht is defined at the same pos as Et
-        const std::complex<double> dht = (iData.freqValue()[1][i] - iData.freqValue()[0][i]) / (std::abs(_iDelta) * unit);
+        const std::complex<double> dht =
+            (iData->freqValue()[1][i] - iData->freqValue()[0][i]) / (std::abs(_iDelta) * unit);
 
         // NOTE: the Python source also computes `beta` here (a propagation constant) and stores it
         // as `self.beta`, but that's only ever read back for CalcPort's ref_plane_shift handling,
         // which gerber2ems never exercises (see the Port class doc comment) -- omitted as dead code.
         _zRef[i] = std::sqrt(et[i] * det / (ht * dht));
     }
+    return {};
 }
 
 } // namespace gerber2ems

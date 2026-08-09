@@ -9,6 +9,7 @@
 
 #include <complex>
 #include <cstdint>
+#include <expected>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -21,20 +22,25 @@
 namespace gerber2ems {
 
 /// Direct (Goertzel-style) DFT of a time-domain signal at a set of frequencies.
-std::vector<std::complex<double>> dftTimeToFreq(const std::vector<double>& t, const std::vector<double>& val,
-                                                 const std::vector<double>& freq, const std::string& signalType = "pulse");
+std::expected<std::vector<std::complex<double>>, std::string> dftTimeToFreq(
+    const std::vector<double>& t, const std::vector<double>& val, const std::vector<double>& freq,
+    const std::string& signalType = "pulse");
 
 /// Loaded & DFT'd data for one or more openEMS voltage/current probe files.
 class UIData {
 public:
-    UIData(const std::vector<std::string>& filenames, const std::filesystem::path& path,
-           const std::vector<double>& freq, const std::string& signalType = "pulse");
+    /// A constructor can't report failure, so loading happens behind this factory instead.
+    static std::expected<UIData, std::string> load(const std::vector<std::string>& filenames,
+                                                     const std::filesystem::path& path, const std::vector<double>& freq,
+                                                     const std::string& signalType = "pulse");
 
     const std::vector<std::vector<double>>& time() const { return _time; }
     const std::vector<std::vector<double>>& value() const { return _value; }
     const std::vector<std::vector<std::complex<double>>>& freqValue() const { return _freqValue; }
 
 private:
+    UIData() = default;
+
     std::vector<std::vector<double>> _time;
     std::vector<std::vector<double>> _value;
     std::vector<std::vector<std::complex<double>>> _freqValue;
@@ -56,12 +62,15 @@ public:
 
     std::int32_t number() const { return _number; }
 
-    virtual void readUiData(const std::filesystem::path& simPath, const std::vector<double>& freq,
-                             const std::string& signalType = "pulse");
+    virtual std::expected<void, std::string> readUiData(const std::filesystem::path& simPath,
+                                                          const std::vector<double>& freq,
+                                                          const std::string& signalType = "pulse");
 
     /// Computes uf_inc/uf_ref (incident/reflected wave phasors vs. frequency) from probe data.
-    virtual void calcPort(const std::filesystem::path& simPath, const std::vector<double>& freq,
-                           std::optional<double> refImpedance = std::nullopt, const std::string& signalType = "pulse");
+    virtual std::expected<void, std::string> calcPort(const std::filesystem::path& simPath,
+                                                        const std::vector<double>& freq,
+                                                        std::optional<double> refImpedance = std::nullopt,
+                                                        const std::string& signalType = "pulse");
 
     const std::vector<std::complex<double>>& ufInc() const { return _ufInc; }
     const std::vector<std::complex<double>>& ufRef() const { return _ufRef; }
@@ -100,8 +109,9 @@ public:
                const std::string& excDir, double excite = 0, std::int32_t priority = 0,
                std::string portNamePrefix = "", double delay = 0);
 
-    void calcPort(const std::filesystem::path& simPath, const std::vector<double>& freq,
-                  std::optional<double> refImpedance = std::nullopt, const std::string& signalType = "pulse") override;
+    std::expected<void, std::string> calcPort(const std::filesystem::path& simPath, const std::vector<double>& freq,
+                                               std::optional<double> refImpedance = std::nullopt,
+                                               const std::string& signalType = "pulse") override;
 
 private:
     double _resistance;
@@ -115,8 +125,8 @@ public:
             const std::string& propDir, const std::string& excDir, double excite = 0, double feedR = 50,
             std::int32_t priority = 0, std::string portNamePrefix = "", double delay = 0);
 
-    void readUiData(const std::filesystem::path& simPath, const std::vector<double>& freq,
-                     const std::string& signalType = "pulse") override;
+    std::expected<void, std::string> readUiData(const std::filesystem::path& simPath, const std::vector<double>& freq,
+                                                 const std::string& signalType = "pulse") override;
 
 private:
     std::int32_t _excNy;
