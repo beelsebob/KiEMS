@@ -5,10 +5,13 @@
 #pragma once
 
 #include <cstdint>
+#include <expected>
+#include <string>
 #include <vector>
 
 #include "config.hpp"
 #include "importer.hpp"
+#include "paths_config.hpp"
 
 namespace gerber2ems {
 
@@ -25,7 +28,7 @@ struct StitchingVia {
 /// nets' and the ground net's own copper survive, clipped to a padded region ("cutout") around the
 /// involved nets' own extent.
 struct SlicedBoard {
-    /// Per metal layer, in the same order as Config::sharedConfig().getMetals(), the final
+    /// Per metal layer, in the same order as EMSConfig::getMetals(), the final
     /// triangulated copper for that layer (involved-net copper, plus ground-net copper wherever it
     /// falls inside the cutout).
     std::vector<std::vector<Triangle>> layerTriangles;
@@ -62,8 +65,7 @@ struct SlicedBoard {
 ///    every other segment is a new cut. Stitching vias are placed along new-cut segments only, at
 ///    sim.viaEdgeDistance() inward, spaced sim.viaSpacing() apart, connecting through whichever
 ///    layers the (cutout-clipped) ground composite covers at that position.
-///
-/// Exits the process on any unresolvable reference (mirrors resolveSimulationPorts()).
-SlicedBoard sliceBoardForSimulation(const SimulationConfig& sim);
+std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const SimulationConfig& sim, const EMSConfig& config,
+                                                                  const PathsConfig& paths);
 
 } // namespace gerber2ems

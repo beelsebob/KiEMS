@@ -49,31 +49,42 @@ std::string _normalizeLayerName(std::string name) {
 
 } // namespace
 
-Simulation::Simulation(SimulationConfig& simConfig)
+Simulation::Simulation(SimulationConfig& simConfig, const EMSConfig& config, const RunOptions& options,
+                        const PathsConfig& paths)
     : _csx(new ContinuousStructure()),
       _grid(nullptr),
       _simConfig(simConfig),
+      _config(config),
+      _options(options),
+      _paths(paths),
       _planeMaterial(nullptr),
       _viaMaterial(nullptr),
       _viaFillingMaterial(nullptr) {
-    _fdtd.SetNumberOfTimeSteps(static_cast<unsigned int>(Config::sharedConfig().maxSteps()));
+    _fdtd.SetNumberOfTimeSteps(static_cast<unsigned int>(_config.maxSteps()));
     _fdtd.SetCSX(_csx);
     _grid = _csx->GetGrid();
     _grid->SetDeltaUnit(constants::baseUnit / constants::unitMultiplier);
 
     _planeMaterial = addMetal(*_csx, "Plane");
     _viaMaterial = addMetal(*_csx, "Via");
-    _viaFillingMaterial = addMaterial(*_csx, "ViaFilling", Config::sharedConfig().via().fillingEpsilon());
+    _viaFillingMaterial = addMaterial(*_csx, "ViaFilling", _config.via().fillingEpsilon());
 }
 
-void Simulation::sliceBoard() { _slicedBoard = sliceBoardForSimulation(_simConfig); }
+void Simulation::sliceBoard() {
+    auto result = sliceBoardForSimulation(_simConfig, _config, _paths);
+    if (!result) {
+        logError(result.error());
+        std::exit(1);
+    }
+    _slicedBoard = std::move(*result);
+}
 
 void Simulation::createMaterials() {
-    const auto metals = Config::sharedConfig().getMetals();
+    const auto metals = _config.getMetals();
     for (std::size_t i = 0; i < metals.size(); ++i) {
         _gerberMaterials.push_back(addMetal(*_csx, "Gerber_" + std::to_string(i)));
     }
-    const auto substrates = Config::sharedConfig().getSubstrates();
+    const auto substrates = _config.getSubstrates();
     for (std::size_t i = 0; i < substrates.size(); ++i) {
         _substrateMaterials.push_back(addMaterial(*_csx, "Substrate_" + std::to_string(i), substrates[i].epsilon()));
     }
@@ -140,11 +151,11 @@ void Simulation::addPortGrid() {
 }
 
 void Simulation::addGrid() {
-    _gridGen = std::make_unique<GridGenerator>(_slicedBoard.xMin, _slicedBoard.yMin, _slicedBoard.width,
+    _gridGen = std::make_unique<GridGenerator>(_config, _slicedBoard.xMin, _slicedBoard.yMin, _slicedBoard.width,
                                                 _slicedBoard.height);
     addPortGrid();
     logInfo("Compiling grid");
-    _gridGen->generate(*_grid, _simConfig);
+    _gridGen->generate(*_grid, _simConfig, _paths.fabDir);
     printGridStats();
 }
 
@@ -168,13 +179,13 @@ void Simulation::addContours(const std::vector<Triangle>& contours, double zHeig
 void Simulation::addGerbers() {
     logInfo("Adding copper from sliced board geometry");
 
-    // _slicedBoard.layerTriangles is already indexed exactly like Config::sharedConfig().getMetals()
+    // _slicedBoard.layerTriangles is already indexed exactly like _config.getMetals()
     // (see board_slicing.cpp) -- one entry per metal layer, in stackup order -- so no separate
     // per-file compositing/lookup is needed here any more (board_slicing.cpp did it once, per
     // simulation, using only this simulation's involved+ground nets rather than the whole board).
     double offset = 0;
     std::int32_t index = 0;
-    for (const auto& layer : Config::sharedConfig().layers()) {
+    for (const auto& layer : _config.layers()) {
         if (layer.kind() == LayerKind::Substrate) {
             offset -= layer.thickness();
         } else if (layer.kind() == LayerKind::Metal) {
@@ -188,7 +199,7 @@ void Simulation::addGerbers() {
 double Simulation::getMetalLayerOffset(std::int32_t index) const {
     std::int32_t currentMetalIndex = -1;
     double offset = 0;
-    for (const auto& layer : Config::sharedConfig().layers()) {
+    for (const auto& layer : _config.layers()) {
         if (layer.kind() == LayerKind::Metal) {
             ++currentMetalIndex;
             if (currentMetalIndex == index) {
@@ -300,7 +311,7 @@ void Simulation::addPlane(double zHeight) {
 void Simulation::addSubstrates() {
     logInfo("Adding substrates");
     double offset = 0;
-    const auto substrates = Config::sharedConfig().getSubstrates();
+    const auto substrates = _config.getSubstrates();
     for (std::size_t i = 0; i < substrates.size(); ++i) {
         addBox(*_substrateMaterials[i], {_slicedBoard.xMin, _slicedBoard.yMin, offset},
                {_slicedBoard.xMin + _slicedBoard.width, _slicedBoard.yMin + _slicedBoard.height,
@@ -314,9 +325,14 @@ void Simulation::addSubstrates() {
 
 void Simulation::addVias() {
     logInfo("Adding vias from excellon file");
+    auto viasResult = getVias(_paths);
+    if (!viasResult) {
+        logError(viasResult.error());
+        std::exit(1);
+    }
     // Real board vias: kept only where they still fall within this simulation's sliced outline --
     // a via for copper that's been sliced away has nothing left to connect to anyway.
-    for (const auto& via : getVias()) {
+    for (const auto& via : *viasResult) {
         if (_pointInPolygon(via.x, via.y, _slicedBoard.outline)) {
             addVia(via.x, via.y, via.diameter);
         }
@@ -331,7 +347,7 @@ void Simulation::addVias() {
 
 void Simulation::addVia(double xPos, double yPos, double diameter) {
     double thickness = 0;
-    for (const auto& layer : Config::sharedConfig().getSubstrates()) {
+    for (const auto& layer : _config.getSubstrates()) {
         thickness += layer.thickness();
     }
 
@@ -346,7 +362,7 @@ void Simulation::addVia(double xPos, double yPos, double diameter) {
     xCoords.clear();
     yCoords.clear();
     for (std::int32_t i = constants::viaPolygon - 1; i >= 0; --i) {
-        const double platingThickness = Config::sharedConfig().via().platingThickness();
+        const double platingThickness = _config.via().platingThickness();
         xCoords.push_back(xPos + std::sin(static_cast<double>(i) / constants::viaPolygon * 2 * M_PI) *
                                       (diameter / 2 + platingThickness));
         yCoords.push_back(yPos + std::cos(static_cast<double>(i) / constants::viaPolygon * 2 * M_PI) *
@@ -358,19 +374,18 @@ void Simulation::addVia(double xPos, double yPos, double diameter) {
 void Simulation::addSingleDumpBox(const std::string& name, double z) {
     logDebug("Adding dump box at " + std::to_string(z));
     CSPropDumpBox* dump = addDump(*_csx, name, {1, 1, 1});
-    const double margin = Config::sharedConfig().grid().margin().xy();
+    const double margin = _config.grid().margin().xy();
     addBox(*dump, {_slicedBoard.xMin - margin, _slicedBoard.yMin - margin, z},
            {_slicedBoard.xMin + _slicedBoard.width + margin, _slicedBoard.yMin + _slicedBoard.height + margin, z});
 }
 
 void Simulation::addDumpBoxes() {
-    const Arguments& args = Config::sharedConfig().arguments();
-    if (!args.exportField().has_value()) {
+    if (!_options.exportField.has_value()) {
         return;
     }
     logInfo("Adding field dump boxes");
 
-    std::vector<std::string> exportField = *args.exportField();
+    std::vector<std::string> exportField = *_options.exportField;
     if (exportField.empty()) {
         exportField = {"outer", "cu-outer", "cu-inner", "substrate"};
     }
@@ -380,8 +395,8 @@ void Simulation::addDumpBoxes() {
 
     double offset = 0;
     std::int32_t metalIdx = 0;
-    const std::int32_t metalCount = static_cast<std::int32_t>(Config::sharedConfig().getMetals().size());
-    for (const auto& layer : Config::sharedConfig().layers()) {
+    const std::int32_t metalCount = static_cast<std::int32_t>(_config.getMetals().size());
+    for (const auto& layer : _config.layers()) {
         const std::string normName = _normalizeLayerName(layer.name());
         if (layer.kind() == LayerKind::Substrate) {
             if (contains("substrate")) {
@@ -425,7 +440,7 @@ void Simulation::setBoundaryConditions(bool pml) {
 }
 
 void Simulation::setExcitation() {
-    const Frequency& freq = Config::sharedConfig().frequency();
+    const Frequency& freq = _config.frequency();
     logDebug("Setting excitation to gaussian pulse from " + std::to_string(freq.start()) + " to " +
              std::to_string(freq.stop()));
     _fdtd.SetGaussExcite((freq.start() + freq.stop()) / 2, (freq.stop() - freq.start()) / 2);
@@ -439,10 +454,9 @@ void Simulation::setSinusExcitation(double freq) {
 void Simulation::run(std::int32_t excitedPortNumber) {
     logInfo("Starting simulation");
     const std::filesystem::path cwd = std::filesystem::current_path();
-    _fdtd.SetOverSampling(Config::sharedConfig().arguments().oversampling());
+    _fdtd.SetOverSampling(_options.oversampling);
 
-    const std::filesystem::path simPath =
-        cwd / constants::simSimulationDir(_simConfig.name()) / std::to_string(excitedPortNumber);
+    const std::filesystem::path simPath = _paths.simulationDir / _simConfig.name() / std::to_string(excitedPortNumber);
     std::filesystem::create_directories(simPath);
     std::filesystem::current_path(simPath);
 
@@ -457,8 +471,7 @@ void Simulation::run(std::int32_t excitedPortNumber) {
 }
 
 void Simulation::saveGeometry() const {
-    const std::filesystem::path filename =
-        std::filesystem::current_path() / constants::simGeometryDir(_simConfig.name()) / "geometry.xml";
+    const std::filesystem::path filename = _paths.geometryDir / _simConfig.name() / "geometry.xml";
     logInfo("Saving geometry to " + filename.string());
     _csx->Write2XML(filename.string());
 
@@ -475,8 +488,7 @@ void Simulation::saveGeometry() const {
 }
 
 void Simulation::loadGeometry() {
-    const std::filesystem::path filename =
-        std::filesystem::current_path() / constants::simGeometryDir(_simConfig.name()) / "geometry.xml";
+    const std::filesystem::path filename = _paths.geometryDir / _simConfig.name() / "geometry.xml";
     logInfo("Loading geometry from " + filename.string());
     if (!std::filesystem::exists(filename)) {
         logError("Geometry file does not exist. Did you run geometry step?");
@@ -488,8 +500,7 @@ void Simulation::loadGeometry() {
 
 std::pair<std::vector<std::vector<std::complex<double>>>, std::vector<std::vector<std::complex<double>>>>
 Simulation::getPortParameters(std::int32_t exIndex, const std::vector<double>& frequencies) {
-    const std::filesystem::path resultPath =
-        std::filesystem::current_path() / constants::simSimulationDir(_simConfig.name()) / std::to_string(exIndex);
+    const std::filesystem::path resultPath = _paths.simulationDir / _simConfig.name() / std::to_string(exIndex);
 
     std::vector<std::vector<std::complex<double>>> incident;
     std::vector<std::vector<std::complex<double>>> reflected;

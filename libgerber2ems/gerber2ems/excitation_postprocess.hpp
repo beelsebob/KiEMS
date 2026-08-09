@@ -18,7 +18,7 @@ namespace gerber2ems {
 class ExcitationPostprocessor {
 public:
     ExcitationPostprocessor(const SimulationConfig& simConfig, const Postprocessor& sParams,
-                             std::vector<double> frequencies);
+                             std::vector<double> frequencies, const Frequency& frequency);
 
     /// Synthesizes+propagates+superposes every excitation's contribution to every port in
     /// simConfig.ports(). No-op if the simulation has no excitations configured.
@@ -40,6 +40,7 @@ private:
     const SimulationConfig& _simConfig;
     const Postprocessor& _sParams;
     std::vector<double> _frequencies;
+    const Frequency& _frequency;
     double _dt = 0;
     std::vector<TimeWaveform> _responses; // indexed like _simConfig.ports(); empty until run()
 };

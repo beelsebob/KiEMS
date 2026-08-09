@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <expected>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -530,13 +531,26 @@ private:
 void to_json(nlohmann::json& j, const SimulationConfig& p);
 void from_json(const nlohmann::json& j, SimulationConfig& p);
 
-/// Config validation and parsing singleton class.
-class Config {
-public:
-    static Config& sharedConfig();
+/// Per-run knobs that don't belong in the parsed config itself -- distinct from Arguments (the
+/// CLI's own argv-parsing type, which also carries argv-only fields like configPath/updateConfig
+/// that a library caller has no business setting).
+struct RunOptions {
+    std::int32_t oversampling = 4;
+    std::optional<std::vector<std::string>> exportField;
+    bool transparent = false;
+    bool plotPhase = false;
+};
 
-    /// Load config file (default: simulation.json).
-    static void load(const Arguments& args);
+/// Parsed simulation.json configuration, plus the stackup imported into it separately (see
+/// loadStackup()). A plain value type: every caller holds and threads it explicitly rather than
+/// reaching into shared global state, so multiple EMSConfigs (e.g. for different boards) can
+/// coexist safely in the same process.
+class EMSConfig {
+public:
+    /// Parses `cfgPath`. If updateConfig is true and no file exists at cfgPath, creates a stub, and
+    /// afterwards rewrites the file with any missing fields filled in (mirrors the CLI's
+    /// --update-config behavior).
+    static std::expected<EMSConfig, std::string> parse(const std::filesystem::path& cfgPath, bool updateConfig);
 
     /// Load stackup from json object.
     void loadStackup(const nlohmann::json& stackup);
@@ -559,14 +573,7 @@ public:
     const Via& via() const { return _via; }
     const Grid& grid() const { return _grid; }
 
-    double pcbWidth() const { return _pcbWidth; }
-    void setPcbWidth(double value) { _pcbWidth = value; }
-
-    double pcbHeight() const { return _pcbHeight; }
-    void setPcbHeight(double value) { _pcbHeight = value; }
-
     const std::vector<LayerConfig>& layers() const { return _layers; }
-    const Arguments& arguments() const { return _arguments; }
 
     std::vector<LayerConfig> getSubstrates() const;
     std::vector<LayerConfig> getMetals() const;
@@ -578,7 +585,7 @@ public:
     std::optional<std::int32_t> metalLayerIndexForFileName(const std::string& normalizedFileName) const;
 
 private:
-    Config() = default;
+    EMSConfig() = default;
 
     /// Validate grid setting & clamp values (mirrors _Config.__post_init__).
     void _postInit();
@@ -599,10 +606,7 @@ private:
     Via _via;
     Grid _grid;
 
-    double _pcbWidth = 0;  // not (de)serialized
-    double _pcbHeight = 0; // not (de)serialized
-    std::vector<LayerConfig> _layers; // not (de)serialized
-    Arguments _arguments;             // not (de)serialized
+    std::vector<LayerConfig> _layers; // not (de)serialized, populated by loadStackup()
 };
 
 } // namespace gerber2ems

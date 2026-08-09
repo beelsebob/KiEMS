@@ -49,38 +49,6 @@ std::int32_t _runProcess(const std::vector<std::string>& args) {
     return WIFEXITED(status) ? static_cast<std::int32_t>(WEXITSTATUS(status)) : -1;
 }
 
-// macOS's KiCad.app doesn't symlink kicad-cli anywhere on a typical PATH -- it ships only inside
-// the app bundle. posix_spawnp's own PATH search (via _runProcess above) already covers the case
-// where a user's shell PATH does include it (e.g. a Homebrew install); this only needs to cover
-// the common case where it doesn't, without requiring the user to edit their PATH.
-const std::vector<std::filesystem::path> kKicadCliFallbackPaths = {
-    "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
-};
-
-/// Resolves the `kicad-cli` command to run: "kicad-cli" itself if a bare lookup would find it on
-/// PATH, else the first known KiCad.app bundle location that actually exists.
-std::string _resolveKicadCli() {
-    const char* pathEnv = std::getenv("PATH");
-    if (pathEnv != nullptr) {
-        std::stringstream pathStream(pathEnv);
-        std::string dir;
-        while (std::getline(pathStream, dir, ':')) {
-            std::error_code ec;
-            if (std::filesystem::is_regular_file(std::filesystem::path(dir) / "kicad-cli", ec)) {
-                return "kicad-cli";
-            }
-        }
-    }
-    for (const auto& candidate : kKicadCliFallbackPaths) {
-        std::error_code ec;
-        if (std::filesystem::is_regular_file(candidate, ec)) {
-            logDebug("kicad-cli not found on PATH; using " + candidate.string());
-            return candidate.string();
-        }
-    }
-    return "kicad-cli"; // Let posix_spawnp's own error reporting handle the "truly not found" case.
-}
-
 // ---- small filesystem helpers ----
 
 bool _endsWith(const std::string& s, std::string_view suffix) {
@@ -113,15 +81,14 @@ std::vector<std::string> _splitDot(const std::string& s) {
 
 } // namespace
 
-void exportKicadPcb(const std::filesystem::path& kicadPcbPath) {
+std::expected<void, std::string> exportKicadPcb(const PathsConfig& paths, const std::filesystem::path& kicadPcbPath) {
     logInfo("Exporting gerbers/drill/position files from " + kicadPcbPath.string() + " via kicad-cli");
-    const std::filesystem::path fabDir = std::filesystem::current_path() / "fab";
-    std::filesystem::create_directories(fabDir);
+    std::filesystem::create_directories(paths.fabDir);
 
     const std::string pcb = kicadPcbPath.string();
-    const std::string fabOut = (fabDir.string() + "/");
-    const std::string posOut = (fabDir / "positions-pos.csv").string();
-    const std::string kicadCli = _resolveKicadCli();
+    const std::string fabOut = (paths.fabDir.string() + "/");
+    const std::string posOut = (paths.fabDir / "positions-pos.csv").string();
+    const std::string kicadCli = paths.kicadCliPath.string();
 
     const std::int32_t drillStatus =
         _runProcess({kicadCli, "pcb", "export", "drill", "--format", "excellon", "--excellon-separate-th", "-o",
@@ -132,9 +99,8 @@ void exportKicadPcb(const std::filesystem::path& kicadPcbPath) {
                                                  "--use-drill-file-origin", "--units", "mm", "-o", posOut, pcb});
 
     if (drillStatus != 0 || gerberStatus != 0 || posStatus != 0) {
-        logError("kicad-cli export failed (drill/gerbers/pos exit codes: " + std::to_string(drillStatus) + "/" +
-                  std::to_string(gerberStatus) + "/" + std::to_string(posStatus) + ")");
-        std::exit(1);
+        return std::unexpected("kicad-cli export failed (drill/gerbers/pos exit codes: " + std::to_string(drillStatus) +
+                                "/" + std::to_string(gerberStatus) + "/" + std::to_string(posStatus) + ")");
     }
 
     // port_resolution.cpp (libkicad-based net/pad queries) needs a board -- and, for net_class
@@ -142,32 +108,29 @@ void exportKicadPcb(const std::filesystem::path& kicadPcbPath) {
     // `-s`/`-p` invocation than this one. Keep persistent copies rather than requiring `-i` to be
     // repeated on every invocation.
     std::error_code copyEc;
-    std::filesystem::copy_file(kicadPcbPath, std::filesystem::current_path() / constants::fabBoardFile,
-                                std::filesystem::copy_options::overwrite_existing, copyEc);
+    std::filesystem::copy_file(kicadPcbPath, paths.fabBoardFile, std::filesystem::copy_options::overwrite_existing,
+                                copyEc);
     if (copyEc) {
-        logError("Failed to copy " + kicadPcbPath.string() + " to fab/: " + copyEc.message());
-        std::exit(1);
+        return std::unexpected("Failed to copy " + kicadPcbPath.string() + " to fab/: " + copyEc.message());
     }
     const std::filesystem::path projectPath = std::filesystem::path(kicadPcbPath).replace_extension(".kicad_pro");
     if (std::filesystem::is_regular_file(projectPath)) {
-        std::filesystem::copy_file(projectPath, std::filesystem::current_path() / constants::fabProjectFile,
-                                    std::filesystem::copy_options::overwrite_existing, copyEc);
+        std::filesystem::copy_file(projectPath, paths.fabProjectFile, std::filesystem::copy_options::overwrite_existing,
+                                    copyEc);
         if (copyEc) {
-            logError("Failed to copy " + projectPath.string() + " to fab/: " + copyEc.message());
-            std::exit(1);
+            return std::unexpected("Failed to copy " + projectPath.string() + " to fab/: " + copyEc.message());
         }
     } else {
         logWarning("No sibling .kicad_pro found for " + kicadPcbPath.string() +
                    "; involved_nets entries using \"net_class\" will fail to resolve");
     }
+    return {};
 }
 
-std::vector<ViaHole> getVias() {
-    const std::filesystem::path fabDir = std::filesystem::current_path() / "fab";
-    std::vector<std::filesystem::path> drillFiles = _globSuffix(fabDir, "-PTH.drl");
+std::expected<std::vector<ViaHole>, std::string> getVias(const PathsConfig& paths) {
+    std::vector<std::filesystem::path> drillFiles = _globSuffix(paths.fabDir, "-PTH.drl");
     if (drillFiles.empty()) {
-        logError("Couldn't find drill file");
-        std::exit(1);
+        return std::unexpected("Couldn't find drill file");
     }
 
     std::map<std::int32_t, double> drills = {{0, 0.0}};
@@ -205,23 +168,20 @@ std::vector<ViaHole> getVias() {
     return vias;
 }
 
-void importStackup() {
+std::expected<void, std::string> importStackup(const PathsConfig& paths, EMSConfig& config) {
     // Deliberately not under fab/: everything in fab/ is regenerated wholesale by exportKicadPcb()
     // (kicad-cli's own gerber/drill/pos export), but the stackup has no kicad-cli export equivalent
     // -- it's user-maintained (exported by hand from KiCad's Board Setup > Board Stackup dialog),
     // so it lives beside simulation.json instead, alongside the other input the user controls.
-    const std::filesystem::path filename = "stackup.json";
-    std::ifstream file(filename);
+    std::ifstream file(paths.stackupFile);
     if (!file.is_open()) {
-        logError("Couldn't open stackup file: " + filename.string());
-        std::exit(1);
+        return std::unexpected("Couldn't open stackup file: " + paths.stackupFile.string());
     }
     nlohmann::json stackup;
     try {
         file >> stackup;
     } catch (const nlohmann::json::parse_error& error) {
-        logError(std::string("JSON decoding failed: ") + error.what());
-        std::exit(1);
+        return std::unexpected(std::string("JSON decoding failed: ") + error.what());
     }
 
     const std::string ver = stackup.value("format_version", std::string());
@@ -230,12 +190,12 @@ void importStackup() {
 
     const bool ok = !ver.empty() && verParts.size() >= 2 && stackupParts.size() >= 2 && verParts[0] == stackupParts[0] &&
                     verParts[1] >= stackupParts[1]; // mirrors the Python source's string comparison
-    if (ok) {
-        Config::sharedConfig().loadStackup(stackup);
-    } else {
-        logError("Stackup format (" + ver + ") is not supported (supported: " + std::string(stackupFormatVersion) + ")");
-        std::exit(1);
+    if (!ok) {
+        return std::unexpected("Stackup format (" + ver + ") is not supported (supported: " +
+                                std::string(stackupFormatVersion) + ")");
     }
+    config.loadStackup(stackup);
+    return {};
 }
 
 } // namespace gerber2ems

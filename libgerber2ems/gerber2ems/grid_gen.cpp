@@ -9,6 +9,7 @@
 #include <sstream>
 
 #include "config.hpp"
+#include "constants.hpp"
 #include "csx_grid_utils.hpp"
 #include "logging.hpp"
 
@@ -403,11 +404,13 @@ std::vector<double> Region::densifyRegionGrid(std::vector<double> grid, double g
 /// the encapsulation note.
 class GridGeneratorAxis {
 public:
-    GridGeneratorAxis(std::string axis, Region board) : _axis(std::move(axis)), _board(board) {}
+    /// `grid` must outlive this GridGeneratorAxis (kept by reference).
+    GridGeneratorAxis(std::string axis, Region board, const Grid& grid)
+        : _axis(std::move(axis)), _board(board), _grid(grid) {}
 
     void addLinesFromTrace(const std::vector<TraceSegment>& segments) {
         const std::string oaxis = _axis == "y" ? "x" : "y";
-        const double w3 = Config::sharedConfig().grid().optimal() / 3;
+        const double w3 = _grid.optimal() / 3;
         auto axisValue = [](const Position& pos, const std::string& axis) { return axis == "x" ? pos.x() : pos.y(); };
 
         for (const auto& seg : segments) {
@@ -458,7 +461,7 @@ public:
 
     /// Shrinks/merges conflicting edge regions (following the rule of thirds as closely as possible).
     void resolveEdgeRegions() {
-        const double gridSize = Config::sharedConfig().grid().optimal();
+        const double gridSize = _grid.optimal();
         const double gridMin = gridSize / 1.8;
         std::sort(_edgeCells.begin(), _edgeCells.end(),
                   [](const Region& a, const Region& b) { return a.prio > b.prio; }); // high to low
@@ -514,15 +517,15 @@ public:
 
     CSRectGrid& compileGrid(CSRectGrid& csgrid, double offset) {
         clearGridLines(csgrid, _axis);
-        const double gridSize = Config::sharedConfig().grid().optimal();
-        const double cellRatio = Config::sharedConfig().grid().cellRatio().xy();
+        const double gridSize = _grid.optimal();
+        const double cellRatio = _grid.cellRatio().xy();
         const double gridMin = gridSize / cellRatio;
-        const double gridDiag = Config::sharedConfig().grid().diagonal();
-        const double gridPerp = Config::sharedConfig().grid().perpendicular();
+        const double gridDiag = _grid.diagonal();
+        const double gridPerp = _grid.perpendicular();
 
         resolveEdgeRegions();
         std::vector<double> grid;
-        if (Config::sharedConfig().grid().margin().fromTrace()) {
+        if (_grid.margin().fromTrace()) {
             _board.min = std::numeric_limits<double>::infinity();
             _board.max = -std::numeric_limits<double>::infinity();
             for (const auto* list : {&_edgeCells, &_diagonal, &_parallel, &_perpendicular}) {
@@ -531,7 +534,7 @@ public:
                     _board.max = std::max(_board.max, r.max);
                 }
             }
-            const double margin = Config::sharedConfig().grid().margin().xy();
+            const double margin = _grid.margin().xy();
             _board.min -= margin;
             _board.max += margin;
         } else {
@@ -567,7 +570,7 @@ public:
         }
         grid = _dedupGrid(grid, gridMin, edgeGrid);
 
-        grid = _board.densifyRegionGrid(grid, Config::sharedConfig().grid().max(), gridMin, cellRatio);
+        grid = _board.densifyRegionGrid(grid, _grid.max(), gridMin, cellRatio);
         grid = _dedupGrid(grid, gridMin, edgeGrid);
 
         std::vector<double> intLines;
@@ -614,24 +617,24 @@ private:
     std::vector<Region> _parallel;
     std::vector<Region> _diagonal;
     std::vector<Region> _perpendicular;
+    const Grid& _grid;
 };
 
 } // namespace
 
 struct GridGenerator::Impl {
-    Impl(double boardXMin, double boardYMin, double boardWidth, double boardHeight)
-        : x("x", Region(-Config::sharedConfig().grid().margin().xy(),
-                         boardWidth + Config::sharedConfig().grid().margin().xy())),
-          y("y", Region(-Config::sharedConfig().grid().margin().xy(),
-                         boardHeight + Config::sharedConfig().grid().margin().xy())),
+    Impl(const EMSConfig& config, double boardXMin, double boardYMin, double boardWidth, double boardHeight)
+        : x("x", Region(-config.grid().margin().xy(), boardWidth + config.grid().margin().xy()), config.grid()),
+          y("y", Region(-config.grid().margin().xy(), boardHeight + config.grid().margin().xy()), config.grid()),
           xmin(boardXMin),
           xmax(boardXMin + boardWidth),
           ymin(boardYMin),
-          ymax(boardYMin + boardHeight) {}
+          ymax(boardYMin + boardHeight),
+          _config(config) {}
 
     std::vector<std::int32_t> _generateZ() {
         logInfo("### Grid Generator: generate Z axis ###");
-        const Grid& gridCfg = Config::sharedConfig().grid();
+        const Grid& gridCfg = _config.grid();
         const double cellRatio = gridCfg.cellRatio().z();
         const double gridMin = gridCfg.optimal() / cellRatio;
         const double gridMax = gridCfg.max();
@@ -643,7 +646,7 @@ struct GridGenerator::Impl {
 
         std::vector<double> zLines = {0};
         double offset = 0;
-        for (const auto& layer : Config::sharedConfig().getSubstrates()) {
+        for (const auto& layer : _config.getSubstrates()) {
             for (std::int32_t i = 0; i < zCount; ++i) {
                 zLines.push_back(offset - layer.thickness() +
                                   (layer.thickness() * static_cast<double>(i)) / static_cast<double>(zCount));
@@ -668,15 +671,15 @@ struct GridGenerator::Impl {
         return result;
     }
 
-    CSRectGrid& generate(CSRectGrid& grid, const SimulationConfig& simConfig) {
-        const std::filesystem::path fabDir = std::filesystem::current_path() / "fab";
+    CSRectGrid& generate(CSRectGrid& grid, const SimulationConfig& simConfig, const std::filesystem::path& fabDir) {
+        const double tessellationTolerance = static_cast<double>(_config.pixelSize()) * constants::unitMultiplier;
         std::vector<GerberFile> gerbers;
         std::error_code ec;
         if (std::filesystem::is_directory(fabDir, ec)) {
             for (const auto& entry : std::filesystem::directory_iterator(fabDir, ec)) {
                 const std::string name = entry.path().filename().string();
                 if (name.size() >= 7 && name.compare(name.size() - 7, 7, "_Cu.gbr") == 0) {
-                    auto gerberResult = GerberFile::load(entry.path());
+                    auto gerberResult = GerberFile::load(entry.path(), tessellationTolerance);
                     if (!gerberResult) {
                         logError(gerberResult.error());
                         std::exit(1);
@@ -726,10 +729,12 @@ struct GridGenerator::Impl {
     double xmax = 0;
     double ymin = 0;
     double ymax = 0;
+    const EMSConfig& _config;
 };
 
-GridGenerator::GridGenerator(double boardXMin, double boardYMin, double boardWidth, double boardHeight)
-    : _impl(std::make_unique<Impl>(boardXMin, boardYMin, boardWidth, boardHeight)) {}
+GridGenerator::GridGenerator(const EMSConfig& config, double boardXMin, double boardYMin, double boardWidth,
+                              double boardHeight)
+    : _impl(std::make_unique<Impl>(config, boardXMin, boardYMin, boardWidth, boardHeight)) {}
 GridGenerator::~GridGenerator() = default;
 
 std::vector<Pad>& GridGenerator::addPads() { return _impl->addPads; }
@@ -737,8 +742,9 @@ std::unordered_map<std::string, Aperture>& GridGenerator::addApertures() { retur
 double GridGenerator::xmin() const { return _impl->xmin; }
 double GridGenerator::ymin() const { return _impl->ymin; }
 
-CSRectGrid& GridGenerator::generate(CSRectGrid& grid, const SimulationConfig& simConfig) {
-    return _impl->generate(grid, simConfig);
+CSRectGrid& GridGenerator::generate(CSRectGrid& grid, const SimulationConfig& simConfig,
+                                     const std::filesystem::path& fabDir) {
+    return _impl->generate(grid, simConfig, fabDir);
 }
 
 } // namespace gerber2ems

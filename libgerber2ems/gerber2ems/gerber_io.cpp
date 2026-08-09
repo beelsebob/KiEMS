@@ -926,7 +926,8 @@ struct GerberFile::ParserState {
     bool multiQuadrant = false;       // Set by G75; G74 (single-quadrant) is rejected outright.
 };
 
-std::expected<GerberFile, std::string> GerberFile::load(const std::filesystem::path& path) {
+std::expected<GerberFile, std::string> GerberFile::load(const std::filesystem::path& path,
+                                                          double tessellationTolerance) {
     // Aperture-macro parsing (ApertureMacro's constructor, elsewhere in this file) still reports
     // malformed macro definitions via std::runtime_error rather than std::expected -- those are
     // defensive checks against inputs no real board this parser has been validated against has
@@ -935,7 +936,7 @@ std::expected<GerberFile, std::string> GerberFile::load(const std::filesystem::p
     // decision from leaking a raw exception out of an API that otherwise promises never to throw.
     try {
         GerberFile file;
-        if (auto result = file._parse(path); !result) {
+        if (auto result = file._parse(path, tessellationTolerance); !result) {
             return std::unexpected(std::move(result).error());
         }
         return file;
@@ -944,7 +945,8 @@ std::expected<GerberFile, std::string> GerberFile::load(const std::filesystem::p
     }
 }
 
-std::expected<void, std::string> GerberFile::_parse(const std::filesystem::path& path) {
+std::expected<void, std::string> GerberFile::_parse(const std::filesystem::path& path,
+                                                      double tessellationTolerance) {
     logInfo("Parsing gerber file: " + path.string());
     std::ifstream fileHandle(path);
     std::stringstream buffer;
@@ -957,7 +959,7 @@ std::expected<void, std::string> GerberFile::_parse(const std::filesystem::path&
         const std::string line = it->str();
         if (_startsWith(line, "%")) {
             _processPercentLine(line, parser);
-        } else if (auto result = _processNormalLine(line, parser); !result) {
+        } else if (auto result = _processNormalLine(line, parser, tessellationTolerance); !result) {
             return result;
         }
     }
@@ -1048,7 +1050,8 @@ void GerberFile::_processPercentLine(const std::string& line, ParserState& parse
     }
 }
 
-std::expected<void, std::string> GerberFile::_processNormalLine(const std::string& line, ParserState& parser) {
+std::expected<void, std::string> GerberFile::_processNormalLine(const std::string& line, ParserState& parser,
+                                                                  double tessellationTolerance) {
     const std::string sline = _stripChars(line, "%*\n");
     const std::vector<std::string> split = _split(sline, ',');
 
@@ -1112,12 +1115,13 @@ std::expected<void, std::string> GerberFile::_processNormalLine(const std::strin
     } else if (_startsWith(split[0], "D")) {
         parser.aperture = split[0];
     } else if (_startsWith(split[0], "X")) {
-        return _processDrawingLine(sline, parser);
+        return _processDrawingLine(sline, parser, tessellationTolerance);
     }
     return {};
 }
 
-std::expected<void, std::string> GerberFile::_processDrawingLine(const std::string& line, ParserState& parser) {
+std::expected<void, std::string> GerberFile::_processDrawingLine(const std::string& line, ParserState& parser,
+                                                                   double tessellationTolerance) {
     const std::string sline = _removePrefix(line, "X");
     const auto [x, afterX] = _partition(sline, 'Y');
     const auto [y1, afterY] = _partition(afterX, 'D');
@@ -1143,9 +1147,7 @@ std::expected<void, std::string> GerberFile::_processDrawingLine(const std::stri
                 const double j = parser.fformat.yFormat().parse(afterJ) * _fileFormatScale();
                 const Position center(parser.pos.x() + i, parser.pos.y() + j);
                 const bool clockwise = parser.plotMode == PlotMode::CircularClockwise;
-                const double tolerance =
-                    static_cast<double>(Config::sharedConfig().pixelSize()) * constants::unitMultiplier;
-                subPoints = _tessellateArc(parser.pos, pos, center, clockwise, tolerance);
+                subPoints = _tessellateArc(parser.pos, pos, center, clockwise, tessellationTolerance);
             }
         }
 

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <expected>
 #include <filesystem>
 #include <limits>
 #include <numbers>
@@ -17,6 +18,7 @@
 #include "gerber_io.hpp"
 #include "libkicad_query.hpp"
 #include "logging.hpp"
+#include "paths_config.hpp"
 
 namespace gerber2ems {
 
@@ -36,9 +38,9 @@ std::string _normalizeLayerName(std::string name) {
 // unrelated modules for a parse that costs microseconds). Needed here so pad positions (from
 // libkicad, aux-origin-relative) land in the exact same re-origined frame gerber_composite.cpp
 // places composited copper triangles in.
-Position _edgeCutsOrigin() {
+std::expected<Position, std::string> _edgeCutsOrigin(const std::filesystem::path& fabDir,
+                                                       double tessellationTolerance) {
     std::error_code ec;
-    const std::filesystem::path fabDir = std::filesystem::current_path() / "fab";
     std::optional<std::filesystem::path> edgeCutsPath;
     if (std::filesystem::is_directory(fabDir, ec)) {
         for (const auto& entry : std::filesystem::directory_iterator(fabDir, ec)) {
@@ -50,15 +52,13 @@ Position _edgeCutsOrigin() {
         }
     }
     if (!edgeCutsPath.has_value()) {
-        logError("No EdgeCuts gerber in fab dir(" + fabDir.string() + ")");
-        std::exit(1);
+        return std::unexpected("No EdgeCuts gerber in fab dir(" + fabDir.string() + ")");
     }
     double xMin = std::numeric_limits<double>::infinity();
     double yMin = std::numeric_limits<double>::infinity();
-    auto edgeCutsResult = GerberFile::load(*edgeCutsPath);
+    auto edgeCutsResult = GerberFile::load(*edgeCutsPath, tessellationTolerance);
     if (!edgeCutsResult) {
-        logError(edgeCutsResult.error());
-        std::exit(1);
+        return std::unexpected(std::move(edgeCutsResult).error());
     }
     const GerberFile& edgeCuts = *edgeCutsResult;
     for (const auto& seg : edgeCuts.traceForNet("no-net").segments()) {
@@ -81,13 +81,16 @@ Position _padPositionInSimFrame(const PadIdentity& pad, const Position& edgeCuts
 // pad would be wasteful.
 class _CopperLayerCache {
 public:
-    const GerberFile* forLayerFileName(const std::string& layerFileName) {
+    /// Returns nullptr (a success value, not an error) if there's legitimately no copper gerber for
+    /// this layer; only a failure to parse a gerber that *was* found is reported as unexpected.
+    std::expected<const GerberFile*, std::string> forLayerFileName(const std::filesystem::path& fabDir,
+                                                                     const std::string& layerFileName,
+                                                                     double tessellationTolerance) {
         const auto it = _files.find(layerFileName);
         if (it != _files.end()) {
             return it->second.has_value() ? &*it->second : nullptr;
         }
 
-        const std::filesystem::path fabDir = std::filesystem::current_path() / "fab";
         const std::string suffix = "-" + layerFileName + ".gbr";
         std::optional<std::filesystem::path> gerberPath;
         std::error_code ec;
@@ -104,10 +107,9 @@ public:
         if (!gerberPath.has_value()) {
             return &*_files.emplace(layerFileName, std::nullopt).first->second;
         }
-        auto gerberResult = GerberFile::load(*gerberPath);
+        auto gerberResult = GerberFile::load(*gerberPath, tessellationTolerance);
         if (!gerberResult) {
-            logError(gerberResult.error());
-            std::exit(1);
+            return std::unexpected(std::move(gerberResult).error());
         }
         return &*_files.emplace(layerFileName, std::move(*gerberResult)).first->second;
     }
@@ -151,14 +153,16 @@ double _padSearchToleranceSimUnits(double padWidthMm, double padHeightMm) {
 // pad's own footprint rotation, which doesn't necessarily match the direction its routed trace
 // departs in (angled fanouts, connectors, etc.). Returns nullopt (having logged why) if no trace
 // segment endpoint is close enough to the pad, or its angle isn't close enough to cardinal.
-std::optional<double> _deriveDirection(_CopperLayerCache& cache, const Position& padPositionSim,
-                                        const Position& edgeCutsOrigin, double padWidthMm, double padHeightMm,
-                                        const std::string& netName, const std::string& layerFileName,
-                                        const std::string& portLabel) {
-    const GerberFile* gerber = cache.forLayerFileName(layerFileName);
+std::expected<double, std::string> _deriveDirection(_CopperLayerCache& cache, const std::filesystem::path& fabDir,
+                                                      const Position& padPositionSim, const Position& edgeCutsOrigin,
+                                                      double padWidthMm, double padHeightMm,
+                                                      const std::string& netName, const std::string& layerFileName,
+                                                      const std::string& portLabel, double tessellationTolerance) {
+    auto gerberResult = cache.forLayerFileName(fabDir, layerFileName, tessellationTolerance);
+    if (!gerberResult) return std::unexpected(std::move(gerberResult).error());
+    const GerberFile* gerber = *gerberResult;
     if (!gerber) {
-        logError("No copper gerber found for layer \"" + layerFileName + "\" (port " + portLabel + ")");
-        return std::nullopt;
+        return std::unexpected("No copper gerber found for layer \"" + layerFileName + "\" (port " + portLabel + ")");
     }
 
     const double toleranceSimUnits = _padSearchToleranceSimUnits(padWidthMm, padHeightMm);
@@ -197,9 +201,9 @@ std::optional<double> _deriveDirection(_CopperLayerCache& cache, const Position&
               [](const Candidate& a, const Candidate& b) { return a.distance < b.distance; });
 
     if (candidates.empty()) {
-        logError("Could not find net \"" + netName + "\"'s own routed copper departing pad for port " + portLabel +
-                  " -- set an explicit \"direction\" override for this involved_nets entry");
-        return std::nullopt;
+        return std::unexpected("Could not find net \"" + netName +
+                                "\"'s own routed copper departing pad for port " + portLabel +
+                                " -- set an explicit \"direction\" override for this involved_nets entry");
     }
 
     for (const Candidate& candidate : candidates) {
@@ -207,13 +211,13 @@ std::optional<double> _deriveDirection(_CopperLayerCache& cache, const Position&
         const double angle = std::atan2(candidate.to.y() - candidate.from.y(), candidate.to.x() - candidate.from.x());
         const std::optional<double> snapped = _snapToCardinal(angle, kDirectionToleranceDegrees);
         if (snapped.has_value()) {
-            return snapped;
+            return *snapped;
         }
     }
 
-    logError("Net \"" + netName + "\"'s routed copper departs pad for port " + portLabel +
-              " at a non-cardinal angle -- set an explicit \"direction\" override for this involved_nets entry");
-    return std::nullopt;
+    return std::unexpected("Net \"" + netName + "\"'s routed copper departs pad for port " + portLabel +
+                            " at a non-cardinal angle -- set an explicit \"direction\" override for this "
+                            "involved_nets entry");
 }
 
 /// One (footprintRef, padNumber) -> resolved port index -- built once per simulation while placing
@@ -230,32 +234,38 @@ struct _PortIndex {
     std::vector<std::pair<std::string, std::string>> entries; // parallel to SimulationConfig::ports()
 };
 
-void _resolvePortRef(PortRef& ref, const _PortIndex& index, const std::vector<std::string>& involvedNets,
-                      const std::string& simName, const std::string& fieldLabel) {
-    const PadIdentity resolved =
-        libkicad_query::resolvePin(ref.footprint(), ref.pin(),
+std::expected<void, std::string> _resolvePortRef(const PathsConfig& paths, PortRef& ref, const _PortIndex& index,
+                                                  const std::vector<std::string>& involvedNets,
+                                                  const std::string& simName, const std::string& fieldLabel) {
+    auto resolvedResult =
+        libkicad_query::resolvePin(paths, ref.footprint(), ref.pin(),
                                     "Simulation \"" + simName + "\": " + fieldLabel + " (" + ref.footprint() + "." +
                                         ref.pin() + ")");
+    if (!resolvedResult) return std::unexpected(std::move(resolvedResult).error());
+    const PadIdentity& resolved = *resolvedResult;
     if (std::find(involvedNets.begin(), involvedNets.end(), resolved.netName) == involvedNets.end()) {
-        logError("Simulation \"" + simName + "\": " + fieldLabel + " (" + ref.footprint() + "." + ref.pin() +
-                  ", net \"" + resolved.netName + "\") is not part of this simulation's involved_nets");
-        std::exit(1);
+        return std::unexpected("Simulation \"" + simName + "\": " + fieldLabel + " (" + ref.footprint() + "." +
+                                ref.pin() + ", net \"" + resolved.netName +
+                                "\") is not part of this simulation's involved_nets");
     }
     const std::optional<std::int32_t> portIndex = index.find(resolved.footprintRef, resolved.padNumber);
     if (!portIndex.has_value()) {
-        logError("Simulation \"" + simName + "\": " + fieldLabel + " (" + ref.footprint() + "." + ref.pin() +
-                  ") did not resolve to a placed port");
-        std::exit(1);
+        return std::unexpected("Simulation \"" + simName + "\": " + fieldLabel + " (" + ref.footprint() + "." +
+                                ref.pin() + ") did not resolve to a placed port");
     }
     ref.setResolvedIndex(*portIndex);
+    return {};
 }
 
 } // namespace
 
-void resolveSimulationPorts() {
-    const Position edgeCutsOrigin = _edgeCutsOrigin();
+std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const PathsConfig& paths) {
+    const double tessellationTolerance = static_cast<double>(config.pixelSize()) * constants::unitMultiplier;
+    auto edgeCutsOriginResult = _edgeCutsOrigin(paths.fabDir, tessellationTolerance);
+    if (!edgeCutsOriginResult) return std::unexpected(std::move(edgeCutsOriginResult).error());
+    const Position& edgeCutsOrigin = *edgeCutsOriginResult;
 
-    for (SimulationConfig& sim : Config::sharedConfig().simulations()) {
+    for (SimulationConfig& sim : config.simulations()) {
         _CopperLayerCache layerCache;
         _PortIndex portIndex;
 
@@ -265,29 +275,33 @@ void resolveSimulationPorts() {
         std::vector<std::string> orderedNets;
 
         for (const InvolvedNetConfig& entry : sim.involvedNets()) {
-            for (const std::string& netName : libkicad_query::resolveInvolvedNetNames(entry)) {
+            auto nets = libkicad_query::resolveInvolvedNetNames(paths, entry);
+            if (!nets) return std::unexpected(std::move(nets).error());
+            for (const std::string& netName : *nets) {
                 const auto [it, inserted] = netOwner.emplace(netName, &entry);
                 if (!inserted) {
-                    logError("Simulation \"" + sim.name() + "\": net \"" + netName +
-                              "\" is claimed by more than one involved_nets entry");
-                    std::exit(1);
+                    return std::unexpected("Simulation \"" + sim.name() + "\": net \"" + netName +
+                                            "\" is claimed by more than one involved_nets entry");
                 }
                 orderedNets.push_back(netName);
             }
         }
         if (orderedNets.empty()) {
-            logError("Simulation \"" + sim.name() + "\": involved_nets resolved to zero nets");
-            std::exit(1);
+            return std::unexpected("Simulation \"" + sim.name() + "\": involved_nets resolved to zero nets");
         }
         sim.resolvedNets() = orderedNets;
         // Resolved purely to confirm the ground net(s) actually exist -- the ground copper itself
         // is consumed by board_slicing.cpp, not here.
-        (void)libkicad_query::resolveGroundNetNames(sim.groundNet());
+        if (auto ground = libkicad_query::resolveGroundNetNames(paths, sim.groundNet()); !ground) {
+            return std::unexpected(std::move(ground).error());
+        }
 
         for (const std::string& netName : orderedNets) {
             const InvolvedNetConfig& entry = *netOwner.at(netName);
-            const std::vector<PadIdentity> pads = libkicad_query::padsOnNet(
-                netName, "Simulation \"" + sim.name() + "\": enumerating pads on net \"" + netName + "\"");
+            auto padsResult = libkicad_query::padsOnNet(
+                paths, netName, "Simulation \"" + sim.name() + "\": enumerating pads on net \"" + netName + "\"");
+            if (!padsResult) return std::unexpected(std::move(padsResult).error());
+            const std::vector<PadIdentity>& pads = *padsResult;
 
             if (pads.size() > 32) {
                 logWarning("Simulation \"" + sim.name() + "\": net \"" + netName + "\" resolved to " +
@@ -301,25 +315,22 @@ void resolveSimulationPorts() {
                 const Position positionSim = _padPositionInSimFrame(pad, edgeCutsOrigin);
                 const std::string layerFileName = _normalizeLayerName(pad.copperLayerName);
 
-                const std::optional<std::int32_t> layer =
-                    Config::sharedConfig().metalLayerIndexForFileName(layerFileName);
+                const std::optional<std::int32_t> layer = config.metalLayerIndexForFileName(layerFileName);
                 if (!layer.has_value()) {
-                    logError("Port " + portLabel + ": copper layer \"" + pad.copperLayerName +
-                              "\" not found in stackup (through-hole pads, which span every copper layer, aren't "
-                              "supported yet -- v1 requires SMD pads)");
-                    std::exit(1);
+                    return std::unexpected(
+                        "Port " + portLabel + ": copper layer \"" + pad.copperLayerName +
+                        "\" not found in stackup (through-hole pads, which span every copper layer, aren't "
+                        "supported yet -- v1 requires SMD pads)");
                 }
 
                 double direction = 0;
                 if (entry.direction().has_value()) {
                     direction = *entry.direction();
                 } else {
-                    const std::optional<double> derived =
-                        _deriveDirection(layerCache, positionSim, edgeCutsOrigin, pad.widthMm, pad.heightMm, netName,
-                                          layerFileName, portLabel);
-                    if (!derived.has_value()) {
-                        std::exit(1);
-                    }
+                    auto derived =
+                        _deriveDirection(layerCache, paths.fabDir, positionSim, edgeCutsOrigin, pad.widthMm,
+                                          pad.heightMm, netName, layerFileName, portLabel, tessellationTolerance);
+                    if (!derived) return std::unexpected(std::move(derived).error());
                     direction = *derived;
                 }
 
@@ -348,39 +359,62 @@ void resolveSimulationPorts() {
         }
 
         for (ExcitationConfig& excitation : sim.excitations()) {
-            const PadIdentity resolved = libkicad_query::resolvePin(
-                excitation.footprint(), excitation.pin(),
+            auto resolvedResult = libkicad_query::resolvePin(
+                paths, excitation.footprint(), excitation.pin(),
                 "Simulation \"" + sim.name() + "\": excitation on " + excitation.footprint() + "." +
                     excitation.pin());
+            if (!resolvedResult) return std::unexpected(std::move(resolvedResult).error());
+            const PadIdentity& resolved = *resolvedResult;
             if (std::find(orderedNets.begin(), orderedNets.end(), resolved.netName) == orderedNets.end()) {
-                logError("Simulation \"" + sim.name() + "\": excitation targets " + excitation.footprint() + "." +
-                          excitation.pin() + " (net \"" + resolved.netName +
-                          "\") but that net is not part of this simulation's involved_nets");
-                std::exit(1);
+                return std::unexpected("Simulation \"" + sim.name() + "\": excitation targets " +
+                                        excitation.footprint() + "." + excitation.pin() + " (net \"" +
+                                        resolved.netName +
+                                        "\") but that net is not part of this simulation's involved_nets");
             }
             const std::optional<std::int32_t> index = portIndex.find(resolved.footprintRef, resolved.padNumber);
             if (!index.has_value()) {
-                logError("Simulation \"" + sim.name() + "\": excitation on " + excitation.footprint() + "." +
-                          excitation.pin() + " did not resolve to a placed port");
-                std::exit(1);
+                return std::unexpected("Simulation \"" + sim.name() + "\": excitation on " + excitation.footprint() +
+                                        "." + excitation.pin() + " did not resolve to a placed port");
             }
             excitation.setDrivenPortIndex(*index);
         }
 
         for (SingleEndedConfig& trace : sim.traces()) {
-            _resolvePortRef(trace.start(), portIndex, orderedNets, sim.name(), "trace start");
-            _resolvePortRef(trace.stop(), portIndex, orderedNets, sim.name(), "trace stop");
+            if (auto r = _resolvePortRef(paths, trace.start(), portIndex, orderedNets, sim.name(), "trace start");
+                !r) {
+                return r;
+            }
+            if (auto r = _resolvePortRef(paths, trace.stop(), portIndex, orderedNets, sim.name(), "trace stop"); !r) {
+                return r;
+            }
             trace.postInit();
         }
 
         for (DifferentialPairConfig& pair : sim.diffPairs()) {
-            _resolvePortRef(pair.startP(), portIndex, orderedNets, sim.name(), "differential pair start_p");
-            _resolvePortRef(pair.stopP(), portIndex, orderedNets, sim.name(), "differential pair stop_p");
-            _resolvePortRef(pair.startN(), portIndex, orderedNets, sim.name(), "differential pair start_n");
-            _resolvePortRef(pair.stopN(), portIndex, orderedNets, sim.name(), "differential pair stop_n");
+            if (auto r = _resolvePortRef(paths, pair.startP(), portIndex, orderedNets, sim.name(),
+                                          "differential pair start_p");
+                !r) {
+                return r;
+            }
+            if (auto r = _resolvePortRef(paths, pair.stopP(), portIndex, orderedNets, sim.name(),
+                                          "differential pair stop_p");
+                !r) {
+                return r;
+            }
+            if (auto r = _resolvePortRef(paths, pair.startN(), portIndex, orderedNets, sim.name(),
+                                          "differential pair start_n");
+                !r) {
+                return r;
+            }
+            if (auto r = _resolvePortRef(paths, pair.stopN(), portIndex, orderedNets, sim.name(),
+                                          "differential pair stop_n");
+                !r) {
+                return r;
+            }
             pair.postInit();
         }
     }
+    return {};
 }
 
 } // namespace gerber2ems

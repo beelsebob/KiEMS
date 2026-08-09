@@ -329,7 +329,10 @@ class GerberFile {
 public:
     /// Parses the gerber file at `path`. A constructor can't report failure, so parsing happens
     /// behind this factory instead; the object it returns is always fully parsed.
-    static std::expected<GerberFile, std::string> load(const std::filesystem::path& path);
+    /// `tessellationTolerance` (simulation units) controls arc-tessellation fidelity -- the same
+    /// value gerber_composite.cpp's compositeOps()/triangulate() take explicitly.
+    static std::expected<GerberFile, std::string> load(const std::filesystem::path& path,
+                                                         double tessellationTolerance);
 
     /// Parts of the file that are currently not supported/interpreted by the parser.
     const std::string& unparsed() const { return _unparsed; }
@@ -350,10 +353,12 @@ private:
 
     struct ParserState; // Definition (and FileFormat/NumberFormat) are parsing-only, kept in the .cpp.
 
-    std::expected<void, std::string> _parse(const std::filesystem::path& path);
+    std::expected<void, std::string> _parse(const std::filesystem::path& path, double tessellationTolerance);
     void _processPercentLine(const std::string& line, ParserState& parser);
-    std::expected<void, std::string> _processNormalLine(const std::string& line, ParserState& parser);
-    std::expected<void, std::string> _processDrawingLine(const std::string& line, ParserState& parser);
+    std::expected<void, std::string> _processNormalLine(const std::string& line, ParserState& parser,
+                                                          double tessellationTolerance);
+    std::expected<void, std::string> _processDrawingLine(const std::string& line, ParserState& parser,
+                                                           double tessellationTolerance);
     void _handleApertureDefinition(const std::vector<std::string>& split, ParserState& parser);
 
     std::string _unparsed;

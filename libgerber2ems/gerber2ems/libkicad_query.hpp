@@ -7,10 +7,12 @@
 // same way this project already shells out to kicad-cli (see importer.cpp's _runProcess).
 #pragma once
 
+#include <expected>
 #include <string>
 #include <vector>
 
 #include "config.hpp"
+#include "paths_config.hpp"
 
 namespace gerber2ems::libkicad_query {
 
@@ -31,27 +33,36 @@ struct PadIdentity {
     double heightMm = 0;
 };
 
-/// Resolves one footprint's pin to its net name. `context` prefixes any error message; on failure,
-/// logs the error and exits the process (every caller treats this as an unrecoverable config error
-/// -- a typo'd footprint/pin name needs the user to fix the config, not a fallback).
-std::string netForFootprintPin(const std::string& footprint, const std::string& pin, const std::string& context);
+/// Resolves one footprint's pin to its net name. `paths` supplies the board/project to query and
+/// the query-helper binary to run (see PathsConfig); `context` prefixes any error message -- every
+/// caller treats a failure here as an unrecoverable config error (a typo'd footprint/pin name
+/// needs the user to fix the config, not a fallback), but the decision of what to do about it is
+/// now the caller's, not this function's.
+std::expected<std::string, std::string> netForFootprintPin(const PathsConfig& paths, const std::string& footprint,
+                                                             const std::string& pin, const std::string& context);
 
-/// Every net assigned to `netClassName`. Exits the process on failure (see netForFootprintPin).
-std::vector<std::string> netsInNetClass(const std::string& netClassName, const std::string& context);
+/// Every net assigned to `netClassName`. See netForFootprintPin.
+std::expected<std::vector<std::string>, std::string> netsInNetClass(const PathsConfig& paths,
+                                                                      const std::string& netClassName,
+                                                                      const std::string& context);
 
-/// Every pad connected to `netName`. Exits the process on failure (see netForFootprintPin).
-std::vector<PadIdentity> padsOnNet(const std::string& netName, const std::string& context);
+/// Every pad connected to `netName`. See netForFootprintPin.
+std::expected<std::vector<PadIdentity>, std::string> padsOnNet(const PathsConfig& paths, const std::string& netName,
+                                                                 const std::string& context);
 
-/// Resolves one footprint's pin to its full pad identity (position/orientation/layer/net). Exits
-/// the process on failure (see netForFootprintPin).
-PadIdentity resolvePin(const std::string& footprint, const std::string& pin, const std::string& context);
+/// Resolves one footprint's pin to its full pad identity (position/orientation/layer/net). See
+/// netForFootprintPin.
+std::expected<PadIdentity, std::string> resolvePin(const PathsConfig& paths, const std::string& footprint,
+                                                     const std::string& pin, const std::string& context);
 
 /// Resolves an InvolvedNetConfig entry (net_class / net / footprint+pins) to a list of net names,
 /// per its documented semantics (a footprint+pin entry resolves to that pin's net, deduplicated
 /// across its pins() list).
-std::vector<std::string> resolveInvolvedNetNames(const InvolvedNetConfig& entry);
+std::expected<std::vector<std::string>, std::string> resolveInvolvedNetNames(const PathsConfig& paths,
+                                                                               const InvolvedNetConfig& entry);
 
 /// Resolves a GroundNetConfig (net_class / net) to a list of net names.
-std::vector<std::string> resolveGroundNetNames(const GroundNetConfig& ground);
+std::expected<std::vector<std::string>, std::string> resolveGroundNetNames(const PathsConfig& paths,
+                                                                             const GroundNetConfig& ground);
 
 } // namespace gerber2ems::libkicad_query

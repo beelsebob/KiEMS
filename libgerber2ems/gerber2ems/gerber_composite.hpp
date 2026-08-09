@@ -2,9 +2,11 @@
 // (gerbv-render + boundary-trace) pipeline.
 #pragma once
 
+#include <expected>
 #include <filesystem>
 #include <functional>
 #include <limits>
+#include <string>
 #include <vector>
 
 #include <clipper2/clipper.h>
@@ -26,7 +28,8 @@ struct BoundingBox {
     double yMax = -std::numeric_limits<double>::infinity();
 };
 
-BoundingBox edgeCutsBoundingBox();
+std::expected<BoundingBox, std::string> edgeCutsBoundingBox(const std::filesystem::path& fabDir,
+                                                              double tessellationTolerance);
 
 /// Composites `ops` (a caller-chosen subset of a GerberFile's copperOps() -- e.g. every op, or only
 /// those on nets of interest, per CopperOp::net) into a single accumulated Clipper2 polygon set,
@@ -54,6 +57,8 @@ std::vector<Triangle> triangulate(const Clipper2Lib::Paths64& composited, double
 /// matching getDimensions() and the rest of the codebase's [0, pcbWidth] x [0, pcbHeight]
 /// convention (mirroring what the old raster pipeline did implicitly via its "crop to content"
 /// step).
-std::vector<Triangle> compositeLayerTriangles(const std::filesystem::path& gerberPath);
+std::expected<std::vector<Triangle>, std::string> compositeLayerTriangles(const std::filesystem::path& fabDir,
+                                                                            const std::filesystem::path& gerberPath,
+                                                                            double tessellationTolerance);
 
 } // namespace gerber2ems

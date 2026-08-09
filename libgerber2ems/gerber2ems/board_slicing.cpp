@@ -88,8 +88,9 @@ std::vector<Position> _chainSegmentsIntoLoop(std::vector<TraceSegment> remaining
 /// loops (a cutout/slot as a separate closed loop, rather than a single self-touching "keyhole"
 /// outline -- see gerber_io.cpp's own note on the same assumption for zone regions) would need this
 /// extended to collect multiple loops, which isn't done here.
-Clipper2Lib::Path64 _realBoardOutline(double originX, double originY) {
-    const std::filesystem::path fabDir = std::filesystem::current_path() / "fab";
+std::expected<Clipper2Lib::Path64, std::string> _realBoardOutline(const std::filesystem::path& fabDir,
+                                                                    double originX, double originY,
+                                                                    double tessellationTolerance) {
     std::optional<std::filesystem::path> edgeCutsPath;
     std::error_code ec;
     if (std::filesystem::is_directory(fabDir, ec)) {
@@ -102,19 +103,16 @@ Clipper2Lib::Path64 _realBoardOutline(double originX, double originY) {
         }
     }
     if (!edgeCutsPath.has_value()) {
-        logError("No EdgeCuts gerber in fab dir(" + fabDir.string() + ")");
-        std::exit(1);
+        return std::unexpected("No EdgeCuts gerber in fab dir(" + fabDir.string() + ")");
     }
-    auto edgeCutsResult = GerberFile::load(*edgeCutsPath);
+    auto edgeCutsResult = GerberFile::load(*edgeCutsPath, tessellationTolerance);
     if (!edgeCutsResult) {
-        logError(edgeCutsResult.error());
-        std::exit(1);
+        return std::unexpected(std::move(edgeCutsResult).error());
     }
     const GerberFile& edgeCuts = *edgeCutsResult;
     const std::vector<Position> loop = _chainSegmentsIntoLoop(edgeCuts.traceForNet("no-net").segments());
     if (loop.size() < 3) {
-        logError("Edge_Cuts outline has fewer than 3 points");
-        std::exit(1);
+        return std::unexpected("Edge_Cuts outline has fewer than 3 points");
     }
     return _positionsToPath64(loop, originX, originY);
 }
@@ -182,8 +180,8 @@ std::vector<CopperOp> _opsOnNets(const GerberFile& gerber, const std::unordered_
     return filtered;
 }
 
-std::optional<std::filesystem::path> _copperGerberForFileName(const std::string& layerFileName) {
-    const std::filesystem::path fabDir = std::filesystem::current_path() / "fab";
+std::optional<std::filesystem::path> _copperGerberForFileName(const std::filesystem::path& fabDir,
+                                                                const std::string& layerFileName) {
     const std::string suffix = "-" + layerFileName + ".gbr";
     std::error_code ec;
     if (std::filesystem::is_directory(fabDir, ec)) {
@@ -199,22 +197,30 @@ std::optional<std::filesystem::path> _copperGerberForFileName(const std::string&
 
 } // namespace
 
-SlicedBoard sliceBoardForSimulation(const SimulationConfig& sim) {
+std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const SimulationConfig& sim, const EMSConfig& config,
+                                                                  const PathsConfig& paths) {
     std::unordered_set<std::string> involvedNets;
     for (const InvolvedNetConfig& entry : sim.involvedNets()) {
-        for (const std::string& net : libkicad_query::resolveInvolvedNetNames(entry)) {
+        auto nets = libkicad_query::resolveInvolvedNetNames(paths, entry);
+        if (!nets) return std::unexpected(std::move(nets).error());
+        for (const std::string& net : *nets) {
             involvedNets.insert(net);
         }
     }
     std::unordered_set<std::string> groundNets;
-    for (const std::string& net : libkicad_query::resolveGroundNetNames(sim.groundNet())) {
-        groundNets.insert(net);
+    {
+        auto nets = libkicad_query::resolveGroundNetNames(paths, sim.groundNet());
+        if (!nets) return std::unexpected(std::move(nets).error());
+        for (const std::string& net : *nets) {
+            groundNets.insert(net);
+        }
     }
 
-    const BoundingBox origin = edgeCutsBoundingBox();
-    const double tessellationTolerance =
-        static_cast<double>(Config::sharedConfig().pixelSize()) * constants::unitMultiplier;
-    const std::vector<LayerConfig> metals = Config::sharedConfig().getMetals();
+    const double tessellationTolerance = static_cast<double>(config.pixelSize()) * constants::unitMultiplier;
+    auto originResult = edgeCutsBoundingBox(paths.fabDir, tessellationTolerance);
+    if (!originResult) return std::unexpected(std::move(originResult).error());
+    const BoundingBox& origin = *originResult;
+    const std::vector<LayerConfig> metals = config.getMetals();
 
     // Per layer: the involved-net and ground-net composites (pre-cutout), and the GerberFile they
     // came from (kept alive for _opsOnNets' aperture lookups during compositing).
@@ -223,15 +229,13 @@ SlicedBoard sliceBoardForSimulation(const SimulationConfig& sim) {
 
     Clipper2Lib::Paths64 signalUnionAllLayers;
     for (std::size_t layerIndex = 0; layerIndex < metals.size(); ++layerIndex) {
-        const std::optional<std::filesystem::path> gerberPath = _copperGerberForFileName(metals[layerIndex].file());
+        const std::optional<std::filesystem::path> gerberPath =
+            _copperGerberForFileName(paths.fabDir, metals[layerIndex].file());
         if (!gerberPath.has_value()) {
             continue; // No copper on this layer at all.
         }
-        auto gerberResult = GerberFile::load(*gerberPath);
-        if (!gerberResult) {
-            logError(gerberResult.error());
-            std::exit(1);
-        }
+        auto gerberResult = GerberFile::load(*gerberPath, tessellationTolerance);
+        if (!gerberResult) return std::unexpected(std::move(gerberResult).error());
         const GerberFile& gerber = *gerberResult;
 
         signalPerLayer[layerIndex] =
@@ -244,22 +248,22 @@ SlicedBoard sliceBoardForSimulation(const SimulationConfig& sim) {
     }
 
     if (signalUnionAllLayers.empty()) {
-        logError("Simulation \"" + sim.name() + "\": involved nets have no copper on any layer");
-        std::exit(1);
+        return std::unexpected("Simulation \"" + sim.name() + "\": involved nets have no copper on any layer");
     }
 
     // Cutout region: involved-net footprint padded by hull_padding, clipped to the real board
     // outline (see board_slicing.hpp's algorithm doc comment -- this stands in for a true concave
     // hull/alpha-shape, which isn't implemented here).
-    const Clipper2Lib::Path64 realOutline = _realBoardOutline(origin.xMin, origin.yMin);
+    auto realOutlineResult = _realBoardOutline(paths.fabDir, origin.xMin, origin.yMin, tessellationTolerance);
+    if (!realOutlineResult) return std::unexpected(std::move(realOutlineResult).error());
+    const Clipper2Lib::Path64& realOutline = *realOutlineResult;
     const Clipper2Lib::Paths64 padded =
         Clipper2Lib::InflatePaths(signalUnionAllLayers, sim.hullPadding(), Clipper2Lib::JoinType::Round,
                                     Clipper2Lib::EndType::Polygon, 2.0, tessellationTolerance);
     const Clipper2Lib::Paths64 cutout =
         Clipper2Lib::Intersect(padded, {realOutline}, Clipper2Lib::FillRule::NonZero);
     if (cutout.empty()) {
-        logError("Simulation \"" + sim.name() + "\": computed cutout region is empty");
-        std::exit(1);
+        return std::unexpected("Simulation \"" + sim.name() + "\": computed cutout region is empty");
     }
 
     // Stitching vias: walk every outer boundary loop of the cutout, classify each edge against the
@@ -315,8 +319,9 @@ SlicedBoard sliceBoardForSimulation(const SimulationConfig& sim) {
                     continue; // No ground copper here to stitch to -- skip rather than place a
                               // floating via.
                 }
-                stitchingVias.push_back(StitchingVia{static_cast<double>(viaPos.x), static_cast<double>(viaPos.y),
-                                                       Config::sharedConfig().via().platingThickness()});
+                stitchingVias.push_back(
+                    StitchingVia{static_cast<double>(viaPos.x), static_cast<double>(viaPos.y),
+                                 config.via().platingThickness()});
             }
         }
     }
@@ -347,8 +352,7 @@ SlicedBoard sliceBoardForSimulation(const SimulationConfig& sim) {
         }
     }
     if (largestOuter == nullptr) {
-        logError("Simulation \"" + sim.name() + "\": cutout region has no outer loop");
-        std::exit(1);
+        return std::unexpected("Simulation \"" + sim.name() + "\": cutout region has no outer loop");
     }
 
     double xMin = std::numeric_limits<double>::infinity();

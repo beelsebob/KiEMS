@@ -17,6 +17,7 @@
 #include "csx_helpers.hpp"
 #include "grid_gen.hpp"
 #include "importer.hpp"
+#include "paths_config.hpp"
 #include "ports.hpp"
 
 namespace gerber2ems {
@@ -24,7 +25,9 @@ namespace gerber2ems {
 /// Interacts with openEMS/CSXCAD to build simulation geometry and run the FDTD simulation.
 class Simulation {
 public:
-    explicit Simulation(SimulationConfig& simConfig);
+    /// `simConfig`/`config`/`options`/`paths` must all outlive this Simulation (kept by reference).
+    Simulation(SimulationConfig& simConfig, const EMSConfig& config, const RunOptions& options,
+               const PathsConfig& paths);
 
     /// Slices simConfig's board geometry (see board_slicing.hpp) -- simConfig.ports() must already
     /// be populated (resolveSimulationPorts(), called before any Simulation is constructed). Must
@@ -83,6 +86,9 @@ private:
     CSRectGrid* _grid;
 
     SimulationConfig& _simConfig;
+    const EMSConfig& _config;
+    const RunOptions& _options;
+    const PathsConfig& _paths;
     SlicedBoard _slicedBoard;
 
     std::vector<std::unique_ptr<Port>> _ports;

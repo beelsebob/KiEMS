@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
+#include <stdexcept>
 
 #include "constants.hpp"
 #include "logging.hpp"
@@ -35,8 +36,8 @@ std::string _pinToString(const nlohmann::json& j) {
     if (j.is_number_integer()) {
         return std::to_string(j.get<std::int64_t>());
     }
-    logError("A \"pin\"/\"pins\" entry must be a string (pin name) or integer (pin number), got: " + j.dump());
-    std::exit(1);
+    throw std::runtime_error("A \"pin\"/\"pins\" entry must be a string (pin name) or integer (pin number), got: " +
+                              j.dump());
 }
 
 } // namespace
@@ -87,8 +88,8 @@ void from_json(const nlohmann::json& j, InvolvedNetConfig& p) {
     const std::int32_t selectorCount =
         static_cast<std::int32_t>(hasNetClass) + static_cast<std::int32_t>(hasNet) + static_cast<std::int32_t>(hasFootprint);
     if (selectorCount != 1) {
-        logError("involved_nets entry must have exactly one of \"net_class\", \"net\", or \"footprint\"+\"pins\"");
-        std::exit(1);
+        throw std::runtime_error(
+            "involved_nets entry must have exactly one of \"net_class\", \"net\", or \"footprint\"+\"pins\"");
     }
 
     if (hasNetClass) {
@@ -107,8 +108,7 @@ void from_json(const nlohmann::json& j, InvolvedNetConfig& p) {
             }
         }
         if (p._pins.empty()) {
-            logError("involved_nets entry for footprint \"" + *p._footprint + "\" has no \"pins\"");
-            std::exit(1);
+            throw std::runtime_error("involved_nets entry for footprint \"" + *p._footprint + "\" has no \"pins\"");
         }
     }
 
@@ -141,8 +141,7 @@ void from_json(const nlohmann::json& j, GroundNetConfig& p) {
     const bool hasNetClass = j.contains("net_class");
     const bool hasNet = j.contains("net");
     if (static_cast<std::int32_t>(hasNetClass) + static_cast<std::int32_t>(hasNet) != 1) {
-        logError("ground_net must have exactly one of \"net_class\" or \"net\"");
-        std::exit(1);
+        throw std::runtime_error("ground_net must have exactly one of \"net_class\" or \"net\"");
     }
     if (hasNetClass) {
         p._kind = GroundSelectorKind::NetClass;
@@ -192,9 +191,8 @@ void from_json(const nlohmann::json& j, ExcitationConfig& p) {
         p._amplitude = j.at("amplitude").get<double>();
     }
     if (!p._isMain && (!p._frequency.has_value() || !p._amplitude.has_value())) {
-        logError("Non-main excitation on " + p._footprint + "." + p._pin +
-                  " must specify both \"frequency\" and \"amplitude\"");
-        std::exit(1);
+        throw std::runtime_error("Non-main excitation on " + p._footprint + "." + p._pin +
+                                  " must specify both \"frequency\" and \"amplitude\"");
     }
 }
 
@@ -399,8 +397,7 @@ void from_json(const nlohmann::json& j, SimulationConfig& p) {
     p._name = j.at("name").get<std::string>();
     p._involvedNets = j.value("involved_nets", std::vector<InvolvedNetConfig>{});
     if (p._involvedNets.empty()) {
-        logError("Simulation \"" + p._name + "\" has no involved_nets");
-        std::exit(1);
+        throw std::runtime_error("Simulation \"" + p._name + "\" has no involved_nets");
     }
     p._groundNet = j.at("ground_net").get<GroundNetConfig>();
     p._hullPadding = j.value("hull_padding", def._hullPadding);
@@ -411,22 +408,17 @@ void from_json(const nlohmann::json& j, SimulationConfig& p) {
     p._diffPairs = j.value("differential_pairs", std::vector<DifferentialPairConfig>{});
 }
 
-Config& Config::sharedConfig() {
-    static Config instance;
-    return instance;
-}
-
-void Config::_postInit() {
+void EMSConfig::_postInit() {
     _grid.applyFrequencyConstraint(_frequency.stop());
     _formatVersion = std::string(constants::configFormatVersion);
 }
 
-void Config::_applyUnitMultiplier() {
+void EMSConfig::_applyUnitMultiplier() {
     _grid.scaleToSimulationUnits(constants::unitMultiplier);
     _via.scaleToSimulationUnits(constants::unitMultiplier);
 }
 
-std::vector<LayerConfig> Config::getSubstrates() const {
+std::vector<LayerConfig> EMSConfig::getSubstrates() const {
     std::vector<LayerConfig> result;
     for (const auto& layer : _layers) {
         if (layer.kind() == LayerKind::Substrate) {
@@ -436,7 +428,7 @@ std::vector<LayerConfig> Config::getSubstrates() const {
     return result;
 }
 
-std::vector<LayerConfig> Config::getMetals() const {
+std::vector<LayerConfig> EMSConfig::getMetals() const {
     std::vector<LayerConfig> result;
     for (const auto& layer : _layers) {
         if (layer.kind() == LayerKind::Metal) {
@@ -446,7 +438,7 @@ std::vector<LayerConfig> Config::getMetals() const {
     return result;
 }
 
-std::optional<std::int32_t> Config::metalLayerIndexForFileName(const std::string& normalizedFileName) const {
+std::optional<std::int32_t> EMSConfig::metalLayerIndexForFileName(const std::string& normalizedFileName) const {
     const std::vector<LayerConfig> metals = getMetals();
     for (std::size_t i = 0; i < metals.size(); ++i) {
         if (metals[i].file() == normalizedFileName) {
@@ -456,7 +448,7 @@ std::optional<std::int32_t> Config::metalLayerIndexForFileName(const std::string
     return std::nullopt;
 }
 
-void Config::loadStackup(const nlohmann::json& stackup) {
+void EMSConfig::loadStackup(const nlohmann::json& stackup) {
     std::vector<LayerConfig> parsed;
     for (const auto& layer : stackup.at("layers")) {
         parsed.emplace_back(layer);
@@ -469,7 +461,7 @@ void Config::loadStackup(const nlohmann::json& stackup) {
     }
 }
 
-bool Config::_isCfgVersionInvalid(const std::optional<std::string>& version) {
+bool EMSConfig::_isCfgVersionInvalid(const std::optional<std::string>& version) {
     if (!version.has_value()) {
         return true;
     }
@@ -485,7 +477,7 @@ bool Config::_isCfgVersionInvalid(const std::optional<std::string>& version) {
     return versionParts[1] > currentParts[1];
 }
 
-nlohmann::json Config::_getCfgJson(const std::filesystem::path& cfgPath, bool updateConfig) {
+nlohmann::json EMSConfig::_getCfgJson(const std::filesystem::path& cfgPath, bool updateConfig) {
     logInfo("Loading config from " + cfgPath.string());
 
     if (!std::filesystem::is_regular_file(cfgPath) && updateConfig) {
@@ -493,8 +485,7 @@ nlohmann::json Config::_getCfgJson(const std::filesystem::path& cfgPath, bool up
     }
 
     if (!std::filesystem::is_regular_file(cfgPath)) {
-        logError("Config file doesn't exist: " + cfgPath.string());
-        std::exit(1);
+        throw std::runtime_error("Config file doesn't exist: " + cfgPath.string());
     }
 
     nlohmann::json jsonCfg;
@@ -507,8 +498,7 @@ nlohmann::json Config::_getCfgJson(const std::filesystem::path& cfgPath, bool up
             try {
                 jsonCfg = nlohmann::json::parse(content);
             } catch (const nlohmann::json::parse_error& error) {
-                logError(std::string("JSON decoding failed: ") + error.what());
-                std::exit(1);
+                throw std::runtime_error(std::string("JSON decoding failed: ") + error.what());
             }
         }
     }
@@ -526,59 +516,65 @@ nlohmann::json Config::_getCfgJson(const std::filesystem::path& cfgPath, bool up
     return jsonCfg;
 }
 
-void Config::load(const Arguments& args) {
-    Config& self = sharedConfig();
+std::expected<EMSConfig, std::string> EMSConfig::parse(const std::filesystem::path& cfgPath, bool updateConfig) {
+    // JSON deserialization failures (malformed syntax, a validation check inside one of this file's
+    // from_json hooks) surface as exceptions -- nlohmann::json's own from_json calling convention
+    // (invoked implicitly by .get<T>()/.value<T>() below) has no way to return std::expected, so
+    // this is the one boundary that converts them into this function's own std::expected contract.
+    try {
+        EMSConfig self;
 
-    logInfo("Parsing config");
-    const std::filesystem::path cfgPath = std::filesystem::absolute(
-        args.configPath().has_value() ? std::filesystem::path(*args.configPath()) : constants::defaultConfigPath);
-    const nlohmann::json jsonCfg = _getCfgJson(cfgPath, args.updateConfig());
+        logInfo("Parsing config");
+        const nlohmann::json jsonCfg = _getCfgJson(cfgPath, updateConfig);
 
-    const std::optional<std::string> version =
-        jsonCfg.contains("format_version") && !jsonCfg.at("format_version").is_null()
-            ? std::optional<std::string>(jsonCfg.at("format_version").get<std::string>())
-            : std::nullopt;
-    if (_isCfgVersionInvalid(version)) {
-        logError("Config format (" + version.value_or("null") + ") is not supported (supported: " +
-                  std::string(constants::configFormatVersion) + ")");
-        std::exit(1);
-    }
+        const std::optional<std::string> version =
+            jsonCfg.contains("format_version") && !jsonCfg.at("format_version").is_null()
+                ? std::optional<std::string>(jsonCfg.at("format_version").get<std::string>())
+                : std::nullopt;
+        if (_isCfgVersionInvalid(version)) {
+            throw std::runtime_error("Config format (" + version.value_or("null") +
+                                      ") is not supported (supported: " +
+                                      std::string(constants::configFormatVersion) + ")");
+        }
 
-    self._formatVersion = std::string(constants::configFormatVersion);
-    self._frequency = jsonCfg.value("frequency", Frequency{});
-    self._maxSteps = jsonCfg.value("max_steps", 100000);
-    self._pixelSize = jsonCfg.value("pixel_size", 5);
-    self._via = jsonCfg.value("via", Via{});
-    self._grid = jsonCfg.value("grid", Grid{});
+        self._formatVersion = std::string(constants::configFormatVersion);
+        self._frequency = jsonCfg.value("frequency", Frequency{});
+        self._maxSteps = jsonCfg.value("max_steps", 100000);
+        self._pixelSize = jsonCfg.value("pixel_size", 5);
+        self._via = jsonCfg.value("via", Via{});
+        self._grid = jsonCfg.value("grid", Grid{});
 
-    self._simulations.clear();
-    for (const auto& s : jsonCfg.at("simulations")) {
-        self._simulations.push_back(s.get<SimulationConfig>());
-    }
-    // Note: SingleEndedConfig::postInit()/DifferentialPairConfig::postInit() are deliberately NOT
-    // called here -- they validate that each PortRef resolved to a real port, which only happens
-    // later in resolveSimulationPorts() (port_resolution.cpp), once libkicad has actually resolved
-    // this simulation's involved nets into concrete ports. Called from there instead.
+        self._simulations.clear();
+        for (const auto& s : jsonCfg.at("simulations")) {
+            self._simulations.push_back(s.get<SimulationConfig>());
+        }
+        // Note: SingleEndedConfig::postInit()/DifferentialPairConfig::postInit() are deliberately NOT
+        // called here -- they validate that each PortRef resolved to a real port, which only happens
+        // later in resolveSimulationPorts() (port_resolution.cpp), once libkicad has actually resolved
+        // this simulation's involved nets into concrete ports. Called from there instead.
 
-    self._postInit();
-    self._arguments = args;
+        self._postInit();
 
-    if (args.updateConfig()) {
-        nlohmann::json out;
-        out["format_version"] = self._formatVersion;
-        out["frequency"] = self._frequency;
-        out["max_steps"] = self._maxSteps;
-        out["pixel_size"] = self._pixelSize;
-        out["via"] = self._via;
-        out["grid"] = self._grid;
-        out["simulations"] = self._simulations;
-        std::ofstream file(cfgPath);
-        file << out.dump(4);
-    }
+        if (updateConfig) {
+            nlohmann::json out;
+            out["format_version"] = self._formatVersion;
+            out["frequency"] = self._frequency;
+            out["max_steps"] = self._maxSteps;
+            out["pixel_size"] = self._pixelSize;
+            out["via"] = self._via;
+            out["grid"] = self._grid;
+            out["simulations"] = self._simulations;
+            std::ofstream file(cfgPath);
+            file << out.dump(4);
+        }
 
-    self._applyUnitMultiplier();
-    for (auto& simulation : self._simulations) {
-        simulation.scaleToSimulationUnits(constants::unitMultiplier);
+        self._applyUnitMultiplier();
+        for (auto& simulation : self._simulations) {
+            simulation.scaleToSimulationUnits(constants::unitMultiplier);
+        }
+        return self;
+    } catch (const std::exception& e) {
+        return std::unexpected(e.what());
     }
 }
 

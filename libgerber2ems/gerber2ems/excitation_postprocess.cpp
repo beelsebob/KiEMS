@@ -36,13 +36,13 @@ void _saveFigure(const matplot::figure_handle& fig, const std::filesystem::path&
 } // namespace
 
 ExcitationPostprocessor::ExcitationPostprocessor(const SimulationConfig& simConfig, const Postprocessor& sParams,
-                                                   std::vector<double> frequencies)
-    : _simConfig(simConfig), _sParams(sParams), _frequencies(std::move(frequencies)) {}
+                                                   std::vector<double> frequencies, const Frequency& frequency)
+    : _simConfig(simConfig), _sParams(sParams), _frequencies(std::move(frequencies)), _frequency(frequency) {}
 
 double ExcitationPostprocessor::_pickDt() const {
     // 8x oversampling above the highest analysis frequency -- comfortably past Nyquist, giving
     // clean time-domain resolution for the reconstructed waveform.
-    const double stopFreq = Config::sharedConfig().frequency().stop();
+    const double stopFreq = _frequency.stop();
     return stopFreq > 0 ? 1.0 / (8.0 * stopFreq) : 1e-12;
 }
 
@@ -76,7 +76,7 @@ void ExcitationPostprocessor::run() {
 
             const TimeWaveform stimulus =
                 excitation.isMain()
-                    ? synthesizeMainStimulus(Config::sharedConfig().frequency(), excitation.startTime(),
+                    ? synthesizeMainStimulus(_frequency, excitation.startTime(),
                                               excitation.duration(), excitation.phaseDegrees(), _dt, sampleCount)
                     : synthesizeToneBurst(*excitation.frequency(), *excitation.amplitude(), excitation.phaseDegrees(),
                                            excitation.startTime(), excitation.duration(), _dt, sampleCount);

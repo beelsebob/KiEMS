@@ -39,10 +39,10 @@ Position _pointToPosition(const Clipper2Lib::Point64& pt) {
 
 } // namespace
 
-BoundingBox edgeCutsBoundingBox() {
+std::expected<BoundingBox, std::string> edgeCutsBoundingBox(const std::filesystem::path& fabDir,
+                                                              double tessellationTolerance) {
     BoundingBox box;
     std::error_code ec;
-    const std::filesystem::path fabDir = std::filesystem::current_path() / "fab";
     std::optional<std::filesystem::path> edgeCutsPath;
     if (std::filesystem::is_directory(fabDir, ec)) {
         for (const auto& entry : std::filesystem::directory_iterator(fabDir, ec)) {
@@ -54,13 +54,11 @@ BoundingBox edgeCutsBoundingBox() {
         }
     }
     if (!edgeCutsPath.has_value()) {
-        logError("No EdgeCuts gerber in fab dir(" + fabDir.string() + ")");
-        std::exit(1);
+        return std::unexpected("No EdgeCuts gerber in fab dir(" + fabDir.string() + ")");
     }
-    auto edgeCutsResult = GerberFile::load(*edgeCutsPath);
+    auto edgeCutsResult = GerberFile::load(*edgeCutsPath, tessellationTolerance);
     if (!edgeCutsResult) {
-        logError(edgeCutsResult.error());
-        std::exit(1);
+        return std::unexpected(std::move(edgeCutsResult).error());
     }
     const GerberFile& edgeCuts = *edgeCutsResult;
     for (const auto& seg : edgeCuts.traceForNet("no-net").segments()) {
@@ -233,16 +231,19 @@ std::vector<Triangle> triangulate(const Clipper2Lib::Paths64& composited, double
     return result;
 }
 
-std::vector<Triangle> compositeLayerTriangles(const std::filesystem::path& gerberPath) {
-    auto gerberResult = GerberFile::load(gerberPath);
+std::expected<std::vector<Triangle>, std::string> compositeLayerTriangles(const std::filesystem::path& fabDir,
+                                                                            const std::filesystem::path& gerberPath,
+                                                                            double tessellationTolerance) {
+    auto gerberResult = GerberFile::load(gerberPath, tessellationTolerance);
     if (!gerberResult) {
-        logError(gerberResult.error());
-        std::exit(1);
+        return std::unexpected(std::move(gerberResult).error());
     }
     const GerberFile& gerber = *gerberResult;
-    const BoundingBox origin = edgeCutsBoundingBox();
-    const double tessellationTolerance =
-        static_cast<double>(Config::sharedConfig().pixelSize()) * constants::unitMultiplier;
+    auto originResult = edgeCutsBoundingBox(fabDir, tessellationTolerance);
+    if (!originResult) {
+        return std::unexpected(std::move(originResult).error());
+    }
+    const BoundingBox& origin = *originResult;
 
     const Clipper2Lib::Paths64 composited =
         compositeOps(gerber, gerber.copperOps(), origin.xMin, origin.yMin, tessellationTolerance);

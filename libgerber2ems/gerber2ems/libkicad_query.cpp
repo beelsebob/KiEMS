@@ -11,11 +11,6 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#if defined(__APPLE__)
-#include <mach-o/dyld.h>
-#endif
-
-#include "constants.hpp"
 #include "logging.hpp"
 
 extern char** environ;
@@ -23,25 +18,6 @@ extern char** environ;
 namespace gerber2ems::libkicad_query {
 
 namespace {
-
-std::filesystem::path _boardPath() { return std::filesystem::current_path() / constants::fabBoardFile; }
-std::filesystem::path _projectPath() { return std::filesystem::current_path() / constants::fabProjectFile; }
-
-/// Absolute path to the currently-running executable's own directory, via the macOS-specific
-/// _NSGetExecutablePath API (portable across how this binary itself was invoked -- PATH lookup,
-/// relative path, symlink, etc.) -- libkicad_smoketest is always a sibling build product in the
-/// same BUILT_PRODUCTS_DIR.
-std::filesystem::path _executableDir() {
-    std::array<char, 4096> buffer{};
-    std::uint32_t size = static_cast<std::uint32_t>(buffer.size());
-    if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
-        logError("_NSGetExecutablePath: path longer than buffer");
-        std::exit(1);
-    }
-    std::error_code ec;
-    const std::filesystem::path resolved = std::filesystem::canonical(buffer.data(), ec);
-    return (ec ? std::filesystem::path(buffer.data()) : resolved).parent_path();
-}
 
 struct _SubprocessResult {
     std::int32_t exitCode = -1;
@@ -52,12 +28,11 @@ struct _SubprocessResult {
 /// Runs `args[0]` with the given arguments, capturing its stdout/stderr rather than letting them
 /// pass through (unlike importer.cpp's _runProcess, which is used for kicad-cli's own
 /// user-facing diagnostics instead).
-_SubprocessResult _runCapturing(const std::vector<std::string>& args) {
+std::expected<_SubprocessResult, std::string> _runCapturing(const std::vector<std::string>& args) {
     std::array<int, 2> stdoutPipe{};
     std::array<int, 2> stderrPipe{};
     if (pipe(stdoutPipe.data()) != 0 || pipe(stderrPipe.data()) != 0) {
-        logError("Failed to create pipes for subprocess: " + args[0]);
-        std::exit(1);
+        return std::unexpected("Failed to create pipes for subprocess: " + args[0]);
     }
 
     posix_spawn_file_actions_t actions;
@@ -84,8 +59,7 @@ _SubprocessResult _runCapturing(const std::vector<std::string>& args) {
     if (rc != 0) {
         close(stdoutPipe[0]);
         close(stderrPipe[0]);
-        logError("Failed to spawn process: " + args[0]);
-        std::exit(1);
+        return std::unexpected("Failed to spawn process: " + args[0]);
     }
 
     _SubprocessResult result;
@@ -148,81 +122,93 @@ PadIdentity _parsePadLine(const std::string& line) {
     return pad;
 }
 
-std::vector<std::string> _query(const std::string& command, const std::vector<std::string>& args,
-                                 const std::string& context) {
-    std::vector<std::string> fullArgs = {(_executableDir() / "libkicad_smoketest").string(), command,
-                                          _projectPath().string(), _boardPath().string()};
+std::expected<std::vector<std::string>, std::string> _query(const PathsConfig& paths, const std::string& command,
+                                                              const std::vector<std::string>& args,
+                                                              const std::string& context) {
+    std::vector<std::string> fullArgs = {paths.kicadQueryHelperPath.string(), command,
+                                          paths.fabProjectFile.string(), paths.fabBoardFile.string()};
     fullArgs.insert(fullArgs.end(), args.begin(), args.end());
 
-    const _SubprocessResult result = _runCapturing(fullArgs);
-    if (result.exitCode != 0) {
-        logError(context + ": " + _rstrip(result.stdErr));
-        std::exit(1);
+    auto result = _runCapturing(fullArgs);
+    if (!result) return std::unexpected(std::move(result).error());
+    if (result->exitCode != 0) {
+        return std::unexpected(context + ": " + _rstrip(result->stdErr));
     }
-    return _splitLines(result.stdOut);
+    return _splitLines(result->stdOut);
 }
 
 } // namespace
 
-std::string netForFootprintPin(const std::string& footprint, const std::string& pin, const std::string& context) {
-    const std::vector<std::string> lines = _query("net-for-pin", {footprint, pin}, context);
-    if (lines.empty()) {
-        logError(context + ": empty response from libkicad_smoketest");
-        std::exit(1);
+std::expected<std::string, std::string> netForFootprintPin(const PathsConfig& paths, const std::string& footprint,
+                                                             const std::string& pin, const std::string& context) {
+    auto lines = _query(paths, "net-for-pin", {footprint, pin}, context);
+    if (!lines) return std::unexpected(std::move(lines).error());
+    if (lines->empty()) {
+        return std::unexpected(context + ": empty response from libkicad_smoketest");
     }
-    return lines.front();
+    return lines->front();
 }
 
-std::vector<std::string> netsInNetClass(const std::string& netClassName, const std::string& context) {
-    return _query("nets-in-class", {netClassName}, context);
+std::expected<std::vector<std::string>, std::string> netsInNetClass(const PathsConfig& paths,
+                                                                      const std::string& netClassName,
+                                                                      const std::string& context) {
+    return _query(paths, "nets-in-class", {netClassName}, context);
 }
 
-std::vector<PadIdentity> padsOnNet(const std::string& netName, const std::string& context) {
+std::expected<std::vector<PadIdentity>, std::string> padsOnNet(const PathsConfig& paths, const std::string& netName,
+                                                                 const std::string& context) {
+    auto lines = _query(paths, "pads-on-net", {netName}, context);
+    if (!lines) return std::unexpected(std::move(lines).error());
     std::vector<PadIdentity> pads;
-    for (const std::string& line : _query("pads-on-net", {netName}, context)) {
+    for (const std::string& line : *lines) {
         pads.push_back(_parsePadLine(line));
     }
     return pads;
 }
 
-PadIdentity resolvePin(const std::string& footprint, const std::string& pin, const std::string& context) {
-    const std::vector<std::string> lines = _query("resolve-pin", {footprint, pin}, context);
-    if (lines.empty()) {
-        logError(context + ": empty response from libkicad_smoketest");
-        std::exit(1);
+std::expected<PadIdentity, std::string> resolvePin(const PathsConfig& paths, const std::string& footprint,
+                                                     const std::string& pin, const std::string& context) {
+    auto lines = _query(paths, "resolve-pin", {footprint, pin}, context);
+    if (!lines) return std::unexpected(std::move(lines).error());
+    if (lines->empty()) {
+        return std::unexpected(context + ": empty response from libkicad_smoketest");
     }
-    return _parsePadLine(lines.front());
+    return _parsePadLine(lines->front());
 }
 
-std::vector<std::string> resolveInvolvedNetNames(const InvolvedNetConfig& entry) {
+std::expected<std::vector<std::string>, std::string> resolveInvolvedNetNames(const PathsConfig& paths,
+                                                                               const InvolvedNetConfig& entry) {
     switch (entry.kind()) {
         case NetSelectorKind::Net:
-            return {*entry.net()};
+            return std::vector<std::string>{*entry.net()};
         case NetSelectorKind::NetClass:
-            return netsInNetClass(*entry.netClass(), "Resolving net_class \"" + *entry.netClass() + "\"");
+            return netsInNetClass(paths, *entry.netClass(), "Resolving net_class \"" + *entry.netClass() + "\"");
         case NetSelectorKind::FootprintPin: {
             std::vector<std::string> nets;
             for (const std::string& pin : entry.pins()) {
-                std::string net =
-                    netForFootprintPin(*entry.footprint(), pin, "Resolving " + *entry.footprint() + "." + pin);
-                if (std::find(nets.begin(), nets.end(), net) == nets.end()) {
-                    nets.push_back(std::move(net));
+                auto net = netForFootprintPin(paths, *entry.footprint(), pin,
+                                               "Resolving " + *entry.footprint() + "." + pin);
+                if (!net) return std::unexpected(std::move(net).error());
+                if (std::find(nets.begin(), nets.end(), *net) == nets.end()) {
+                    nets.push_back(std::move(*net));
                 }
             }
             return nets;
         }
     }
-    return {};
+    return std::vector<std::string>{};
 }
 
-std::vector<std::string> resolveGroundNetNames(const GroundNetConfig& ground) {
+std::expected<std::vector<std::string>, std::string> resolveGroundNetNames(const PathsConfig& paths,
+                                                                             const GroundNetConfig& ground) {
     switch (ground.kind()) {
         case GroundSelectorKind::Net:
-            return {*ground.net()};
+            return std::vector<std::string>{*ground.net()};
         case GroundSelectorKind::NetClass:
-            return netsInNetClass(*ground.netClass(), "Resolving ground_net's net_class \"" + *ground.netClass() + "\"");
+            return netsInNetClass(paths, *ground.netClass(),
+                                   "Resolving ground_net's net_class \"" + *ground.netClass() + "\"");
     }
-    return {};
+    return std::vector<std::string>{};
 }
 
 } // namespace gerber2ems::libkicad_query

@@ -5,18 +5,25 @@
 //  CLI entry point. Ported from gerber2ems/main.py.
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <vector>
+
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 
 #include "gerber2ems/config.hpp"
 #include "gerber2ems/constants.hpp"
 #include "gerber2ems/excitation_postprocess.hpp"
 #include "gerber2ems/importer.hpp"
 #include "gerber2ems/logging.hpp"
+#include "gerber2ems/paths_config.hpp"
 #include "gerber2ems/port_resolution.hpp"
 #include "gerber2ems/postprocess.hpp"
 #include "gerber2ems/simulation.hpp"
@@ -76,9 +83,10 @@ bool looksLikeFlag(const std::string& s) { return s.size() > 1 && s[0] == '-'; }
 
 Arguments parseArguments(int argc, char** argv) {
     Arguments args;
-    // Left relative (not anchored to the invoking shell's cwd here): main() chdirs into the config
-    // file's own directory before these are ever used, so a relative default correctly resolves
-    // relative to simulation.json's location, not wherever the tool happened to be invoked from.
+    // Left relative: main() resolves these against the config file's own directory once parsing is
+    // done (see the PathsConfig setup in main()), so a relative default -- or a relative -i/-o --
+    // correctly resolves relative to simulation.json's location, not wherever the tool happened to
+    // be invoked from.
     args.setInput(constants::simulationDir);
     args.setOutput(constants::resultsDir);
 
@@ -185,8 +193,52 @@ void setupLogging(const Arguments& args) {
     setLogLevel(level);
 }
 
-void createDir(const std::filesystem::path& path, bool cleanup = false) {
-    const std::filesystem::path directoryPath = std::filesystem::current_path() / path;
+// macOS's KiCad.app doesn't symlink kicad-cli anywhere on a typical PATH -- it ships only inside
+// the app bundle. Only the CLI is allowed to do this kind of PATH-scanning/fallback-guessing (a
+// sandboxed GUI can't, and libgerber2ems itself never does -- see importer.hpp); it's a convenience
+// specific to this unsandboxed developer tool.
+std::filesystem::path resolveKicadCli() {
+    const char* pathEnv = std::getenv("PATH");
+    if (pathEnv != nullptr) {
+        std::stringstream pathStream(pathEnv);
+        std::string dir;
+        while (std::getline(pathStream, dir, ':')) {
+            std::error_code ec;
+            if (std::filesystem::is_regular_file(std::filesystem::path(dir) / "kicad-cli", ec)) {
+                return "kicad-cli";
+            }
+        }
+    }
+    static const std::array<std::filesystem::path, 1> kKicadCliFallbackPaths = {
+        "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
+    };
+    for (const auto& candidate : kKicadCliFallbackPaths) {
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(candidate, ec)) {
+            logDebug("kicad-cli not found on PATH; using " + candidate.string());
+            return candidate;
+        }
+    }
+    return "kicad-cli"; // Let posix_spawnp's own error reporting handle the "truly not found" case.
+}
+
+// Absolute path to the currently-running executable's own directory, via the macOS-specific
+// _NSGetExecutablePath API -- libkicad_smoketest is always a sibling build product in the same
+// BUILT_PRODUCTS_DIR as this CLI. Only the CLI does this "sibling of self" resolution; the library
+// itself takes the helper's path as an explicit PathsConfig field (see libkicad_query.hpp) so a
+// sandboxed GUI app can point it at a bundled copy instead.
+std::filesystem::path executableDir() {
+    std::array<char, 4096> buffer{};
+    std::uint32_t size = static_cast<std::uint32_t>(buffer.size());
+    if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+        return {};
+    }
+    std::error_code ec;
+    const std::filesystem::path resolved = std::filesystem::canonical(buffer.data(), ec);
+    return (ec ? std::filesystem::path(buffer.data()) : resolved).parent_path();
+}
+
+void createDir(const std::filesystem::path& directoryPath, bool cleanup = false) {
     if (cleanup && std::filesystem::exists(directoryPath)) {
         std::filesystem::remove_all(directoryPath);
     }
@@ -195,18 +247,18 @@ void createDir(const std::filesystem::path& path, bool cleanup = false) {
     }
 }
 
-void geometry() {
-    for (auto& simConfig : Config::sharedConfig().simulations()) {
+void geometry(EMSConfig& config, const RunOptions& options, const PathsConfig& paths) {
+    for (auto& simConfig : config.simulations()) {
         logInfo("### Building geometry for simulation \"" + simConfig.name() + "\" ###");
-        createDir(constants::simGeometryDir(simConfig.name()));
+        createDir(paths.geometryDir / simConfig.name());
 
-        Simulation sim(simConfig);
+        Simulation sim(simConfig, config, options, paths);
         sim.sliceBoard();
         sim.createMaterials();
         sim.addGerbers();
         sim.addGrid();
         sim.addSubstrates();
-        if (Config::sharedConfig().arguments().exportField().has_value()) {
+        if (options.exportField.has_value()) {
             sim.addDumpBoxes();
         }
         sim.setBoundaryConditions(false);
@@ -216,15 +268,15 @@ void geometry() {
     }
 }
 
-void simulate() {
-    for (auto& simConfig : Config::sharedConfig().simulations()) {
-        createDir(constants::simSimulationDir(simConfig.name()));
+void simulate(EMSConfig& config, const RunOptions& options, const PathsConfig& paths) {
+    for (auto& simConfig : config.simulations()) {
+        createDir(paths.simulationDir / simConfig.name());
 
         std::optional<Simulation> sim;
         auto& ports = simConfig.ports();
         for (std::size_t index = 0; index < ports.size(); ++index) {
             if (ports[index].excite()) {
-                sim.emplace(simConfig);
+                sim.emplace(simConfig, config, options, paths);
                 logInfo("[" + simConfig.name() + "] Simulating with excitation on port #" + std::to_string(index));
                 sim->loadGeometry();
                 sim->setExcitation();
@@ -240,8 +292,7 @@ void simulate() {
             sim->addVirtualPorts();
         }
 
-        const std::vector<double> frequencies =
-            linspace(Config::sharedConfig().frequency().start(), Config::sharedConfig().frequency().stop(), 1001);
+        const std::vector<double> frequencies = linspace(config.frequency().start(), config.frequency().stop(), 1001);
         Postprocessor post(frequencies, simConfig);
 
         for (std::size_t index = 0; index < ports.size(); ++index) {
@@ -254,19 +305,16 @@ void simulate() {
             }
         }
         post.calculateSparams();
-        post.sparamToFile(constants::simSimulationDir(simConfig.name()));
+        post.sparamToFile(paths.simulationDir / simConfig.name());
     }
 }
 
-void postprocess() {
-    const Arguments& args = Config::sharedConfig().arguments();
-
-    for (auto& simConfig : Config::sharedConfig().simulations()) {
+void postprocess(EMSConfig& config, const Arguments& args) {
+    for (auto& simConfig : config.simulations()) {
         const std::filesystem::path outDir = args.output() / simConfig.name();
         std::filesystem::create_directories(outDir);
 
-        const std::vector<double> frequencies =
-            linspace(Config::sharedConfig().frequency().start(), Config::sharedConfig().frequency().stop(), 1001);
+        const std::vector<double> frequencies = linspace(config.frequency().start(), config.frequency().stop(), 1001);
         Postprocessor post(frequencies, simConfig);
         post.loadSparams(args.input() / simConfig.name());
         post.processData();
@@ -281,7 +329,7 @@ void postprocess() {
         if (!simConfig.excitations().empty()) {
             const std::filesystem::path excDir = outDir / "excitations";
             std::filesystem::create_directories(excDir);
-            ExcitationPostprocessor excPost(simConfig, post, frequencies);
+            ExcitationPostprocessor excPost(simConfig, post, frequencies, config.frequency());
             excPost.run();
             excPost.saveToFile(excDir);
             excPost.renderPlots(excDir, args.transparent());
@@ -296,23 +344,35 @@ int main(int argc, char** argv) {
 
     // Every relative path in this tool (fab/, ems/, etc., and -i/-o if given as relative paths) is
     // meant to be relative to simulation.json's own location, not to wherever the tool happened to
-    // be invoked from -- resolve the config path against the invoking shell's cwd once, here, then
-    // chdir into its directory before anything else touches the filesystem. Config::load() re-runs
-    // std::filesystem::absolute() on this same path, which is a no-op once it's already absolute.
+    // be invoked from -- resolve the config path against the invoking shell's cwd once, here, and
+    // build every other path explicitly off its parent directory below (no chdir: the library
+    // itself never assumes a shared process cwd, and this CLI doesn't need one either).
     const std::filesystem::path cfgPath = std::filesystem::absolute(
         args.configPath().has_value() ? std::filesystem::path(*args.configPath()) : constants::defaultConfigPath);
     args.setConfigPath(cfgPath.string());
-    std::error_code chdirEc;
-    std::filesystem::current_path(cfgPath.parent_path(), chdirEc);
-    if (chdirEc) {
-        logError("Could not enter config directory " + cfgPath.parent_path().string() + ": " + chdirEc.message());
-        return EXIT_FAILURE;
+    const std::filesystem::path configDir = cfgPath.parent_path();
+    if (args.input().is_relative()) {
+        args.setInput(configDir / args.input());
+    }
+    if (args.output().is_relative()) {
+        args.setOutput(configDir / args.output());
     }
 
+    const PathsConfig paths =
+        PathsConfig::forConfigDir(configDir, resolveKicadCli(), executableDir() / "libkicad_smoketest");
+
     if (args.input().extension() == ".kicad_pcb") {
-        exportKicadPcb(args.input());
+        if (auto result = exportKicadPcb(paths, args.input()); !result) {
+            logError(result.error());
+            return EXIT_FAILURE;
+        }
     }
-    Config::load(args);
+    auto configResult = EMSConfig::parse(cfgPath, args.updateConfig());
+    if (!configResult) {
+        logError(configResult.error());
+        return EXIT_FAILURE;
+    }
+    EMSConfig config = std::move(*configResult);
     setupLogging(args);
     if (args.updateConfig()) {
         return EXIT_SUCCESS;
@@ -329,25 +389,37 @@ int main(int argc, char** argv) {
     // count to load Sx<port>.csv files. Requires fab/board.kicad_pcb (persisted by exportKicadPcb())
     // from this invocation's own -i or an earlier one, and fab/stackup.json (importStackup()) for
     // resolveSimulationPorts()'s copper-layer-index lookup.
-    importStackup();
-    resolveSimulationPorts();
+    if (auto result = importStackup(paths, config); !result) {
+        logError(result.error());
+        return EXIT_FAILURE;
+    }
+    if (auto result = resolveSimulationPorts(config, paths); !result) {
+        logError(result.error());
+        return EXIT_FAILURE;
+    }
 
-    createDir(constants::baseDir);
+    createDir(paths.baseDir);
+
+    RunOptions options;
+    options.oversampling = args.oversampling();
+    options.exportField = args.exportField();
+    options.transparent = args.transparent();
+    options.plotPhase = args.plotPhase();
 
     if (args.geometry() || args.all()) {
         logInfo("Creating geometry");
-        createDir(constants::geometryDir, true);
-        geometry();
+        createDir(paths.geometryDir, true);
+        geometry(config, options, paths);
     }
     if (args.simulate() || args.all()) {
         logInfo("Running simulation");
-        createDir(constants::simulationDir, true);
-        simulate();
+        createDir(paths.simulationDir, true);
+        simulate(config, options, paths);
     }
     if (args.postprocess() || args.all()) {
         logInfo("Postprocessing");
-        createDir(constants::resultsDir, true);
-        postprocess();
+        createDir(paths.resultsDir, true);
+        postprocess(config, args);
     }
 
     return EXIT_SUCCESS;

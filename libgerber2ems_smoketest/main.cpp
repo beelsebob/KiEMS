@@ -23,10 +23,17 @@ bool checkConstants() {
     return true;
 }
 
-bool checkConfigDefaults() {
-    const Config& cfg = Config::sharedConfig();
-    if (!cfg.simulations().empty()) {
-        std::cerr << "FAIL: default Config::sharedConfig() should have no simulations configured\n";
+bool checkConfigParseFailsCleanly() {
+    // EMSConfig::parse() against a path that can't exist should come back as a clean
+    // std::expected failure, not a thrown exception or a crash -- exercises the library's
+    // std::expected-based error boundary from outside its own target.
+    auto result = EMSConfig::parse("/nonexistent/libgerber2ems_smoketest/simulation.json", false);
+    if (result.has_value()) {
+        std::cerr << "FAIL: EMSConfig::parse() should have failed for a nonexistent path\n";
+        return false;
+    }
+    if (result.error().empty()) {
+        std::cerr << "FAIL: EMSConfig::parse() failure should carry a non-empty error message\n";
         return false;
     }
     return true;
@@ -45,7 +52,7 @@ bool checkLogging() {
 int main() {
     bool ok = true;
     ok &= checkConstants();
-    ok &= checkConfigDefaults();
+    ok &= checkConfigParseFailsCleanly();
     ok &= checkLogging();
 
     if (ok) {

@@ -2,10 +2,14 @@
 #pragma once
 
 #include <cstdint>
+#include <expected>
 #include <filesystem>
+#include <string>
 #include <vector>
 
+#include "config.hpp"
 #include "gerber_io.hpp"
+#include "paths_config.hpp"
 
 namespace gerber2ems {
 
@@ -26,20 +30,21 @@ struct ViaHole {
     double diameter = 0;
 };
 
-/// Exports gerbers, an Excellon drill file, and a position file from a KiCad PCB into `./fab/`
-/// (creating it if needed), by shelling out to `kicad-cli` -- KiCad's own officially-maintained
-/// headless export tool. There is no practical way to do this without invoking KiCad's own
-/// tooling: its IPC API only gained export support in KiCad 11, and its internal plotting classes
-/// (GERBER_PLOTTER etc.) are undocumented internals that pull in KiCad's full wxWidgets/Cairo/Boost
-/// dependency stack with no stable ABI -- both considered and rejected for the same reasons
-/// linking libgerbv directly was rejected earlier in this project. Exits the process on failure.
-void exportKicadPcb(const std::filesystem::path& kicadPcbPath);
+/// Exports gerbers, an Excellon drill file, and a position file from a KiCad PCB into
+/// `paths.fabDir` (creating it if needed), by shelling out to `paths.kicadCliPath` -- KiCad's own
+/// officially-maintained headless export tool. There is no practical way to do this without
+/// invoking KiCad's own tooling: its IPC API only gained export support in KiCad 11, and its
+/// internal plotting classes (GERBER_PLOTTER etc.) are undocumented internals that pull in KiCad's
+/// full wxWidgets/Cairo/Boost dependency stack with no stable ABI -- both considered and rejected
+/// for the same reasons linking libgerbv directly was rejected earlier in this project.
+std::expected<void, std::string> exportKicadPcb(const PathsConfig& paths, const std::filesystem::path& kicadPcbPath);
 
-/// Parses `fab/*-PTH.drl` (Excellon drill file) for plated through-hole via positions/diameters.
-std::vector<ViaHole> getVias();
+/// Parses `paths.fabDir`'s `*-PTH.drl` (Excellon drill file) for plated through-hole via
+/// positions/diameters.
+std::expected<std::vector<ViaHole>, std::string> getVias(const PathsConfig& paths);
 
-/// Imports stackup information from `stackup.json`, next to simulation.json (not under fab/,
-/// which holds only kicad-cli-regenerated output), into the shared Config.
-void importStackup();
+/// Imports stackup information from `paths.stackupFile`, next to simulation.json (not under fab/,
+/// which holds only kicad-cli-regenerated output), into `config`.
+std::expected<void, std::string> importStackup(const PathsConfig& paths, EMSConfig& config);
 
 } // namespace gerber2ems

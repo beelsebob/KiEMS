@@ -9,7 +9,7 @@
 // Fourier transform, and its inverse (assuming a real time-domain signal, so only positive
 // frequencies are needed -- the standard single-sided-spectrum convention) reconstructs x(t) from a
 // spectrum known at a finite set of frequencies. Because the analysis-and-synthesis frequency grid
-// is exactly Postprocessor's own (Config::sharedConfig().frequency()'s linspace), no interpolation
+// is exactly Postprocessor's own (EMSConfig::frequency()'s linspace), no interpolation
 // between grids is ever needed -- everything here operates directly on that one grid.
 #pragma once
 
