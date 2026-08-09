@@ -13,6 +13,7 @@
 
 #include <complex>
 #include <cstdint>
+#include <expected>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -41,6 +42,12 @@ public:
     std::optional<std::vector<std::complex<double>>> getImpedance(std::int32_t port) const;
     std::optional<std::vector<std::complex<double>>> getSParam(std::int32_t outputPort, std::int32_t inputPort) const;
 
+    /// Injects an already-computed S-parameter directly, bypassing addPortData()+calculateSparams()
+    /// -- lets a caller that already has S-parameter data in memory (e.g. SimulationResult, see
+    /// simulation_result.hpp) build a fresh Postprocessor from it without round-tripping through
+    /// Sx<port>.csv on disk the way loadSparams() does.
+    void setSParam(std::int32_t outputPort, std::int32_t inputPort, std::vector<std::complex<double>> value);
+
     void renderSParams(bool plotPhase, bool transparent, const std::filesystem::path& outputDir) const;
     void renderDiffPairSParams(bool transparent, const std::filesystem::path& outputDir) const;
     void renderDiffImpedance(bool transparent, const std::filesystem::path& outputDir) const;
@@ -50,7 +57,7 @@ public:
 
     void saveToFile(const std::filesystem::path& outputDir) const;
     void sparamToFile(const std::filesystem::path& simulationDir) const;
-    void loadSparams(const std::filesystem::path& inputDir);
+    std::expected<void, std::string> loadSparams(const std::filesystem::path& inputDir);
 
 private:
     void savePortToFile(std::int32_t portNumber, const std::filesystem::path& path) const;

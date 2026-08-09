@@ -1,17 +1,27 @@
 #include "simulation.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cerrno>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <limits>
 #include <map>
 #include <regex>
 #include <sstream>
 
+#include <spawn.h>
+#include <sys/wait.h>
+
+#include <nlohmann/json.hpp>
+
 #include "constants.hpp"
 #include "csx_grid_utils.hpp"
 #include "logging.hpp"
+
+extern char** environ;
 
 namespace gerber2ems {
 
@@ -70,13 +80,13 @@ Simulation::Simulation(SimulationConfig& simConfig, const EMSConfig& config, con
     _viaFillingMaterial = addMaterial(*_csx, "ViaFilling", _config.via().fillingEpsilon());
 }
 
-void Simulation::sliceBoard() {
+std::expected<void, std::string> Simulation::sliceBoard() {
     auto result = sliceBoardForSimulation(_simConfig, _config, _paths);
     if (!result) {
-        logError(result.error());
-        std::exit(1);
+        return std::unexpected(result.error());
     }
     _slicedBoard = std::move(*result);
+    return {};
 }
 
 void Simulation::createMaterials() {
@@ -196,7 +206,7 @@ void Simulation::addGerbers() {
     }
 }
 
-double Simulation::getMetalLayerOffset(std::int32_t index) const {
+std::expected<double, std::string> Simulation::getMetalLayerOffset(std::int32_t index) const {
     std::int32_t currentMetalIndex = -1;
     double offset = 0;
     for (const auto& layer : _config.layers()) {
@@ -209,15 +219,14 @@ double Simulation::getMetalLayerOffset(std::int32_t index) const {
             offset -= layer.thickness();
         }
     }
-    logError("Hadn't found " + std::to_string(index) + "th metal layer");
-    std::exit(1);
+    return std::unexpected("Hadn't found " + std::to_string(index) + "th metal layer");
 }
 
-void Simulation::addMslPort(PortConfig& portConfig, std::int32_t portNumber, bool excite) {
+std::expected<void, std::string> Simulation::addMslPort(PortConfig& portConfig, std::int32_t portNumber, bool excite) {
     logDebug("Adding port number " + std::to_string(_ports.size()));
     if (!portConfig.position().has_value() || !portConfig.direction().has_value()) {
         logError("Port has no defined position or rotation, skipping");
-        return;
+        return {};
     }
     while (*portConfig.direction() < 0) {
         portConfig.setDirection(*portConfig.direction() + 360);
@@ -227,11 +236,19 @@ void Simulation::addMslPort(PortConfig& portConfig, std::int32_t portNumber, boo
     const auto dirIt = dirMap.find(static_cast<std::int32_t>(*portConfig.direction()));
     if (dirIt == dirMap.end()) {
         logError("Ports rotation is not a multiple of 90 degrees which is not supported, skipping");
-        return;
+        return {};
     }
 
-    const double startZ = getMetalLayerOffset(portConfig.layer());
-    const double stopZ = getMetalLayerOffset(portConfig.plane());
+    const auto startZResult = getMetalLayerOffset(portConfig.layer());
+    if (!startZResult) {
+        return std::unexpected(startZResult.error());
+    }
+    const auto stopZResult = getMetalLayerOffset(portConfig.plane());
+    if (!stopZResult) {
+        return std::unexpected(stopZResult.error());
+    }
+    const double startZ = *startZResult;
+    const double stopZ = *stopZResult;
     const double angle = *portConfig.direction() / 360.0 * 2 * M_PI;
     const auto [posX, posY] = *portConfig.position();
     const double width = portConfig.width();
@@ -252,23 +269,32 @@ void Simulation::addMslPort(PortConfig& portConfig, std::int32_t portNumber, boo
     CSPropMetal* metal = addMetal(*_csx, "Port_" + std::to_string(portNumber));
     _ports.push_back(std::make_unique<MSLPort>(*_csx, portNumber, *metal, start, stop, dirIt->second, "z",
                                                 excite ? 1.0 : 0.0, portConfig.impedance(), 100));
+    return {};
 }
 
-void Simulation::addResistivePort(PortConfig& portConfig, bool excite) {
+std::expected<void, std::string> Simulation::addResistivePort(PortConfig& portConfig, bool excite) {
     logDebug("Adding port number " + std::to_string(_ports.size()));
     if (!portConfig.position().has_value() || !portConfig.direction().has_value()) {
         logError("Port has no defined position or rotation, skipping");
-        return;
+        return {};
     }
     static const std::map<std::int32_t, std::string> dirMap = {{0, "y"}, {90, "x"}, {180, "y"}, {270, "x"}};
     const auto dirIt = dirMap.find(static_cast<std::int32_t>(*portConfig.direction()));
     if (dirIt == dirMap.end()) {
         logError("Ports rotation is not a multiple of 90 degrees which is not supported, skipping");
-        return;
+        return {};
     }
 
-    const double startZ = getMetalLayerOffset(portConfig.layer());
-    const double stopZ = getMetalLayerOffset(portConfig.plane());
+    const auto startZResult = getMetalLayerOffset(portConfig.layer());
+    if (!startZResult) {
+        return std::unexpected(startZResult.error());
+    }
+    const auto stopZResult = getMetalLayerOffset(portConfig.plane());
+    if (!stopZResult) {
+        return std::unexpected(stopZResult.error());
+    }
+    const double startZ = *startZResult;
+    const double stopZ = *stopZResult;
     const double angle = *portConfig.direction() / 360.0 * 2 * M_PI;
     const auto [posX, posY] = *portConfig.position();
     const double width = portConfig.width();
@@ -287,6 +313,7 @@ void Simulation::addResistivePort(PortConfig& portConfig, bool excite) {
     logDebug("Adding resistive port at start: " + _point3ToString(start) + " end: " + _point3ToString(stop));
     _ports.push_back(std::make_unique<LumpedPort>(*_csx, static_cast<std::int32_t>(_ports.size()),
                                                     portConfig.impedance(), start, stop, "z", excite ? 1.0 : 0.0, 100));
+    return {};
 }
 
 void Simulation::addVirtualPort(const PortConfig& portConfig) {
@@ -323,12 +350,11 @@ void Simulation::addSubstrates() {
     }
 }
 
-void Simulation::addVias() {
+std::expected<void, std::string> Simulation::addVias() {
     logInfo("Adding vias from excellon file");
     auto viasResult = getVias(_paths);
     if (!viasResult) {
-        logError(viasResult.error());
-        std::exit(1);
+        return std::unexpected(viasResult.error());
     }
     // Real board vias: kept only where they still fall within this simulation's sliced outline --
     // a via for copper that's been sliced away has nothing left to connect to anyway.
@@ -343,6 +369,7 @@ void Simulation::addVias() {
     for (const auto& via : _slicedBoard.stitchingVias) {
         addVia(via.x, via.y, via.diameter);
     }
+    return {};
 }
 
 void Simulation::addVia(double xPos, double yPos, double diameter) {
@@ -451,23 +478,84 @@ void Simulation::setSinusExcitation(double freq) {
     _fdtd.SetSinusExcite(freq);
 }
 
-void Simulation::run(std::int32_t excitedPortNumber) {
+std::expected<void, std::string> Simulation::run(std::int32_t excitedPortNumber) {
     logInfo("Starting simulation");
-    const std::filesystem::path cwd = std::filesystem::current_path();
-    _fdtd.SetOverSampling(_options.oversampling);
-
     const std::filesystem::path simPath = _paths.simulationDir / _simConfig.name() / std::to_string(excitedPortNumber);
-    std::filesystem::create_directories(simPath);
-    std::filesystem::current_path(simPath);
-
-    const int ec = _fdtd.SetupFDTD();
-    if (ec != 0) {
-        logError("Run: Setup failed, error code: " + std::to_string(ec));
-    } else {
-        _fdtd.RunFDTD();
+    std::error_code dirEc;
+    std::filesystem::create_directories(simPath, dirEc);
+    if (dirEc) {
+        return std::unexpected("Failed to create simulation directory: " + dirEc.message());
     }
 
+    // job.json carries just enough for a freshly-spawned worker to reconstruct an equivalent
+    // Simulation on its own (it shares no memory with this process): where to reload the already-
+    // saved geometry from, and which port to excite. Everything else (grid/via/frequency/maxSteps)
+    // the worker re-derives itself from paths.configFile, exactly as this process did.
+    const std::filesystem::path jobPath = simPath / "job.json";
+    nlohmann::json job;
+    job["config_path"] = _paths.configFile.string();
+    job["simulation_name"] = _simConfig.name();
+    job["excited_port"] = excitedPortNumber;
+    job["oversampling"] = _options.oversampling;
+    {
+        std::ofstream jobFile(jobPath);
+        if (!jobFile) {
+            return std::unexpected("Failed to write job file: " + jobPath.string());
+        }
+        jobFile << job.dump();
+    }
+
+    // Cleared up front so a stale error from a previous run in the same directory can never be
+    // mistaken for this run's failure.
+    const std::filesystem::path errorPath = simPath / "worker_error.txt";
+    std::error_code removeEc;
+    std::filesystem::remove(errorPath, removeEc);
+
+    std::string workerPathStr = _paths.fdtdWorkerPath.string();
+    std::string jobPathStr = jobPath.string();
+    std::array<char*, 3> argv = {workerPathStr.data(), jobPathStr.data(), nullptr};
+    pid_t pid = 0;
+    if (posix_spawn(&pid, workerPathStr.c_str(), nullptr, nullptr, argv.data(), environ) != 0) {
+        return std::unexpected("Failed to spawn FDTD worker (" + workerPathStr + "): " + std::strerror(errno));
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) {
+        return std::unexpected("waitpid failed: " + std::string(std::strerror(errno)));
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        std::ifstream errFile(errorPath);
+        if (errFile) {
+            std::stringstream buffer;
+            buffer << errFile.rdbuf();
+            if (!buffer.str().empty()) {
+                return std::unexpected(buffer.str());
+            }
+        }
+        return std::unexpected("FDTD worker exited with an error (no message written to " + errorPath.string() + ")");
+    }
+    return {};
+}
+
+std::expected<void, std::string> Simulation::runFDTDInPlace(std::int32_t excitedPortNumber) {
+    const std::filesystem::path cwd = std::filesystem::current_path();
+    const std::filesystem::path simPath = _paths.simulationDir / _simConfig.name() / std::to_string(excitedPortNumber);
+    std::error_code dirEc;
+    std::filesystem::create_directories(simPath, dirEc);
+    if (dirEc) {
+        return std::unexpected("Failed to create simulation directory: " + dirEc.message());
+    }
+    std::filesystem::current_path(simPath);
+
+    _fdtd.SetOverSampling(_options.oversampling);
+    const int rc = _fdtd.SetupFDTD();
+    if (rc != 0) {
+        std::filesystem::current_path(cwd);
+        return std::unexpected("Run: Setup failed, error code: " + std::to_string(rc));
+    }
+    _fdtd.RunFDTD();
+
     std::filesystem::current_path(cwd);
+    return {};
 }
 
 void Simulation::saveGeometry() const {
@@ -487,18 +575,19 @@ void Simulation::saveGeometry() const {
     outFile << newContent;
 }
 
-void Simulation::loadGeometry() {
+std::expected<void, std::string> Simulation::loadGeometry() {
     const std::filesystem::path filename = _paths.geometryDir / _simConfig.name() / "geometry.xml";
     logInfo("Loading geometry from " + filename.string());
     if (!std::filesystem::exists(filename)) {
-        logError("Geometry file does not exist. Did you run geometry step?");
-        std::exit(1);
+        return std::unexpected("Geometry file does not exist. Did you run geometry step? (" + filename.string() + ")");
     }
     _csx->ReadFromXML(filename.string());
     _grid = _csx->GetGrid();
+    return {};
 }
 
-std::pair<std::vector<std::vector<std::complex<double>>>, std::vector<std::vector<std::complex<double>>>>
+std::expected<std::pair<std::vector<std::vector<std::complex<double>>>, std::vector<std::vector<std::complex<double>>>>,
+              std::string>
 Simulation::getPortParameters(std::int32_t exIndex, const std::vector<double>& frequencies) {
     const std::filesystem::path resultPath = _paths.simulationDir / _simConfig.name() / std::to_string(exIndex);
 
@@ -506,14 +595,14 @@ Simulation::getPortParameters(std::int32_t exIndex, const std::vector<double>& f
     std::vector<std::vector<std::complex<double>>> reflected;
     for (std::size_t index = 0; index < _ports.size(); ++index) {
         if (auto result = _ports[index]->calcPort(resultPath, frequencies); !result) {
-            logError("Port data files do not exist. Did you run simulation step? (" + result.error() + ")");
-            std::exit(1);
+            return std::unexpected("Port data files do not exist. Did you run simulation step? (" + result.error() +
+                                    ")");
         }
         logDebug("Found data for port " + std::to_string(index));
         incident.push_back(_ports[index]->ufInc());
         reflected.push_back(_ports[index]->ufRef());
     }
-    return {reflected, incident};
+    return std::make_pair(std::move(reflected), std::move(incident));
 }
 
 void Simulation::setupPorts(std::int32_t enabledIdx) {
@@ -541,13 +630,16 @@ void Simulation::setupPorts(std::int32_t enabledIdx) {
     }
 }
 
-void Simulation::addPorts() {
+std::expected<void, std::string> Simulation::addPorts() {
     logInfo("Adding ports");
     _ports.clear();
     auto& ports = _simConfig.ports();
     for (std::size_t index = 0; index < ports.size(); ++index) {
-        addMslPort(ports[index], static_cast<std::int32_t>(index), true);
+        if (auto result = addMslPort(ports[index], static_cast<std::int32_t>(index), true); !result) {
+            return result;
+        }
     }
+    return {};
 }
 
 void Simulation::addVirtualPorts() {

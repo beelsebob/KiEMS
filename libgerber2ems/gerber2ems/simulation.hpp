@@ -4,8 +4,10 @@
 
 #include <complex>
 #include <cstdint>
+#include <expected>
 #include <filesystem>
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -35,19 +37,19 @@ public:
     /// all consume the result. Deliberately not done in the constructor: a `simulate()`-step
     /// Simulation only ever calls loadGeometry() (reading the already-built geometry.xml a
     /// `geometry()`-step Simulation saved earlier) and never needs sliced geometry recomputed.
-    void sliceBoard();
+    std::expected<void, std::string> sliceBoard();
 
     void createMaterials();
     void addGrid();
     void addGerbers();
     void addPortGrid();
 
-    void addMslPort(PortConfig& portConfig, std::int32_t portNumber, bool excite = false);
-    void addResistivePort(PortConfig& portConfig, bool excite = false);
+    std::expected<void, std::string> addMslPort(PortConfig& portConfig, std::int32_t portNumber, bool excite = false);
+    std::expected<void, std::string> addResistivePort(PortConfig& portConfig, bool excite = false);
     void addVirtualPort(const PortConfig& portConfig);
     void addPlane(double zHeight);
     void addSubstrates();
-    void addVias();
+    std::expected<void, std::string> addVias();
     void addVia(double xPos, double yPos, double diameter);
     void addDumpBoxes();
 
@@ -55,24 +57,38 @@ public:
     void setExcitation();
     void setSinusExcitation(double freq);
 
-    void run(std::int32_t excitedPortNumber);
+    /// Runs one port's FDTD pass in a dedicated posix_spawn'd worker process (see
+    /// paths.fdtdWorkerPath), rather than chdir'ing this process -- so the caller's own working
+    /// directory (and any other threads it owns) are never touched. The worker reconstructs its own
+    /// Simulation from paths.configFile/simConfig.name()/geometry.xml; it doesn't share memory with
+    /// this object. loadGeometry()/setExcitation()/setupPorts(excitedPortNumber) must already have
+    /// been called on *this* Simulation before run(), even though the worker redoes the same steps
+    /// on its own copy -- getPortParameters() afterwards still reads this object's _ports.
+    std::expected<void, std::string> run(std::int32_t excitedPortNumber);
+
+    /// The actual FDTD execution: chdirs into this port's simulation directory, runs
+    /// SetupFDTD()/RunFDTD(), and restores the previous working directory. Only ever safe to call
+    /// from a freshly-spawned, single-purpose process (see gerber2ems_fdtd_worker's main()) -- never
+    /// called directly by run(), which spawns exactly such a process instead of calling this itself.
+    std::expected<void, std::string> runFDTDInPlace(std::int32_t excitedPortNumber);
 
     void saveGeometry() const;
-    void loadGeometry();
+    std::expected<void, std::string> loadGeometry();
 
     /// Returns (reflected, incident) uf phasors per port, vs. `frequencies`.
-    std::pair<std::vector<std::vector<std::complex<double>>>, std::vector<std::vector<std::complex<double>>>>
+    std::expected<std::pair<std::vector<std::vector<std::complex<double>>>, std::vector<std::vector<std::complex<double>>>>,
+                  std::string>
     getPortParameters(std::int32_t exIndex, const std::vector<double>& frequencies);
 
     void setupPorts(std::int32_t enabledIdx);
-    void addPorts();
+    std::expected<void, std::string> addPorts();
     void addVirtualPorts();
 
     const std::vector<std::unique_ptr<Port>>& ports() const { return _ports; }
 
 private:
     void addContours(const std::vector<Triangle>& contours, double zHeight, std::int32_t layerIndex);
-    double getMetalLayerOffset(std::int32_t index) const;
+    std::expected<double, std::string> getMetalLayerOffset(std::int32_t index) const;
     void addSingleDumpBox(const std::string& name, double z);
     void printGridStats() const;
 

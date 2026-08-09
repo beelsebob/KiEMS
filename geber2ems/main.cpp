@@ -21,12 +21,13 @@
 #include "gerber2ems/config.hpp"
 #include "gerber2ems/constants.hpp"
 #include "gerber2ems/excitation_postprocess.hpp"
+#include "gerber2ems/geometry_result.hpp"
 #include "gerber2ems/importer.hpp"
 #include "gerber2ems/logging.hpp"
 #include "gerber2ems/paths_config.hpp"
 #include "gerber2ems/port_resolution.hpp"
-#include "gerber2ems/postprocess.hpp"
-#include "gerber2ems/simulation.hpp"
+#include "gerber2ems/postprocess_result.hpp"
+#include "gerber2ems/simulation_result.hpp"
 
 using namespace gerber2ems;
 
@@ -247,89 +248,35 @@ void createDir(const std::filesystem::path& directoryPath, bool cleanup = false)
     }
 }
 
-void geometry(EMSConfig& config, const RunOptions& options, const PathsConfig& paths) {
-    for (auto& simConfig : config.simulations()) {
-        logInfo("### Building geometry for simulation \"" + simConfig.name() + "\" ###");
-        createDir(paths.geometryDir / simConfig.name());
-
-        Simulation sim(simConfig, config, options, paths);
-        sim.sliceBoard();
-        sim.createMaterials();
-        sim.addGerbers();
-        sim.addGrid();
-        sim.addSubstrates();
-        if (options.exportField.has_value()) {
-            sim.addDumpBoxes();
-        }
-        sim.setBoundaryConditions(false);
-        sim.addVias();
-        sim.addPorts();
-        sim.saveGeometry();
-    }
-}
-
-void simulate(EMSConfig& config, const RunOptions& options, const PathsConfig& paths) {
-    for (auto& simConfig : config.simulations()) {
-        createDir(paths.simulationDir / simConfig.name());
-
-        std::optional<Simulation> sim;
-        auto& ports = simConfig.ports();
-        for (std::size_t index = 0; index < ports.size(); ++index) {
-            if (ports[index].excite()) {
-                sim.emplace(simConfig, config, options, paths);
-                logInfo("[" + simConfig.name() + "] Simulating with excitation on port #" + std::to_string(index));
-                sim->loadGeometry();
-                sim->setExcitation();
-                sim->setupPorts(static_cast<std::int32_t>(index));
-                sim->run(static_cast<std::int32_t>(index));
-            }
-        }
-        if (!sim.has_value()) {
-            logError("[" + simConfig.name() + "] No port is configured to excite; nothing to simulate.");
-            continue;
-        }
-        if (sim->ports().empty()) {
-            sim->addVirtualPorts();
-        }
-
-        const std::vector<double> frequencies = linspace(config.frequency().start(), config.frequency().stop(), 1001);
-        Postprocessor post(frequencies, simConfig);
-
-        for (std::size_t index = 0; index < ports.size(); ++index) {
-            if (ports[index].excite()) {
-                auto [reflected, incident] = sim->getPortParameters(static_cast<std::int32_t>(index), frequencies);
-                for (std::size_t i = 0; i < ports.size(); ++i) {
-                    post.addPortData(static_cast<std::int32_t>(i), static_cast<std::int32_t>(index), incident[i],
-                                      reflected[i]);
-                }
-            }
-        }
-        post.calculateSparams();
-        post.sparamToFile(paths.simulationDir / simConfig.name());
-    }
-}
-
-void postprocess(EMSConfig& config, const Arguments& args) {
-    for (auto& simConfig : config.simulations()) {
+/// Every simulation's frequency-domain results, once postprocessed -- writes CSVs/PNGs to
+/// args.output()/<simName>, mirroring what the old postprocess() free function did directly
+/// against a raw Postprocessor. Excitation postprocessing (a downstream consumer of S-parameters,
+/// not part of the geometry->simulate->postprocess pipeline itself) still reaches into the
+/// underlying Postprocessor via PostprocessResult::postprocessorFor() -- see its doc comment.
+void saveAndRenderResults(const PostprocessResult& results, const Arguments& args) {
+    for (const auto& simConfig : results.config().simulations()) {
         const std::filesystem::path outDir = args.output() / simConfig.name();
         std::filesystem::create_directories(outDir);
 
-        const std::vector<double> frequencies = linspace(config.frequency().start(), config.frequency().stop(), 1001);
-        Postprocessor post(frequencies, simConfig);
-        post.loadSparams(args.input() / simConfig.name());
-        post.processData();
-        post.saveToFile(outDir);
-        post.renderSParams(args.plotPhase(), args.transparent(), outDir);
-        post.renderImpedance(args.transparent(), outDir);
-        post.renderSmith(args.transparent(), outDir);
-        post.renderDiffPairSParams(args.transparent(), outDir);
-        post.renderDiffImpedance(args.transparent(), outDir);
-        post.renderTraceDelays(args.transparent(), outDir);
+        results.saveToFile(simConfig.name(), outDir);
+        results.renderSParams(simConfig.name(), args.plotPhase(), args.transparent(), outDir);
+        results.renderImpedance(simConfig.name(), args.transparent(), outDir);
+        results.renderSmith(simConfig.name(), args.transparent(), outDir);
+        results.renderDiffPairSParams(simConfig.name(), args.transparent(), outDir);
+        results.renderDiffImpedance(simConfig.name(), args.transparent(), outDir);
+        results.renderTraceDelays(simConfig.name(), args.transparent(), outDir);
 
         if (!simConfig.excitations().empty()) {
+            const Postprocessor* post = results.postprocessorFor(simConfig.name());
+            if (post == nullptr) {
+                continue;
+            }
             const std::filesystem::path excDir = outDir / "excitations";
             std::filesystem::create_directories(excDir);
-            ExcitationPostprocessor excPost(simConfig, post, frequencies, config.frequency());
+            const std::vector<double> frequencies =
+                linspace(results.config().frequency().start(), results.config().frequency().stop(),
+                         constants::frequencySampleCount);
+            ExcitationPostprocessor excPost(simConfig, *post, frequencies, results.config().frequency());
             excPost.run();
             excPost.saveToFile(excDir);
             excPost.renderPlots(excDir, args.transparent());
@@ -359,7 +306,8 @@ int main(int argc, char** argv) {
     }
 
     const PathsConfig paths =
-        PathsConfig::forConfigDir(configDir, resolveKicadCli(), executableDir() / "libkicad_smoketest");
+        PathsConfig::forConfigFile(cfgPath, resolveKicadCli(), executableDir() / "libkicad_smoketest",
+                                    executableDir() / "gerber2ems_fdtd_worker");
 
     if (args.input().extension() == ".kicad_pcb") {
         if (auto result = exportKicadPcb(paths, args.input()); !result) {
@@ -406,20 +354,71 @@ int main(int argc, char** argv) {
     options.transparent = args.transparent();
     options.plotPhase = args.plotPhase();
 
+    // Each stage's result carries its own EMSConfig forward (see geometry_result.hpp), so `config`
+    // itself is only ever consumed once, by whichever of build()/load() below runs first -- every
+    // later stage reads through the previous stage's result instead of touching `config` again.
+    std::optional<GeometryResult> geometryResult;
+    std::optional<SimulationResult> simulationResult;
+    std::optional<PostprocessResult> postprocessResult;
+
     if (args.geometry() || args.all()) {
         logInfo("Creating geometry");
         createDir(paths.geometryDir, true);
-        geometry(config, options, paths);
+        auto result = GeometryResult::build(std::move(config), options, paths);
+        if (!result) {
+            logError(result.error());
+            return EXIT_FAILURE;
+        }
+        geometryResult = std::move(*result);
     }
     if (args.simulate() || args.all()) {
         logInfo("Running simulation");
         createDir(paths.simulationDir, true);
-        simulate(config, options, paths);
+        if (!geometryResult.has_value()) {
+            // -s invoked standalone, in a separate process from whichever -g produced geometry.xml.
+            auto loaded = GeometryResult::load(std::move(config), paths);
+            if (!loaded) {
+                logError(loaded.error());
+                return EXIT_FAILURE;
+            }
+            geometryResult = std::move(*loaded);
+        }
+        auto result = SimulationResult::run(*geometryResult, options);
+        if (!result) {
+            logError(result.error());
+            return EXIT_FAILURE;
+        }
+        simulationResult = std::move(*result);
     }
     if (args.postprocess() || args.all()) {
         logInfo("Postprocessing");
         createDir(paths.resultsDir, true);
-        postprocess(config, args);
+        if (!simulationResult.has_value()) {
+            // -p invoked standalone: reload geometry (if this invocation didn't just build it) and
+            // Sx<port>.csv from args.input() -- the CLI's own -i override, defaulting to
+            // paths.simulationDir -- rather than re-running FDTD.
+            if (!geometryResult.has_value()) {
+                auto loaded = GeometryResult::load(std::move(config), paths);
+                if (!loaded) {
+                    logError(loaded.error());
+                    return EXIT_FAILURE;
+                }
+                geometryResult = std::move(*loaded);
+            }
+            auto loaded = SimulationResult::load(*geometryResult, args.input());
+            if (!loaded) {
+                logError(loaded.error());
+                return EXIT_FAILURE;
+            }
+            simulationResult = std::move(*loaded);
+        }
+        auto result = PostprocessResult::compute(*simulationResult);
+        if (!result) {
+            logError(result.error());
+            return EXIT_FAILURE;
+        }
+        postprocessResult = std::move(*result);
+        saveAndRenderResults(*postprocessResult, args);
     }
 
     return EXIT_SUCCESS;

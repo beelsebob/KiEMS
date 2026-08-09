@@ -39,4 +39,8 @@ inline constexpr std::int32_t viaPolygon = 12;
 inline constexpr std::string_view stackupFormatVersion = "1.0";
 inline constexpr std::string_view configFormatVersion = "2.0";
 
+// Number of frequency-domain sample points S-parameters/impedance/delay are computed and plotted
+// at, spanning [Frequency::start(), Frequency::stop()].
+inline constexpr std::int32_t frequencySampleCount = 1001;
+
 } // namespace gerber2ems::constants

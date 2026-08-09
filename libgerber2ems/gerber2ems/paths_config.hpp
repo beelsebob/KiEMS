@@ -12,7 +12,8 @@
 namespace gerber2ems {
 
 struct PathsConfig {
-    std::filesystem::path configDir;      // directory containing simulation.json; base for the rest
+    std::filesystem::path configFile;      // the resolved simulation.json path itself
+    std::filesystem::path configDir;       // configFile's parent directory; base for the rest
     std::filesystem::path stackupFile;     // configDir / "stackup.json"
     std::filesystem::path fabDir;          // configDir / "fab" -- kicad-cli-regenerated gerbers/drill/pos
     std::filesystem::path fabBoardFile;    // configDir / "fab/board.kicad_pcb"
@@ -23,15 +24,18 @@ struct PathsConfig {
     std::filesystem::path resultsDir;      // configDir / "ems/results"
 
     // Explicit paths to bundleable helper tools this library shells out to -- never resolved via
-    // $PATH or a location relative to this process's own binary (see importer.hpp/libkicad_query.hpp).
+    // $PATH or a location relative to this process's own binary (see importer.hpp/libkicad_query.hpp
+    // and simulation.hpp's Simulation::run(), which posix_spawns fdtdWorkerPath).
     std::filesystem::path kicadCliPath;
     std::filesystem::path kicadQueryHelperPath;
+    std::filesystem::path fdtdWorkerPath;
 
-    /// Builds every derived field from `configDir` and the two helper-tool paths. The CLI's own
+    /// Builds every derived field from `configFile` and the helper-tool paths. The CLI's own
     /// convenience default: a GUI app is free to populate a PathsConfig by hand instead (e.g. to
-    /// point kicadQueryHelperPath at a bundled copy rather than a sibling binary).
-    static PathsConfig forConfigDir(std::filesystem::path configDir, std::filesystem::path kicadCliPath,
-                                     std::filesystem::path kicadQueryHelperPath);
+    /// point kicadQueryHelperPath/fdtdWorkerPath at bundled copies rather than sibling binaries).
+    static PathsConfig forConfigFile(std::filesystem::path configFile, std::filesystem::path kicadCliPath,
+                                      std::filesystem::path kicadQueryHelperPath,
+                                      std::filesystem::path fdtdWorkerPath);
 };
 
 } // namespace gerber2ems

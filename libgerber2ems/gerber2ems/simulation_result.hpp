@@ -1,0 +1,63 @@
+// Opaque result of the simulate pipeline stage. See postprocess_result.hpp for the stage that
+// consumes this.
+#pragma once
+
+#include <complex>
+#include <cstdint>
+#include <expected>
+#include <filesystem>
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "geometry_result.hpp"
+#include "postprocess.hpp"
+
+namespace gerber2ems {
+
+/// S-parameters computed from FDTD runs (one posix_spawn'd worker process per excited port -- see
+/// Simulation::run()) for every simulation in the GeometryResult it was built from. Carries that
+/// GeometryResult (and, through it, the EMSConfig) forward, so PostprocessResult only ever needs
+/// *this*, never the original config or geometry again.
+class SimulationResult {
+public:
+    /// Runs FDTD for every excited port of every simulation in `geometry`, then computes
+    /// S-parameters from the resulting incident/reflected phasors. Also writes Sx<port>.csv into
+    /// `geometry.paths().simulationDir` per simulation (the same files `load()` reads back), so a
+    /// later `-p`-only invocation in a separate process can resume from this run's output.
+    static std::expected<SimulationResult, std::string> run(const GeometryResult& geometry, const RunOptions& options);
+
+    /// Reconstructs a SimulationResult by reading back Sx<port>.csv files from `inputDir` (usually
+    /// `geometry.paths().simulationDir`, wherever a previous `run()` wrote them -- exposed as an
+    /// explicit parameter, rather than hardcoded to that path, purely so the CLI's own `-i` override
+    /// keeps working) -- e.g. a `-p`-only invocation, run in a separate process from whichever `-s`
+    /// produced them, rather than re-running FDTD.
+    static std::expected<SimulationResult, std::string> load(const GeometryResult& geometry,
+                                                               const std::filesystem::path& inputDir);
+
+    const EMSConfig& config() const { return _geometry.config(); }
+    const GeometryResult& geometry() const { return _geometry; }
+
+    /// nullopt if `simulationName` isn't in config(), or if that port pair wasn't (successfully)
+    /// simulated.
+    std::optional<std::vector<std::complex<double>>> getSParam(const std::string& simulationName,
+                                                                 std::int32_t outputPort, std::int32_t inputPort) const;
+
+    /// Writes `simulationName`'s Sx<port>.csv files to `outputDir`. No-op if `simulationName` isn't
+    /// in config() or had no excited port.
+    void sparamToFile(const std::string& simulationName, const std::filesystem::path& outputDir) const;
+
+private:
+    SimulationResult(GeometryResult geometry, std::vector<double> frequencies,
+                      std::map<std::string, std::unique_ptr<Postprocessor>> postprocessors);
+
+    const Postprocessor* _postprocessorFor(const std::string& simulationName) const;
+
+    GeometryResult _geometry;
+    std::vector<double> _frequencies;
+    std::map<std::string, std::unique_ptr<Postprocessor>> _postprocessors;
+};
+
+} // namespace gerber2ems

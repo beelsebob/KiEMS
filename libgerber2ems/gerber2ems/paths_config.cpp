@@ -4,9 +4,11 @@
 
 namespace gerber2ems {
 
-PathsConfig PathsConfig::forConfigDir(std::filesystem::path configDir, std::filesystem::path kicadCliPath,
-                                       std::filesystem::path kicadQueryHelperPath) {
+PathsConfig PathsConfig::forConfigFile(std::filesystem::path configFile, std::filesystem::path kicadCliPath,
+                                        std::filesystem::path kicadQueryHelperPath,
+                                        std::filesystem::path fdtdWorkerPath) {
     PathsConfig paths;
+    const std::filesystem::path configDir = configFile.parent_path();
     paths.stackupFile = configDir / "stackup.json";
     paths.fabDir = configDir / "fab";
     paths.fabBoardFile = configDir / constants::fabBoardFile;
@@ -17,7 +19,9 @@ PathsConfig PathsConfig::forConfigDir(std::filesystem::path configDir, std::file
     paths.resultsDir = configDir / constants::resultsDir;
     paths.kicadCliPath = std::move(kicadCliPath);
     paths.kicadQueryHelperPath = std::move(kicadQueryHelperPath);
-    paths.configDir = std::move(configDir);
+    paths.fdtdWorkerPath = std::move(fdtdWorkerPath);
+    paths.configDir = configDir;
+    paths.configFile = std::move(configFile);
     return paths;
 }
 

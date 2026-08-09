@@ -212,6 +212,10 @@ std::optional<std::vector<std::complex<double>>> Postprocessor::getSParam(std::i
     return std::nullopt;
 }
 
+void Postprocessor::setSParam(std::int32_t outputPort, std::int32_t inputPort, std::vector<std::complex<double>> value) {
+    _sParams[static_cast<std::size_t>(outputPort)][static_cast<std::size_t>(inputPort)] = std::move(value);
+}
+
 void Postprocessor::renderSParams(bool plotPhase, bool transparent, const std::filesystem::path& outputDir) const {
     logInfo("Rendering S-parameter plots");
     const std::vector<double> freqGHz = _scaleFreqGHz(_frequencies);
@@ -648,7 +652,7 @@ std::string _trim(const std::string& s) {
 
 } // namespace
 
-void Postprocessor::loadSparams(const std::filesystem::path& inputDir) {
+std::expected<void, std::string> Postprocessor::loadSparams(const std::filesystem::path& inputDir) {
     for (std::size_t idx = 0; idx < _simConfig.ports().size(); ++idx) {
         const PortConfig& port = _simConfig.ports()[idx];
         if (!port.excite()) {
@@ -656,9 +660,8 @@ void Postprocessor::loadSparams(const std::filesystem::path& inputDir) {
         }
         const std::filesystem::path fpath = inputDir / _sparamPath(static_cast<std::int32_t>(idx));
         if (!std::filesystem::exists(fpath)) {
-            logError("Input file with s-parameters (" + std::filesystem::absolute(fpath).string() +
-                      ") could not be found. Did you run simulation step?");
-            std::exit(1);
+            return std::unexpected("Input file with s-parameters (" + std::filesystem::absolute(fpath).string() +
+                                    ") could not be found. Did you run simulation step?");
         }
 
         std::ifstream csvfile(fpath);
@@ -727,9 +730,9 @@ void Postprocessor::loadSparams(const std::filesystem::path& inputDir) {
         for (const auto& [sxx, col] : sMap["mag"]) {
             const auto argIt = sMap["arg"].find(sxx);
             if (argIt == sMap["arg"].end()) {
-                logError("S-param CSV error: no phase data matching `mag(S" + std::to_string(sxx.first) + "-" +
-                          std::to_string(sxx.second) + ")` from column " + std::to_string(col) + "!");
-                throw std::runtime_error("S-param CSV parse error");
+                return std::unexpected("S-param CSV error: no phase data matching `mag(S" + std::to_string(sxx.first) +
+                                        "-" + std::to_string(sxx.second) + ")` from column " + std::to_string(col) +
+                                        "!");
             }
             const bool degrees = phDegrees.at(sxx);
             for (std::size_t r = 0; r < rows.size(); ++r) {
@@ -741,9 +744,9 @@ void Postprocessor::loadSparams(const std::filesystem::path& inputDir) {
         for (const auto& [sxx, col] : sMap["re"]) {
             const auto imIt = sMap["im"].find(sxx);
             if (imIt == sMap["im"].end()) {
-                logError("S-param CSV error: no imaginary data matching `re(S" + std::to_string(sxx.first) + "-" +
-                          std::to_string(sxx.second) + ")` from column " + std::to_string(col) + "!");
-                throw std::runtime_error("S-param CSV parse error");
+                return std::unexpected("S-param CSV error: no imaginary data matching `re(S" + std::to_string(sxx.first) +
+                                        "-" + std::to_string(sxx.second) + ")` from column " + std::to_string(col) +
+                                        "!");
             }
             for (std::size_t r = 0; r < rows.size(); ++r) {
                 _sParams[static_cast<std::size_t>(sxx.first)][static_cast<std::size_t>(sxx.second)][r] =
@@ -751,6 +754,7 @@ void Postprocessor::loadSparams(const std::filesystem::path& inputDir) {
             }
         }
     }
+    return {};
 }
 
 } // namespace gerber2ems
