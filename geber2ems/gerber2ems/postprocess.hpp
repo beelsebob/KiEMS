@@ -18,12 +18,16 @@
 #include <string>
 #include <vector>
 
+#include "config.hpp"
+
 namespace gerber2ems {
 
 /// Post-processes and displays simulation data.
 class Postprocessor {
 public:
-    Postprocessor(std::vector<double> frequencies, std::int32_t portCount);
+    /// Port count/reference impedances/traces/differential-pairs all come from `simConfig`, which
+    /// must outlive this Postprocessor (kept by reference, not copied).
+    Postprocessor(std::vector<double> frequencies, const SimulationConfig& simConfig);
 
     /// Adds port data (incident/reflected phasors vs. frequency) from a simulation run.
     void addPortData(std::int32_t port, std::int32_t excitedPort, const std::vector<std::complex<double>>& incident,
@@ -55,6 +59,7 @@ private:
     static bool isValid(const std::vector<std::complex<double>>& array);
     static bool isValid(std::complex<double> value);
 
+    const SimulationConfig& _simConfig;
     std::vector<double> _frequencies;
     std::int32_t _count;
 

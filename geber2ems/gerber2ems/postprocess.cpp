@@ -83,8 +83,10 @@ std::string _sLabel(std::int32_t j, std::int32_t i) {
 
 } // namespace
 
-Postprocessor::Postprocessor(std::vector<double> frequencies, std::int32_t portCount)
-    : _frequencies(std::move(frequencies)), _count(portCount) {
+Postprocessor::Postprocessor(std::vector<double> frequencies, const SimulationConfig& simConfig)
+    : _simConfig(simConfig),
+      _frequencies(std::move(frequencies)),
+      _count(static_cast<std::int32_t>(simConfig.ports().size())) {
     const std::size_t n = _frequencies.size();
     const auto make3 = [&](std::complex<double> fillValue) {
         return std::vector<std::vector<std::vector<std::complex<double>>>>(
@@ -101,8 +103,8 @@ Postprocessor::Postprocessor(std::vector<double> frequencies, std::int32_t portC
     _impedances = std::vector<std::vector<std::complex<double>>>(static_cast<std::size_t>(_count),
                                                                     std::vector<std::complex<double>>(n, kComplexNaN));
 
-    _referenceZs.reserve(Config::sharedConfig().ports().size());
-    for (const auto& p : Config::sharedConfig().ports()) {
+    _referenceZs.reserve(_simConfig.ports().size());
+    for (const auto& p : _simConfig.ports()) {
         _referenceZs.push_back(p.impedance());
     }
 }
@@ -265,12 +267,15 @@ void Postprocessor::renderDiffPairSParams(bool transparent, const std::filesyste
     logInfo("Rendering differential pair S-parameter plots");
     const std::vector<double> freqGHz = _scaleFreqGHz(_frequencies);
 
-    for (const auto& pair : Config::sharedConfig().diffPairs()) {
-        const auto sp = static_cast<std::size_t>(pair.startP());
-        const auto sn = static_cast<std::size_t>(pair.startN());
-        const auto ep = static_cast<std::size_t>(pair.stopP());
-        const auto en = static_cast<std::size_t>(pair.stopN());
-        if (!pair.correct() || !isValid(_sParams[sp][sp]) || !isValid(_sParams[sn][sn])) {
+    for (const auto& pair : _simConfig.diffPairs()) {
+        if (!pair.correct()) {
+            continue;
+        }
+        const auto sp = static_cast<std::size_t>(*pair.startP().resolvedIndex());
+        const auto sn = static_cast<std::size_t>(*pair.startN().resolvedIndex());
+        const auto ep = static_cast<std::size_t>(*pair.stopP().resolvedIndex());
+        const auto en = static_cast<std::size_t>(*pair.stopN().resolvedIndex());
+        if (!isValid(_sParams[sp][sp]) || !isValid(_sParams[sn][sn])) {
             continue;
         }
 
@@ -316,12 +321,15 @@ void Postprocessor::renderDiffPairSParams(bool transparent, const std::filesyste
 
 void Postprocessor::renderDiffImpedance(bool transparent, const std::filesystem::path& outputDir) const {
     logInfo("Rendering differential pair impedance plots");
-    for (const auto& pair : Config::sharedConfig().diffPairs()) {
-        const auto sp = static_cast<std::size_t>(pair.startP());
-        const auto sn = static_cast<std::size_t>(pair.startN());
-        const auto ep = static_cast<std::size_t>(pair.stopP());
-        const auto en = static_cast<std::size_t>(pair.stopN());
-        if (!pair.correct() || !isValid(_sParams[sp][sp]) || !isValid(_sParams[sn][sn])) {
+    for (const auto& pair : _simConfig.diffPairs()) {
+        if (!pair.correct()) {
+            continue;
+        }
+        const auto sp = static_cast<std::size_t>(*pair.startP().resolvedIndex());
+        const auto sn = static_cast<std::size_t>(*pair.startN().resolvedIndex());
+        const auto ep = static_cast<std::size_t>(*pair.stopP().resolvedIndex());
+        const auto en = static_cast<std::size_t>(*pair.stopN().resolvedIndex());
+        if (!isValid(_sParams[sp][sp]) || !isValid(_sParams[sn][sn])) {
             continue;
         }
 
@@ -427,7 +435,7 @@ void Postprocessor::renderSmith(bool transparent, const std::filesystem::path& o
         matplot::plot(circleX, circleY)->color("black");
         matplot::plot(std::vector<double>{-1, 1}, std::vector<double>{0, 0})->color("black");
 
-        const double s11Margin = Config::sharedConfig().ports()[static_cast<std::size_t>(port)].dBMargin();
+        const double s11Margin = _simConfig.ports()[static_cast<std::size_t>(port)].dBMargin();
         const double vswrMargin = (std::pow(10.0, s11Margin / 20.0) + 1) / (std::pow(10.0, s11Margin / 20.0) - 1);
         const double vswrGamma = std::abs((vswrMargin - 1) / (vswrMargin + 1));
         std::vector<double> vswrX;
@@ -457,11 +465,14 @@ void Postprocessor::renderTraceDelays(bool transparent, const std::filesystem::p
     logInfo("Rendering trace delay plots");
     const std::vector<double> freqGHz = _scaleFreqGHz(_frequencies);
 
-    for (const auto& trace : Config::sharedConfig().traces()) {
-        const auto start = static_cast<std::size_t>(trace.start());
-        const auto stop = static_cast<std::size_t>(trace.stop());
-        if (!trace.correct() || std::any_of(_delays[stop][start].begin(), _delays[stop][start].end(),
-                                             [](double v) { return std::isnan(v); })) {
+    for (const auto& trace : _simConfig.traces()) {
+        if (!trace.correct()) {
+            continue;
+        }
+        const auto start = static_cast<std::size_t>(*trace.start().resolvedIndex());
+        const auto stop = static_cast<std::size_t>(*trace.stop().resolvedIndex());
+        if (std::any_of(_delays[stop][start].begin(), _delays[stop][start].end(),
+                         [](double v) { return std::isnan(v); })) {
             continue;
         }
         std::vector<double> delayNs(_delays[stop][start].size());
@@ -477,16 +488,19 @@ void Postprocessor::renderTraceDelays(bool transparent, const std::filesystem::p
         _saveFigure(fig, outputDir / (trace.name().value_or("trace") + "_delay.png"), transparent);
     }
 
-    for (const auto& pair : Config::sharedConfig().diffPairs()) {
-        const auto sp = static_cast<std::size_t>(pair.startP());
-        const auto sn = static_cast<std::size_t>(pair.startN());
-        const auto ep = static_cast<std::size_t>(pair.stopP());
-        const auto en = static_cast<std::size_t>(pair.stopN());
+    for (const auto& pair : _simConfig.diffPairs()) {
+        if (!pair.correct()) {
+            continue;
+        }
+        const auto sp = static_cast<std::size_t>(*pair.startP().resolvedIndex());
+        const auto sn = static_cast<std::size_t>(*pair.startN().resolvedIndex());
+        const auto ep = static_cast<std::size_t>(*pair.stopP().resolvedIndex());
+        const auto en = static_cast<std::size_t>(*pair.stopN().resolvedIndex());
         const bool nOk = !std::any_of(_delays[en][sn].begin(), _delays[en][sn].end(),
                                        [](double v) { return std::isnan(v); });
         const bool pOk = !std::any_of(_delays[ep][sp].begin(), _delays[ep][sp].end(),
                                        [](double v) { return std::isnan(v); });
-        if (!pair.correct() || !nOk || !pOk) {
+        if (!nOk || !pOk) {
             continue;
         }
         std::vector<double> nDelay(_delays[en][sn].size());
@@ -635,8 +649,8 @@ std::string _trim(const std::string& s) {
 } // namespace
 
 void Postprocessor::loadSparams(const std::filesystem::path& inputDir) {
-    for (std::size_t idx = 0; idx < Config::sharedConfig().ports().size(); ++idx) {
-        const PortConfig& port = Config::sharedConfig().ports()[idx];
+    for (std::size_t idx = 0; idx < _simConfig.ports().size(); ++idx) {
+        const PortConfig& port = _simConfig.ports()[idx];
         if (!port.excite()) {
             continue;
         }

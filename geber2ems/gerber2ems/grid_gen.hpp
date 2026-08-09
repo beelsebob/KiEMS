@@ -8,6 +8,7 @@
 
 #include <CSXCAD/CSRectGrid.h>
 
+#include "config.hpp"
 #include "gerber_io.hpp"
 
 namespace gerber2ems {
@@ -16,7 +17,11 @@ namespace gerber2ems {
 /// (Region, SubRegion, GridGeneratorAxis) is an internal implementation detail of this class.
 class GridGenerator {
 public:
-    GridGenerator();
+    /// `boardXMin`/`boardYMin`/`boardWidth`/`boardHeight` are the simulation's own board extent
+    /// (SlicedBoard's, per board_slicing.hpp) -- not necessarily the real board's, and not
+    /// necessarily starting at (0,0), since a sliced cutout is generally offset from the real
+    /// board's own Edge_Cuts origin.
+    GridGenerator(double boardXMin, double boardYMin, double boardWidth, double boardHeight);
     ~GridGenerator();
 
     /// Extra pads to consider during grid generation (e.g. synthetic port apertures).
@@ -27,8 +32,10 @@ public:
     double xmin() const;
     double ymin() const;
 
-    /// Generates the complete dynamic grid (X, Y and Z lines) into `grid`.
-    CSRectGrid& generate(CSRectGrid& grid);
+    /// Generates the complete dynamic grid (X, Y and Z lines) into `grid`, densifying around
+    /// `simConfig`'s resolved involved nets (see SimulationConfig::resolvedNets(), populated by
+    /// port_resolution.cpp).
+    CSRectGrid& generate(CSRectGrid& grid, const SimulationConfig& simConfig);
 
 private:
     struct Impl;

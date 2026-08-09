@@ -37,19 +37,9 @@ Position _pointToPosition(const Clipper2Lib::Point64& pt) {
 
 // ---- board origin ----
 
-/// Bounding box of the board's Edge_Cuts outline, in native (unshifted) simulation-unit
-/// coordinates. Every other consumer of board extent (getDimensions(), grid_gen.cpp's own
-/// independent parse) derives it the same way -- from Edge_Cuts vector geometry directly, not a
-/// rendered raster -- so this intentionally duplicates that small scan rather than threading a
-/// shared cache through unrelated modules for a parse that costs microseconds.
-struct BoundingBox {
-    double xMin = std::numeric_limits<double>::infinity();
-    double xMax = -std::numeric_limits<double>::infinity();
-    double yMin = std::numeric_limits<double>::infinity();
-    double yMax = -std::numeric_limits<double>::infinity();
-};
+} // namespace
 
-BoundingBox _edgeCutsBoundingBox() {
+BoundingBox edgeCutsBoundingBox() {
     BoundingBox box;
     std::error_code ec;
     const std::filesystem::path fabDir = std::filesystem::current_path() / "fab";
@@ -76,6 +66,8 @@ BoundingBox _edgeCutsBoundingBox() {
     }
     return box;
 }
+
+namespace {
 
 // ---- CopperOp -> Clipper2 paths ----
 
@@ -149,13 +141,9 @@ void _collectRegions(const Clipper2Lib::PolyPath64* node,
 
 } // namespace
 
-std::vector<Triangle> compositeLayerTriangles(const std::filesystem::path& gerberPath) {
-    const GerberFile gerber(gerberPath);
-    const BoundingBox origin = _edgeCutsBoundingBox();
-    const double tessellationTolerance =
-        static_cast<double>(Config::sharedConfig().pixelSize()) * constants::unitMultiplier;
-
-    // Walk copperOps in file order, applying each maximal same-polarity run against a running
+Clipper2Lib::Paths64 compositeOps(const GerberFile& gerber, const std::vector<CopperOp>& ops, double originX,
+                                    double originY, double tessellationTolerance) {
+    // Walk ops in (file) order, applying each maximal same-polarity run against a running
     // accumulator: Union for dark, Difference for clear. This reproduces Gerber's actual
     // painter's-algorithm polarity compositing (see CopperOp's own doc comment for why grouping
     // into runs is lossless rather than just a performance shortcut).
@@ -177,7 +165,7 @@ std::vector<Triangle> compositeLayerTriangles(const std::filesystem::path& gerbe
         haveRun = false;
     };
 
-    for (const CopperOp& op : gerber.copperOps()) {
+    for (const CopperOp& op : ops) {
         if (haveRun && op.additive != runAdditive) {
             flushRun();
         }
@@ -186,24 +174,27 @@ std::vector<Triangle> compositeLayerTriangles(const std::filesystem::path& gerbe
 
         Clipper2Lib::Paths64 opPaths;
         if (op.kind == CopperOp::Kind::Stroke) {
-            opPaths = _strokeToPaths(std::get<TraceSegment>(op.payload), tessellationTolerance, origin.xMin,
-                                      origin.yMin);
+            opPaths = _strokeToPaths(std::get<TraceSegment>(op.payload), tessellationTolerance, originX, originY);
         } else if (op.kind == CopperOp::Kind::Pad) {
-            opPaths = _padToPaths(std::get<Pad>(op.payload), gerber.apertures(), tessellationTolerance, origin.xMin,
-                                   origin.yMin);
+            opPaths =
+                _padToPaths(std::get<Pad>(op.payload), gerber.apertures(), tessellationTolerance, originX, originY);
         } else {
-            opPaths = _zoneToPaths(std::get<std::vector<TraceSegment>>(op.payload), origin.xMin, origin.yMin);
+            opPaths = _zoneToPaths(std::get<std::vector<TraceSegment>>(op.payload), originX, originY);
         }
         runPaths.insert(runPaths.end(), opPaths.begin(), opPaths.end());
     }
     flushRun();
+    return accumulator;
+}
 
-    if (accumulator.empty()) {
-        return {}; // No copper features on this layer.
+std::vector<Triangle> triangulate(const Clipper2Lib::Paths64& composited, double tessellationTolerance,
+                                    const std::string& contextForErrors) {
+    if (composited.empty()) {
+        return {};
     }
 
     Clipper2Lib::PolyTree64 tree;
-    Clipper2Lib::BooleanOp(Clipper2Lib::ClipType::Union, Clipper2Lib::FillRule::NonZero, accumulator, {}, tree);
+    Clipper2Lib::BooleanOp(Clipper2Lib::ClipType::Union, Clipper2Lib::FillRule::NonZero, composited, {}, tree);
 
     std::vector<std::pair<Clipper2Lib::Path64, Clipper2Lib::Paths64>> regions;
     _collectRegions(&tree, regions);
@@ -220,8 +211,8 @@ std::vector<Triangle> compositeLayerTriangles(const std::filesystem::path& gerbe
         Clipper2Lib::Paths64 solution;
         const Clipper2Lib::TriangulateResult triResult = Clipper2Lib::Triangulate(pp, solution);
         if (triResult != Clipper2Lib::TriangulateResult::success) {
-            logError("Triangulation failed for a copper region in " + gerberPath.string() +
-                      " (code " + std::to_string(static_cast<int>(triResult)) + ")");
+            logError("Triangulation failed for a copper region in " + contextForErrors + " (code " +
+                      std::to_string(static_cast<int>(triResult)) + ")");
             continue;
         }
         for (const auto& tri : solution) {
@@ -233,8 +224,19 @@ std::vector<Triangle> compositeLayerTriangles(const std::filesystem::path& gerbe
         }
     }
 
-    logDebug("Found " + std::to_string(result.size()) + " triangles for " + gerberPath.string());
+    logDebug("Found " + std::to_string(result.size()) + " triangles for " + contextForErrors);
     return result;
+}
+
+std::vector<Triangle> compositeLayerTriangles(const std::filesystem::path& gerberPath) {
+    const GerberFile gerber(gerberPath);
+    const BoundingBox origin = edgeCutsBoundingBox();
+    const double tessellationTolerance =
+        static_cast<double>(Config::sharedConfig().pixelSize()) * constants::unitMultiplier;
+
+    const Clipper2Lib::Paths64 composited =
+        compositeOps(gerber, gerber.copperOps(), origin.xMin, origin.yMin, tessellationTolerance);
+    return triangulate(composited, tessellationTolerance, gerberPath.string());
 }
 
 } // namespace gerber2ems

@@ -23,88 +23,189 @@ std::vector<std::string> _splitDot(const std::string& s) {
     return parts;
 }
 
-// Splits a single CSV line into fields, honouring double-quoted fields (with "" as an escaped
-// quote), matching Python's csv.reader(delimiter=",", quotechar='"') closely enough for the
-// KiCad-style pick & place files this tool reads.
-std::vector<std::string> _parseCsvLine(const std::string& line) {
-    std::vector<std::string> fields;
-    std::string field;
-    bool inQuotes = false;
-    for (std::size_t i = 0; i < line.size(); ++i) {
-        const char c = line[i];
-        if (inQuotes) {
-            if (c == '"') {
-                if (i + 1 < line.size() && line[i + 1] == '"') {
-                    field.push_back('"');
-                    ++i;
-                } else {
-                    inQuotes = false;
-                }
-            } else {
-                field.push_back(c);
-            }
-        } else {
-            if (c == '"') {
-                inQuotes = true;
-            } else if (c == ',') {
-                fields.push_back(field);
-                field.clear();
-            } else {
-                field.push_back(c);
-            }
-        }
+// Pin identifiers stay std::string internally (KiCad pad "numbers" are frequently alphanumeric --
+// BGA designators like "A12", or a schematic pin name like "GND" -- and get passed as plain text to
+// the libkicad_smoketest subprocess either way), but a JSON config may write a purely numeric pin
+// as a bare integer (e.g. `"pin": 4`) rather than a quoted string, for a more natural-looking
+// config. Accept either.
+std::string _pinToString(const nlohmann::json& j) {
+    if (j.is_string()) {
+        return j.get<std::string>();
     }
-    fields.push_back(field);
-    return fields;
+    if (j.is_number_integer()) {
+        return std::to_string(j.get<std::int64_t>());
+    }
+    logError("A \"pin\"/\"pins\" entry must be a string (pin name) or integer (pin number), got: " + j.dump());
+    std::exit(1);
 }
 
 } // namespace
-
-PortConfig PortConfig::withName(const std::string& name) {
-    PortConfig pc;
-    pc._name = name;
-    return pc;
-}
 
 void PortConfig::scaleToSimulationUnits(std::int32_t unitMultiplier) {
     _width *= unitMultiplier;
     _length *= unitMultiplier;
 }
 
-void to_json(nlohmann::json& j, const PortConfig& p) {
-    j = nlohmann::json{
-        {"name", p._name},
-        {"width", p._width},
-        {"length", p._length},
-        {"impedance", p._impedance},
-        {"layer", p._layer},
-        {"plane", p._plane},
-        {"dB_margin", p._dBMargin},
-        {"excite", p._excite},
-    };
+void to_json(nlohmann::json& j, const PortRef& p) { j = nlohmann::json{{"footprint", p._footprint}, {"pin", p._pin}}; }
+
+void from_json(const nlohmann::json& j, PortRef& p) {
+    p._footprint = j.at("footprint").get<std::string>();
+    p._pin = _pinToString(j.at("pin"));
 }
 
-void from_json(const nlohmann::json& j, PortConfig& p) {
-    const PortConfig def;
-    p._name = j.value("name", def._name);
-    p._width = j.value("width", def._width);
-    p._length = j.value("length", def._length);
-    p._impedance = j.value("impedance", def._impedance);
-    p._layer = j.value("layer", def._layer);
-    p._plane = j.value("plane", def._plane);
-    p._dBMargin = j.value("dB_margin", def._dBMargin);
-    p._excite = j.value("excite", def._excite);
-}
-
-void DifferentialPairConfig::postInit(std::int32_t portCount) {
-    if (!_name.has_value()) {
-        _name = std::to_string(_startP) + "_" + std::to_string(_stopP) + "_" + std::to_string(_startN) + "_" +
-                std::to_string(_stopN);
+void to_json(nlohmann::json& j, const InvolvedNetConfig& p) {
+    switch (p._kind) {
+        case NetSelectorKind::NetClass:
+            j = nlohmann::json{{"net_class", *p._netClass}};
+            break;
+        case NetSelectorKind::Net:
+            j = nlohmann::json{{"net", *p._net}};
+            break;
+        case NetSelectorKind::FootprintPin:
+            j = nlohmann::json{{"footprint", *p._footprint}, {"pins", p._pins}};
+            break;
     }
-    auto check = [&](const char* field, std::int32_t pn) {
-        if (pn >= portCount) {
-            logWarning("Differential pair " + *_name + " is defined to use not existing port number " +
-                       std::to_string(pn) + " as " + field);
+    j["impedance"] = p._impedance;
+    j["length"] = p._length;
+    j["plane"] = p._plane;
+    if (p._width.has_value()) {
+        j["width"] = *p._width;
+    }
+    if (p._dBMargin.has_value()) {
+        j["dB_margin"] = *p._dBMargin;
+    }
+    if (p._direction.has_value()) {
+        j["direction"] = *p._direction;
+    }
+}
+
+void from_json(const nlohmann::json& j, InvolvedNetConfig& p) {
+    const InvolvedNetConfig def;
+    const bool hasNetClass = j.contains("net_class");
+    const bool hasNet = j.contains("net");
+    const bool hasFootprint = j.contains("footprint");
+    const std::int32_t selectorCount =
+        static_cast<std::int32_t>(hasNetClass) + static_cast<std::int32_t>(hasNet) + static_cast<std::int32_t>(hasFootprint);
+    if (selectorCount != 1) {
+        logError("involved_nets entry must have exactly one of \"net_class\", \"net\", or \"footprint\"+\"pins\"");
+        std::exit(1);
+    }
+
+    if (hasNetClass) {
+        p._kind = NetSelectorKind::NetClass;
+        p._netClass = j.at("net_class").get<std::string>();
+    } else if (hasNet) {
+        p._kind = NetSelectorKind::Net;
+        p._net = j.at("net").get<std::string>();
+    } else {
+        p._kind = NetSelectorKind::FootprintPin;
+        p._footprint = j.at("footprint").get<std::string>();
+        p._pins.clear();
+        if (j.contains("pins")) {
+            for (const auto& pin : j.at("pins")) {
+                p._pins.push_back(_pinToString(pin));
+            }
+        }
+        if (p._pins.empty()) {
+            logError("involved_nets entry for footprint \"" + *p._footprint + "\" has no \"pins\"");
+            std::exit(1);
+        }
+    }
+
+    p._impedance = j.value("impedance", def._impedance);
+    p._length = j.value("length", def._length);
+    p._plane = j.value("plane", def._plane);
+    if (j.contains("width")) {
+        p._width = j.at("width").get<double>();
+    }
+    if (j.contains("dB_margin")) {
+        p._dBMargin = j.at("dB_margin").get<double>();
+    }
+    if (j.contains("direction")) {
+        p._direction = j.at("direction").get<double>();
+    }
+}
+
+void to_json(nlohmann::json& j, const GroundNetConfig& p) {
+    switch (p._kind) {
+        case GroundSelectorKind::NetClass:
+            j = nlohmann::json{{"net_class", *p._netClass}};
+            break;
+        case GroundSelectorKind::Net:
+            j = nlohmann::json{{"net", *p._net}};
+            break;
+    }
+}
+
+void from_json(const nlohmann::json& j, GroundNetConfig& p) {
+    const bool hasNetClass = j.contains("net_class");
+    const bool hasNet = j.contains("net");
+    if (static_cast<std::int32_t>(hasNetClass) + static_cast<std::int32_t>(hasNet) != 1) {
+        logError("ground_net must have exactly one of \"net_class\" or \"net\"");
+        std::exit(1);
+    }
+    if (hasNetClass) {
+        p._kind = GroundSelectorKind::NetClass;
+        p._netClass = j.at("net_class").get<std::string>();
+    } else {
+        p._kind = GroundSelectorKind::Net;
+        p._net = j.at("net").get<std::string>();
+    }
+}
+
+void to_json(nlohmann::json& j, const ExcitationConfig& p) {
+    j = nlohmann::json{
+        {"main", p._isMain},
+        {"start_time", p._startTime},
+        {"duration", p._duration},
+        {"phase", p._phaseDegrees},
+        {"footprint", p._footprint},
+        {"pin", p._pin},
+    };
+    if (p._frequency.has_value()) {
+        j["frequency"] = *p._frequency;
+    }
+    if (p._amplitude.has_value()) {
+        j["amplitude"] = *p._amplitude;
+    }
+}
+
+void from_json(const nlohmann::json& j, ExcitationConfig& p) {
+    const ExcitationConfig def;
+    p._isMain = j.value("main", def._isMain);
+    p._startTime = j.value("start_time", def._startTime);
+    if (j.contains("duration")) {
+        p._duration = j.at("duration").get<double>();
+    } else if (j.contains("end_time")) {
+        p._duration = j.at("end_time").get<double>() - p._startTime;
+    } else {
+        p._duration = def._duration;
+    }
+    p._phaseDegrees = j.value("phase", def._phaseDegrees);
+    p._footprint = j.at("footprint").get<std::string>();
+    p._pin = _pinToString(j.at("pin"));
+
+    if (j.contains("frequency")) {
+        p._frequency = j.at("frequency").get<double>();
+    }
+    if (j.contains("amplitude")) {
+        p._amplitude = j.at("amplitude").get<double>();
+    }
+    if (!p._isMain && (!p._frequency.has_value() || !p._amplitude.has_value())) {
+        logError("Non-main excitation on " + p._footprint + "." + p._pin +
+                  " must specify both \"frequency\" and \"amplitude\"");
+        std::exit(1);
+    }
+}
+
+void DifferentialPairConfig::postInit() {
+    if (!_name.has_value()) {
+        _name = _startP.footprint() + "." + _startP.pin() + "_" + _stopP.footprint() + "." + _stopP.pin();
+    }
+    auto check = [&](const char* field, const PortRef& ref) {
+        if (!ref.resolvedIndex().has_value()) {
+            logWarning("Differential pair " + *_name + " references an unresolved port (" + ref.footprint() + "." +
+                       ref.pin() + ") as " + field);
             _correct = false;
         }
     };
@@ -121,32 +222,29 @@ void to_json(nlohmann::json& j, const DifferentialPairConfig& p) {
         {"start_n", p._startN},
         {"stop_n", p._stopN},
         {"name", p._name.has_value() ? nlohmann::json(*p._name) : nlohmann::json(nullptr)},
-        {"nets", p._nets},
     };
 }
 
 void from_json(const nlohmann::json& j, DifferentialPairConfig& p) {
-    const DifferentialPairConfig def;
-    p._startP = j.value("start_p", def._startP);
-    p._stopP = j.value("stop_p", def._stopP);
-    p._startN = j.value("start_n", def._startN);
-    p._stopN = j.value("stop_n", def._stopN);
+    p._startP = j.at("start_p").get<PortRef>();
+    p._stopP = j.at("stop_p").get<PortRef>();
+    p._startN = j.at("start_n").get<PortRef>();
+    p._stopN = j.at("stop_n").get<PortRef>();
     if (j.contains("name") && !j.at("name").is_null()) {
         p._name = j.at("name").get<std::string>();
     } else {
         p._name = std::nullopt;
     }
-    p._nets = j.value("nets", def._nets);
 }
 
-void SingleEndedConfig::postInit(std::int32_t portCount) {
+void SingleEndedConfig::postInit() {
     if (!_name.has_value()) {
-        _name = std::to_string(_start) + "_" + std::to_string(_stop);
+        _name = _start.footprint() + "." + _start.pin() + "_" + _stop.footprint() + "." + _stop.pin();
     }
-    auto check = [&](const char* field, std::int32_t pn) {
-        if (pn >= portCount) {
-            logWarning("Trace " + *_name + " is defined to use not existing port number " + std::to_string(pn) +
-                       " as " + field);
+    auto check = [&](const char* field, const PortRef& ref) {
+        if (!ref.resolvedIndex().has_value()) {
+            logWarning("Trace " + *_name + " references an unresolved port (" + ref.footprint() + "." + ref.pin() +
+                       ") as " + field);
             _correct = false;
         }
     };
@@ -159,20 +257,17 @@ void to_json(nlohmann::json& j, const SingleEndedConfig& p) {
         {"start", p._start},
         {"stop", p._stop},
         {"name", p._name.has_value() ? nlohmann::json(*p._name) : nlohmann::json(nullptr)},
-        {"nets", p._nets},
     };
 }
 
 void from_json(const nlohmann::json& j, SingleEndedConfig& p) {
-    const SingleEndedConfig def;
-    p._start = j.value("start", def._start);
-    p._stop = j.value("stop", def._stop);
+    p._start = j.at("start").get<PortRef>();
+    p._stop = j.at("stop").get<PortRef>();
     if (j.contains("name") && !j.at("name").is_null()) {
         p._name = j.at("name").get<std::string>();
     } else {
         p._name = std::nullopt;
     }
-    p._nets = j.value("nets", def._nets);
 }
 
 LayerKind LayerConfig::_parseKind(const std::string& kind) {
@@ -279,6 +374,43 @@ void from_json(const nlohmann::json& j, Grid& g) {
     g._cellRatio = j.value("cell_ratio", def._cellRatio);
 }
 
+void SimulationConfig::scaleToSimulationUnits(std::int32_t unitMultiplier) {
+    _hullPadding *= unitMultiplier;
+    _viaEdgeDistance *= unitMultiplier;
+    _viaSpacing *= unitMultiplier;
+}
+
+void to_json(nlohmann::json& j, const SimulationConfig& p) {
+    j = nlohmann::json{
+        {"name", p._name},
+        {"involved_nets", p._involvedNets},
+        {"ground_net", p._groundNet},
+        {"hull_padding", p._hullPadding},
+        {"via_edge_distance", p._viaEdgeDistance},
+        {"via_spacing", p._viaSpacing},
+        {"excitations", p._excitations},
+        {"traces", p._traces},
+        {"differential_pairs", p._diffPairs},
+    };
+}
+
+void from_json(const nlohmann::json& j, SimulationConfig& p) {
+    const SimulationConfig def;
+    p._name = j.at("name").get<std::string>();
+    p._involvedNets = j.value("involved_nets", std::vector<InvolvedNetConfig>{});
+    if (p._involvedNets.empty()) {
+        logError("Simulation \"" + p._name + "\" has no involved_nets");
+        std::exit(1);
+    }
+    p._groundNet = j.at("ground_net").get<GroundNetConfig>();
+    p._hullPadding = j.value("hull_padding", def._hullPadding);
+    p._viaEdgeDistance = j.value("via_edge_distance", def._viaEdgeDistance);
+    p._viaSpacing = j.value("via_spacing", def._viaSpacing);
+    p._excitations = j.value("excitations", std::vector<ExcitationConfig>{});
+    p._traces = j.value("traces", std::vector<SingleEndedConfig>{});
+    p._diffPairs = j.value("differential_pairs", std::vector<DifferentialPairConfig>{});
+}
+
 Config& Config::sharedConfig() {
     static Config instance;
     return instance;
@@ -314,6 +446,16 @@ std::vector<LayerConfig> Config::getMetals() const {
     return result;
 }
 
+std::optional<std::int32_t> Config::metalLayerIndexForFileName(const std::string& normalizedFileName) const {
+    const std::vector<LayerConfig> metals = getMetals();
+    for (std::size_t i = 0; i < metals.size(); ++i) {
+        if (metals[i].file() == normalizedFileName) {
+            return static_cast<std::int32_t>(i);
+        }
+    }
+    return std::nullopt;
+}
+
 void Config::loadStackup(const nlohmann::json& stackup) {
     std::vector<LayerConfig> parsed;
     for (const auto& layer : stackup.at("layers")) {
@@ -341,47 +483,6 @@ bool Config::_isCfgVersionInvalid(const std::optional<std::string>& version) {
     }
     // Mirrors the Python source's (likely unintended) lexicographic string comparison.
     return versionParts[1] > currentParts[1];
-}
-
-std::vector<std::tuple<std::int32_t, std::pair<double, double>, double>> getPortsFromFile(
-    const std::filesystem::path& filename) {
-    std::vector<std::tuple<std::int32_t, std::pair<double, double>, double>> ports;
-    std::ifstream csvfile(filename);
-    std::string line;
-    bool first = true;
-    while (std::getline(csvfile, line)) {
-        if (first) {
-            first = false;
-            continue; // skip header
-        }
-        if (line.empty()) {
-            continue;
-        }
-        const std::vector<std::string> row = _parseCsvLine(line);
-        if (row.size() < 6) {
-            continue;
-        }
-        if (row[2].find("Simulation_Port") != std::string::npos ||
-            row[2].find("Simulation-Port") != std::string::npos) {
-            const std::int32_t number = static_cast<std::int32_t>(std::stoi(row[0].substr(2)));
-            const double x = std::stod(row[3]) / 1000 / constants::baseUnit * constants::unitMultiplier;
-            const double y = std::stod(row[4]) / 1000 / constants::baseUnit * constants::unitMultiplier;
-            const double direction = std::stod(row[5]);
-            // NOTE deliberate deviation from the Python source, which returns `number - 1` here
-            // (assuming 1-indexed refdes like SP1..SPn). Boards whose pick&place exports 0-indexed
-            // simulation port refdes (SP0..SPn-1, as this project's own reference board does) hit
-            // `cfg.ports[-1]`, which Python silently wraps around to the *last* port instead of
-            // erroring -- and cross-checking against actual board geometry confirms that wraparound
-            // assigns the wrong physical position to the wrong port index (it scrambles which ports
-            // pair up), rather than being an intentional convention. Using the refdes number
-            // directly (no shift) matches the correct pairing for 0-indexed boards; a genuinely
-            // 1-indexed board would need this reverted (or a config-driven base offset), but no such
-            // board is in scope here.
-            ports.emplace_back(number, std::pair{x, y}, direction);
-            logDebug("Found port #" + std::to_string(number) + " position in pos file");
-        }
-    }
-    return ports;
 }
 
 nlohmann::json Config::_getCfgJson(const std::filesystem::path& cfgPath, bool updateConfig) {
@@ -416,50 +517,11 @@ nlohmann::json Config::_getCfgJson(const std::filesystem::path& cfgPath, bool up
         jsonCfg = nlohmann::json{{"format_version", std::string(constants::configFormatVersion)}};
     }
 
-    if (!jsonCfg.contains("ports") || jsonCfg.at("ports").empty()) {
-        std::vector<std::tuple<std::int32_t, std::pair<double, double>, double>> portsPnp;
-        std::error_code ec;
-        const std::filesystem::path fabDir = std::filesystem::current_path() / "fab";
-        if (std::filesystem::is_directory(fabDir, ec)) {
-            for (const auto& entry : std::filesystem::directory_iterator(fabDir, ec)) {
-                const std::string name = entry.path().filename().string();
-                if (name.size() >= 7 && name.compare(name.size() - 7, 7, "pos.csv") == 0) {
-                    auto found = getPortsFromFile(entry.path());
-                    portsPnp.insert(portsPnp.end(), found.begin(), found.end());
-                }
-            }
-        }
-
-        std::vector<PortConfig> ports;
-        ports.reserve(portsPnp.size());
-        for (const auto& p : portsPnp) {
-            ports.push_back(PortConfig::withName(std::to_string(std::get<0>(p))));
-        }
-        if (!ports.empty()) {
-            ports.back().setExcite(true);
-            if (ports.size() >= 4) {
-                ports[ports.size() - 3].setExcite(true);
-            }
-        }
-
-        jsonCfg["ports"] = ports;
-
-        // NOTE deliberate deviation from the Python source, which subtracts 1 again here on top of
-        // the `number - 1` already applied by getPortsFromFile above -- since getPortsFromFile here
-        // returns the unshifted refdes number directly, these entries must match that convention
-        // without a further shift.
-        if (ports.size() == 2 || ports.size() == 3) {
-            jsonCfg["traces"] = nlohmann::json::array(
-                {nlohmann::json{{"start", std::get<0>(portsPnp[portsPnp.size() - 1])},
-                                 {"stop", std::get<0>(portsPnp[portsPnp.size() - 2])}}});
-        }
-        if (ports.size() >= 4) {
-            jsonCfg["differential_pairs"] = nlohmann::json::array(
-                {nlohmann::json{{"start_p", std::get<0>(portsPnp[portsPnp.size() - 1])},
-                                 {"stop_p", std::get<0>(portsPnp[portsPnp.size() - 2])},
-                                 {"start_n", std::get<0>(portsPnp[portsPnp.size() - 3])},
-                                 {"stop_n", std::get<0>(portsPnp[portsPnp.size() - 4])}}});
-        }
+    // Ports are always resolved from involved_nets/libkicad now, never guessed from a pick&place
+    // CSV -- --update-config just ensures a "simulations" list exists to hand-edit, rather than
+    // trying to bootstrap one.
+    if (!jsonCfg.contains("simulations")) {
+        jsonCfg["simulations"] = nlohmann::json::array();
     }
     return jsonCfg;
 }
@@ -482,12 +544,6 @@ void Config::load(const Arguments& args) {
         std::exit(1);
     }
 
-    self._ports.clear();
-    for (const auto& p : jsonCfg.at("ports")) {
-        self._ports.push_back(p.get<PortConfig>());
-    }
-    const std::int32_t portCount = static_cast<std::int32_t>(self._ports.size());
-
     self._formatVersion = std::string(constants::configFormatVersion);
     self._frequency = jsonCfg.value("frequency", Frequency{});
     self._maxSteps = jsonCfg.value("max_steps", 100000);
@@ -495,23 +551,14 @@ void Config::load(const Arguments& args) {
     self._via = jsonCfg.value("via", Via{});
     self._grid = jsonCfg.value("grid", Grid{});
 
-    self._traces.clear();
-    if (jsonCfg.contains("traces")) {
-        for (const auto& t : jsonCfg.at("traces")) {
-            SingleEndedConfig trace = t.get<SingleEndedConfig>();
-            trace.postInit(portCount);
-            self._traces.push_back(std::move(trace));
-        }
+    self._simulations.clear();
+    for (const auto& s : jsonCfg.at("simulations")) {
+        self._simulations.push_back(s.get<SimulationConfig>());
     }
-
-    self._diffPairs.clear();
-    if (jsonCfg.contains("differential_pairs")) {
-        for (const auto& d : jsonCfg.at("differential_pairs")) {
-            DifferentialPairConfig pair = d.get<DifferentialPairConfig>();
-            pair.postInit(portCount);
-            self._diffPairs.push_back(std::move(pair));
-        }
-    }
+    // Note: SingleEndedConfig::postInit()/DifferentialPairConfig::postInit() are deliberately NOT
+    // called here -- they validate that each PortRef resolved to a real port, which only happens
+    // later in resolveSimulationPorts() (port_resolution.cpp), once libkicad has actually resolved
+    // this simulation's involved nets into concrete ports. Called from there instead.
 
     self._postInit();
     self._arguments = args;
@@ -519,22 +566,20 @@ void Config::load(const Arguments& args) {
     if (args.updateConfig()) {
         nlohmann::json out;
         out["format_version"] = self._formatVersion;
-        out["ports"] = self._ports;
         out["frequency"] = self._frequency;
         out["max_steps"] = self._maxSteps;
         out["pixel_size"] = self._pixelSize;
         out["via"] = self._via;
         out["grid"] = self._grid;
-        out["traces"] = self._traces;
-        out["differential_pairs"] = self._diffPairs;
+        out["simulations"] = self._simulations;
         std::ofstream file(cfgPath);
         file << out.dump(4);
     }
 
-    for (auto& port : self._ports) {
-        port.scaleToSimulationUnits(constants::unitMultiplier);
-    }
     self._applyUnitMultiplier();
+    for (auto& simulation : self._simulations) {
+        simulation.scaleToSimulationUnits(constants::unitMultiplier);
+    }
 }
 
 } // namespace gerber2ems

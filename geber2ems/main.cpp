@@ -14,8 +14,10 @@
 
 #include "gerber2ems/config.hpp"
 #include "gerber2ems/constants.hpp"
+#include "gerber2ems/excitation_postprocess.hpp"
 #include "gerber2ems/importer.hpp"
 #include "gerber2ems/logging.hpp"
+#include "gerber2ems/port_resolution.hpp"
 #include "gerber2ems/postprocess.hpp"
 #include "gerber2ems/simulation.hpp"
 
@@ -74,8 +76,11 @@ bool looksLikeFlag(const std::string& s) { return s.size() > 1 && s[0] == '-'; }
 
 Arguments parseArguments(int argc, char** argv) {
     Arguments args;
-    args.setInput(std::filesystem::current_path() / constants::simulationDir);
-    args.setOutput(std::filesystem::current_path() / constants::resultsDir);
+    // Left relative (not anchored to the invoking shell's cwd here): main() chdirs into the config
+    // file's own directory before these are ever used, so a relative default correctly resolves
+    // relative to simulation.json's location, not wherever the tool happened to be invoked from.
+    args.setInput(constants::simulationDir);
+    args.setOutput(constants::resultsDir);
 
     static const std::vector<std::string> exportFieldChoices = {"outer", "cu-outer", "cu-inner", "substrate"};
     static const std::vector<std::string> logChoices = {"DEBUG", "INFO", "WARNING", "ERROR"};
@@ -191,89 +196,119 @@ void createDir(const std::filesystem::path& path, bool cleanup = false) {
 }
 
 void geometry() {
-    Simulation sim;
-    importStackup();
-    importPortPositions();
+    for (auto& simConfig : Config::sharedConfig().simulations()) {
+        logInfo("### Building geometry for simulation \"" + simConfig.name() + "\" ###");
+        createDir(constants::simGeometryDir(simConfig.name()));
 
-    const auto [width, height] = getDimensions();
-    Config::sharedConfig().setPcbHeight(height);
-    Config::sharedConfig().setPcbWidth(width);
-
-    sim.createMaterials();
-    sim.addGerbers();
-    sim.addGrid();
-    sim.addSubstrates();
-    if (Config::sharedConfig().arguments().exportField().has_value()) {
-        sim.addDumpBoxes();
+        Simulation sim(simConfig);
+        sim.sliceBoard();
+        sim.createMaterials();
+        sim.addGerbers();
+        sim.addGrid();
+        sim.addSubstrates();
+        if (Config::sharedConfig().arguments().exportField().has_value()) {
+            sim.addDumpBoxes();
+        }
+        sim.setBoundaryConditions(false);
+        sim.addVias();
+        sim.addPorts();
+        sim.saveGeometry();
     }
-    sim.setBoundaryConditions(false);
-    sim.addVias();
-    sim.addPorts();
-    sim.saveGeometry();
 }
 
 void simulate() {
-    std::optional<Simulation> sim;
-    auto& ports = Config::sharedConfig().ports();
-    for (std::size_t index = 0; index < ports.size(); ++index) {
-        if (ports[index].excite()) {
-            sim.emplace();
-            logInfo("Simulating with excitation on port #" + std::to_string(index));
-            sim->loadGeometry();
-            sim->setExcitation();
-            sim->setupPorts(static_cast<std::int32_t>(index));
-            sim->run(static_cast<std::int32_t>(index));
-        }
-    }
-    if (!sim.has_value()) {
-        // Mirrors what the Python source would hit here (an unhandled NameError, since `sim` is
-        // only ever bound inside the loop above) with a clear diagnostic instead of a crash.
-        logError("No port is configured to excite (`excite: true`); nothing to simulate.");
-        std::exit(1);
-    }
-    if (sim->ports().empty()) {
-        sim->addVirtualPorts();
-    }
+    for (auto& simConfig : Config::sharedConfig().simulations()) {
+        createDir(constants::simSimulationDir(simConfig.name()));
 
-    const std::vector<double> frequencies =
-        linspace(Config::sharedConfig().frequency().start(), Config::sharedConfig().frequency().stop(), 1001);
-    Postprocessor post(frequencies, static_cast<std::int32_t>(ports.size()));
-
-    for (std::size_t index = 0; index < ports.size(); ++index) {
-        if (ports[index].excite()) {
-            auto [reflected, incident] = sim->getPortParameters(static_cast<std::int32_t>(index), frequencies);
-            for (std::size_t i = 0; i < ports.size(); ++i) {
-                post.addPortData(static_cast<std::int32_t>(i), static_cast<std::int32_t>(index), incident[i],
-                                  reflected[i]);
+        std::optional<Simulation> sim;
+        auto& ports = simConfig.ports();
+        for (std::size_t index = 0; index < ports.size(); ++index) {
+            if (ports[index].excite()) {
+                sim.emplace(simConfig);
+                logInfo("[" + simConfig.name() + "] Simulating with excitation on port #" + std::to_string(index));
+                sim->loadGeometry();
+                sim->setExcitation();
+                sim->setupPorts(static_cast<std::int32_t>(index));
+                sim->run(static_cast<std::int32_t>(index));
             }
         }
+        if (!sim.has_value()) {
+            logError("[" + simConfig.name() + "] No port is configured to excite; nothing to simulate.");
+            continue;
+        }
+        if (sim->ports().empty()) {
+            sim->addVirtualPorts();
+        }
+
+        const std::vector<double> frequencies =
+            linspace(Config::sharedConfig().frequency().start(), Config::sharedConfig().frequency().stop(), 1001);
+        Postprocessor post(frequencies, simConfig);
+
+        for (std::size_t index = 0; index < ports.size(); ++index) {
+            if (ports[index].excite()) {
+                auto [reflected, incident] = sim->getPortParameters(static_cast<std::int32_t>(index), frequencies);
+                for (std::size_t i = 0; i < ports.size(); ++i) {
+                    post.addPortData(static_cast<std::int32_t>(i), static_cast<std::int32_t>(index), incident[i],
+                                      reflected[i]);
+                }
+            }
+        }
+        post.calculateSparams();
+        post.sparamToFile(constants::simSimulationDir(simConfig.name()));
     }
-    post.calculateSparams();
-    post.sparamToFile(constants::simulationDir);
 }
 
 void postprocess() {
     const Arguments& args = Config::sharedConfig().arguments();
-    std::filesystem::create_directories(args.output());
 
-    const std::vector<double> frequencies =
-        linspace(Config::sharedConfig().frequency().start(), Config::sharedConfig().frequency().stop(), 1001);
-    Postprocessor post(frequencies, static_cast<std::int32_t>(Config::sharedConfig().ports().size()));
-    post.loadSparams(args.input());
-    post.processData();
-    post.saveToFile(args.output());
-    post.renderSParams(args.plotPhase(), args.transparent(), args.output());
-    post.renderImpedance(args.transparent(), args.output());
-    post.renderSmith(args.transparent(), args.output());
-    post.renderDiffPairSParams(args.transparent(), args.output());
-    post.renderDiffImpedance(args.transparent(), args.output());
-    post.renderTraceDelays(args.transparent(), args.output());
+    for (auto& simConfig : Config::sharedConfig().simulations()) {
+        const std::filesystem::path outDir = args.output() / simConfig.name();
+        std::filesystem::create_directories(outDir);
+
+        const std::vector<double> frequencies =
+            linspace(Config::sharedConfig().frequency().start(), Config::sharedConfig().frequency().stop(), 1001);
+        Postprocessor post(frequencies, simConfig);
+        post.loadSparams(args.input() / simConfig.name());
+        post.processData();
+        post.saveToFile(outDir);
+        post.renderSParams(args.plotPhase(), args.transparent(), outDir);
+        post.renderImpedance(args.transparent(), outDir);
+        post.renderSmith(args.transparent(), outDir);
+        post.renderDiffPairSParams(args.transparent(), outDir);
+        post.renderDiffImpedance(args.transparent(), outDir);
+        post.renderTraceDelays(args.transparent(), outDir);
+
+        if (!simConfig.excitations().empty()) {
+            const std::filesystem::path excDir = outDir / "excitations";
+            std::filesystem::create_directories(excDir);
+            ExcitationPostprocessor excPost(simConfig, post, frequencies);
+            excPost.run();
+            excPost.saveToFile(excDir);
+            excPost.renderPlots(excDir, args.transparent());
+        }
+    }
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
-    const Arguments args = parseArguments(argc, argv);
+    Arguments args = parseArguments(argc, argv);
+
+    // Every relative path in this tool (fab/, ems/, etc., and -i/-o if given as relative paths) is
+    // meant to be relative to simulation.json's own location, not to wherever the tool happened to
+    // be invoked from -- resolve the config path against the invoking shell's cwd once, here, then
+    // chdir into its directory before anything else touches the filesystem. Config::load() re-runs
+    // std::filesystem::absolute() on this same path, which is a no-op once it's already absolute.
+    const std::filesystem::path cfgPath = std::filesystem::absolute(
+        args.configPath().has_value() ? std::filesystem::path(*args.configPath()) : constants::defaultConfigPath);
+    args.setConfigPath(cfgPath.string());
+    std::error_code chdirEc;
+    std::filesystem::current_path(cfgPath.parent_path(), chdirEc);
+    if (chdirEc) {
+        logError("Could not enter config directory " + cfgPath.parent_path().string() + ": " + chdirEc.message());
+        return EXIT_FAILURE;
+    }
+
     if (args.input().extension() == ".kicad_pcb") {
         exportKicadPcb(args.input());
     }
@@ -287,6 +322,15 @@ int main(int argc, char** argv) {
         logInfo(R"(No steps selected. Exiting. To select steps use "-g", "-s", "-p", "-a" flags)");
         return EXIT_SUCCESS;
     }
+
+    // Resolved unconditionally (not just for -g/-a): -s/-p invoked standalone, in a separate
+    // process from whichever earlier invocation ran -g, still need every simulation's ports()
+    // populated -- simulate() reads which ports to excite, postprocess() needs the right port
+    // count to load Sx<port>.csv files. Requires fab/board.kicad_pcb (persisted by exportKicadPcb())
+    // from this invocation's own -i or an earlier one, and fab/stackup.json (importStackup()) for
+    // resolveSimulationPorts()'s copper-layer-index lookup.
+    importStackup();
+    resolveSimulationPorts();
 
     createDir(constants::baseDir);
 

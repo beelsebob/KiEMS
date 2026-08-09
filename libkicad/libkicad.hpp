@@ -11,11 +11,37 @@
 
 #include <expected>
 #include <string>
+#include <vector>
 
 #include "libkicad_result.hpp"
 
 namespace libkicad {
 
 std::expected<PadCounts, std::string> countPads(const std::string& projectPath, const std::string& boardPath);
+
+/// Resolves the net connected to one footprint's pin. `pin` is tried first as a pad number
+/// (PAD::GetNumber(), e.g. "3"), then as a schematic pin name (PAD::GetPinFunction(), e.g. "GND")
+/// if no pad matches by number.
+std::expected<std::string, std::string> netForFootprintPin(const std::string& projectPath,
+                                                             const std::string& boardPath,
+                                                             const std::string& footprintRef, const std::string& pin);
+
+/// Resolves one footprint's pin to its full pad identity (including position/orientation/layer and
+/// which net it's on) -- the same pad lookup as netForFootprintPin, but returning everything about
+/// that specific pad rather than just its net name. Used to match a footprint+pin selector
+/// (ExcitationConfig, a trace/differential-pair PortRef) back to one already-resolved port.
+std::expected<PadPosition, std::string> resolvePin(const std::string& projectPath, const std::string& boardPath,
+                                                     const std::string& footprintRef, const std::string& pin);
+
+/// Every net assigned to the given netclass (by name). Requires the board to have a linked
+/// project (a sibling .kicad_pro) for netclass assignment to be resolvable at all.
+std::expected<std::vector<std::string>, std::string> netsInNetClass(const std::string& projectPath,
+                                                                      const std::string& boardPath,
+                                                                      const std::string& netClassName);
+
+/// Every pad connected to the given net, with position/orientation/layer for port placement.
+std::expected<std::vector<PadPosition>, std::string> padsOnNet(const std::string& projectPath,
+                                                                 const std::string& boardPath,
+                                                                 const std::string& netName);
 
 } // namespace libkicad

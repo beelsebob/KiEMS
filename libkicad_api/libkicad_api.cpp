@@ -14,4 +14,43 @@ std::expected<PadCounts, std::string> countPads(const std::string& projectPath, 
     return raw.counts;
 }
 
+std::expected<std::string, std::string> netForFootprintPin(const std::string& projectPath,
+                                                             const std::string& boardPath,
+                                                             const std::string& footprintRef, const std::string& pin) {
+    detail::RawNetNameResult raw = detail::netForFootprintPinRaw(projectPath, boardPath, footprintRef, pin);
+    if (!raw.ok) {
+        return std::unexpected(std::move(raw.error));
+    }
+    return raw.netName;
+}
+
+std::expected<PadPosition, std::string> resolvePin(const std::string& projectPath, const std::string& boardPath,
+                                                     const std::string& footprintRef, const std::string& pin) {
+    detail::RawPadResult raw = detail::resolvePinRaw(projectPath, boardPath, footprintRef, pin);
+    if (!raw.ok) {
+        return std::unexpected(std::move(raw.error));
+    }
+    return raw.pad;
+}
+
+std::expected<std::vector<std::string>, std::string> netsInNetClass(const std::string& projectPath,
+                                                                      const std::string& boardPath,
+                                                                      const std::string& netClassName) {
+    detail::RawNetClassMembersResult raw = detail::netsInNetClassRaw(projectPath, boardPath, netClassName);
+    if (!raw.ok) {
+        return std::unexpected(std::move(raw.error));
+    }
+    return raw.netNames;
+}
+
+std::expected<std::vector<PadPosition>, std::string> padsOnNet(const std::string& projectPath,
+                                                                 const std::string& boardPath,
+                                                                 const std::string& netName) {
+    detail::RawPadsOnNetResult raw = detail::padsOnNetRaw(projectPath, boardPath, netName);
+    if (!raw.ok) {
+        return std::unexpected(std::move(raw.error));
+    }
+    return raw.pads;
+}
+
 } // namespace libkicad

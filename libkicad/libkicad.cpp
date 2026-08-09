@@ -3,6 +3,8 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <utility>
 
 // KiCad and wx headers aren't built against this project's strict warning settings and aren't
 // ours to fix; silence their diagnostics for the includes and the rest of this file, since some
@@ -17,7 +19,14 @@
 #include <pgm_base.h>
 #include <settings/settings_manager.h>
 #include <project.h>
+#include <base_units.h>
 #include <board.h>
+#include <board_design_settings.h>
+#include <footprint.h>
+#include <pad.h>
+#include <netinfo.h>
+#include <netclass.h>
+#include <project/net_settings.h>
 #include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
 #include <api/headless_pcb_context.h>
 #include <api/api_handler_pcb.h>
@@ -72,14 +81,53 @@ RawPadCountsResult _fail(std::string error) {
     return result;
 }
 
-} // namespace
+RawNetNameResult _failNetName(std::string error) {
+    RawNetNameResult result;
+    result.ok = false;
+    result.error = std::move(error);
+    return result;
+}
 
-RawPadCountsResult countPadsRaw(const std::string& projectPath, const std::string& boardPath) {
-    ensureGeneratorsRegistered();
+RawNetClassMembersResult _failNetClassMembers(std::string error) {
+    RawNetClassMembersResult result;
+    result.ok = false;
+    result.error = std::move(error);
+    return result;
+}
 
+RawPadsOnNetResult _failPadsOnNet(std::string error) {
+    RawPadsOnNetResult result;
+    result.ok = false;
+    result.error = std::move(error);
+    return result;
+}
+
+RawPadResult _failPad(std::string error) {
+    RawPadResult result;
+    result.ok = false;
+    result.error = std::move(error);
+    return result;
+}
+
+// Keeps the BOARD alive (owned by the context) for as long as the caller needs it.
+struct LoadedBoard {
+    std::shared_ptr<HEADLESS_PCB_CONTEXT> context;
+    BOARD* board = nullptr;
+};
+
+// Shared board-loading sequence: wx init, SETTINGS_MANAGER project load, PCB_IO_KICAD_SEXPR board
+// load, HEADLESS_PCB_CONTEXT construction (this is what wires BOARD::SetProject(), needed before
+// any netclass query -- see netsInNetClassRaw). Bypasses PCB_IO_MGR's format registry (which
+// unconditionally links in every foreign-format importer, per pcbnew/pcb_io/pcb_io_mgr.cpp's
+// static REGISTER_PLUGIN globals) and goes straight to the one real KiCad-format plugin needed;
+// this is still the exact same LoadBoard() implementation PCB_IO_MGR would have dispatched to for
+// KICAD_SEXP.
+std::optional<LoadedBoard> _loadBoard(const std::string& projectPath, const std::string& boardPath,
+                                       std::string& error) {
     bool wxInitialized = _ensureWxInitialized();
     if (!wxInitialized) {
-        return _fail("wxInitialize failed");
+        error = "wxInitialize failed";
+        return std::nullopt;
     }
 
     SETTINGS_MANAGER& settingsManager = Pgm().GetSettingsManager();
@@ -87,43 +135,89 @@ RawPadCountsResult countPadsRaw(const std::string& projectPath, const std::strin
 
     bool projectLoaded = settingsManager.LoadProject(wxProjectPath);
     if (!projectLoaded) {
-        return _fail("LoadProject failed");
+        error = "LoadProject failed";
+        return std::nullopt;
     }
 
     PROJECT* project = settingsManager.GetProject(wxProjectPath);
     if (!project) {
-        return _fail("GetProject returned null");
+        error = "GetProject returned null";
+        return std::nullopt;
     }
 
-    // Bypass PCB_IO_MGR's format registry (which unconditionally links in every foreign-format
-    // importer, per pcbnew/pcb_io/pcb_io_mgr.cpp's static REGISTER_PLUGIN globals) and go
-    // straight to the one real KiCad-format plugin needed. This is still the exact same
-    // LoadBoard() implementation PCB_IO_MGR would have dispatched to for KICAD_SEXP.
     PCB_IO_KICAD_SEXPR plugin;
     wxString wxBoardPath = wxString::FromUTF8(boardPath);
     std::unique_ptr<BOARD> board(plugin.LoadBoard(wxBoardPath, nullptr, nullptr, project));
     if (!board) {
-        return _fail("LoadBoard failed");
+        error = "LoadBoard failed";
+        return std::nullopt;
     }
+
+    BOARD* boardPtr = board.get();
+    auto context = std::make_shared<HEADLESS_PCB_CONTEXT>(std::move(board), project, nullptr);
+    if (!context->GetBoard()) {
+        error = "HEADLESS_PCB_CONTEXT has no board";
+        return std::nullopt;
+    }
+
+    LoadedBoard result;
+    result.context = std::move(context);
+    result.board = boardPtr;
+    return result;
+}
+
+// Finds one footprint's pad by number (e.g. "3"), falling back to a pin-function-name scan (e.g.
+// "GND") if no pad matches by number -- those are different fields on PAD. Returns nullptr (with
+// `error` set) if the footprint or pad/pin can't be found.
+PAD* _findFootprintPad(BOARD* board, const std::string& footprintRef, const std::string& pin, std::string& error) {
+    FOOTPRINT* footprint = board->FindFootprintByReference(wxString::FromUTF8(footprintRef));
+    if (!footprint) {
+        error = "footprint not found: " + footprintRef;
+        return nullptr;
+    }
+
+    const wxString wxPin = wxString::FromUTF8(pin);
+    PAD* pad = footprint->FindPadByNumber(wxPin);
+    if (!pad) {
+        for (PAD* candidate : footprint->Pads()) {
+            if (candidate->GetPinFunction() == wxPin) {
+                pad = candidate;
+                break;
+            }
+        }
+    }
+    if (!pad) {
+        error = "pad/pin not found: " + footprintRef + "." + pin;
+        return nullptr;
+    }
+    return pad;
+}
+
+} // namespace
+
+RawPadCountsResult countPadsRaw(const std::string& projectPath, const std::string& boardPath) {
+    ensureGeneratorsRegistered();
+
+    std::string error;
+    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    if (!loaded) {
+        return _fail(std::move(error));
+    }
+    BOARD* board = loaded->board;
 
     PadCounts counts;
     counts.footprintCount = static_cast<std::int32_t>(board->Footprints().size());
     counts.trackCount = static_cast<std::int32_t>(board->Tracks().size());
     counts.zoneCount = static_cast<std::int32_t>(board->Zones().size());
 
-    auto context = std::make_shared<HEADLESS_PCB_CONTEXT>(std::move(board), project, nullptr);
-    if (!context->GetBoard()) {
-        return _fail("HEADLESS_PCB_CONTEXT has no board");
-    }
-
-    API_HANDLER_PCB handler(context, nullptr);
+    API_HANDLER_PCB handler(loaded->context, nullptr);
 
     // Drive the query purely via protobuf -- exactly what the real API server does with a
     // message that arrived over the wire.
     kiapi::common::commands::GetItems getItems;
     getItems.mutable_header()->mutable_document()->set_type(kiapi::common::types::DocumentType::DOCTYPE_PCB);
     getItems.mutable_header()->mutable_document()->set_board_filename(
-            wxFileName(wxBoardPath).GetFullName().ToStdString());
+            wxFileName(wxString::FromUTF8(boardPath)).GetFullName().ToStdString());
     getItems.add_types(kiapi::common::types::KOT_PCB_PAD);
 
     kiapi::common::ApiRequest request;
@@ -150,6 +244,141 @@ RawPadCountsResult countPadsRaw(const std::string& projectPath, const std::strin
     RawPadCountsResult result;
     result.ok = true;
     result.counts = counts;
+    return result;
+}
+
+RawNetNameResult netForFootprintPinRaw(const std::string& projectPath, const std::string& boardPath,
+                                        const std::string& footprintRef, const std::string& pin) {
+    std::string error;
+    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    if (!loaded) {
+        return _failNetName(std::move(error));
+    }
+    BOARD* board = loaded->board;
+
+    std::string findError;
+    PAD* pad = _findFootprintPad(board, footprintRef, pin, findError);
+    if (!pad) {
+        return _failNetName(std::move(findError));
+    }
+
+    RawNetNameResult result;
+    result.ok = true;
+    result.netName = pad->GetNetname().ToStdString();
+    return result;
+}
+
+RawPadResult resolvePinRaw(const std::string& projectPath, const std::string& boardPath,
+                            const std::string& footprintRef, const std::string& pin) {
+    std::string error;
+    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    if (!loaded) {
+        return _failPad(std::move(error));
+    }
+    BOARD* board = loaded->board;
+
+    std::string findError;
+    PAD* pad = _findFootprintPad(board, footprintRef, pin, findError);
+    if (!pad) {
+        return _failPad(std::move(findError));
+    }
+
+    const VECTOR2I auxOrigin = board->GetDesignSettings().GetAuxOrigin();
+    const VECTOR2I position = pad->GetPosition() - auxOrigin;
+
+    RawPadResult result;
+    result.ok = true;
+    result.pad.footprintRef = footprintRef;
+    result.pad.padNumber = pad->GetNumber().ToStdString();
+    result.pad.netName = pad->GetNetname().ToStdString();
+    result.pad.xMm = pcbIUScale.IUTomm(position.x);
+    // KiCad's internal coordinate system has Y increasing downward; Gerber/pos.csv exports (and
+    // this whole pipeline's own native frame, built entirely from those exports) have Y increasing
+    // upward. kicad-cli's own exporters apply this flip internally; PAD::GetPosition() returns the
+    // raw internal value, so it has to be negated here to land in the same frame as everything
+    // else libkicad_query's callers consume. Confirmed empirically against a real board: a pad's
+    // libkicad-reported Y was the exact negation of its Gerber-file Y at the same physical spot.
+    result.pad.yMm = -pcbIUScale.IUTomm(position.y);
+    result.pad.orientationDeg = pad->GetOrientation().AsDegrees();
+    result.pad.copperLayerName = board->GetLayerName(pad->GetLayer()).ToStdString();
+    result.pad.widthMm = pcbIUScale.IUTomm(pad->GetSizeX());
+    result.pad.heightMm = pcbIUScale.IUTomm(pad->GetSizeY());
+    return result;
+}
+
+RawNetClassMembersResult netsInNetClassRaw(const std::string& projectPath, const std::string& boardPath,
+                                            const std::string& netClassName) {
+    std::string error;
+    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    if (!loaded) {
+        return _failNetClassMembers(std::move(error));
+    }
+    BOARD* board = loaded->board;
+
+    // libkicad bypasses BOARD_LOADER (which normally calls this right after BOARD::SetProject()),
+    // so every net's GetNetClass() would otherwise silently report the board's default "Default"
+    // netclass rather than the project's real, user-defined ones.
+    board->SynchronizeNetsAndNetClasses(/* aResetTrackAndViaSizes = */ false);
+
+    RawNetClassMembersResult result;
+    result.ok = true;
+    const wxString wxNetClassName = wxString::FromUTF8(netClassName);
+    for (NETINFO_ITEM* net : board->GetNetInfo()) {
+        if (net->GetNetCode() == NETINFO_LIST::UNCONNECTED) {
+            continue;
+        }
+        const NETCLASS* netClass = net->GetNetClass();
+        // NETCLASS::GetName() can return a synthesized comma-joined name for aggregate/multi-
+        // pattern netclasses -- ContainsNetclassWithName() is the purpose-built membership check.
+        if (netClass != nullptr && netClass->ContainsNetclassWithName(wxNetClassName)) {
+            result.netNames.push_back(net->GetNetname().ToStdString());
+        }
+    }
+    return result;
+}
+
+RawPadsOnNetResult padsOnNetRaw(const std::string& projectPath, const std::string& boardPath,
+                                 const std::string& netName) {
+    std::string error;
+    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    if (!loaded) {
+        return _failPadsOnNet(std::move(error));
+    }
+    BOARD* board = loaded->board;
+
+    RawPadsOnNetResult result;
+    result.ok = true;
+    const wxString wxNetName = wxString::FromUTF8(netName);
+    // gerber2ems's whole pipeline (Gerbers, drill file, pick&place CSV) is exported via kicad-cli
+    // with --use-drill-file-origin, i.e. every coordinate it consumes is relative to the board's
+    // configured auxiliary origin, not KiCad's absolute canvas origin. Subtract it here (in integer
+    // KiCad internal units, before the mm conversion, to avoid floating-point precision loss) so
+    // every PadPosition this function returns is already in that same frame.
+    const VECTOR2I auxOrigin = board->GetDesignSettings().GetAuxOrigin();
+    for (FOOTPRINT* footprint : board->Footprints()) {
+        for (PAD* pad : footprint->Pads()) {
+            if (pad->GetNetname() != wxNetName) {
+                continue;
+            }
+
+            // PAD::GetPosition()/GetOrientation() already fold in the parent footprint's
+            // placement/rotation transform -- no extra transform math needed here.
+            const VECTOR2I position = pad->GetPosition() - auxOrigin;
+
+            PadPosition padPosition;
+            padPosition.footprintRef = footprint->GetReference().ToStdString();
+            padPosition.padNumber = pad->GetNumber().ToStdString();
+            padPosition.netName = netName;
+            padPosition.xMm = pcbIUScale.IUTomm(position.x);
+            // Y flip: see the identical comment in resolvePinRaw().
+            padPosition.yMm = -pcbIUScale.IUTomm(position.y);
+            padPosition.orientationDeg = pad->GetOrientation().AsDegrees();
+            padPosition.copperLayerName = board->GetLayerName(pad->GetLayer()).ToStdString();
+            padPosition.widthMm = pcbIUScale.IUTomm(pad->GetSizeX());
+            padPosition.heightMm = pcbIUScale.IUTomm(pad->GetSizeY());
+            result.pads.push_back(std::move(padPosition));
+        }
+    }
     return result;
 }
 

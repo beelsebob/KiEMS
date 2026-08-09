@@ -1,6 +1,7 @@
 #include "importer.hpp"
 
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <limits>
 #include <map>
@@ -16,7 +17,6 @@
 
 #include "config.hpp"
 #include "constants.hpp"
-#include "gerber_composite.hpp"
 #include "logging.hpp"
 
 extern char** environ;
@@ -47,6 +47,38 @@ std::int32_t _runProcess(const std::vector<std::string>& args) {
     int status = 0;
     waitpid(pid, &status, 0);
     return WIFEXITED(status) ? static_cast<std::int32_t>(WEXITSTATUS(status)) : -1;
+}
+
+// macOS's KiCad.app doesn't symlink kicad-cli anywhere on a typical PATH -- it ships only inside
+// the app bundle. posix_spawnp's own PATH search (via _runProcess above) already covers the case
+// where a user's shell PATH does include it (e.g. a Homebrew install); this only needs to cover
+// the common case where it doesn't, without requiring the user to edit their PATH.
+const std::vector<std::filesystem::path> kKicadCliFallbackPaths = {
+    "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
+};
+
+/// Resolves the `kicad-cli` command to run: "kicad-cli" itself if a bare lookup would find it on
+/// PATH, else the first known KiCad.app bundle location that actually exists.
+std::string _resolveKicadCli() {
+    const char* pathEnv = std::getenv("PATH");
+    if (pathEnv != nullptr) {
+        std::stringstream pathStream(pathEnv);
+        std::string dir;
+        while (std::getline(pathStream, dir, ':')) {
+            std::error_code ec;
+            if (std::filesystem::is_regular_file(std::filesystem::path(dir) / "kicad-cli", ec)) {
+                return "kicad-cli";
+            }
+        }
+    }
+    for (const auto& candidate : kKicadCliFallbackPaths) {
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(candidate, ec)) {
+            logDebug("kicad-cli not found on PATH; using " + candidate.string());
+            return candidate.string();
+        }
+    }
+    return "kicad-cli"; // Let posix_spawnp's own error reporting handle the "truly not found" case.
 }
 
 // ---- small filesystem helpers ----
@@ -89,13 +121,14 @@ void exportKicadPcb(const std::filesystem::path& kicadPcbPath) {
     const std::string pcb = kicadPcbPath.string();
     const std::string fabOut = (fabDir.string() + "/");
     const std::string posOut = (fabDir / "positions-pos.csv").string();
+    const std::string kicadCli = _resolveKicadCli();
 
     const std::int32_t drillStatus =
-        _runProcess({"kicad-cli", "pcb", "export", "drill", "--format", "excellon", "--excellon-separate-th", "-o",
+        _runProcess({kicadCli, "pcb", "export", "drill", "--format", "excellon", "--excellon-separate-th", "-o",
                      fabOut, pcb});
-    const std::int32_t gerberStatus = _runProcess({"kicad-cli", "pcb", "export", "gerbers", "--no-protel-ext",
+    const std::int32_t gerberStatus = _runProcess({kicadCli, "pcb", "export", "gerbers", "--no-protel-ext",
                                                     "--use-drill-file-origin", "-o", fabOut, pcb});
-    const std::int32_t posStatus = _runProcess({"kicad-cli", "pcb", "export", "pos", "--format", "csv",
+    const std::int32_t posStatus = _runProcess({kicadCli, "pcb", "export", "pos", "--format", "csv",
                                                  "--use-drill-file-origin", "--units", "mm", "-o", posOut, pcb});
 
     if (drillStatus != 0 || gerberStatus != 0 || posStatus != 0) {
@@ -103,51 +136,30 @@ void exportKicadPcb(const std::filesystem::path& kicadPcbPath) {
                   std::to_string(gerberStatus) + "/" + std::to_string(posStatus) + ")");
         std::exit(1);
     }
-}
 
-std::pair<double, double> getDimensions() {
-    const std::filesystem::path fabDir = std::filesystem::current_path() / "fab";
-    const std::vector<std::filesystem::path> edgeMatches = _globSuffix(fabDir, "Edge_Cuts.gbr");
-    if (edgeMatches.empty()) {
-        logError("No edge_cuts gerber found");
+    // port_resolution.cpp (libkicad-based net/pad queries) needs a board -- and, for net_class
+    // involved-net entries, a linked project -- to query, potentially in a later, separate `-g`/
+    // `-s`/`-p` invocation than this one. Keep persistent copies rather than requiring `-i` to be
+    // repeated on every invocation.
+    std::error_code copyEc;
+    std::filesystem::copy_file(kicadPcbPath, std::filesystem::current_path() / constants::fabBoardFile,
+                                std::filesystem::copy_options::overwrite_existing, copyEc);
+    if (copyEc) {
+        logError("Failed to copy " + kicadPcbPath.string() + " to fab/: " + copyEc.message());
         std::exit(1);
     }
-    const GerberFile edgeCuts(edgeMatches.front());
-    double xMin = std::numeric_limits<double>::infinity();
-    double xMax = -std::numeric_limits<double>::infinity();
-    double yMin = std::numeric_limits<double>::infinity();
-    double yMax = -std::numeric_limits<double>::infinity();
-    for (const auto& seg : edgeCuts.traceForNet("no-net").segments()) {
-        xMin = std::min({seg.start().x(), seg.stop().x(), xMin});
-        yMin = std::min({seg.start().y(), seg.stop().y(), yMin});
-        xMax = std::max({seg.start().x(), seg.stop().x(), xMax});
-        yMax = std::max({seg.start().y(), seg.stop().y(), yMax});
-    }
-    const double width = xMax - xMin;
-    const double height = yMax - yMin;
-    logDebug("Board dimensions read from file are: height:" + std::to_string(height) +
-             " width:" + std::to_string(width));
-    return {width, height};
-}
-
-std::vector<Triangle> getTriangles(const std::string& layerFileName) {
-    const std::filesystem::path fabDir = std::filesystem::current_path() / "fab";
-    const std::string suffix = "-" + layerFileName + ".gbr";
-    std::optional<std::filesystem::path> gerberPath;
-    std::error_code ec;
-    if (std::filesystem::is_directory(fabDir, ec)) {
-        for (const auto& entry : std::filesystem::directory_iterator(fabDir, ec)) {
-            if (_endsWith(entry.path().filename().string(), suffix)) {
-                gerberPath = entry.path();
-                break;
-            }
+    const std::filesystem::path projectPath = std::filesystem::path(kicadPcbPath).replace_extension(".kicad_pro");
+    if (std::filesystem::is_regular_file(projectPath)) {
+        std::filesystem::copy_file(projectPath, std::filesystem::current_path() / constants::fabProjectFile,
+                                    std::filesystem::copy_options::overwrite_existing, copyEc);
+        if (copyEc) {
+            logError("Failed to copy " + projectPath.string() + " to fab/: " + copyEc.message());
+            std::exit(1);
         }
+    } else {
+        logWarning("No sibling .kicad_pro found for " + kicadPcbPath.string() +
+                   "; involved_nets entries using \"net_class\" will fail to resolve");
     }
-    if (!gerberPath.has_value()) {
-        logError("Couldn't find gerber file for layer: " + layerFileName);
-        std::exit(1);
-    }
-    return compositeLayerTriangles(*gerberPath);
 }
 
 std::vector<ViaHole> getVias() {
@@ -194,7 +206,11 @@ std::vector<ViaHole> getVias() {
 }
 
 void importStackup() {
-    const std::filesystem::path filename = "fab/stackup.json";
+    // Deliberately not under fab/: everything in fab/ is regenerated wholesale by exportKicadPcb()
+    // (kicad-cli's own gerber/drill/pos export), but the stackup has no kicad-cli export equivalent
+    // -- it's user-maintained (exported by hand from KiCad's Board Setup > Board Stackup dialog),
+    // so it lives beside simulation.json instead, alongside the other input the user controls.
+    const std::filesystem::path filename = "stackup.json";
     std::ifstream file(filename);
     if (!file.is_open()) {
         logError("Couldn't open stackup file: " + filename.string());
@@ -219,34 +235,6 @@ void importStackup() {
     } else {
         logError("Stackup format (" + ver + ") is not supported (supported: " + std::string(stackupFormatVersion) + ")");
         std::exit(1);
-    }
-}
-
-void importPortPositions() {
-    std::vector<std::tuple<std::int32_t, std::pair<double, double>, double>> ports;
-    for (const auto& filename : _globSuffix(std::filesystem::current_path() / "fab", "pos.csv")) {
-        auto found = getPortsFromFile(filename);
-        ports.insert(ports.end(), found.begin(), found.end());
-    }
-
-    for (const auto& [number, position, direction] : ports) {
-        // Guards against a negative index (e.g. a board using differently-numbered refdes than
-        // expected): rather than replicate Python's `cfg.ports[-1]` wraparound-to-last-port
-        // behavior, skip with a warning below via the "not defined on board" pass.
-        if (number >= 0 && static_cast<std::int32_t>(Config::sharedConfig().ports().size()) > number) {
-            PortConfig& port = Config::sharedConfig().ports()[static_cast<std::size_t>(number)];
-            if (!port.position().has_value()) {
-                port.setPosition(position);
-                port.setDirection(direction);
-            } else {
-                logWarning("Port #" + std::to_string(number) + " is defined twice on the board. Ignoring the second instance");
-            }
-        }
-    }
-    for (std::size_t index = 0; index < Config::sharedConfig().ports().size(); ++index) {
-        if (!Config::sharedConfig().ports()[index].position().has_value()) {
-            logError("Port #" + std::to_string(index) + " is not defined on board. It will be skipped");
-        }
     }
 }
 

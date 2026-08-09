@@ -12,6 +12,7 @@
 #include <CSXCAD/ContinuousStructure.h>
 #include <openEMS/openems.h>
 
+#include "board_slicing.hpp"
 #include "config.hpp"
 #include "csx_helpers.hpp"
 #include "grid_gen.hpp"
@@ -23,7 +24,15 @@ namespace gerber2ems {
 /// Interacts with openEMS/CSXCAD to build simulation geometry and run the FDTD simulation.
 class Simulation {
 public:
-    Simulation();
+    explicit Simulation(SimulationConfig& simConfig);
+
+    /// Slices simConfig's board geometry (see board_slicing.hpp) -- simConfig.ports() must already
+    /// be populated (resolveSimulationPorts(), called before any Simulation is constructed). Must
+    /// be called before createMaterials()/addGerbers()/addGrid()/addSubstrates()/addVias(), which
+    /// all consume the result. Deliberately not done in the constructor: a `simulate()`-step
+    /// Simulation only ever calls loadGeometry() (reading the already-built geometry.xml a
+    /// `geometry()`-step Simulation saved earlier) and never needs sliced geometry recomputed.
+    void sliceBoard();
 
     void createMaterials();
     void addGrid();
@@ -72,6 +81,9 @@ private:
     ContinuousStructure* _csx;
     openEMS _fdtd;
     CSRectGrid* _grid;
+
+    SimulationConfig& _simConfig;
+    SlicedBoard _slicedBoard;
 
     std::vector<std::unique_ptr<Port>> _ports;
     std::vector<CSProperties*> _gerberMaterials;   // owned by _csx

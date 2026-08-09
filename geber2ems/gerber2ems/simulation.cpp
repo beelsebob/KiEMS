@@ -4,7 +4,6 @@
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
-#include <future>
 #include <limits>
 #include <map>
 #include <regex>
@@ -22,6 +21,23 @@ std::string _point3ToString(const Point3& p) {
     return "[" + std::to_string(p[0]) + ", " + std::to_string(p[1]) + ", " + std::to_string(p[2]) + "]";
 }
 
+// Standard ray-casting point-in-polygon test against a simple closed loop.
+bool _pointInPolygon(double x, double y, const std::vector<Position>& polygon) {
+    bool inside = false;
+    for (std::size_t i = 0, j = polygon.size() - 1; i < polygon.size(); j = i++) {
+        const Position& pi = polygon[i];
+        const Position& pj = polygon[j];
+        const bool crosses = (pi.y() > y) != (pj.y() > y);
+        if (crosses) {
+            const double xIntersect = pj.x() + (y - pj.y()) * (pi.x() - pj.x()) / (pi.y() - pj.y());
+            if (x < xIntersect) {
+                inside = !inside;
+            }
+        }
+    }
+    return inside;
+}
+
 std::string _normalizeLayerName(std::string name) {
     for (char& c : name) {
         if (c == '.' || c == '(' || c == ')' || c == ' ' || c == '/') {
@@ -33,9 +49,10 @@ std::string _normalizeLayerName(std::string name) {
 
 } // namespace
 
-Simulation::Simulation()
+Simulation::Simulation(SimulationConfig& simConfig)
     : _csx(new ContinuousStructure()),
       _grid(nullptr),
+      _simConfig(simConfig),
       _planeMaterial(nullptr),
       _viaMaterial(nullptr),
       _viaFillingMaterial(nullptr) {
@@ -48,6 +65,8 @@ Simulation::Simulation()
     _viaMaterial = addMetal(*_csx, "Via");
     _viaFillingMaterial = addMaterial(*_csx, "ViaFilling", Config::sharedConfig().via().fillingEpsilon());
 }
+
+void Simulation::sliceBoard() { _slicedBoard = sliceBoardForSimulation(_simConfig); }
 
 void Simulation::createMaterials() {
     const auto metals = Config::sharedConfig().getMetals();
@@ -100,7 +119,7 @@ void Simulation::printGridStats() const {
 
 void Simulation::addPortGrid() {
     logInfo("Adding ports grid");
-    for (auto& portConfig : Config::sharedConfig().ports()) {
+    for (auto& portConfig : _simConfig.ports()) {
         if (!portConfig.position().has_value() || !portConfig.direction().has_value()) {
             logError("Port has no defined position or rotation, skipping");
             return;
@@ -121,10 +140,11 @@ void Simulation::addPortGrid() {
 }
 
 void Simulation::addGrid() {
-    _gridGen = std::make_unique<GridGenerator>();
+    _gridGen = std::make_unique<GridGenerator>(_slicedBoard.xMin, _slicedBoard.yMin, _slicedBoard.width,
+                                                _slicedBoard.height);
     addPortGrid();
     logInfo("Compiling grid");
-    _gridGen->generate(*_grid);
+    _gridGen->generate(*_grid, _simConfig);
     printGridStats();
 }
 
@@ -146,36 +166,20 @@ void Simulation::addContours(const std::vector<Triangle>& contours, double zHeig
 }
 
 void Simulation::addGerbers() {
-    logInfo("Adding copper from gerber files");
+    logInfo("Adding copper from sliced board geometry");
 
-    std::vector<std::string> filenames;
-    for (const auto& lc : Config::sharedConfig().layers()) {
-        if (lc.kind() == LayerKind::Metal) {
-            filenames.push_back(lc.file());
-        }
-    }
-
-    std::vector<std::future<std::vector<Triangle>>> futures;
-    futures.reserve(filenames.size());
-    for (const auto& filename : filenames) {
-        futures.push_back(std::async(std::launch::async, getTriangles, filename));
-    }
-    std::vector<std::vector<Triangle>> contours;
-    contours.reserve(futures.size());
-    for (auto& f : futures) {
-        contours.push_back(f.get());
-    }
-
+    // _slicedBoard.layerTriangles is already indexed exactly like Config::sharedConfig().getMetals()
+    // (see board_slicing.cpp) -- one entry per metal layer, in stackup order -- so no separate
+    // per-file compositing/lookup is needed here any more (board_slicing.cpp did it once, per
+    // simulation, using only this simulation's involved+ground nets rather than the whole board).
     double offset = 0;
     std::int32_t index = 0;
-    std::size_t contourIdx = 0;
     for (const auto& layer : Config::sharedConfig().layers()) {
         if (layer.kind() == LayerKind::Substrate) {
             offset -= layer.thickness();
         } else if (layer.kind() == LayerKind::Metal) {
             logInfo("Adding metal mesh for " + layer.file());
-            addContours(contours[contourIdx], offset, index);
-            ++contourIdx;
+            addContours(_slicedBoard.layerTriangles.at(static_cast<std::size_t>(index)), offset, index);
             ++index;
         }
     }
@@ -289,8 +293,8 @@ void Simulation::addVirtualPort(const PortConfig& portConfig) {
 }
 
 void Simulation::addPlane(double zHeight) {
-    addBox(*_planeMaterial, {0, 0, zHeight}, {Config::sharedConfig().pcbWidth(), Config::sharedConfig().pcbHeight(), zHeight},
-           1);
+    addBox(*_planeMaterial, {_slicedBoard.xMin, _slicedBoard.yMin, zHeight},
+           {_slicedBoard.xMin + _slicedBoard.width, _slicedBoard.yMin + _slicedBoard.height, zHeight}, 1);
 }
 
 void Simulation::addSubstrates() {
@@ -298,8 +302,9 @@ void Simulation::addSubstrates() {
     double offset = 0;
     const auto substrates = Config::sharedConfig().getSubstrates();
     for (std::size_t i = 0; i < substrates.size(); ++i) {
-        addBox(*_substrateMaterials[i], {0, 0, offset},
-               {Config::sharedConfig().pcbWidth(), Config::sharedConfig().pcbHeight(), offset - substrates[i].thickness()},
+        addBox(*_substrateMaterials[i], {_slicedBoard.xMin, _slicedBoard.yMin, offset},
+               {_slicedBoard.xMin + _slicedBoard.width, _slicedBoard.yMin + _slicedBoard.height,
+                offset - substrates[i].thickness()},
                -static_cast<std::int32_t>(i) - 1);
         logDebug("Added substrate from " + std::to_string(offset) + " to " +
                  std::to_string(offset - substrates[i].thickness()));
@@ -309,7 +314,17 @@ void Simulation::addSubstrates() {
 
 void Simulation::addVias() {
     logInfo("Adding vias from excellon file");
+    // Real board vias: kept only where they still fall within this simulation's sliced outline --
+    // a via for copper that's been sliced away has nothing left to connect to anyway.
     for (const auto& via : getVias()) {
+        if (_pointInPolygon(via.x, via.y, _slicedBoard.outline)) {
+            addVia(via.x, via.y, via.diameter);
+        }
+    }
+
+    logInfo("Adding " + std::to_string(_slicedBoard.stitchingVias.size()) +
+            " ground-net stitching via(s) from board slicing");
+    for (const auto& via : _slicedBoard.stitchingVias) {
         addVia(via.x, via.y, via.diameter);
     }
 }
@@ -344,8 +359,8 @@ void Simulation::addSingleDumpBox(const std::string& name, double z) {
     logDebug("Adding dump box at " + std::to_string(z));
     CSPropDumpBox* dump = addDump(*_csx, name, {1, 1, 1});
     const double margin = Config::sharedConfig().grid().margin().xy();
-    addBox(*dump, {-margin, -margin, z},
-           {Config::sharedConfig().pcbWidth() + margin, Config::sharedConfig().pcbHeight() + margin, z});
+    addBox(*dump, {_slicedBoard.xMin - margin, _slicedBoard.yMin - margin, z},
+           {_slicedBoard.xMin + _slicedBoard.width + margin, _slicedBoard.yMin + _slicedBoard.height + margin, z});
 }
 
 void Simulation::addDumpBoxes() {
@@ -426,7 +441,8 @@ void Simulation::run(std::int32_t excitedPortNumber) {
     const std::filesystem::path cwd = std::filesystem::current_path();
     _fdtd.SetOverSampling(Config::sharedConfig().arguments().oversampling());
 
-    const std::filesystem::path simPath = cwd / constants::simulationDir / std::to_string(excitedPortNumber);
+    const std::filesystem::path simPath =
+        cwd / constants::simSimulationDir(_simConfig.name()) / std::to_string(excitedPortNumber);
     std::filesystem::create_directories(simPath);
     std::filesystem::current_path(simPath);
 
@@ -441,7 +457,8 @@ void Simulation::run(std::int32_t excitedPortNumber) {
 }
 
 void Simulation::saveGeometry() const {
-    const std::filesystem::path filename = std::filesystem::current_path() / constants::geometryDir / "geometry.xml";
+    const std::filesystem::path filename =
+        std::filesystem::current_path() / constants::simGeometryDir(_simConfig.name()) / "geometry.xml";
     logInfo("Saving geometry to " + filename.string());
     _csx->Write2XML(filename.string());
 
@@ -458,7 +475,8 @@ void Simulation::saveGeometry() const {
 }
 
 void Simulation::loadGeometry() {
-    const std::filesystem::path filename = std::filesystem::current_path() / constants::geometryDir / "geometry.xml";
+    const std::filesystem::path filename =
+        std::filesystem::current_path() / constants::simGeometryDir(_simConfig.name()) / "geometry.xml";
     logInfo("Loading geometry from " + filename.string());
     if (!std::filesystem::exists(filename)) {
         logError("Geometry file does not exist. Did you run geometry step?");
@@ -470,7 +488,8 @@ void Simulation::loadGeometry() {
 
 std::pair<std::vector<std::vector<std::complex<double>>>, std::vector<std::vector<std::complex<double>>>>
 Simulation::getPortParameters(std::int32_t exIndex, const std::vector<double>& frequencies) {
-    const std::filesystem::path resultPath = std::filesystem::current_path() / constants::simulationDir / std::to_string(exIndex);
+    const std::filesystem::path resultPath =
+        std::filesystem::current_path() / constants::simSimulationDir(_simConfig.name()) / std::to_string(exIndex);
 
     std::vector<std::vector<std::complex<double>>> incident;
     std::vector<std::vector<std::complex<double>>> reflected;
@@ -516,7 +535,7 @@ void Simulation::setupPorts(std::int32_t enabledIdx) {
 void Simulation::addPorts() {
     logInfo("Adding ports");
     _ports.clear();
-    auto& ports = Config::sharedConfig().ports();
+    auto& ports = _simConfig.ports();
     for (std::size_t index = 0; index < ports.size(); ++index) {
         addMslPort(ports[index], static_cast<std::int32_t>(index), true);
     }
@@ -524,7 +543,7 @@ void Simulation::addPorts() {
 
 void Simulation::addVirtualPorts() {
     logInfo("Adding virtual ports");
-    for (const auto& portConfig : Config::sharedConfig().ports()) {
+    for (const auto& portConfig : _simConfig.ports()) {
         addVirtualPort(portConfig);
     }
 }

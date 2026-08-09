@@ -312,6 +312,11 @@ struct CopperOp {
 
     Kind kind;
     bool additive; // Polarity active when this operation was parsed (dark = true, clear = false).
+    // Net active when this operation was parsed (the same value that keys GerberFile::traces()/
+    // GerberFile::pads() for the Stroke/Zone cases -- carried here too, uniformly across all three
+    // Kinds, so a consumer can filter copperOps() by net membership without reaching into the
+    // payload variant to distinguish how each Kind happens to track it).
+    std::string net;
     // Stroke: a single drawn segment (already tessellated if it was an arc -- see _tessellateArc).
     // Pad: a flashed aperture.
     // Zone: a closed loop of segments forming one filled region (G36...G37), already force-closed.

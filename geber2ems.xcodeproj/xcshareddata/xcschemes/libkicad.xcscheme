@@ -15,9 +15,9 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "71AD229130263515006D5847"
-               BuildableName = "geber2ems"
-               BlueprintName = "geber2ems"
+               BlueprintIdentifier = "B0B651E8085482933DC2AFFE"
+               BuildableName = "liblibkicad.a"
+               BlueprintName = "libkicad"
                ReferencedContainer = "container:geber2ems.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
@@ -40,40 +40,7 @@
       debugDocumentVersioning = "YES"
       debugServiceExtension = "internal"
       allowLocationSimulation = "YES"
-      viewDebuggingEnabled = "No"
       queueDebuggingEnableBacktraceRecording = "Yes">
-      <BuildableProductRunnable
-         runnableDebuggingMode = "0">
-         <BuildableReference
-            BuildableIdentifier = "primary"
-            BlueprintIdentifier = "71AD229130263515006D5847"
-            BuildableName = "geber2ems"
-            BlueprintName = "geber2ems"
-            ReferencedContainer = "container:geber2ems.xcodeproj">
-         </BuildableReference>
-      </BuildableProductRunnable>
-      <CommandLineArguments>
-         <CommandLineArgument
-            argument = "-i"
-            isEnabled = "YES">
-         </CommandLineArgument>
-         <CommandLineArgument
-            argument = "/Users/tdavie/Documents/Keyboard\ Hub.sim/Keyboard\ Hub.kicad_pcb"
-            isEnabled = "YES">
-         </CommandLineArgument>
-         <CommandLineArgument
-            argument = "-c"
-            isEnabled = "YES">
-         </CommandLineArgument>
-         <CommandLineArgument
-            argument = "/Users/tdavie/Documents/Keyboard\ Hub.sim/simulation.json"
-            isEnabled = "YES">
-         </CommandLineArgument>
-         <CommandLineArgument
-            argument = "-g"
-            isEnabled = "YES">
-         </CommandLineArgument>
-      </CommandLineArguments>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Release"
@@ -81,16 +48,15 @@
       savedToolIdentifier = ""
       useCustomWorkingDirectory = "NO"
       debugDocumentVersioning = "YES">
-      <BuildableProductRunnable
-         runnableDebuggingMode = "0">
+      <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "71AD229130263515006D5847"
-            BuildableName = "geber2ems"
-            BlueprintName = "geber2ems"
+            BlueprintIdentifier = "B0B651E8085482933DC2AFFE"
+            BuildableName = "liblibkicad.a"
+            BlueprintName = "libkicad"
             ReferencedContainer = "container:geber2ems.xcodeproj">
          </BuildableReference>
-      </BuildableProductRunnable>
+      </MacroExpansion>
    </ProfileAction>
    <AnalyzeAction
       buildConfiguration = "Debug">

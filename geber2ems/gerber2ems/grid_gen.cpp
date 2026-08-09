@@ -4,12 +4,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
 #include <functional>
 #include <limits>
 #include <sstream>
-
-#include <nlohmann/json.hpp>
 
 #include "config.hpp"
 #include "csx_grid_utils.hpp"
@@ -622,43 +619,15 @@ private:
 } // namespace
 
 struct GridGenerator::Impl {
-    Impl()
+    Impl(double boardXMin, double boardYMin, double boardWidth, double boardHeight)
         : x("x", Region(-Config::sharedConfig().grid().margin().xy(),
-                         Config::sharedConfig().pcbWidth() + Config::sharedConfig().grid().margin().xy())),
+                         boardWidth + Config::sharedConfig().grid().margin().xy())),
           y("y", Region(-Config::sharedConfig().grid().margin().xy(),
-                         Config::sharedConfig().pcbHeight() + Config::sharedConfig().grid().margin().xy())) {
-        _getBoardOffset();
-    }
-
-    void _getBoardOffset() {
-        const std::filesystem::path fabDir = std::filesystem::current_path() / "fab";
-        std::optional<std::filesystem::path> edgeCutsPath;
-        std::error_code ec;
-        if (std::filesystem::is_directory(fabDir, ec)) {
-            for (const auto& entry : std::filesystem::directory_iterator(fabDir, ec)) {
-                const std::string name = entry.path().filename().string();
-                if (name.size() >= 13 && name.compare(name.size() - 13, 13, "Edge_Cuts.gbr") == 0) {
-                    edgeCutsPath = entry.path();
-                    break;
-                }
-            }
-        }
-        if (!edgeCutsPath.has_value()) {
-            logError("No EdgeCuts gerber in fab dir(" + fabDir.string() + ")");
-            std::exit(1);
-        }
-        GerberFile edgeCuts(*edgeCutsPath);
-        xmin = std::numeric_limits<double>::infinity();
-        xmax = -std::numeric_limits<double>::infinity();
-        ymin = std::numeric_limits<double>::infinity();
-        ymax = -std::numeric_limits<double>::infinity();
-        for (const auto& seg : edgeCuts.traceForNet("no-net").segments()) {
-            xmin = std::min({seg.start().x(), seg.stop().x(), xmin});
-            ymin = std::min({seg.start().y(), seg.stop().y(), ymin});
-            xmax = std::max({seg.start().x(), seg.stop().x(), xmax});
-            ymax = std::max({seg.start().y(), seg.stop().y(), ymax});
-        }
-    }
+                         boardHeight + Config::sharedConfig().grid().margin().xy())),
+          xmin(boardXMin),
+          xmax(boardXMin + boardWidth),
+          ymin(boardYMin),
+          ymax(boardYMin + boardHeight) {}
 
     std::vector<std::int32_t> _generateZ() {
         logInfo("### Grid Generator: generate Z axis ###");
@@ -699,7 +668,7 @@ struct GridGenerator::Impl {
         return result;
     }
 
-    CSRectGrid& generate(CSRectGrid& grid) {
+    CSRectGrid& generate(CSRectGrid& grid, const SimulationConfig& simConfig) {
         const std::filesystem::path fabDir = std::filesystem::current_path() / "fab";
         std::vector<GerberFile> gerbers;
         std::error_code ec;
@@ -712,41 +681,11 @@ struct GridGenerator::Impl {
             }
         }
 
-        logInfo("### Grid Generator: get nets of interest ###");
-        std::vector<std::string> nets;
-        for (const auto& pair : Config::sharedConfig().diffPairs()) {
-            nets.insert(nets.end(), pair.nets().begin(), pair.nets().end());
-        }
-        for (const auto& trace : Config::sharedConfig().traces()) {
-            nets.insert(nets.end(), trace.nets().begin(), trace.nets().end());
-        }
-        if (nets.empty()) {
-            const std::filesystem::path netinfoPath = std::filesystem::current_path() / "netinfo.json";
-            std::ifstream netinfoFile(netinfoPath);
-            if (netinfoFile.is_open()) {
-                nlohmann::json netinfo;
-                netinfoFile >> netinfo;
-                for (const auto& net : netinfo.at("nets")) {
-                    nets.push_back(net.at("name").get<std::string>());
-                }
-            } else {
-                logWarning("File with nets under test not found! (" + netinfoPath.string() + ")");
-                std::vector<std::string> uniqueNets;
-                for (const auto& gbr : gerbers) {
-                    for (const auto& [net, trace] : gbr.traces()) {
-                        (void)trace;
-                        if (std::find(uniqueNets.begin(), uniqueNets.end(), net) == uniqueNets.end()) {
-                            uniqueNets.push_back(net);
-                        }
-                    }
-                }
-                for (const auto& net : uniqueNets) {
-                    if (net != "GND" && net != "gnd" && net != "no-net") {
-                        nets.push_back(net);
-                    }
-                }
-            }
-        }
+        // "Nets of interest" for mesh-density purposes are simply this simulation's own resolved
+        // involved nets (see SimulationConfig::resolvedNets(), populated by resolveSimulationPorts())
+        // -- board slicing has already reduced the board down to just these nets' (plus the ground
+        // net's) copper, so there's no longer a separate "guess which nets matter" step needed.
+        std::vector<std::string> nets = simConfig.resolvedNets();
 
         logInfo("### Grid Generator: parse gerber files ###");
         for (auto& gbr : gerbers) {
@@ -784,7 +723,8 @@ struct GridGenerator::Impl {
     double ymax = 0;
 };
 
-GridGenerator::GridGenerator() : _impl(std::make_unique<Impl>()) {}
+GridGenerator::GridGenerator(double boardXMin, double boardYMin, double boardWidth, double boardHeight)
+    : _impl(std::make_unique<Impl>(boardXMin, boardYMin, boardWidth, boardHeight)) {}
 GridGenerator::~GridGenerator() = default;
 
 std::vector<Pad>& GridGenerator::addPads() { return _impl->addPads; }
@@ -792,6 +732,8 @@ std::unordered_map<std::string, Aperture>& GridGenerator::addApertures() { retur
 double GridGenerator::xmin() const { return _impl->xmin; }
 double GridGenerator::ymin() const { return _impl->ymin; }
 
-CSRectGrid& GridGenerator::generate(CSRectGrid& grid) { return _impl->generate(grid); }
+CSRectGrid& GridGenerator::generate(CSRectGrid& grid, const SimulationConfig& simConfig) {
+    return _impl->generate(grid, simConfig);
+}
 
 } // namespace gerber2ems

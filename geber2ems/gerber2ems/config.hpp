@@ -5,7 +5,6 @@
 #include <filesystem>
 #include <optional>
 #include <string>
-#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -76,13 +75,22 @@ private:
     std::optional<std::string> _logLevel;
 };
 
-/// Class representing and parsing port config.
+/// Class representing a single simulation port. Never (de)serialized directly -- populated by
+/// port_resolution.cpp from a SimulationConfig's InvolvedNetConfig entries, one instance per pad
+/// on each resolved net.
 class PortConfig {
 public:
-    static PortConfig withName(const std::string& name);
-
     const std::string& name() const { return _name; }
     void setName(std::string value) { _name = std::move(value); }
+
+    // Identity of the real board pad this port sits on -- used by port_resolution.cpp to match an
+    // ExcitationConfig/PortRef's footprint+pin selector back to a resolved port index, without
+    // parsing it out of name() (which is a display string, not a stable key).
+    const std::string& footprintRef() const { return _footprintRef; }
+    void setFootprintRef(std::string value) { _footprintRef = std::move(value); }
+
+    const std::string& padNumber() const { return _padNumber; }
+    void setPadNumber(std::string value) { _padNumber = std::move(value); }
 
     const std::optional<std::pair<double, double>>& position() const { return _position; }
     void setPosition(std::pair<double, double> value) { _position = value; }
@@ -91,11 +99,22 @@ public:
     void setDirection(double value) { _direction = value; }
 
     double width() const { return _width; }
+    void setWidth(double value) { _width = value; }
+
     double length() const { return _length; }
+    void setLength(double value) { _length = value; }
+
     double impedance() const { return _impedance; }
+    void setImpedance(double value) { _impedance = value; }
+
     std::int32_t layer() const { return _layer; }
+    void setLayer(std::int32_t value) { _layer = value; }
+
     std::int32_t plane() const { return _plane; }
+    void setPlane(std::int32_t value) { _plane = value; }
+
     double dBMargin() const { return _dBMargin; }
+    void setDBMargin(double value) { _dBMargin = value; }
 
     bool excite() const { return _excite; }
     void setExcite(bool value) { _excite = value; }
@@ -105,12 +124,11 @@ public:
     void scaleToSimulationUnits(std::int32_t unitMultiplier);
 
 private:
-    friend void to_json(nlohmann::json& j, const PortConfig& p);
-    friend void from_json(const nlohmann::json& j, PortConfig& p);
-
     std::string _name = "Unnamed";
-    std::optional<std::pair<double, double>> _position; // not (de)serialized
-    std::optional<double> _direction;                    // not (de)serialized
+    std::string _footprintRef;
+    std::string _padNumber;
+    std::optional<std::pair<double, double>> _position;
+    std::optional<double> _direction;
     double _width = 200;
     double _length = 1000;
     double _impedance = 50;
@@ -120,59 +138,200 @@ private:
     bool _excite = false;
 };
 
-void to_json(nlohmann::json& j, const PortConfig& p);
-void from_json(const nlohmann::json& j, PortConfig& p);
+/// Identifies a port by the footprint+pin selector it was placed on -- the same, human-writable
+/// way any other part of this config names a specific pin (ExcitationConfig, an InvolvedNetConfig
+/// footprint-pin entry). Resolved to a concrete index into a SimulationConfig's ports() once
+/// during resolveSimulationPorts(), the same way ExcitationConfig's driven pin is.
+class PortRef {
+public:
+    const std::string& footprint() const { return _footprint; }
+    const std::string& pin() const { return _pin; }
 
-/// Class representing and parsing differential pair config.
+    const std::optional<std::int32_t>& resolvedIndex() const { return _resolvedIndex; }
+    void setResolvedIndex(std::int32_t index) { _resolvedIndex = index; }
+
+private:
+    friend void to_json(nlohmann::json& j, const PortRef& p);
+    friend void from_json(const nlohmann::json& j, PortRef& p);
+
+    std::string _footprint;
+    std::string _pin;
+    std::optional<std::int32_t> _resolvedIndex; // not (de)serialized
+};
+
+void to_json(nlohmann::json& j, const PortRef& p);
+void from_json(const nlohmann::json& j, PortRef& p);
+
+/// Which of InvolvedNetConfig's mutually-exclusive selector fields is populated.
+enum class NetSelectorKind {
+    NetClass,
+    Net,
+    FootprintPin,
+};
+
+/// One entry in a SimulationConfig's involved-nets list. Resolves (via port_resolution.cpp and
+/// libkicad) to a set of net names -- a net class expands to every net assigned to it; a
+/// footprint+pin resolves to the net connected to that pin and is thereafter treated exactly like
+/// naming that net directly. Every pad on every resolved net gets one auto-placed PortConfig,
+/// using this entry's impedance/length/plane/overrides.
+class InvolvedNetConfig {
+public:
+    NetSelectorKind kind() const { return _kind; }
+    const std::optional<std::string>& netClass() const { return _netClass; }
+    const std::optional<std::string>& net() const { return _net; }
+    const std::optional<std::string>& footprint() const { return _footprint; }
+    const std::vector<std::string>& pins() const { return _pins; }
+
+    double impedance() const { return _impedance; }
+    double length() const { return _length; } // -> PortConfig::length()
+    std::int32_t plane() const { return _plane; }
+    const std::optional<double>& width() const { return _width; }
+    const std::optional<double>& dBMargin() const { return _dBMargin; }
+    const std::optional<double>& direction() const { return _direction; } // escape hatch, see port_resolution.cpp
+
+    // impedance/length/width are intentionally left unscaled here: they're copied verbatim into a
+    // resolved PortConfig by port_resolution.cpp, which scales the whole PortConfig exactly once
+    // (PortConfig::scaleToSimulationUnits) -- scaling them here too would double-scale.
+
+private:
+    friend void to_json(nlohmann::json& j, const InvolvedNetConfig& p);
+    friend void from_json(const nlohmann::json& j, InvolvedNetConfig& p);
+
+    NetSelectorKind _kind = NetSelectorKind::Net;
+    std::optional<std::string> _netClass;
+    std::optional<std::string> _net;
+    std::optional<std::string> _footprint;
+    std::vector<std::string> _pins;
+    double _impedance = 50;
+    double _length = 1000;
+    std::int32_t _plane = 1;
+    std::optional<double> _width;
+    std::optional<double> _dBMargin;
+    std::optional<double> _direction;
+};
+
+void to_json(nlohmann::json& j, const InvolvedNetConfig& p);
+void from_json(const nlohmann::json& j, InvolvedNetConfig& p);
+
+/// Which of GroundNetConfig's mutually-exclusive selector fields is populated.
+enum class GroundSelectorKind {
+    NetClass,
+    Net,
+};
+
+/// Names the net (or net class) whose copper survives board slicing purely to give the sliced
+/// nets something real to return current through -- never becomes a port or a signal of interest.
+class GroundNetConfig {
+public:
+    GroundSelectorKind kind() const { return _kind; }
+    const std::optional<std::string>& netClass() const { return _netClass; }
+    const std::optional<std::string>& net() const { return _net; }
+
+private:
+    friend void to_json(nlohmann::json& j, const GroundNetConfig& p);
+    friend void from_json(const nlohmann::json& j, GroundNetConfig& p);
+
+    GroundSelectorKind _kind = GroundSelectorKind::Net;
+    std::optional<std::string> _netClass;
+    std::optional<std::string> _net;
+};
+
+void to_json(nlohmann::json& j, const GroundNetConfig& p);
+void from_json(const nlohmann::json& j, GroundNetConfig& p);
+
+/// One entry in a SimulationConfig's excitations list. Purely a postprocessing input (see
+/// excitation_postprocess.hpp) -- it plays no role in which ports get excited during the actual
+/// FDTD sweep (every involved-net port always does).
+class ExcitationConfig {
+public:
+    double startTime() const { return _startTime; }
+    double duration() const { return _duration; }
+    bool isMain() const { return _isMain; }
+    const std::optional<double>& frequency() const { return _frequency; } // required iff !isMain()
+    const std::optional<double>& amplitude() const { return _amplitude; } // required iff !isMain()
+    double phaseDegrees() const { return _phaseDegrees; }
+    const std::string& footprint() const { return _footprint; }
+    const std::string& pin() const { return _pin; }
+
+    const std::optional<std::int32_t>& drivenPortIndex() const { return _drivenPortIndex; }
+    void setDrivenPortIndex(std::int32_t index) { _drivenPortIndex = index; }
+
+private:
+    friend void to_json(nlohmann::json& j, const ExcitationConfig& p);
+    friend void from_json(const nlohmann::json& j, ExcitationConfig& p);
+
+    double _startTime = 0;
+    double _duration = 0;
+    bool _isMain = false;
+    std::optional<double> _frequency;
+    std::optional<double> _amplitude;
+    double _phaseDegrees = 0;
+    std::string _footprint;
+    std::string _pin;
+    std::optional<std::int32_t> _drivenPortIndex; // not (de)serialized
+};
+
+void to_json(nlohmann::json& j, const ExcitationConfig& p);
+void from_json(const nlohmann::json& j, ExcitationConfig& p);
+
+/// Class representing and parsing differential pair config, for postprocessing (mixed-mode
+/// S-parameter / differential impedance) purposes. References ports by footprint+pin rather than
+/// index, since one-port-per-pad makes hand-written indices unpredictable.
 class DifferentialPairConfig {
 public:
-    std::int32_t startP() const { return _startP; }
-    std::int32_t stopP() const { return _stopP; }
-    std::int32_t startN() const { return _startN; }
-    std::int32_t stopN() const { return _stopN; }
+    const PortRef& startP() const { return _startP; }
+    PortRef& startP() { return _startP; }
+    const PortRef& stopP() const { return _stopP; }
+    PortRef& stopP() { return _stopP; }
+    const PortRef& startN() const { return _startN; }
+    PortRef& startN() { return _startN; }
+    const PortRef& stopN() const { return _stopN; }
+    PortRef& stopN() { return _stopN; }
     const std::optional<std::string>& name() const { return _name; }
-    const std::vector<std::string>& nets() const { return _nets; }
     bool correct() const { return _correct; }
 
-    /// Validate trace config against the number of defined ports (mirrors __post_init__).
-    void postInit(std::int32_t portCount);
+    /// Validate that every PortRef resolved to a real port (mirrors __post_init__, now
+    /// resolution-based instead of index-range-based).
+    void postInit();
 
 private:
     friend void to_json(nlohmann::json& j, const DifferentialPairConfig& p);
     friend void from_json(const nlohmann::json& j, DifferentialPairConfig& p);
 
-    std::int32_t _startP = 0;
-    std::int32_t _stopP = 1;
-    std::int32_t _startN = 2;
-    std::int32_t _stopN = 3;
+    PortRef _startP;
+    PortRef _stopP;
+    PortRef _startN;
+    PortRef _stopN;
     std::optional<std::string> _name;
-    std::vector<std::string> _nets;
     bool _correct = true; // not (de)serialized
 };
 
 void to_json(nlohmann::json& j, const DifferentialPairConfig& p);
 void from_json(const nlohmann::json& j, DifferentialPairConfig& p);
 
-/// Class representing and parsing single-ended config.
+/// Class representing and parsing single-ended trace config, for postprocessing (propagation
+/// delay/insertion loss labeling) purposes. References ports by footprint+pin, see
+/// DifferentialPairConfig.
 class SingleEndedConfig {
 public:
-    std::int32_t start() const { return _start; }
-    std::int32_t stop() const { return _stop; }
+    const PortRef& start() const { return _start; }
+    PortRef& start() { return _start; }
+    const PortRef& stop() const { return _stop; }
+    PortRef& stop() { return _stop; }
     const std::optional<std::string>& name() const { return _name; }
-    const std::vector<std::string>& nets() const { return _nets; }
     bool correct() const { return _correct; }
 
-    /// Validate trace config against the number of defined ports (mirrors __post_init__).
-    void postInit(std::int32_t portCount);
+    /// Validate that both PortRefs resolved to real ports (mirrors __post_init__, now
+    /// resolution-based instead of index-range-based).
+    void postInit();
 
 private:
     friend void to_json(nlohmann::json& j, const SingleEndedConfig& p);
     friend void from_json(const nlohmann::json& j, SingleEndedConfig& p);
 
-    std::int32_t _start = 0;
-    std::int32_t _stop = 1;
+    PortRef _start;
+    PortRef _stop;
     std::optional<std::string> _name;
-    std::vector<std::string> _nets;
     bool _correct = true; // not (de)serialized
 };
 
@@ -315,6 +474,62 @@ private:
 void to_json(nlohmann::json& j, const Grid& g);
 void from_json(const nlohmann::json& j, Grid& g);
 
+/// One independent simulation: its own involved-nets-driven port resolution, board slicing
+/// parameters, and excitation list. Replaces the old flat Config::ports()/traces()/diffPairs() for
+/// everything simulation-specific.
+class SimulationConfig {
+public:
+    const std::string& name() const { return _name; }
+    const std::vector<InvolvedNetConfig>& involvedNets() const { return _involvedNets; }
+    const GroundNetConfig& groundNet() const { return _groundNet; }
+
+    double hullPadding() const { return _hullPadding; }
+    double viaEdgeDistance() const { return _viaEdgeDistance; }
+    double viaSpacing() const { return _viaSpacing; }
+
+    std::vector<ExcitationConfig>& excitations() { return _excitations; }
+    const std::vector<ExcitationConfig>& excitations() const { return _excitations; }
+    std::vector<SingleEndedConfig>& traces() { return _traces; }
+    const std::vector<SingleEndedConfig>& traces() const { return _traces; }
+    std::vector<DifferentialPairConfig>& diffPairs() { return _diffPairs; }
+    const std::vector<DifferentialPairConfig>& diffPairs() const { return _diffPairs; }
+
+    std::vector<PortConfig>& ports() { return _ports; }
+    const std::vector<PortConfig>& ports() const { return _ports; }
+
+    /// Every net name resolved from involvedNets() (populated once by resolveSimulationPorts(),
+    /// alongside ports()) -- cached here so grid_gen.cpp's mesh-density hint doesn't need to
+    /// re-resolve net_class/footprint+pin entries via another libkicad_query round trip.
+    std::vector<std::string>& resolvedNets() { return _resolvedNets; }
+    const std::vector<std::string>& resolvedNets() const { return _resolvedNets; }
+
+    /// Scales hullPadding/viaEdgeDistance/viaSpacing into simulation units. Resolved ports scale
+    /// themselves individually (PortConfig::scaleToSimulationUnits, called by port_resolution.cpp)
+    /// -- this does not touch ports() or involvedNets(), which either aren't populated yet at
+    /// config-load time or are copied verbatim into a PortConfig later (see InvolvedNetConfig).
+    void scaleToSimulationUnits(std::int32_t unitMultiplier);
+
+private:
+    friend void to_json(nlohmann::json& j, const SimulationConfig& p);
+    friend void from_json(const nlohmann::json& j, SimulationConfig& p);
+
+    std::string _name;
+    std::vector<InvolvedNetConfig> _involvedNets;
+    GroundNetConfig _groundNet;
+    double _hullPadding = 2000;
+    double _viaEdgeDistance = 300;
+    double _viaSpacing = 500;
+    std::vector<ExcitationConfig> _excitations;
+    std::vector<SingleEndedConfig> _traces;
+    std::vector<DifferentialPairConfig> _diffPairs;
+
+    std::vector<PortConfig> _ports;         // not (de)serialized, populated by resolveSimulationPorts()
+    std::vector<std::string> _resolvedNets; // not (de)serialized, populated by resolveSimulationPorts()
+};
+
+void to_json(nlohmann::json& j, const SimulationConfig& p);
+void from_json(const nlohmann::json& j, SimulationConfig& p);
+
 /// Config validation and parsing singleton class.
 class Config {
 public:
@@ -328,8 +543,8 @@ public:
 
     const std::string& formatVersion() const { return _formatVersion; }
 
-    const std::vector<PortConfig>& ports() const { return _ports; }
-    std::vector<PortConfig>& ports() { return _ports; }
+    const std::vector<SimulationConfig>& simulations() const { return _simulations; }
+    std::vector<SimulationConfig>& simulations() { return _simulations; }
 
     const Frequency& frequency() const { return _frequency; }
     std::int32_t maxSteps() const { return _maxSteps; }
@@ -343,8 +558,6 @@ public:
     std::int32_t pixelSize() const { return _pixelSize; }
     const Via& via() const { return _via; }
     const Grid& grid() const { return _grid; }
-    const std::vector<SingleEndedConfig>& traces() const { return _traces; }
-    const std::vector<DifferentialPairConfig>& diffPairs() const { return _diffPairs; }
 
     double pcbWidth() const { return _pcbWidth; }
     void setPcbWidth(double value) { _pcbWidth = value; }
@@ -358,6 +571,12 @@ public:
     std::vector<LayerConfig> getSubstrates() const;
     std::vector<LayerConfig> getMetals() const;
 
+    /// Ordinal index (0-based, counting from the top) of the Metal-kind layer whose LayerConfig::
+    /// file() matches `normalizedFileName` (dots already replaced with underscores, matching how
+    /// LayerConfig::file() itself is derived from a layer's KiCad name). Used by port_resolution.cpp
+    /// to turn a pad's copper layer name into the layer index PortConfig::layer() expects.
+    std::optional<std::int32_t> metalLayerIndexForFileName(const std::string& normalizedFileName) const;
+
 private:
     Config() = default;
 
@@ -368,32 +587,22 @@ private:
 
     static bool _isCfgVersionInvalid(const std::optional<std::string>& version);
 
-    /// Read config file and load it to a JSON object.
-    ///
-    /// If updateConfig is enabled and there is no config file at the provided path, returns a
-    /// config stub, auto-populated with ports discovered from `fab/*pos.csv` if none are already
-    /// defined.
+    /// Read config file and load it to a JSON object. If updateConfig is enabled and there is no
+    /// config file at the provided path, returns a stub with an empty "simulations" list.
     static nlohmann::json _getCfgJson(const std::filesystem::path& cfgPath, bool updateConfig);
 
     std::string _formatVersion;
-    std::vector<PortConfig> _ports;
+    std::vector<SimulationConfig> _simulations;
     Frequency _frequency;
     std::int32_t _maxSteps = 100000;
     std::int32_t _pixelSize = 5;
     Via _via;
     Grid _grid;
-    std::vector<SingleEndedConfig> _traces;
-    std::vector<DifferentialPairConfig> _diffPairs;
 
     double _pcbWidth = 0;  // not (de)serialized
     double _pcbHeight = 0; // not (de)serialized
     std::vector<LayerConfig> _layers; // not (de)serialized
     Arguments _arguments;             // not (de)serialized
 };
-
-/// Parse a KiCad-style pick & place CSV file and return all ports found in it, in the format
-/// (port number, (x, y), direction). Also used by the (not yet ported) gerber importer.
-std::vector<std::tuple<std::int32_t, std::pair<double, double>, double>> getPortsFromFile(
-    const std::filesystem::path& filename);
 
 } // namespace gerber2ems

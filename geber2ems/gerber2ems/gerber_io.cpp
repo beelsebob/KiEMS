@@ -1078,7 +1078,7 @@ void GerberFile::_processNormalLine(const std::string& line, ParserState& parser
         Trace trace = traceForNet(parser.net);
         trace.addSegments(parser.zoneContours);
         _traces.insert_or_assign(parser.net, trace);
-        _copperOps.push_back(CopperOp{CopperOp::Kind::Zone, parser.zoneAdditive, parser.zoneContours});
+        _copperOps.push_back(CopperOp{CopperOp::Kind::Zone, parser.zoneAdditive, parser.net, parser.zoneContours});
         parser.zoneContours.clear();
         parser.zone = false;
     } else if (split[0] == "G74") {
@@ -1155,7 +1155,7 @@ void GerberFile::_processDrawingLine(const std::string& line, ParserState& parse
             for (const Position& p : subPoints) {
                 TraceSegment seg(segStart, p, apName, circle->diameter(), PlotMode::Linear);
                 trace.addSegment(seg);
-                _copperOps.push_back(CopperOp{CopperOp::Kind::Stroke, parser.additive, seg});
+                _copperOps.push_back(CopperOp{CopperOp::Kind::Stroke, parser.additive, parser.net, seg});
                 segStart = p;
             }
             _traces.insert_or_assign(parser.net, trace);
@@ -1175,7 +1175,7 @@ void GerberFile::_processDrawingLine(const std::string& line, ParserState& parse
         Pad pad(parser.aperture, parser.net, pos, pinRef, parser.additive, parser.mirror, parser.rotation,
                 parser.scale);
         _pads.push_back(pad);
-        _copperOps.push_back(CopperOp{CopperOp::Kind::Pad, parser.additive, pad});
+        _copperOps.push_back(CopperOp{CopperOp::Kind::Pad, parser.additive, parser.net, pad});
     }
 }
 
