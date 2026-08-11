@@ -19,6 +19,7 @@
 
 #include "constants.hpp"
 #include "csx_grid_utils.hpp"
+#include "gerber_composite.hpp"
 #include "logging.hpp"
 
 extern char** environ;
@@ -48,6 +49,41 @@ bool _pointInPolygon(double x, double y, const std::vector<Position>& polygon) {
     return inside;
 }
 
+// Shortest distance from (x, y) to the polyline formed by `polygon`'s edges (treated as a closed
+// loop) -- same algorithm as board_slicing.cpp's file-local _distancePointToPolyline, just against
+// Position rather than Clipper2Lib::Point64 (this file never touches Clipper2 types directly).
+double _distanceToPolygonBoundary(double x, double y, const std::vector<Position>& polygon) {
+    double best = std::numeric_limits<double>::infinity();
+    for (std::size_t i = 0, j = polygon.size() - 1; i < polygon.size(); j = i++) {
+        const Position& a = polygon[j];
+        const Position& b = polygon[i];
+        const double abx = b.x() - a.x();
+        const double aby = b.y() - a.y();
+        const double lenSq = abx * abx + aby * aby;
+        double t = 0;
+        if (lenSq > 0) {
+            t = ((x - a.x()) * abx + (y - a.y()) * aby) / lenSq;
+            t = std::clamp(t, 0.0, 1.0);
+        }
+        const double px = a.x() + t * abx;
+        const double py = a.y() + t * aby;
+        best = std::min(best, std::hypot(x - px, y - py));
+    }
+    return best;
+}
+
+// A via whose *center* has been sliced away can still have real copper overlapping the sliced
+// outline (its pad straddling the cutout boundary) -- checking only the center point (as this used
+// to) silently dropped any such via, which is real copper the board-slicing cutout genuinely
+// intersects. A via counts as kept if its center is inside the outline, or its disc (center +
+// radius) reaches the outline boundary.
+bool _viaIntersectsOutline(double x, double y, double diameter, const std::vector<Position>& outline) {
+    if (_pointInPolygon(x, y, outline)) {
+        return true;
+    }
+    return _distanceToPolygonBoundary(x, y, outline) <= diameter / 2;
+}
+
 std::string _normalizeLayerName(std::string name) {
     for (char& c : name) {
         if (c == '.' || c == '(' || c == ')' || c == ' ' || c == '/') {
@@ -55,6 +91,58 @@ std::string _normalizeLayerName(std::string name) {
         }
     }
     return name;
+}
+
+/// One via's cross-section boundary, tessellated the same way a plain round via's already was
+/// (constants::viaPolygon segments total): a plain circle when (x1, y1) and (x2, y2) coincide (the
+/// overwhelmingly common case -- a round drilled via), or a stadium/capsule shape between the two
+/// points otherwise (an elongated through-hole, e.g. a connector's oblong SHIELD pad -- see
+/// ViaHole's own doc comment). `reversed` matches the two existing call sites' own opposite winding
+/// conventions (filling vs. outer ring) -- preserved from the original circular-only
+/// implementation rather than re-derived, since the reason for it isn't documented anywhere in this
+/// codebase's history, and getting it wrong would be a silent, hard-to-notice regression rather
+/// than a build failure.
+std::pair<std::vector<double>, std::vector<double>> _viaPolygon(double x1, double y1, double x2, double y2,
+                                                                    double diameter, bool reversed) {
+    const double radius = diameter / 2;
+    std::vector<double> xs;
+    std::vector<double> ys;
+
+    if (x1 == x2 && y1 == y2) {
+        for (std::int32_t step = 0; step < constants::viaPolygon; ++step) {
+            const std::int32_t i = reversed ? constants::viaPolygon - 1 - step : step;
+            const double angle = static_cast<double>(i) / constants::viaPolygon * 2 * M_PI;
+            xs.push_back(x1 + std::sin(angle) * radius);
+            ys.push_back(y1 + std::cos(angle) * radius);
+        }
+        return {xs, ys};
+    }
+
+    const double lineAngle = std::atan2(y2 - y1, x2 - x1);
+    const std::int32_t halfSegments = std::max(std::int32_t{1}, constants::viaPolygon / 2);
+    // halfSegments *points* spanning a pi-radian sweep means halfSegments-1 *steps* -- dividing by
+    // halfSegments instead undershoots the far endpoint by one step's worth of angle, leaving each
+    // semicircle looking like it doesn't quite reach 180 degrees.
+    const std::int32_t angleDenominator = std::max(std::int32_t{1}, halfSegments - 1);
+    // Semicircle around (x2, y2) covering its far side (away from (x1, y1)), then one around
+    // (x1, y1) covering its own far side -- the two straight sides connecting them are implicit,
+    // the same way the plain-circle case above never explicitly closes its own loop (CSXCAD's
+    // polygon primitives connect the last point back to the first).
+    for (std::int32_t i = 0; i < halfSegments; ++i) {
+        const double a = lineAngle - M_PI / 2 + M_PI * static_cast<double>(i) / angleDenominator;
+        xs.push_back(x2 + std::cos(a) * radius);
+        ys.push_back(y2 + std::sin(a) * radius);
+    }
+    for (std::int32_t i = 0; i < halfSegments; ++i) {
+        const double a = lineAngle + M_PI / 2 + M_PI * static_cast<double>(i) / angleDenominator;
+        xs.push_back(x1 + std::cos(a) * radius);
+        ys.push_back(y1 + std::sin(a) * radius);
+    }
+    if (reversed) {
+        std::reverse(xs.begin(), xs.end());
+        std::reverse(ys.begin(), ys.end());
+    }
+    return {xs, ys};
 }
 
 } // namespace
@@ -69,7 +157,8 @@ Simulation::Simulation(SimulationConfig& simConfig, const EMSConfig& config, con
       _paths(paths),
       _planeMaterial(nullptr),
       _viaMaterial(nullptr),
-      _viaFillingMaterial(nullptr) {
+      _viaFillingMaterial(nullptr),
+      _npthVoidMaterial(nullptr) {
     _fdtd.SetNumberOfTimeSteps(static_cast<unsigned int>(_config.maxSteps()));
     _fdtd.SetCSX(_csx);
     _grid = _csx->GetGrid();
@@ -78,6 +167,7 @@ Simulation::Simulation(SimulationConfig& simConfig, const EMSConfig& config, con
     _planeMaterial = addMetal(*_csx, "Plane");
     _viaMaterial = addMetal(*_csx, "Via");
     _viaFillingMaterial = addMaterial(*_csx, "ViaFilling", _config.via().fillingEpsilon());
+    _npthVoidMaterial = addMaterial(*_csx, "NPTHVoid", 1.0);
 }
 
 std::expected<void, std::string> Simulation::sliceBoard() {
@@ -352,50 +442,89 @@ void Simulation::addSubstrates() {
 
 std::expected<void, std::string> Simulation::addVias() {
     logInfo("Adding vias from excellon file");
-    auto viasResult = getVias(_paths);
+    // Excellon coordinates come out of kicad-cli relative to the board's auxiliary origin, like
+    // every Gerber this pipeline reads -- re-derived here the same way board_slicing.cpp derives
+    // it (see BoundingBox's own doc comment on why that's a deliberate re-derive-per-use-site, not
+    // a shared cache) so getVias()'s output lands in the same [0, pcbWidth] x [0, pcbHeight] frame
+    // as _slicedBoard, comparable to it directly.
+    const double tessellationTolerance = static_cast<double>(_config.pixelSize()) * constants::unitMultiplier;
+    auto originResult = edgeCutsBoundingBox(_paths.fabDir, tessellationTolerance);
+    if (!originResult) {
+        return std::unexpected(originResult.error());
+    }
+    auto viasResult = getVias(_paths, originResult->xMin, originResult->yMin);
     if (!viasResult) {
         return std::unexpected(viasResult.error());
     }
-    // Real board vias: kept only where they still fall within this simulation's sliced outline --
-    // a via for copper that's been sliced away has nothing left to connect to anyway.
+    // Real board vias: kept only where they still overlap this simulation's sliced outline -- a
+    // via whose pad has been entirely sliced away has nothing left to connect to anyway, but one
+    // straddling the cutout boundary (real copper the cutout genuinely intersects) must be kept,
+    // hence the disc-overlap test rather than a center-point-only one (see
+    // _viaIntersectsOutline's own doc comment). Tested against *both* ends of an elongated via's
+    // centerline (a plain round via just tests the same point twice) -- an oblong pad can straddle
+    // the cutout boundary at either end independently of the other.
     for (const auto& via : *viasResult) {
-        if (_pointInPolygon(via.x, via.y, _slicedBoard.outline)) {
-            addVia(via.x, via.y, via.diameter);
+        if (_viaIntersectsOutline(via.x, via.y, via.diameter, _slicedBoard.outline) ||
+            _viaIntersectsOutline(via.x2, via.y2, via.diameter, _slicedBoard.outline)) {
+            // A real via's own copper pad on each layer is already modeled separately (it's part
+            // of that layer's composited copper, read straight from the Gerbers) -- this outer
+            // ring only needs to be wide enough for the drilled barrel's actual conductive wall,
+            // not a full pad, unlike a stitching via below.
+            const double outerDiameter = via.diameter + 2 * _config.via().platingThickness();
+            addVia(via.x, via.y, via.x2, via.y2, via.diameter, outerDiameter);
         }
     }
 
     logInfo("Adding " + std::to_string(_slicedBoard.stitchingVias.size()) +
             " ground-net stitching via(s) from board slicing");
     for (const auto& via : _slicedBoard.stitchingVias) {
-        addVia(via.x, via.y, via.diameter);
+        // Unlike a real via, a stitching via has no copper pad modeled anywhere else -- its outer
+        // ring has to be the full annular ring diameter to serve as its own pad, not just a thin
+        // conductive wall (see Via::stitchingViaAnnularRingDiameter's own doc comment). Always a
+        // plain round hole -- this pipeline only ever invents round stitching vias, never oblong
+        // ones.
+        addVia(via.x, via.y, via.x, via.y, via.diameter, via.annularRingDiameter);
     }
     return {};
 }
 
-void Simulation::addVia(double xPos, double yPos, double diameter) {
+void Simulation::addVia(double xPos, double yPos, double x2Pos, double y2Pos, double diameter, double outerDiameter) {
     double thickness = 0;
     for (const auto& layer : _config.getSubstrates()) {
         thickness += layer.thickness();
     }
 
-    std::vector<double> xCoords;
-    std::vector<double> yCoords;
-    for (std::int32_t i = 0; i < constants::viaPolygon; ++i) {
-        xCoords.push_back(xPos + std::sin(static_cast<double>(i) / constants::viaPolygon * 2 * M_PI) * diameter / 2);
-        yCoords.push_back(yPos + std::cos(static_cast<double>(i) / constants::viaPolygon * 2 * M_PI) * diameter / 2);
-    }
-    addLinPoly(*_viaFillingMaterial, xCoords, yCoords, axisIndex("z"), -thickness, thickness, 51);
+    auto [fillXs, fillYs] = _viaPolygon(xPos, yPos, x2Pos, y2Pos, diameter, false);
+    addLinPoly(*_viaFillingMaterial, fillXs, fillYs, axisIndex("z"), -thickness, thickness, 51);
 
-    xCoords.clear();
-    yCoords.clear();
-    for (std::int32_t i = constants::viaPolygon - 1; i >= 0; --i) {
-        const double platingThickness = _config.via().platingThickness();
-        xCoords.push_back(xPos + std::sin(static_cast<double>(i) / constants::viaPolygon * 2 * M_PI) *
-                                      (diameter / 2 + platingThickness));
-        yCoords.push_back(yPos + std::cos(static_cast<double>(i) / constants::viaPolygon * 2 * M_PI) *
-                                      (diameter / 2 + platingThickness));
+    auto [outerXs, outerYs] = _viaPolygon(xPos, yPos, x2Pos, y2Pos, outerDiameter, true);
+    addLinPoly(*_viaMaterial, outerXs, outerYs, axisIndex("z"), -thickness, thickness, 50);
+}
+
+void Simulation::addNPTHHoles() {
+    if (_slicedBoard.npthHoleLoops.empty()) {
+        return;
     }
-    addLinPoly(*_viaMaterial, xCoords, yCoords, axisIndex("z"), -thickness, thickness, 50);
+    double thickness = 0;
+    for (const auto& layer : _config.getSubstrates()) {
+        thickness += layer.thickness();
+    }
+    logInfo("Adding " + std::to_string(_slicedBoard.npthHoleLoops.size()) + " NPTH hole(s)");
+    // Same "extrude a material through the whole substrate stack, at a priority above every
+    // substrate layer's" technique addVia() uses for a via's own barrel -- just vacuum instead of
+    // conductor, and priority 60 (above the via priorities of 50/51, though the two shouldn't ever
+    // spatially coincide in practice) so it reliably overrides substrate wherever a hole falls.
+    for (const auto& loop : _slicedBoard.npthHoleLoops) {
+        std::vector<double> xCoords;
+        std::vector<double> yCoords;
+        xCoords.reserve(loop.size());
+        yCoords.reserve(loop.size());
+        for (const Position& p : loop) {
+            xCoords.push_back(p.x());
+            yCoords.push_back(p.y());
+        }
+        addLinPoly(*_npthVoidMaterial, xCoords, yCoords, axisIndex("z"), -thickness, thickness, 60);
+    }
 }
 
 void Simulation::addSingleDumpBox(const std::string& name, double z) {

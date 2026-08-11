@@ -21,7 +21,8 @@ namespace gerber2ems {
 struct StitchingVia {
     double x = 0;
     double y = 0;
-    double diameter = 0;
+    double diameter = 0;            // Drill hole, from EMSConfig::via().stitchingViaHoleDiameter().
+    double annularRingDiameter = 0; // Pad OD, from EMSConfig::via().stitchingViaAnnularRingDiameter().
 };
 
 /// The board geometry actually fed to a Simulation for one SimulationConfig: only the involved
@@ -45,6 +46,12 @@ struct SlicedBoard {
     /// Ground-net stitching vias, placed only along cutout edges that don't already coincide with
     /// the board's real Edge_Cuts outline.
     std::vector<StitchingVia> stitchingVias;
+    /// Every non-plated through-hole (mechanical/alignment hole -- e.g. a USB connector's elongated
+    /// mounting slots) on the board, as an already-tessellated capsule/stadium polygon loop (one
+    /// loop per hole, round holes included -- a capsule with coincident endpoints). Already
+    /// subtracted from layerTriangles' own copper; kept here too so Simulation::addNPTHHoles() can
+    /// cut the same holes out of the substrate model, which layerTriangles alone can't do.
+    std::vector<std::vector<Position>> npthHoleLoops;
 };
 
 /// Slices `sim`'s board geometry. Algorithm:
@@ -59,12 +66,24 @@ struct SlicedBoard {
 ///    board.) Intersected against the board's real Edge_Cuts outline so the cutout never extends
 ///    past the real board edge.
 /// 4. Per layer, final copper = involved-net composite (already inside the cutout by construction)
-///    unioned with ground-net composite intersected with the cutout.
+///    unioned with ground-net composite intersected with the cutout, minus every non-plated
+///    through-hole (NPTH) on the board -- a mechanical/alignment hole (e.g. a USB connector's
+///    elongated mounting slots) has no copper of its own and never appears in any copper Gerber, so
+///    nothing upstream already carves it out of a zone/plane pour that happens to cover that area;
+///    it's subtracted explicitly here, as a capsule/stadium shape so an elongated slot comes out
+///    elongated rather than as a hole only at its center point.
 /// 5. Classify the cutout boundary against the real Edge_Cuts outline: segments lying on/near it
 ///    are pre-existing edges (no stitching -- the real board already provides a return path there);
-///    every other segment is a new cut. Stitching vias are placed along new-cut segments only, at
-///    sim.viaEdgeDistance() inward, spaced sim.viaSpacing() apart, connecting through whichever
-///    layers the (cutout-clipped) ground composite covers at that position.
+///    every other segment is a new cut. Adjacent new-cut segments are joined into contiguous runs
+///    first (the boundary comes out of Clipper2 tessellated into many short segments, so spacing
+///    vias per raw segment would badly over-place them -- see the .cpp for detail); stitching vias
+///    are then placed along each run's own arc length, at sim.viaEdgeDistance() inward, spaced
+///    sim.viaSpacing() apart, connecting through whichever layers the (cutout-clipped) ground
+///    composite covers at that position. A candidate is dropped if it would sit closer than
+///    config.via().viaClearance() (edge-to-edge) to any other via -- real or already placed here,
+///    any net -- or closer than sim.viaSpacing() to any real or already-placed *ground-net* via
+///    specifically (a stitching via is itself always ground, so this keeps freshly-placed ones that
+///    spacing apart from each other too, not just from the board's own vias).
 std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const SimulationConfig& sim, const EMSConfig& config,
                                                                   const PathsConfig& paths);
 

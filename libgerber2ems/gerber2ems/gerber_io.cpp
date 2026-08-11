@@ -209,6 +209,36 @@ void _appendArcPoints(std::vector<Position>& out, const Position& center, double
     }
 }
 
+// One quadrant ("spoke") of a Gerber AM primitive 7 (Thermal) shape: a ring segment between
+// innerRadius and outerRadius, spanning quadrantIndex*90deg (relative to `rotation`) minus the
+// gap's own angular width on each side. A real Gerber thermal gap is a constant-*width* straight
+// band crossing the ring (so, strictly, narrower in angle at the outer edge than the inner one);
+// approximating it here as a single angular half-width, computed at the ring's mean radius, is a
+// deliberate simplification -- indistinguishable at FDTD mesh resolution, and unlike the previous
+// behaviour (this primitive produced no geometry at all), it at least produces the right shape.
+// Empty (fewer than 3 points) if the gap consumes the whole quadrant or the ring is degenerate.
+std::vector<Position> _thermalQuadrantLoop(double centerX, double centerY, double outerRadius, double innerRadius,
+                                            double gapHalfAngle, std::int32_t quadrantIndex, double rotation,
+                                            double tessellationTolerance) {
+    if (innerRadius >= outerRadius || innerRadius < 0) {
+        return {};
+    }
+    const double quadrantCenter = rotation + static_cast<double>(quadrantIndex) * (std::numbers::pi / 2.0);
+    const double startAngle = quadrantCenter - (std::numbers::pi / 4.0 - gapHalfAngle);
+    const double sweep = (std::numbers::pi / 2.0 - 2.0 * gapHalfAngle);
+    if (sweep <= 0) {
+        return {}; // Gap thickness consumes the whole quadrant.
+    }
+    const double endAngle = startAngle + sweep;
+
+    std::vector<Position> points;
+    points.emplace_back(centerX + outerRadius * std::cos(startAngle), centerY + outerRadius * std::sin(startAngle));
+    _appendArcPoints(points, Position(centerX, centerY), outerRadius, startAngle, sweep, tessellationTolerance);
+    points.emplace_back(centerX + innerRadius * std::cos(endAngle), centerY + innerRadius * std::sin(endAngle));
+    _appendArcPoints(points, Position(centerX, centerY), innerRadius, endAngle, -sweep, tessellationTolerance);
+    return points;
+}
+
 // Returns points approximating the arc from `start` to `stop` (start excluded; `stop` itself is
 // always the final entry, snapped exactly to the literal file value even if it doesn't land exactly
 // on the idealised circle, so downstream segment chaining -- e.g. zone-loop closure -- stays exact).
@@ -835,7 +865,63 @@ ApertureMacro::ApertureMacro(const std::vector<std::string>& definitionLines) {
                         .front();
                 });
         } else if (op == "7") {
-            // Thermal relief -- TODO, matches the Python source (unimplemented, silently skipped).
+            // Thermal relief: 7,CenterX,CenterY,OuterDia,InnerDia,GapThickness,Rotation -- no
+            // exposure parameter (always additive), unlike every other primitive here. KiCad emits
+            // an aperture built from this primitive for a pad/via whose zone connection is set to
+            // "Thermal reliefs"; silently producing no geometry at all for it (the previous
+            // behaviour) made that pad's entire copper vanish from this pipeline's composited
+            // layers, not just its thermal spokes.
+            _commands.push_back([sline](const std::vector<double>& args) -> std::vector<TraceSegment> {
+                std::vector<double> param;
+                param.reserve(sline.size());
+                for (const auto& p : sline) {
+                    param.push_back(p(args));
+                }
+                const double centerX = param.at(0) * _fileFormatScale();
+                const double centerY = param.at(1) * _fileFormatScale();
+                const double outerRadius = param.at(2) * _fileFormatScale() / 2;
+                const double innerRadius = param.at(3) * _fileFormatScale() / 2;
+                const double gapThickness = param.at(4) * _fileFormatScale();
+                const double rotation = param.at(5) * (M_PI / 180.0);
+                const double meanRadius = (outerRadius + innerRadius) / 2;
+                const double gapHalfAngle = meanRadius > 0 ? std::atan(gapThickness / 2 / meanRadius) : 0;
+                // Fixed, coarse tolerance -- this TraceSegment-chain path only ever feeds
+                // mesh-density hints (see ApertureCircle::_contours()'s own similarly coarse
+                // 4-segment approximation), never the actual composited/triangulated copper.
+                constexpr double kCoarseToleranceSimUnits = 100.0;
+                std::vector<TraceSegment> contours;
+                for (std::int32_t quadrant = 0; quadrant < 4; ++quadrant) {
+                    std::vector<Position> loop = _thermalQuadrantLoop(centerX, centerY, outerRadius, innerRadius,
+                                                                        gapHalfAngle, quadrant, rotation,
+                                                                        kCoarseToleranceSimUnits);
+                    if (loop.size() < 3) {
+                        continue;
+                    }
+                    std::vector<TraceSegment> segs = _pointsToOutline(loop);
+                    contours.insert(contours.end(), segs.begin(), segs.end());
+                }
+                return contours;
+            });
+            for (std::int32_t quadrant = 0; quadrant < 4; ++quadrant) {
+                _polygonCommands.push_back([sline, quadrant](const std::vector<double>& args,
+                                                               double tessellationTolerance) -> std::vector<Position> {
+                    std::vector<double> param;
+                    param.reserve(sline.size());
+                    for (const auto& p : sline) {
+                        param.push_back(p(args));
+                    }
+                    const double centerX = param.at(0) * _fileFormatScale();
+                    const double centerY = param.at(1) * _fileFormatScale();
+                    const double outerRadius = param.at(2) * _fileFormatScale() / 2;
+                    const double innerRadius = param.at(3) * _fileFormatScale() / 2;
+                    const double gapThickness = param.at(4) * _fileFormatScale();
+                    const double rotation = param.at(5) * (M_PI / 180.0);
+                    const double meanRadius = (outerRadius + innerRadius) / 2;
+                    const double gapHalfAngle = meanRadius > 0 ? std::atan(gapThickness / 2 / meanRadius) : 0;
+                    return _thermalQuadrantLoop(centerX, centerY, outerRadius, innerRadius, gapHalfAngle, quadrant,
+                                                 rotation, tessellationTolerance);
+                });
+            }
         } else {
             throw std::runtime_error("Unknown aperture macro op: " + line);
         }
@@ -889,8 +975,20 @@ std::vector<std::vector<Position>> ApertureMacro::_toPolygon(double tessellation
         if (poly.size() < 3) {
             continue; // degenerate (e.g. a zero-length macro line primitive)
         }
-        accumulated =
-            Clipper2Lib::Union(accumulated, {_positionsToPath64(poly)}, Clipper2Lib::FillRule::NonZero);
+        // Each primitive's own point order isn't necessarily wound the same way as any other
+        // primitive's (a circle's parametric sweep vs. an outline's file-order vertices, say) --
+        // Union's NonZero fill rule cancels rather than reinforces where two oppositely-wound simple
+        // polygons overlap, which would carve a hole out of the macro instead of adding coverage.
+        // Forcing a consistent orientation before each incremental Union call keeps every
+        // overlapping primitive purely additive, matching a macro's real semantics (every listed
+        // primitive just adds more shape, regardless of the direction its own points happen to be
+        // listed in) -- see gerber_composite.cpp's _normalizePositiveOrientation for the same fix
+        // one level up, between whole pads/zones/strokes.
+        Clipper2Lib::Path64 primitivePath = _positionsToPath64(poly);
+        if (!Clipper2Lib::IsPositive(primitivePath)) {
+            std::reverse(primitivePath.begin(), primitivePath.end());
+        }
+        accumulated = Clipper2Lib::Union(accumulated, {primitivePath}, Clipper2Lib::FillRule::NonZero);
     }
 
     std::vector<std::vector<Position>> loops;

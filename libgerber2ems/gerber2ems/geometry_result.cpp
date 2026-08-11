@@ -29,7 +29,10 @@ std::filesystem::path GeometryResult::geometryFile(const std::string& simulation
 
 std::expected<GeometryResult, std::string> GeometryResult::build(EMSConfig config, const RunOptions& options,
                                                                    const PathsConfig& paths) {
-    auto ownedConfig = std::make_shared<EMSConfig>(std::move(config));
+    // config arrives in file units (see EMSConfig::scaledToSimulationUnits()'s doc comment) --
+    // everything from here on (board slicing, grid generation, port placement) needs simulation
+    // units, so this is the one point that conversion happens.
+    auto ownedConfig = std::make_shared<EMSConfig>(config.scaledToSimulationUnits());
 
     for (auto& simConfig : ownedConfig->simulations()) {
         logInfo("### Building geometry for simulation \"" + simConfig.name() + "\" ###");
@@ -45,6 +48,7 @@ std::expected<GeometryResult, std::string> GeometryResult::build(EMSConfig confi
         sim.addGerbers();
         sim.addGrid();
         sim.addSubstrates();
+        sim.addNPTHHoles();
         if (options.exportField.has_value()) {
             sim.addDumpBoxes();
         }
@@ -62,7 +66,9 @@ std::expected<GeometryResult, std::string> GeometryResult::build(EMSConfig confi
 }
 
 std::expected<GeometryResult, std::string> GeometryResult::load(EMSConfig config, const PathsConfig& paths) {
-    auto ownedConfig = std::make_shared<EMSConfig>(std::move(config));
+    // Scaled for the same reason as build() -- so a GeometryResult behaves identically regardless
+    // of whether it was just built or reloaded from a previous run.
+    auto ownedConfig = std::make_shared<EMSConfig>(config.scaledToSimulationUnits());
 
     GeometryResult result(ownedConfig, paths);
     for (const auto& simConfig : ownedConfig->simulations()) {

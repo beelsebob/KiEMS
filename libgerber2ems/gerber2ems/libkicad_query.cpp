@@ -98,11 +98,21 @@ std::vector<std::string> _splitLines(const std::string& s) {
 }
 
 std::vector<std::string> _splitTabs(const std::string& s) {
+    // Not std::getline(stream, field, '\t') in a loop: that silently drops a trailing empty field --
+    // getline on an already-exhausted stream at EOF just fails without appending anything, so a line
+    // ending right at a tab with nothing after it (e.g. "C89\t1\t", a pad with an empty pin function)
+    // would parse as only 2 fields instead of 3, losing that pin entirely at call sites that check
+    // fields.size().
     std::vector<std::string> fields;
-    std::istringstream stream(s);
-    std::string field;
-    while (std::getline(stream, field, '\t')) {
-        fields.push_back(field);
+    std::size_t start = 0;
+    while (true) {
+        const std::size_t tab = s.find('\t', start);
+        if (tab == std::string::npos) {
+            fields.push_back(s.substr(start));
+            break;
+        }
+        fields.push_back(s.substr(start, tab - start));
+        start = tab + 1;
     }
     return fields;
 }
@@ -201,6 +211,74 @@ std::expected<std::vector<StackupLayer>, std::string> stackup(const PathsConfig&
         layers.push_back(_parseStackupLine(line));
     }
     return layers;
+}
+
+std::expected<std::vector<LayerColor>, std::string> layerColors(const PathsConfig& paths, const std::string& context) {
+    auto lines = _query(paths, "layer-colors", {}, context);
+    if (!lines) return std::unexpected(std::move(lines).error());
+    std::vector<LayerColor> colors;
+    for (const std::string& line : *lines) {
+        const std::vector<std::string> fields = _splitTabs(line);
+        colors.push_back(LayerColor{.name = fields.at(0), .hex = fields.at(1)});
+    }
+    return colors;
+}
+
+std::expected<std::vector<std::string>, std::string> netClasses(const PathsConfig& paths, const std::string& context) {
+    return _query(paths, "net-classes", {}, context);
+}
+
+std::expected<std::vector<std::string>, std::string> allNets(const PathsConfig& paths, const std::string& context) {
+    return _query(paths, "all-nets", {}, context);
+}
+
+std::expected<std::vector<ThroughHole>, std::string> throughHoles(const PathsConfig& paths,
+                                                                     const std::string& context) {
+    auto lines = _query(paths, "through-holes", {}, context);
+    if (!lines) return std::unexpected(std::move(lines).error());
+    std::vector<ThroughHole> holes;
+    holes.reserve(lines->size());
+    for (const std::string& line : *lines) {
+        const std::vector<std::string> fields = _splitTabs(line);
+        ThroughHole hole;
+        hole.footprintRef = fields.at(0);
+        hole.padNumber = fields.at(1);
+        hole.netName = fields.at(2);
+        hole.xMm = std::stod(fields.at(3));
+        hole.yMm = std::stod(fields.at(4));
+        hole.padWidthMm = std::stod(fields.at(5));
+        hole.padHeightMm = std::stod(fields.at(6));
+        hole.drillWidthMm = std::stod(fields.at(7));
+        hole.drillHeightMm = std::stod(fields.at(8));
+        holes.push_back(std::move(hole));
+    }
+    return holes;
+}
+
+std::expected<std::vector<FootprintInfo>, std::string> footprints(const PathsConfig& paths,
+                                                                    const std::string& context) {
+    auto lines = _query(paths, "footprints", {}, context);
+    if (!lines) return std::unexpected(std::move(lines).error());
+
+    // libkicad_smoketest's `footprints` command emits one line per pin
+    // (reference\tnumber\tfunction\tvalue\tnetName), with every footprint's pins consecutive (and
+    // `value` repeated on each, redundantly, so every line is self-contained) -- group consecutive
+    // lines sharing a reference into one FootprintInfo rather than requiring a second round trip
+    // per footprint.
+    std::vector<FootprintInfo> result;
+    for (const std::string& line : *lines) {
+        const std::vector<std::string> fields = _splitTabs(line);
+        const std::string& reference = fields.at(0);
+        if (result.empty() || result.back().reference != reference) {
+            const std::string value = fields.size() >= 4 ? fields[3] : "";
+            result.push_back(FootprintInfo{reference, value, {}});
+        }
+        if (fields.size() >= 3 && !fields[1].empty()) {
+            const std::string netName = fields.size() >= 5 ? fields[4] : "";
+            result.back().pins.push_back(FootprintPin{fields[1], fields[2], netName});
+        }
+    }
+    return result;
 }
 
 std::expected<std::vector<std::string>, std::string> resolveInvolvedNetNames(const PathsConfig& paths,

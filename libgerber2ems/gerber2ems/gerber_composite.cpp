@@ -1,5 +1,6 @@
 #include "gerber_composite.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -73,6 +74,27 @@ std::expected<BoundingBox, std::string> edgeCutsBoundingBox(const std::filesyste
 namespace {
 
 // ---- CopperOp -> Clipper2 paths ----
+
+/// Every dark-polarity Gerber element (a pad flash, a zone region, a stroke) independently means
+/// "this area is copper", full stop -- Gerber itself carries no winding-direction convention for a
+/// single filled shape. But Clipper2Lib::Union's NonZero fill rule *is* winding-sensitive: two
+/// overlapping but oppositely-wound simple polygons contribute opposite-signed winding numbers and
+/// cancel to zero (unfilled) in their overlap, rather than reinforcing to nonzero (filled). This
+/// pipeline's own shape generators aren't wound consistently with each other -- e.g. ApertureRect's
+/// point order comes out positive-area (CCW) while _zoneToPaths just replays a zone's own file-order
+/// vertices verbatim, which came out negative-area (CW) on every real board this was checked
+/// against -- so an SMD pad flashed on top of a same-net zone/plane fill could cancel out to a hole
+/// instead of just being redundant coverage, exactly where the pad sits. Forcing every path to the
+/// same (positive-area) orientation before it ever reaches a Union/Difference call makes overlap
+/// always reinforce, matching Gerber's actual "just more copper" semantics regardless of whichever
+/// generator produced the path or which order its points happened to come out in.
+void _normalizePositiveOrientation(Clipper2Lib::Paths64& paths) {
+    for (Clipper2Lib::Path64& path : paths) {
+        if (!Clipper2Lib::IsPositive(path)) {
+            std::reverse(path.begin(), path.end());
+        }
+    }
+}
 
 /// A stroke is widened via Minkowski-sum offsetting (round join/cap): exact for the only stroke
 /// aperture shape the parser allows (circular -- see the "is not circular aperture" check in
@@ -184,6 +206,7 @@ Clipper2Lib::Paths64 compositeOps(const GerberFile& gerber, const std::vector<Co
         } else {
             opPaths = _zoneToPaths(std::get<std::vector<TraceSegment>>(op.payload), originX, originY);
         }
+        _normalizePositiveOrientation(opPaths);
         runPaths.insert(runPaths.end(), opPaths.begin(), opPaths.end());
     }
     flushRun();
@@ -204,15 +227,33 @@ std::vector<Triangle> triangulate(const Clipper2Lib::Paths64& composited, double
 
     std::vector<Triangle> result;
     for (auto& [outer, holes] : regions) {
-        Clipper2Lib::Paths64 pp;
-        pp.reserve(holes.size() + 1);
-        pp.push_back(Clipper2Lib::SimplifyPath(outer, tessellationTolerance, true));
+        // SimplifyPath (Douglas-Peucker-style vertex removal) occasionally *introduces* a
+        // self-intersection it didn't have before -- a documented Clipper2 characteristic, not
+        // something specific to this pipeline's input -- on a polygon with tight concave detail
+        // close to `tessellationTolerance` (a dense zone's thermal-relief notches around a cluster
+        // of pads, say). `outer`/`holes` themselves came straight out of a PolyTree a Union boolean
+        // op just produced, so they're guaranteed simple on their own; only the simplified copies
+        // can fail to triangulate this way. Retrying with those un-simplified originals (more
+        // vertices, but geometrically identical, and reliably triangulable) recovers the region
+        // instead of silently dropping it -- which used to make whole copper regions vanish from
+        // this pipeline's output for no reason visible anywhere in the source data itself.
+        Clipper2Lib::Paths64 simplified;
+        simplified.reserve(holes.size() + 1);
+        simplified.push_back(Clipper2Lib::SimplifyPath(outer, tessellationTolerance, true));
         for (const auto& hole : holes) {
-            pp.push_back(Clipper2Lib::SimplifyPath(hole, tessellationTolerance, true));
+            simplified.push_back(Clipper2Lib::SimplifyPath(hole, tessellationTolerance, true));
         }
 
         Clipper2Lib::Paths64 solution;
-        const Clipper2Lib::TriangulateResult triResult = Clipper2Lib::Triangulate(pp, solution);
+        Clipper2Lib::TriangulateResult triResult = Clipper2Lib::Triangulate(simplified, solution);
+        if (triResult != Clipper2Lib::TriangulateResult::success) {
+            Clipper2Lib::Paths64 raw;
+            raw.reserve(holes.size() + 1);
+            raw.push_back(outer);
+            raw.insert(raw.end(), holes.begin(), holes.end());
+            solution.clear();
+            triResult = Clipper2Lib::Triangulate(raw, solution);
+        }
         if (triResult != Clipper2Lib::TriangulateResult::success) {
             logError("Triangulation failed for a copper region in " + contextForErrors + " (code " +
                       std::to_string(static_cast<int>(triResult)) + ")");

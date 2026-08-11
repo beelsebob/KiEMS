@@ -51,4 +51,31 @@ std::expected<std::vector<PadPosition>, std::string> padsOnNet(const std::string
 std::expected<std::vector<StackupLayer>, std::string> stackup(const std::string& projectPath,
                                                                 const std::string& boardPath);
 
+/// Every copper layer's configured color, from the currently active PCB color theme -- KiCad's own
+/// "layer colours" (Board Setup/Preferences > Colors), not something unique to this board; falls
+/// back to KiCad's built-in default theme if no other theme is resolvable for this process. Not
+/// necessarily in stackup order, and only covers layers the active theme has an entry for.
+std::expected<std::vector<LayerColor>, std::string> layerColors(const std::string& projectPath,
+                                                                  const std::string& boardPath);
+
+/// Every net class name assigned to at least one net on the board, deduplicated. Requires the
+/// board to have a linked project (a sibling .kicad_pro), same as netsInNetClass.
+std::expected<std::vector<std::string>, std::string> netClasses(const std::string& projectPath,
+                                                                  const std::string& boardPath);
+
+/// Every net name on the board (excluding the unconnected pseudo-net).
+std::expected<std::vector<std::string>, std::string> allNets(const std::string& projectPath,
+                                                               const std::string& boardPath);
+
+/// Every footprint on the board, with its pins -- populates a "browse by footprint" UI without a
+/// separate round trip per footprint.
+std::expected<std::vector<FootprintInfo>, std::string> footprints(const std::string& projectPath,
+                                                                    const std::string& boardPath);
+
+/// Every plated through-hole on the board -- both plain KiCad vias and through-hole footprint pads
+/// (e.g. a connector's SHIELD pin) -- with their real copper (annular ring / pad) and drill sizes.
+/// See ThroughHole's own doc comment; non-plated holes are never included.
+std::expected<std::vector<ThroughHole>, std::string> throughHoles(const std::string& projectPath,
+                                                                     const std::string& boardPath);
+
 } // namespace libkicad

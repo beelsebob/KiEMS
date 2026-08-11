@@ -266,9 +266,72 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
         return std::unexpected("Simulation \"" + sim.name() + "\": computed cutout region is empty");
     }
 
+    // Real vias near this simulation, seeding the clearance/spacing checks below -- a stitching via
+    // must never collide with one, and (if the real via is itself on the ground net) must respect
+    // the same viaSpacing from it as from another stitching via. Best-effort: if the drill file
+    // can't be read, stitching vias just place without this check rather than failing the whole
+    // slice over it (the same as if the board genuinely had no other vias nearby).
+    struct ExistingVia {
+        double x = 0;
+        double y = 0;
+        double outerRadius = 0; // For the clearance check (edge-to-edge, not center-to-center).
+        bool isGround = false;  // For the viaSpacing check, which only applies among ground-net vias.
+    };
+    std::vector<ExistingVia> existingVias;
+    if (auto realVias = getVias(paths, origin.xMin, origin.yMin); realVias) {
+        existingVias.reserve(realVias->size());
+        for (const ViaHole& via : *realVias) {
+            // Midpoint of the via's own capsule centerline -- exactly (via.x, via.y) for a plain
+            // round via (x2==x, y2==y), the center of the pad for an elongated one.
+            const double midX = (via.x + via.x2) / 2;
+            const double midY = (via.y + via.y2) / 2;
+            const Clipper2Lib::Point64 pos(static_cast<std::int64_t>(std::llround(midX)),
+                                             static_cast<std::int64_t>(std::llround(midY)));
+            const bool isGround = std::any_of(groundPerLayer.begin(), groundPerLayer.end(),
+                                                [&](const Clipper2Lib::Paths64& ground) {
+                                                    return _pointInComposite(pos, ground);
+                                                });
+            // Circumscribing radius from the midpoint -- half the centerline length plus the pad's
+            // own half-width -- so an elongated pad's clearance footprint is never underestimated,
+            // even though this treats it as round for the purpose of this check (a conservative
+            // over-approximation, not an exact capsule-to-capsule distance).
+            const double halfLength = std::hypot(via.x2 - via.x, via.y2 - via.y) / 2;
+            const double outerRadius = halfLength + via.diameter / 2 + config.via().platingThickness();
+            existingVias.push_back({midX, midY, outerRadius, isGround});
+        }
+    }
+
+    // True if placing a stitchingViaAnnularRingDiameter()-sized via centered at (x, y) would either
+    // physically collide with an existing via (real or already placed in this same pass -- any net,
+    // checked edge-to-edge against config.via().viaClearance()) or sit closer than sim.viaSpacing()
+    // to an existing *ground-net* via specifically (real or already placed -- a stitching via is
+    // always ground, so this also naturally keeps freshly-placed stitching vias that spacing apart
+    // from each other, alongside real ground vias).
+    const double candidateRadius = config.via().stitchingViaAnnularRingDiameter() / 2;
+    auto tooCloseToExistingVia = [&](double x, double y) {
+        for (const ExistingVia& existing : existingVias) {
+            const double dist = std::hypot(x - existing.x, y - existing.y);
+            if (dist < candidateRadius + existing.outerRadius + config.via().viaClearance()) {
+                return true;
+            }
+            if (existing.isGround && dist < sim.viaSpacing()) {
+                return true;
+            }
+        }
+        return false;
+    };
+
     // Stitching vias: walk every outer boundary loop of the cutout, classify each edge against the
     // real board outline (on/near it -> pre-existing, no stitching needed there), and place vias
-    // along new-cut edges only.
+    // along new-cut edges only -- spaced sim.viaSpacing() apart along the *whole contiguous run* of
+    // new-cut edges, not restarted at every individual polygon edge. The cutout boundary comes out
+    // of Clipper2 boolean ops (in particular InflatePaths' round joins) tessellated into many short
+    // segments, most of them far shorter than any real via spacing -- stepping per-edge like the
+    // rest of this pipeline's per-segment code would place a minimum of one via at *every* edge
+    // regardless of its length, since floor(shortSegLen / viaSpacing) always floors to 0 and gets
+    // clamped back up to the "at least 1" minimum. That's what actually produced the reported bug:
+    // clusters of near-duplicate vias at every tessellated vertex, spaced by tessellation
+    // granularity rather than viaSpacing.
     std::vector<StitchingVia> stitchingVias;
     constexpr double kOnEdgeToleranceSimUnits = 100.0; // 10 microns, at 10 sim-units/micron
     for (const Clipper2Lib::Path64& loop : cutout) {
@@ -282,31 +345,93 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
                       // genuine board edge already, per the same logic as the outer loop check.
         }
 
-        for (std::size_t i = 0; i < loop.size(); ++i) {
+        const std::size_t n = loop.size();
+        std::vector<bool> isNewCut(n, false);
+        std::vector<double> segLens(n, 0.0);
+        for (std::size_t i = 0; i < n; ++i) {
             const Clipper2Lib::Point64& a = loop[i];
-            const Clipper2Lib::Point64& b = loop[(i + 1) % loop.size()];
-            const double segLen = std::hypot(static_cast<double>(b.x - a.x), static_cast<double>(b.y - a.y));
-            if (segLen < 1.0) {
+            const Clipper2Lib::Point64& b = loop[(i + 1) % n];
+            segLens[i] = std::hypot(static_cast<double>(b.x - a.x), static_cast<double>(b.y - a.y));
+            if (segLens[i] < 1.0) {
+                continue; // degenerate edge: leave isNewCut false, it'll just be skipped
+            }
+            const Clipper2Lib::Point64 midpoint((a.x + b.x) / 2, (a.y + b.y) / 2);
+            isNewCut[i] = _distancePointToPolyline(midpoint, realOutline) > kOnEdgeToleranceSimUnits;
+        }
+
+        // Run-start indices: an edge starts a new run if it's a new cut and its predecessor isn't
+        // -- except when literally every edge is a new cut (the whole loop is deep inside the real
+        // board, touching it nowhere), which is one single run that can start anywhere; index 0 is
+        // picked arbitrarily for that case.
+        const bool allNewCut = std::all_of(isNewCut.begin(), isNewCut.end(), [](bool v) { return v; });
+        std::vector<std::size_t> runStarts;
+        if (allNewCut && n > 0) {
+            runStarts.push_back(0);
+        } else {
+            for (std::size_t i = 0; i < n; ++i) {
+                const std::size_t prev = (i + n - 1) % n;
+                if (isNewCut[i] && !isNewCut[prev]) {
+                    runStarts.push_back(i);
+                }
+            }
+        }
+
+        for (std::size_t runStart : runStarts) {
+            std::vector<std::size_t> runEdges;
+            std::size_t idx = runStart;
+            for (std::size_t count = 0; count < n; ++count) {
+                if (!isNewCut[idx]) {
+                    break;
+                }
+                runEdges.push_back(idx);
+                idx = (idx + 1) % n;
+                if (idx == runStart) {
+                    break; // Wrapped fully around -- only possible in the allNewCut case.
+                }
+            }
+            if (runEdges.empty()) {
                 continue;
             }
 
-            const Clipper2Lib::Point64 midpoint((a.x + b.x) / 2, (a.y + b.y) / 2);
-            if (_distancePointToPolyline(midpoint, realOutline) <= kOnEdgeToleranceSimUnits) {
-                continue; // Coincides with the real board edge -- not a new cut.
+            // Flatten the run into cumulative-arc-length vertices, so a via's position can be found
+            // by distance along the *whole run* regardless of which underlying edge that distance
+            // falls in.
+            struct RunVertex {
+                double cumDist = 0;
+                Clipper2Lib::Point64 point;
+            };
+            std::vector<RunVertex> vertices;
+            vertices.reserve(runEdges.size() + 1);
+            vertices.push_back({0.0, loop[runStart]});
+            double cum = 0.0;
+            for (std::size_t e : runEdges) {
+                cum += segLens[e];
+                vertices.push_back({cum, loop[(e + 1) % n]});
             }
+            const double totalLength = cum;
 
-            // Inward normal (cutout's outer loops are wound so the interior is to the left of each
-            // directed edge, per Clipper2's default orientation for positive-area outer paths).
-            const double dx = static_cast<double>(b.x - a.x) / segLen;
-            const double dy = static_cast<double>(b.y - a.y) / segLen;
-            const double inwardX = -dy;
-            const double inwardY = dx;
-
-            const auto stepCount = static_cast<std::size_t>(std::max(1.0, std::floor(segLen / sim.viaSpacing())));
+            const auto stepCount = static_cast<std::size_t>(std::max(1.0, std::floor(totalLength / sim.viaSpacing())));
             for (std::size_t step = 0; step <= stepCount; ++step) {
-                const double t = static_cast<double>(step) / static_cast<double>(stepCount);
-                const double edgeX = static_cast<double>(a.x) + t * static_cast<double>(b.x - a.x);
-                const double edgeY = static_cast<double>(a.y) + t * static_cast<double>(b.y - a.y);
+                const double dist = totalLength * static_cast<double>(step) / static_cast<double>(stepCount);
+
+                std::size_t k = 0;
+                while (k + 2 < vertices.size() && vertices[k + 1].cumDist < dist) {
+                    ++k;
+                }
+                const RunVertex& v0 = vertices[k];
+                const RunVertex& v1 = vertices[k + 1];
+                const double vertexSegLen = v1.cumDist - v0.cumDist;
+                const double t = vertexSegLen > 1e-6 ? (dist - v0.cumDist) / vertexSegLen : 0.0;
+                const double edgeX = static_cast<double>(v0.point.x) + t * static_cast<double>(v1.point.x - v0.point.x);
+                const double edgeY = static_cast<double>(v0.point.y) + t * static_cast<double>(v1.point.y - v0.point.y);
+                // Inward normal (cutout's outer loops are wound so the interior is to the left of
+                // each directed edge, per Clipper2's default orientation for positive-area outer
+                // paths).
+                const double dx = vertexSegLen > 1e-6 ? static_cast<double>(v1.point.x - v0.point.x) / vertexSegLen : 1.0;
+                const double dy = vertexSegLen > 1e-6 ? static_cast<double>(v1.point.y - v0.point.y) / vertexSegLen : 0.0;
+                const double inwardX = -dy;
+                const double inwardY = dx;
+
                 const Clipper2Lib::Point64 viaPos(
                     static_cast<std::int64_t>(std::llround(edgeX + inwardX * sim.viaEdgeDistance())),
                     static_cast<std::int64_t>(std::llround(edgeY + inwardY * sim.viaEdgeDistance())));
@@ -319,24 +444,62 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
                     continue; // No ground copper here to stitch to -- skip rather than place a
                               // floating via.
                 }
-                stitchingVias.push_back(
-                    StitchingVia{static_cast<double>(viaPos.x), static_cast<double>(viaPos.y),
-                                 config.via().platingThickness()});
+                const double viaX = static_cast<double>(viaPos.x);
+                const double viaY = static_cast<double>(viaPos.y);
+                if (tooCloseToExistingVia(viaX, viaY)) {
+                    continue;
+                }
+                stitchingVias.push_back(StitchingVia{viaX, viaY, config.via().stitchingViaHoleDiameter(),
+                                                       config.via().stitchingViaAnnularRingDiameter()});
+                existingVias.push_back({viaX, viaY, candidateRadius, true});
             }
         }
     }
 
+    // Non-plated through-holes (mechanical/alignment holes -- e.g. a USB connector's elongated
+    // mounting slots) have no copper of their own anywhere and never appear in any copper Gerber at
+    // all, so nothing upstream already carves them out of a zone/plane pour that happens to cover
+    // that area the way it would for a real pad or trace -- they have to be explicitly subtracted
+    // from every layer's final copper below. Modeled as capsule/stadium shapes (round-jointed
+    // InflatePaths of the hole's own two endpoints, same technique _strokeToPaths uses for a
+    // circular-aperture stroke) so an elongated slot comes out as an actual elongated cutout, not
+    // just a hole at its center point. Best-effort: if the drill file can't be read, the board just
+    // doesn't get these holes cut (as if this feature didn't exist), rather than failing the whole
+    // slice over it.
+    Clipper2Lib::Paths64 npthHolePolygons;
+    if (auto npthHoles = getNPTHHoles(paths, origin.xMin, origin.yMin); npthHoles) {
+        for (const NPTHHole& hole : *npthHoles) {
+            const Clipper2Lib::Path64 line =
+                _positionsToPath64({Position(hole.x1, hole.y1), Position(hole.x2, hole.y2)}, 0, 0);
+            const Clipper2Lib::Paths64 capsule =
+                Clipper2Lib::InflatePaths({line}, hole.diameter / 2.0, Clipper2Lib::JoinType::Round,
+                                            Clipper2Lib::EndType::Round, 2.0, tessellationTolerance);
+            npthHolePolygons.insert(npthHolePolygons.end(), capsule.begin(), capsule.end());
+        }
+    }
+
     // Final per-layer copper: involved-net composite (already inside the cutout by construction)
-    // union ground-net composite intersected with the cutout.
+    // union ground-net composite intersected with the cutout, minus any NPTH holes.
     SlicedBoard result;
     result.layerTriangles.resize(metals.size());
     for (std::size_t layerIndex = 0; layerIndex < metals.size(); ++layerIndex) {
         const Clipper2Lib::Paths64 groundInCutout =
             Clipper2Lib::Intersect(groundPerLayer[layerIndex], cutout, Clipper2Lib::FillRule::NonZero);
-        const Clipper2Lib::Paths64 finalLayer =
+        Clipper2Lib::Paths64 finalLayer =
             Clipper2Lib::Union(signalPerLayer[layerIndex], groundInCutout, Clipper2Lib::FillRule::NonZero);
+        if (!npthHolePolygons.empty()) {
+            finalLayer = Clipper2Lib::Difference(finalLayer, npthHolePolygons, Clipper2Lib::FillRule::NonZero);
+        }
         result.layerTriangles[layerIndex] =
             triangulate(finalLayer, tessellationTolerance, "simulation \"" + sim.name() + "\" layer " + std::to_string(layerIndex));
+    }
+
+    // Kept (as already-tessellated polygon loops, not raw NPTHHoles) so Simulation::addNPTHHoles()
+    // can also cut these out of the substrate model -- the copper subtraction above only affects
+    // copper that happened to exist there, but a real drilled hole removes the dielectric too,
+    // regardless of whether any layer had copper at that exact spot.
+    for (const Clipper2Lib::Path64& loop : npthHolePolygons) {
+        result.npthHoleLoops.push_back(_path64ToPositions(loop));
     }
 
     // Board outline consumers (Simulation::addSubstrates()) expect a single closed polygon loop --

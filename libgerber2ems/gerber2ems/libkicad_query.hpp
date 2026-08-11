@@ -75,6 +75,71 @@ struct StackupLayer {
 /// The board's physical stackup, top-to-bottom. See netForFootprintPin for `context`.
 std::expected<std::vector<StackupLayer>, std::string> stackup(const PathsConfig& paths, const std::string& context);
 
+/// One copper layer's configured display color -- mirrors libkicad::LayerColor. `hex` is
+/// "#RRGGBB" or "#RRGGBBAA".
+struct LayerColor {
+    std::string name;
+    std::string hex;
+};
+
+/// Every copper layer's configured color, from the currently active PCB color theme (KiCad's own
+/// "layer colours" -- not necessarily unique to this board; see libkicad::layerColors's doc
+/// comment). Not necessarily in stackup order. See netForFootprintPin for `context`.
+std::expected<std::vector<LayerColor>, std::string> layerColors(const PathsConfig& paths, const std::string& context);
+
+/// Every user-defined net class name on the board (independent of whether any net currently uses
+/// it). Populates a "browse by net class" UI. See netForFootprintPin for `context`.
+std::expected<std::vector<std::string>, std::string> netClasses(const PathsConfig& paths, const std::string& context);
+
+/// Every net name on the board. Populates a "browse by net" UI. See netForFootprintPin for
+/// `context`.
+std::expected<std::vector<std::string>, std::string> allNets(const PathsConfig& paths, const std::string& context);
+
+/// One pad on a footprint -- mirrors libkicad::FootprintPin. `function` is empty if the pad has no
+/// assigned schematic pin function; `netName` is empty if the pad isn't connected to any net.
+struct FootprintPin {
+    std::string number;
+    std::string function;
+    std::string netName;
+};
+
+/// One footprint on the board and its pins -- mirrors libkicad::FootprintInfo. Populates a "browse
+/// by footprint, then pick a pin" UI. `value` is KiCad's "Value" field text (e.g. "100nF", "10k"),
+/// empty if unset.
+struct FootprintInfo {
+    std::string reference;
+    std::string value;
+    std::vector<FootprintPin> pins;
+};
+
+/// Every footprint on the board, with its pins. See netForFootprintPin for `context`.
+std::expected<std::vector<FootprintInfo>, std::string> footprints(const PathsConfig& paths,
+                                                                    const std::string& context);
+
+/// One plated through-hole on the board -- mirrors libkicad::ThroughHole (see its own doc comment
+/// for the via-vs-through-hole-pad distinction and why NPTH holes are never included here). Sizes
+/// are in millimetres, in the same board-auxiliary-origin frame every other libkicad_query position
+/// uses. footprintRef/padNumber are both empty for a plain KiCad via.
+struct ThroughHole {
+    double xMm = 0;
+    double yMm = 0;
+    std::string netName;
+    std::string footprintRef;
+    std::string padNumber;
+    double padWidthMm = 0;
+    double padHeightMm = 0;
+    double drillWidthMm = 0;
+    double drillHeightMm = 0;
+};
+
+/// Every plated through-hole on the board (vias and through-hole footprint pads alike), with their
+/// real copper (annular ring / pad) and drill sizes -- the authoritative source for how big a given
+/// via/pad actually is, as opposed to reconstructing it from an Excellon drill file (which only
+/// ever carries a hole's position and diameter, nothing about the copper around it). See
+/// netForFootprintPin for `context`.
+std::expected<std::vector<ThroughHole>, std::string> throughHoles(const PathsConfig& paths,
+                                                                     const std::string& context);
+
 /// Resolves an InvolvedNetConfig entry (net_class / net / footprint+pins) to a list of net names,
 /// per its documented semantics (a footprint+pin entry resolves to that pin's net, deduplicated
 /// across its pins() list).

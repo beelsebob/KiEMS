@@ -115,7 +115,7 @@ std::expected<void, std::string> exportKicadPcb(const PathsConfig& paths, const 
     return {};
 }
 
-std::expected<std::vector<ViaHole>, std::string> getVias(const PathsConfig& paths) {
+std::expected<std::vector<ViaHole>, std::string> getVias(const PathsConfig& paths, double originX, double originY) {
     std::vector<std::filesystem::path> drillFiles = _globSuffix(paths.fabDir, "-PTH.drl");
     if (drillFiles.empty()) {
         return std::unexpected("Couldn't find drill file");
@@ -125,9 +125,26 @@ std::expected<std::vector<ViaHole>, std::string> getVias(const PathsConfig& path
     std::int32_t currentDrill = 0;
     std::vector<ViaHole> vias;
 
-    static const std::regex drillDefPattern(R"(T([0-9]+)C([0-9]+.[0-9]+))");
+    static const std::regex drillDefPattern(R"(T([0-9]+)C([0-9]+\.[0-9]+))");
     static const std::regex drillSelectPattern(R"(T([0-9]+))");
-    static const std::regex holePattern(R"(X([0-9]+.[0-9]+)Y([0-9]+.[0-9]+))");
+    // X/Y both need an optional leading '-' -- Excellon coordinates are relative to the board's
+    // auxiliary origin (see PathsConfig's own doc comment on this pipeline's native frame), which
+    // sits at a board corner, not necessarily one that keeps every hole's coordinates positive.
+    // regex_match requires the *whole* line to match; without the '-' this silently failed (no
+    // warning, `regex_match` just returns false) for every hole on the negative side of the
+    // origin -- on a real board, that's often most or all of them, dropping their vias entirely.
+    static const std::regex holePattern(R"(X(-?[0-9]+\.[0-9]+)Y(-?[0-9]+\.[0-9]+))");
+    // G85 "canned slot cycle": a straight drilled cut of the current tool's diameter between two
+    // points, with semicircular ends -- how KiCad/Excellon represents an elongated/oblong plated
+    // through-hole (e.g. a connector's oblong SHIELD pad), same convention getNPTHHoles() already
+    // handles for non-plated ones. holePattern's regex_match alone can never partially match this
+    // (it requires matching the *whole* line), so a slot line just silently fell through every
+    // check below before this existed -- dropping that via/pad entirely, along with whatever it
+    // should have cut out of the substrate (see Simulation::addVia()).
+    static const std::regex slotPattern(
+        R"(X(-?[0-9]+\.[0-9]+)Y(-?[0-9]+\.[0-9]+)G85X(-?[0-9]+\.[0-9]+)Y(-?[0-9]+\.[0-9]+))");
+
+    auto toSimUnits = [](const std::string& raw) { return std::stod(raw) / 1000 / baseUnit * unitMultiplier; };
 
     std::ifstream drillFile(drillFiles.front());
     std::string line;
@@ -139,12 +156,27 @@ std::expected<std::vector<ViaHole>, std::string> getVias(const PathsConfig& path
         if (std::regex_match(line, match, drillSelectPattern)) {
             currentDrill = std::stoi(match[1].str());
         }
-        if (std::regex_match(line, match, holePattern)) {
+        if (std::regex_match(line, match, slotPattern)) {
             const auto it = drills.find(currentDrill);
             if (it != drills.end()) {
                 ViaHole via;
-                via.x = std::stod(match[1].str()) / 1000 / baseUnit * unitMultiplier;
-                via.y = std::stod(match[2].str()) / 1000 / baseUnit * unitMultiplier;
+                via.x = toSimUnits(match[1].str()) - originX;
+                via.y = toSimUnits(match[2].str()) - originY;
+                via.x2 = toSimUnits(match[3].str()) - originX;
+                via.y2 = toSimUnits(match[4].str()) - originY;
+                via.diameter = it->second;
+                vias.push_back(via);
+            } else {
+                logWarning("Drill file parsing failed. Drill with specifed number wasn't found");
+            }
+        } else if (std::regex_match(line, match, holePattern)) {
+            const auto it = drills.find(currentDrill);
+            if (it != drills.end()) {
+                ViaHole via;
+                via.x = toSimUnits(match[1].str()) - originX;
+                via.y = toSimUnits(match[2].str()) - originY;
+                via.x2 = via.x;
+                via.y2 = via.y;
                 via.diameter = it->second;
                 vias.push_back(via);
             } else {
@@ -154,6 +186,74 @@ std::expected<std::vector<ViaHole>, std::string> getVias(const PathsConfig& path
     }
     logDebug("Found " + std::to_string(vias.size()) + " vias");
     return vias;
+}
+
+std::expected<std::vector<NPTHHole>, std::string> getNPTHHoles(const PathsConfig& paths, double originX,
+                                                                  double originY) {
+    std::vector<std::filesystem::path> drillFiles = _globSuffix(paths.fabDir, "-NPTH.drl");
+    if (drillFiles.empty()) {
+        return std::vector<NPTHHole>{}; // Plenty of real boards have no mechanical holes at all.
+    }
+
+    std::map<std::int32_t, double> drills = {{0, 0.0}};
+    std::int32_t currentDrill = 0;
+    std::vector<NPTHHole> holes;
+
+    static const std::regex drillDefPattern(R"(T([0-9]+)C([0-9]+\.[0-9]+))");
+    static const std::regex drillSelectPattern(R"(T([0-9]+))");
+    static const std::regex holePattern(R"(X(-?[0-9]+\.[0-9]+)Y(-?[0-9]+\.[0-9]+))");
+    // G85 "canned slot cycle": a straight drilled cut of the current tool's diameter between two
+    // points, with semicircular ends -- how KiCad/Excellon represents an elongated/oval hole.
+    static const std::regex slotPattern(
+        R"(X(-?[0-9]+\.[0-9]+)Y(-?[0-9]+\.[0-9]+)G85X(-?[0-9]+\.[0-9]+)Y(-?[0-9]+\.[0-9]+))");
+
+    auto toSimUnits = [](const std::string& raw) { return std::stod(raw) / 1000 / baseUnit * unitMultiplier; };
+
+    std::ifstream drillFile(drillFiles.front());
+    std::string line;
+    while (std::getline(drillFile, line)) {
+        std::smatch match;
+        if (std::regex_match(line, match, drillDefPattern)) {
+            drills[std::stoi(match[1].str())] = std::stod(match[2].str()) / 1000 / baseUnit * unitMultiplier;
+            continue;
+        }
+        if (std::regex_match(line, match, drillSelectPattern)) {
+            currentDrill = std::stoi(match[1].str());
+            continue;
+        }
+        // Checked before holePattern: regex_match requires the *whole* line, so holePattern alone
+        // can never partially match a slot line, but checking the more specific pattern first keeps
+        // that obvious rather than relying on that guarantee implicitly.
+        if (std::regex_match(line, match, slotPattern)) {
+            const auto it = drills.find(currentDrill);
+            if (it == drills.end()) {
+                logWarning("NPTH drill file parsing failed. Drill with specified number wasn't found");
+                continue;
+            }
+            NPTHHole hole;
+            hole.x1 = toSimUnits(match[1].str()) - originX;
+            hole.y1 = toSimUnits(match[2].str()) - originY;
+            hole.x2 = toSimUnits(match[3].str()) - originX;
+            hole.y2 = toSimUnits(match[4].str()) - originY;
+            hole.diameter = it->second;
+            holes.push_back(hole);
+            continue;
+        }
+        if (std::regex_match(line, match, holePattern)) {
+            const auto it = drills.find(currentDrill);
+            if (it == drills.end()) {
+                logWarning("NPTH drill file parsing failed. Drill with specified number wasn't found");
+                continue;
+            }
+            NPTHHole hole;
+            hole.x1 = hole.x2 = toSimUnits(match[1].str()) - originX;
+            hole.y1 = hole.y2 = toSimUnits(match[2].str()) - originY;
+            hole.diameter = it->second;
+            holes.push_back(hole);
+        }
+    }
+    logDebug("Found " + std::to_string(holes.size()) + " NPTH holes");
+    return holes;
 }
 
 std::expected<void, std::string> importStackup(const PathsConfig& paths, EMSConfig& config) {

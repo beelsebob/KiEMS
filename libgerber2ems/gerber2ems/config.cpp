@@ -54,6 +54,15 @@ void from_json(const nlohmann::json& j, PortRef& p) {
     p._pin = _pinToString(j.at("pin"));
 }
 
+void to_json(nlohmann::json& j, const ExcludedPin& p) {
+    j = nlohmann::json{{"footprint", p.footprint}, {"pin", p.pin}};
+}
+
+void from_json(const nlohmann::json& j, ExcludedPin& p) {
+    p.footprint = j.at("footprint").get<std::string>();
+    p.pin = _pinToString(j.at("pin"));
+}
+
 void to_json(nlohmann::json& j, const InvolvedNetConfig& p) {
     switch (p._kind) {
         case NetSelectorKind::NetClass:
@@ -77,6 +86,12 @@ void to_json(nlohmann::json& j, const InvolvedNetConfig& p) {
     }
     if (p._direction.has_value()) {
         j["direction"] = *p._direction;
+    }
+    // Only meaningful (and only ever populated) for a Net-kind entry, but written unconditionally
+    // when non-empty regardless of kind -- simpler than special-casing serialization for a field
+    // that source-list toggling already guarantees stays empty on any other kind.
+    if (!p._excludedPins.empty()) {
+        j["excluded_pins"] = p._excludedPins;
     }
 }
 
@@ -123,6 +138,12 @@ void from_json(const nlohmann::json& j, InvolvedNetConfig& p) {
     }
     if (j.contains("direction")) {
         p._direction = j.at("direction").get<double>();
+    }
+    p._excludedPins.clear();
+    if (j.contains("excluded_pins")) {
+        for (const auto& excluded : j.at("excluded_pins")) {
+            p._excludedPins.push_back(excluded.get<ExcludedPin>());
+        }
     }
 }
 
@@ -287,16 +308,29 @@ void from_json(const nlohmann::json& j, Frequency& f) {
     f._stop = j.value("stop", def._stop);
 }
 
-void Via::scaleToSimulationUnits(std::int32_t unitMultiplier) { _platingThickness *= unitMultiplier; }
+void Via::scaleToSimulationUnits(std::int32_t unitMultiplier) {
+    _platingThickness *= unitMultiplier;
+    _stitchingViaHoleDiameter *= unitMultiplier;
+    _stitchingViaAnnularRingDiameter *= unitMultiplier;
+    _viaClearance *= unitMultiplier;
+}
 
 void to_json(nlohmann::json& j, const Via& v) {
-    j = nlohmann::json{{"plating_thickness", v._platingThickness}, {"filling_epsilon", v._fillingEpsilon}};
+    j = nlohmann::json{{"plating_thickness", v._platingThickness},
+                       {"filling_epsilon", v._fillingEpsilon},
+                       {"stitching_via_hole_diameter", v._stitchingViaHoleDiameter},
+                       {"stitching_via_annular_ring_diameter", v._stitchingViaAnnularRingDiameter},
+                       {"via_clearance", v._viaClearance}};
 }
 
 void from_json(const nlohmann::json& j, Via& v) {
     const Via def;
     v._platingThickness = j.value("plating_thickness", def._platingThickness);
     v._fillingEpsilon = j.value("filling_epsilon", def._fillingEpsilon);
+    v._stitchingViaHoleDiameter = j.value("stitching_via_hole_diameter", def._stitchingViaHoleDiameter);
+    v._stitchingViaAnnularRingDiameter =
+        j.value("stitching_via_annular_ring_diameter", def._stitchingViaAnnularRingDiameter);
+    v._viaClearance = j.value("via_clearance", def._viaClearance);
 }
 
 void Margin::scaleToSimulationUnits(std::int32_t unitMultiplier) {
@@ -362,6 +396,9 @@ void SimulationConfig::scaleToSimulationUnits(std::int32_t unitMultiplier) {
     _hullPadding *= unitMultiplier;
     _viaEdgeDistance *= unitMultiplier;
     _viaSpacing *= unitMultiplier;
+    for (auto& port : _ports) {
+        port.scaleToSimulationUnits(unitMultiplier);
+    }
 }
 
 void to_json(nlohmann::json& j, const SimulationConfig& p) {
@@ -435,6 +472,39 @@ std::optional<std::int32_t> EMSConfig::metalLayerIndexForFileName(const std::str
 }
 
 void EMSConfig::loadStackup(std::vector<LayerConfig> layers) { _layers = std::move(layers); }
+
+EMSConfig EMSConfig::scaledToSimulationUnits() const {
+    EMSConfig scaled = *this;
+    scaled._applyUnitMultiplier();
+    for (auto& simulation : scaled._simulations) {
+        simulation.scaleToSimulationUnits(constants::unitMultiplier);
+    }
+    return scaled;
+}
+
+std::expected<void, std::string> EMSConfig::save(const std::filesystem::path& cfgPath) const {
+    nlohmann::json out;
+    out["format_version"] = _formatVersion.empty() ? std::string(constants::configFormatVersion) : _formatVersion;
+    if (_kicadPcbPath.has_value()) {
+        out["kicad_pcb_path"] = _kicadPcbPath->string();
+    }
+    out["frequency"] = _frequency;
+    out["max_steps"] = _maxSteps;
+    out["pixel_size"] = _pixelSize;
+    out["via"] = _via;
+    out["grid"] = _grid;
+    out["simulations"] = _simulations;
+
+    std::ofstream file(cfgPath);
+    if (!file) {
+        return std::unexpected("Couldn't open " + cfgPath.string() + " for writing");
+    }
+    file << out.dump(4);
+    if (!file) {
+        return std::unexpected("Failed to write " + cfgPath.string());
+    }
+    return {};
+}
 
 bool EMSConfig::_isCfgVersionInvalid(const std::optional<std::string>& version) {
     if (!version.has_value()) {
@@ -513,6 +583,9 @@ std::expected<EMSConfig, std::string> EMSConfig::parse(const std::filesystem::pa
         }
 
         self._formatVersion = std::string(constants::configFormatVersion);
+        if (jsonCfg.contains("kicad_pcb_path")) {
+            self._kicadPcbPath = std::filesystem::path(jsonCfg.at("kicad_pcb_path").get<std::string>());
+        }
         self._frequency = jsonCfg.value("frequency", Frequency{});
         self._maxSteps = jsonCfg.value("max_steps", 100000);
         self._pixelSize = jsonCfg.value("pixel_size", 5);
@@ -533,6 +606,9 @@ std::expected<EMSConfig, std::string> EMSConfig::parse(const std::filesystem::pa
         if (updateConfig) {
             nlohmann::json out;
             out["format_version"] = self._formatVersion;
+            if (self._kicadPcbPath.has_value()) {
+                out["kicad_pcb_path"] = self._kicadPcbPath->string();
+            }
             out["frequency"] = self._frequency;
             out["max_steps"] = self._maxSteps;
             out["pixel_size"] = self._pixelSize;
@@ -543,10 +619,10 @@ std::expected<EMSConfig, std::string> EMSConfig::parse(const std::filesystem::pa
             file << out.dump(4);
         }
 
-        self._applyUnitMultiplier();
-        for (auto& simulation : self._simulations) {
-            simulation.scaleToSimulationUnits(constants::unitMultiplier);
-        }
+        // Deliberately not scaled to simulation units here -- self stays in exactly the units the
+        // file uses (an EMSConfig is a document to be edited/saved as much as it's FDTD input now).
+        // See EMSConfig::scaledToSimulationUnits(), called at the one boundary that actually needs
+        // scaled values (GeometryResult::build()/load()).
         return self;
     } catch (const std::exception& e) {
         return std::unexpected(e.what());

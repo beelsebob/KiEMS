@@ -311,6 +311,12 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
             }
 
             for (const PadIdentity& pad : pads) {
+                // "Included in Simulation" per pin (see InvolvedNetConfig's own doc comment) --
+                // this pad's net is involved, but this specific pad was explicitly excluded from
+                // it, so it gets no port at all rather than just an unexcited one.
+                if (entry.isPinExcluded(pad.footprintRef, pad.padNumber)) {
+                    continue;
+                }
                 const std::string portLabel = netName + "@" + pad.footprintRef + "." + pad.padNumber;
                 const Position positionSim = _padPositionInSimFrame(pad, edgeCutsOrigin);
                 const std::string layerFileName = _normalizeLayerName(pad.copperLayerName);
@@ -351,7 +357,12 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                     port.setDBMargin(*entry.dBMargin());
                 }
                 port.setExcite(true); // every involved-net port is excited; results generated for all of them
-                port.scaleToSimulationUnits(constants::unitMultiplier);
+                // width/length deliberately left unscaled here, matching entry.length()/entry.width()'s
+                // own file units -- SimulationConfig::scaleToSimulationUnits() (called once, by
+                // EMSConfig::scaledToSimulationUnits(), at the FDTD-facing boundary) scales every
+                // resolved port along with the rest of the config. position is already in simulation
+                // units (see positionSim above), since it comes from board/gerber geometry, not a
+                // JSON field this config's own scaling concerns itself with.
 
                 portIndex.entries.emplace_back(pad.footprintRef, pad.padNumber);
                 sim.ports().push_back(std::move(port));

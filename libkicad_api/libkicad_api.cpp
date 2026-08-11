@@ -62,4 +62,49 @@ std::expected<std::vector<StackupLayer>, std::string> stackup(const std::string&
     return raw.layers;
 }
 
+std::expected<std::vector<LayerColor>, std::string> layerColors(const std::string& projectPath,
+                                                                  const std::string& boardPath) {
+    detail::RawLayerColorsResult raw = detail::layerColorsRaw(projectPath, boardPath);
+    if (!raw.ok) {
+        return std::unexpected(std::move(raw.error));
+    }
+    return raw.colors;
+}
+
+std::expected<std::vector<std::string>, std::string> netClasses(const std::string& projectPath,
+                                                                  const std::string& boardPath) {
+    detail::RawStringListResult raw = detail::netClassesRaw(projectPath, boardPath);
+    if (!raw.ok) {
+        return std::unexpected(std::move(raw.error));
+    }
+    return raw.values;
+}
+
+std::expected<std::vector<std::string>, std::string> allNets(const std::string& projectPath,
+                                                               const std::string& boardPath) {
+    detail::RawStringListResult raw = detail::allNetsRaw(projectPath, boardPath);
+    if (!raw.ok) {
+        return std::unexpected(std::move(raw.error));
+    }
+    return raw.values;
+}
+
+std::expected<std::vector<FootprintInfo>, std::string> footprints(const std::string& projectPath,
+                                                                    const std::string& boardPath) {
+    detail::RawFootprintsResult raw = detail::footprintsRaw(projectPath, boardPath);
+    if (!raw.ok) {
+        return std::unexpected(std::move(raw.error));
+    }
+    return raw.footprints;
+}
+
+std::expected<std::vector<ThroughHole>, std::string> throughHoles(const std::string& projectPath,
+                                                                     const std::string& boardPath) {
+    detail::RawThroughHolesResult raw = detail::throughHolesRaw(projectPath, boardPath);
+    if (!raw.ok) {
+        return std::unexpected(std::move(raw.error));
+    }
+    return raw.holes;
+}
+
 } // namespace libkicad

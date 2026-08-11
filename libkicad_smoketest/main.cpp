@@ -41,6 +41,25 @@ void _printStackupLayer(const libkicad::StackupLayer& layer) {
                << '\t' << _formatDouble(layer.epsilonR) << '\n';
 }
 
+// One line per pin (not one line per footprint): the caller groups by the reference column, same
+// as every other line-oriented query here -- keeps the wire format flat regardless of how many
+// pins a footprint has. `value` is repeated on every one of a footprint's lines (redundant, but
+// keeps every line self-contained rather than making the caller special-case the first one).
+// Columns: reference, pad number, pin function, footprint value, net name (net name empty if the
+// pad isn't connected to any net).
+void _printFootprints(const std::vector<libkicad::FootprintInfo>& footprints) {
+    for (const libkicad::FootprintInfo& footprint : footprints) {
+        if (footprint.pins.empty()) {
+            std::cout << footprint.reference << "\t\t\t" << footprint.value << "\t\n";
+            continue;
+        }
+        for (const libkicad::FootprintPin& pin : footprint.pins) {
+            std::cout << footprint.reference << '\t' << pin.number << '\t' << pin.function << '\t' << footprint.value
+                       << '\t' << pin.netName << '\n';
+        }
+    }
+}
+
 // Machine-readable query mode used by port_resolution.cpp (invoked as a subprocess, exactly like
 // this project already invokes kicad-cli -- see importer.cpp's _runProcess). libkicad pulls in
 // KiCad's own wx/protobuf/abseil/OpenCASCADE dependency chain, including a *different* build of
@@ -110,10 +129,75 @@ int _runQuery(int argc, char** argv) {
         return 0;
     }
 
+    if (command == "layer-colors" && argc == 4) {
+        const std::expected<std::vector<libkicad::LayerColor>, std::string> colors =
+                libkicad::layerColors(argv[2], argv[3]);
+        if (!colors.has_value()) {
+            std::cerr << colors.error() << "\n";
+            return 1;
+        }
+        for (const libkicad::LayerColor& color : *colors) {
+            std::cout << color.name << '\t' << color.hex << "\n";
+        }
+        return 0;
+    }
+
+    if (command == "net-classes" && argc == 4) {
+        const std::expected<std::vector<std::string>, std::string> classes = libkicad::netClasses(argv[2], argv[3]);
+        if (!classes.has_value()) {
+            std::cerr << classes.error() << "\n";
+            return 1;
+        }
+        for (const std::string& name : *classes) {
+            std::cout << name << "\n";
+        }
+        return 0;
+    }
+
+    if (command == "all-nets" && argc == 4) {
+        const std::expected<std::vector<std::string>, std::string> nets = libkicad::allNets(argv[2], argv[3]);
+        if (!nets.has_value()) {
+            std::cerr << nets.error() << "\n";
+            return 1;
+        }
+        for (const std::string& name : *nets) {
+            std::cout << name << "\n";
+        }
+        return 0;
+    }
+
+    if (command == "footprints" && argc == 4) {
+        const std::expected<std::vector<libkicad::FootprintInfo>, std::string> footprints =
+                libkicad::footprints(argv[2], argv[3]);
+        if (!footprints.has_value()) {
+            std::cerr << footprints.error() << "\n";
+            return 1;
+        }
+        _printFootprints(*footprints);
+        return 0;
+    }
+
+    if (command == "through-holes" && argc == 4) {
+        const std::expected<std::vector<libkicad::ThroughHole>, std::string> holes =
+                libkicad::throughHoles(argv[2], argv[3]);
+        if (!holes.has_value()) {
+            std::cerr << holes.error() << "\n";
+            return 1;
+        }
+        for (const libkicad::ThroughHole& hole : *holes) {
+            std::cout << (hole.footprintRef.empty() ? "(via)" : hole.footprintRef) << "\t" << hole.padNumber << "\t"
+                       << hole.netName << "\t" << hole.xMm << "\t" << hole.yMm << "\t" << hole.padWidthMm << "\t"
+                       << hole.padHeightMm << "\t" << hole.drillWidthMm << "\t" << hole.drillHeightMm << "\n";
+        }
+        return 0;
+    }
+
     std::cerr << "usage: " << argv[0]
                << " {net-for-pin <project> <board> <footprint> <pin> | nets-in-class <project> <board> "
                   "<net_class> | pads-on-net <project> <board> <net> | resolve-pin <project> <board> "
-                  "<footprint> <pin> | stackup <project> <board>}\n";
+                  "<footprint> <pin> | stackup <project> <board> | layer-colors <project> <board> | "
+                  "net-classes <project> <board> | all-nets <project> <board> | "
+                  "footprints <project> <board> | through-holes <project> <board>}\n";
     return 2;
 }
 
@@ -147,6 +231,41 @@ int _runSmoketest(int argc, char** argv) {
         const libkicad::StackupLayer& first = stackup->front();
         std::cout << ", e.g. \"" << first.name << "\" (" << _stackupLayerKindName(first.kind) << "), "
                    << first.thicknessMm << " mm thick";
+    }
+    std::cout << "\n";
+
+    std::expected<std::vector<std::string>, std::string> allNets = libkicad::allNets(argv[1], argv[2]);
+    if (!allNets.has_value()) {
+        std::cerr << "FAILED allNets: " << allNets.error() << "\n";
+        return 1;
+    }
+    std::cout << "Board has " << allNets->size() << " net(s)";
+    if (!allNets->empty()) {
+        std::cout << ", e.g. \"" << allNets->front() << "\"";
+    }
+    std::cout << "\n";
+
+    std::expected<std::vector<std::string>, std::string> netClasses = libkicad::netClasses(argv[1], argv[2]);
+    if (!netClasses.has_value()) {
+        std::cerr << "FAILED netClasses: " << netClasses.error() << "\n";
+        return 1;
+    }
+    std::cout << "Board has " << netClasses->size() << " net class(es)";
+    if (!netClasses->empty()) {
+        std::cout << ", e.g. \"" << netClasses->front() << "\"";
+    }
+    std::cout << "\n";
+
+    std::expected<std::vector<libkicad::FootprintInfo>, std::string> footprints =
+            libkicad::footprints(argv[1], argv[2]);
+    if (!footprints.has_value()) {
+        std::cerr << "FAILED footprints: " << footprints.error() << "\n";
+        return 1;
+    }
+    std::cout << "Board has " << footprints->size() << " footprint(s)";
+    if (!footprints->empty()) {
+        std::cout << ", e.g. \"" << footprints->front().reference << "\" with " << footprints->front().pins.size()
+                   << " pin(s)";
     }
     std::cout << "\n";
 
@@ -192,8 +311,9 @@ int _runSmoketest(int argc, char** argv) {
     return 0;
 }
 
-const std::vector<std::string> kQueryCommands = {"net-for-pin", "nets-in-class", "pads-on-net", "resolve-pin",
-                                                  "stackup"};
+const std::vector<std::string> kQueryCommands = {"net-for-pin",  "nets-in-class", "pads-on-net",   "resolve-pin",
+                                                  "stackup",      "layer-colors",  "net-classes",   "all-nets",
+                                                  "footprints",   "through-holes"};
 
 } // namespace
 

@@ -50,7 +50,21 @@ public:
     void addPlane(double zHeight);
     void addSubstrates();
     std::expected<void, std::string> addVias();
-    void addVia(double xPos, double yPos, double diameter);
+    /// (xPos, yPos)-(x2Pos, y2Pos) is the via's own capsule/stadium centerline -- a plain round via
+    /// is the degenerate case where the two points coincide (see ViaHole's own doc comment).
+    /// `diameter` is the drill hole; `outerDiameter` is the copper conductor's outer edge (the
+    /// "annular ring" OD) -- callers compute this differently per via kind, see addVias().
+    void addVia(double xPos, double yPos, double x2Pos, double y2Pos, double diameter, double outerDiameter);
+    /// Cuts every non-plated through-hole (see SlicedBoard::npthHoleLoops) out of the substrate
+    /// model: an explicit vacuum-epsilon material, extruded through the full substrate stack depth
+    /// at a priority above every substrate layer's, so it overrides them wherever it overlaps --
+    /// the same addLinPoly-through-full-thickness technique addVia() uses for a via's own barrel,
+    /// just with air instead of conductor. Copper is already handled separately (see
+    /// board_slicing.cpp -- an NPTH hole is subtracted from layerTriangles directly, since that's
+    /// plain 2D polygon geometry addGerbers() then extrudes at each metal layer's own Z height); this
+    /// only needs to additionally punch through the substrate boxes addSubstrates() lays down, which
+    /// have no other hole-cutting mechanism at all.
+    void addNPTHHoles();
     void addDumpBoxes();
 
     void setBoundaryConditions(bool pml = false);
@@ -113,6 +127,7 @@ private:
     CSPropMetal* _planeMaterial;
     CSPropMetal* _viaMaterial;
     CSPropMaterial* _viaFillingMaterial;
+    CSPropMaterial* _npthVoidMaterial; // Vacuum (epsilon_r = 1) -- see addNPTHHoles().
 
     std::unique_ptr<GridGenerator> _gridGen;
 };

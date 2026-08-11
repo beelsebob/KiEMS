@@ -18,12 +18,16 @@
 
 #include <pgm_base.h>
 #include <settings/settings_manager.h>
+#include <settings/color_settings.h>
 #include <project.h>
+#include <project/project_file.h>
 #include <base_units.h>
 #include <board.h>
 #include <board_design_settings.h>
 #include <footprint.h>
 #include <pad.h>
+#include <padstack.h>
+#include <pcb_track.h>
 #include <netinfo.h>
 #include <netclass.h>
 #include <project/net_settings.h>
@@ -113,6 +117,34 @@ RawPadResult _failPad(std::string error) {
 
 RawStackupResult _failStackup(std::string error) {
     RawStackupResult result;
+    result.ok = false;
+    result.error = std::move(error);
+    return result;
+}
+
+RawLayerColorsResult _failLayerColors(std::string error) {
+    RawLayerColorsResult result;
+    result.ok = false;
+    result.error = std::move(error);
+    return result;
+}
+
+RawStringListResult _failStringList(std::string error) {
+    RawStringListResult result;
+    result.ok = false;
+    result.error = std::move(error);
+    return result;
+}
+
+RawFootprintsResult _failFootprints(std::string error) {
+    RawFootprintsResult result;
+    result.ok = false;
+    result.error = std::move(error);
+    return result;
+}
+
+RawThroughHolesResult _failThroughHoles(std::string error) {
+    RawThroughHolesResult result;
     result.ok = false;
     result.error = std::move(error);
     return result;
@@ -434,6 +466,169 @@ RawStackupResult stackupRaw(const std::string& projectPath, const std::string& b
         }
         result.layers.push_back(std::move(layer));
     }
+    return result;
+}
+
+RawLayerColorsResult layerColorsRaw(const std::string& projectPath, const std::string& boardPath) {
+    std::string error;
+    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    if (!loaded) {
+        return _failLayerColors(std::move(error));
+    }
+    BOARD* board = loaded->board;
+
+    // Empty name resolves to KiCad's own default color settings if no other theme is found/active
+    // for this (headless, GUI-less) process -- see GetColorSettings()'s own doc comment. This is
+    // the same COLOR_SETTINGS machinery the real PCB editor's "Appearance" panel reads from, just
+    // with no per-project theme selection available outside a full GUI session to prefer instead.
+    COLOR_SETTINGS* colorSettings = Pgm().GetSettingsManager().GetColorSettings(wxEmptyString);
+    if (colorSettings == nullptr) {
+        return _failLayerColors("No PCB color theme available");
+    }
+
+    RawLayerColorsResult result;
+    result.ok = true;
+    const BOARD_STACKUP& stackup = board->GetDesignSettings().GetStackupDescriptor();
+    for (const BOARD_STACKUP_ITEM* item : stackup.GetList()) {
+        if (!item->IsEnabled() || item->GetType() != BS_ITEM_TYPE_COPPER) {
+            continue;
+        }
+        LayerColor layerColor;
+        layerColor.name = board->GetLayerName(item->GetBrdLayerId()).ToStdString();
+        layerColor.hex = colorSettings->GetColor(item->GetBrdLayerId()).ToHexString().ToStdString();
+        result.colors.push_back(std::move(layerColor));
+    }
+    return result;
+}
+
+RawStringListResult netClassesRaw(const std::string& projectPath, const std::string& boardPath) {
+    std::string error;
+    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    if (!loaded) {
+        return _failStringList(std::move(error));
+    }
+    PROJECT* project = loaded->board->GetProject();
+    if (project == nullptr) {
+        return _failStringList("Board has no linked project -- net classes require a sibling .kicad_pro");
+    }
+
+    RawStringListResult result;
+    result.ok = true;
+    // Every user-defined net class, independent of whether a net currently uses it -- matches what
+    // KiCad's own Net Classes editor shows, unlike netsInNetClassRaw (which only cares about
+    // classes actually assigned to a net it's checking membership for).
+    for (const auto& [name, netclass] : project->GetProjectFile().NetSettings()->GetNetclasses()) {
+        result.values.push_back(name.ToStdString());
+    }
+    return result;
+}
+
+RawStringListResult allNetsRaw(const std::string& projectPath, const std::string& boardPath) {
+    std::string error;
+    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    if (!loaded) {
+        return _failStringList(std::move(error));
+    }
+    BOARD* board = loaded->board;
+
+    RawStringListResult result;
+    result.ok = true;
+    for (NETINFO_ITEM* net : board->GetNetInfo()) {
+        if (net->GetNetCode() == NETINFO_LIST::UNCONNECTED) {
+            continue;
+        }
+        result.values.push_back(net->GetNetname().ToStdString());
+    }
+    return result;
+}
+
+RawFootprintsResult footprintsRaw(const std::string& projectPath, const std::string& boardPath) {
+    std::string error;
+    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    if (!loaded) {
+        return _failFootprints(std::move(error));
+    }
+    BOARD* board = loaded->board;
+
+    RawFootprintsResult result;
+    result.ok = true;
+    for (FOOTPRINT* footprint : board->Footprints()) {
+        FootprintInfo info;
+        info.reference = footprint->GetReference().ToStdString();
+        info.value = footprint->GetValue().ToStdString();
+        for (PAD* pad : footprint->Pads()) {
+            FootprintPin pin;
+            pin.number = pad->GetNumber().ToStdString();
+            pin.function = pad->GetPinFunction().ToStdString();
+            pin.netName = pad->GetNetname().ToStdString();
+            info.pins.push_back(std::move(pin));
+        }
+        result.footprints.push_back(std::move(info));
+    }
+    return result;
+}
+
+RawThroughHolesResult throughHolesRaw(const std::string& projectPath, const std::string& boardPath) {
+    std::string error;
+    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    if (!loaded) {
+        return _failThroughHoles(std::move(error));
+    }
+    BOARD* board = loaded->board;
+
+    RawThroughHolesResult result;
+    result.ok = true;
+    const VECTOR2I auxOrigin = board->GetDesignSettings().GetAuxOrigin();
+
+    // Plain KiCad vias -- not tied to any footprint, always round (GetWidth() is the annular ring's
+    // own diameter, GetDrillValue() the hole's -- both single values, unlike a pad's separate X/Y).
+    for (PCB_TRACK* track : board->Tracks()) {
+        if (track->Type() != PCB_VIA_T) {
+            continue;
+        }
+        PCB_VIA* via = static_cast<PCB_VIA*>(track);
+        const VECTOR2I position = via->GetPosition() - auxOrigin;
+
+        ThroughHole hole;
+        hole.xMm = pcbIUScale.IUTomm(position.x);
+        // Y flip: see the identical comment in resolvePinRaw().
+        hole.yMm = -pcbIUScale.IUTomm(position.y);
+        hole.netName = via->GetNetname().ToStdString();
+        const double widthMm = pcbIUScale.IUTomm(via->GetWidth());
+        hole.padWidthMm = widthMm;
+        hole.padHeightMm = widthMm;
+        const double drillMm = pcbIUScale.IUTomm(via->GetDrillValue());
+        hole.drillWidthMm = drillMm;
+        hole.drillHeightMm = drillMm;
+        result.holes.push_back(std::move(hole));
+    }
+
+    // Through-hole pads (PAD_ATTRIB::PTH) -- e.g. a connector's SHIELD pin -- which can be oblong
+    // (GetSizeX()/GetSizeY() and GetDrillSizeX()/GetDrillSizeY() genuinely differ), unlike a via.
+    // NPTH pads are deliberately excluded: those have no copper at all (see ThroughHole's own doc
+    // comment), a different feature entirely (gerber2ems::NPTHHole/getNPTHHoles()).
+    for (FOOTPRINT* footprint : board->Footprints()) {
+        for (PAD* pad : footprint->Pads()) {
+            if (pad->GetAttribute() != PAD_ATTRIB::PTH) {
+                continue;
+            }
+            const VECTOR2I position = pad->GetPosition() - auxOrigin;
+
+            ThroughHole hole;
+            hole.xMm = pcbIUScale.IUTomm(position.x);
+            // Y flip: see the identical comment in resolvePinRaw().
+            hole.yMm = -pcbIUScale.IUTomm(position.y);
+            hole.netName = pad->GetNetname().ToStdString();
+            hole.footprintRef = footprint->GetReference().ToStdString();
+            hole.padNumber = pad->GetNumber().ToStdString();
+            hole.padWidthMm = pcbIUScale.IUTomm(pad->GetSizeX());
+            hole.padHeightMm = pcbIUScale.IUTomm(pad->GetSizeY());
+            hole.drillWidthMm = pcbIUScale.IUTomm(pad->GetDrillSizeX());
+            hole.drillHeightMm = pcbIUScale.IUTomm(pad->GetDrillSizeY());
+            result.holes.push_back(std::move(hole));
+        }
+    }
+
     return result;
 }
 
