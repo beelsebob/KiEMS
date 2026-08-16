@@ -65,6 +65,29 @@ std::optional<std::vector<std::complex<double>>> PostprocessResult::getSParam(co
     return post == nullptr ? std::nullopt : post->getSParam(outputPort, inputPort);
 }
 
+std::optional<std::vector<double>> PostprocessResult::frequencies(const std::string& simulationName) const {
+    const Postprocessor* post = postprocessorFor(simulationName);
+    return post == nullptr ? std::nullopt : std::optional(post->frequencies());
+}
+
+std::optional<std::vector<double>> PostprocessResult::getDelay(const std::string& simulationName,
+                                                                 std::int32_t outputPort, std::int32_t inputPort) const {
+    const Postprocessor* post = postprocessorFor(simulationName);
+    return post == nullptr ? std::nullopt : post->getDelay(outputPort, inputPort);
+}
+
+std::optional<Postprocessor::DiffPairSdd> PostprocessResult::getDiffPairSdd(const std::string& simulationName,
+                                                                             std::int32_t diffPairIndex) const {
+    const Postprocessor* post = postprocessorFor(simulationName);
+    return post == nullptr ? std::nullopt : post->getDiffPairSdd(diffPairIndex);
+}
+
+std::optional<Postprocessor::DiffPairImpedance> PostprocessResult::getDiffPairImpedance(
+    const std::string& simulationName, std::int32_t diffPairIndex) const {
+    const Postprocessor* post = postprocessorFor(simulationName);
+    return post == nullptr ? std::nullopt : post->getDiffPairImpedance(diffPairIndex);
+}
+
 void PostprocessResult::saveToFile(const std::string& simulationName, const std::filesystem::path& outputDir) const {
     if (const Postprocessor* post = postprocessorFor(simulationName); post != nullptr) {
         post->saveToFile(outputDir);

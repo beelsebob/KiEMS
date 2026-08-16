@@ -39,6 +39,15 @@ public:
                                                                     std::int32_t port) const;
     std::optional<std::vector<std::complex<double>>> getSParam(const std::string& simulationName,
                                                                  std::int32_t outputPort, std::int32_t inputPort) const;
+    /// Frequency points every other per-simulation series is sampled at, in Hz. nullopt only if
+    /// `simulationName` isn't in config().
+    std::optional<std::vector<double>> frequencies(const std::string& simulationName) const;
+    std::optional<std::vector<double>> getDelay(const std::string& simulationName, std::int32_t outputPort,
+                                                 std::int32_t inputPort) const;
+    std::optional<Postprocessor::DiffPairSdd> getDiffPairSdd(const std::string& simulationName,
+                                                               std::int32_t diffPairIndex) const;
+    std::optional<Postprocessor::DiffPairImpedance> getDiffPairImpedance(const std::string& simulationName,
+                                                                          std::int32_t diffPairIndex) const;
 
     // Explicit save/render calls, matching Postprocessor's own signatures -- no-ops if
     // `simulationName` isn't in config().

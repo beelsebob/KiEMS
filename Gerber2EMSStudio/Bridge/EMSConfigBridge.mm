@@ -159,6 +159,14 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
     self.cxxNet.setDBMargin(value != nil ? std::optional<double>(value.doubleValue) : std::nullopt);
 }
 
+- (nullable NSNumber*)direction {
+    const auto& value = self.cxxNet.direction();
+    return value.has_value() ? @(*value) : nil;
+}
+- (void)setDirection:(nullable NSNumber*)value {
+    self.cxxNet.setDirection(value != nil ? std::optional<double>(value.doubleValue) : std::nullopt);
+}
+
 - (BOOL)isPinExcludedWithFootprint:(NSString*)footprint pin:(NSString*)pin {
     return self.cxxNet.isPinExcluded(footprint.UTF8String, pin.UTF8String) ? YES : NO;
 }
@@ -486,6 +494,12 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
     gerber2ems::Frequency frequency = _config.frequency();
     frequency.setStop(value);
     _config.setFrequency(frequency);
+}
+- (NSInteger)maxSteps {
+    return _config.maxSteps();
+}
+- (void)setMaxSteps:(NSInteger)value {
+    _config.setMaxSteps(static_cast<std::int32_t>(value));
 }
 
 - (EMSSimulationBridge*)_wrapperForSimulationIndex:(NSInteger)index {

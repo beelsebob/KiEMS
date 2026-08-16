@@ -97,8 +97,24 @@ std::expected<SimulationResult, std::string> SimulationResult::run(const Geometr
             logError("[" + simConfig.name() + "] No port is configured to excite; nothing to simulate.");
             continue;
         }
-        if (sim->ports().empty()) {
-            sim->addVirtualPorts();
+        // loadGeometry() (called above, once per excited port) only repopulates _csx/_grid from the
+        // saved geometry.xml -- it never rebuilds the lightweight C++-side _ports bookkeeping (the
+        // real addPorts() call that did that lives on a *different*, geometry-step-only Simulation
+        // object). Without this, sim->ports() is always empty here, and getPortParameters() below
+        // used to silently fall back to addVirtualPorts() -- a fixed, board-position-independent
+        // dummy port box at (0,0,0)-(10,10,10). MSLPort's constructor derives the measurement-plane
+        // grid spacing (_uDelta/_iDelta, the denominator in its Zref = sqrt(et*det/(ht*dht)) formula)
+        // from wherever the port's own box sits in the mesh; a fixed dummy box picks up whatever grid
+        // spacing happens to exist at that unrelated location instead of the real, much finer spacing
+        // at the actual port, producing wildly wrong per-port impedance normalization -- exactly the
+        // "orders of magnitude too much response on an unconnected port" symptom this fixes. The real
+        // probe/excitation data files on disk are keyed by port number, not geometry, so re-adding the
+        // real ports here (matching every port's true position) reads the same real recorded data but
+        // normalizes it correctly. This duplicates CSX properties already loaded from geometry.xml,
+        // but harmlessly: the FDTD run already happened in a separate worker process before this point,
+        // and this Simulation's _csx is discarded once getPortParameters() below finishes.
+        if (auto result = sim->addPorts(); !result) {
+            return std::unexpected(result.error());
         }
 
         auto post = std::make_unique<Postprocessor>(frequencies, simConfig);

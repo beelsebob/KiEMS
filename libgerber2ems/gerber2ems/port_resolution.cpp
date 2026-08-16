@@ -266,6 +266,15 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
     const Position& edgeCutsOrigin = *edgeCutsOriginResult;
 
     for (SimulationConfig& sim : config.simulations()) {
+        // ports() is entirely derived by this function (see its own doc comment) -- resolving must
+        // be idempotent, since both the Geometry and Simulation Results steps independently call
+        // this on the same long-lived, in-memory EMSConfig. Without clearing first, a second call
+        // (e.g. visiting Results after Geometry, or any cache-invalidating edit triggering a re-run)
+        // would push_back a full second copy of every port onto the first, compounding on every
+        // subsequent call -- and since portIndex below is rebuilt from 0 each call while ports()
+        // itself kept growing, excitation/trace/diff-pair resolved indices would silently point at
+        // the wrong (stale, duplicate) entries too.
+        sim.ports().clear();
         _CopperLayerCache layerCache;
         _PortIndex portIndex;
 
@@ -317,7 +326,7 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                 if (entry.isPinExcluded(pad.footprintRef, pad.padNumber)) {
                     continue;
                 }
-                const std::string portLabel = netName + "@" + pad.footprintRef + "." + pad.padNumber;
+                const std::string portLabel = pad.footprintRef + " pin " + pad.padNumber + " (" + netName + ")";
                 const Position positionSim = _padPositionInSimFrame(pad, edgeCutsOrigin);
                 const std::string layerFileName = _normalizeLayerName(pad.copperLayerName);
 
@@ -356,7 +365,14 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                 if (entry.dBMargin().has_value()) {
                     port.setDBMargin(*entry.dBMargin());
                 }
-                port.setExcite(true); // every involved-net port is excited; results generated for all of them
+                // Not every port on an involved net should be excited -- only the ones the user
+                // actually configured an excitation for (see the excitations loop below, which
+                // flips this back on for whichever ports it resolves to). SimulationResult::run()
+                // spawns one FDTD worker process per excited port, so marking every involved-net
+                // port excited by default -- as this used to do -- silently multiplied simulation
+                // time by however many pads happened to be on the involved nets, not by how many
+                // the user actually asked to drive.
+                port.setExcite(false);
                 // width/length deliberately left unscaled here, matching entry.length()/entry.width()'s
                 // own file units -- SimulationConfig::scaleToSimulationUnits() (called once, by
                 // EMSConfig::scaledToSimulationUnits(), at the FDTD-facing boundary) scales every
@@ -388,6 +404,7 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                                         "." + excitation.pin() + " did not resolve to a placed port");
             }
             excitation.setDrivenPortIndex(*index);
+            sim.ports()[static_cast<std::size_t>(*index)].setExcite(true);
         }
 
         for (SingleEndedConfig& trace : sim.traces()) {

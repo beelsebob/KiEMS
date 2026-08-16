@@ -695,6 +695,12 @@ public:
 
     const Frequency& frequency() const { return _frequency; }
     void setFrequency(Frequency value) { _frequency = value; }
+    /// Hard cap on FDTD timesteps (Simulation::run() -> openEMS::SetNumberOfTimeSteps()) -- the run
+    /// stops here even if openEMS's own -60dB energy-decay end criteria hasn't been reached yet. Too
+    /// low a value truncates the recorded time-domain signal before it's actually decayed, which
+    /// shows up in post-processed S-parameters as spurious ripple and rapid phase rotation (a
+    /// truncated time-domain signal is equivalent to windowing it with a hard rectangular cutoff,
+    /// which is exactly the kind of artifact a DFT turns into ringing).
     std::int32_t maxSteps() const { return _maxSteps; }
     void setMaxSteps(std::int32_t value) { _maxSteps = value; }
     /// Copper-geometry fidelity control, in microns: the maximum chord/sagitta deviation allowed

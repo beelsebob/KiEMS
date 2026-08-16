@@ -22,9 +22,18 @@ final class SimulationPropertiesViewController: NSViewController {
     /// those affect the FDTD run itself, not the geometry step's own output.
     var onGeometryParametersChanged: ((Int) -> Void)?
 
+    /// Fired whenever maxStepsField changes -- unlike onGeometryParametersChanged, this doesn't
+    /// affect geometry at all (it's a pure FDTD-run setting, document-level like frequency/via
+    /// plating above it), so it only needs to invalidate simulation *results*, and for every
+    /// simulation in the document at once (maxSteps isn't per-simulation). Too low a value truncates
+    /// the FDTD run before its energy has decayed, which is exactly the bug this field exists to let
+    /// the user fix -- so a stale cached result from before raising it would defeat the point.
+    var onFDTDParametersChanged: (() -> Void)?
+
     private let nameField = NSTextField(string: "")
     private let groundKindPopUp = NSPopUpButton()
     private let groundNamePopUp = NSPopUpButton()
+    private let maxStepsField = NSTextField(string: "")
     private let hullPaddingField = NSTextField(string: "")
     private let viaEdgeDistanceField = NSTextField(string: "")
     private let viaSpacingField = NSTextField(string: "")
@@ -47,6 +56,12 @@ final class SimulationPropertiesViewController: NSViewController {
         displaySuffix: "Hz", acceptedSuffixes: ["hertz", "hz"], autoSelectsSIPrefix: true)
     private let frequencyStopFormatter = UnitSuffixValueFormatter(
         displaySuffix: "Hz", acceptedSuffixes: ["hertz", "hz"], autoSelectsSIPrefix: true)
+    private let maxStepsFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.maximumFractionDigits = 0 // Timesteps are a plain integer count, never fractional.
+        return formatter
+    }()
 
     private let viaAdvancedDisclosureButton = NSButton()
     private var viaAdvancedRow: NSStackView?
@@ -106,9 +121,10 @@ final class SimulationPropertiesViewController: NSViewController {
         fillingEpsilonField.formatter = Self.plainNumberFormatter
         frequencyStartField.formatter = frequencyStartFormatter
         frequencyStopField.formatter = frequencyStopFormatter
+        maxStepsField.formatter = maxStepsFormatter
 
         for field in [hullPaddingField, viaEdgeDistanceField, viaSpacingField, platingThicknessField,
-                      fillingEpsilonField, frequencyStartField, frequencyStopField] {
+                      fillingEpsilonField, frequencyStartField, frequencyStopField, maxStepsField] {
             field.alignment = .right
             field.target = self
             field.action = #selector(numberFieldChanged(_:))
@@ -174,6 +190,7 @@ final class SimulationPropertiesViewController: NSViewController {
             // edge distance's field directly below -- "Via edge distance:" is the widest label here.
             labeled("Name:", nameField, labelWidth: 130),
             labeled("Ground net:", groundRow, labelWidth: 130),
+            labeled("Max. timesteps:", maxStepsField, labelWidth: 130),
             labeled("Hull padding:", hullPaddingField, labelWidth: 130),
             frequencyRow,
             viaMainRow,
@@ -196,7 +213,7 @@ final class SimulationPropertiesViewController: NSViewController {
             stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 8),
             stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -8),
         ])
-        for field in [nameField, hullPaddingField] {
+        for field in [nameField, hullPaddingField, maxStepsField] {
             field.widthAnchor.constraint(equalToConstant: 160).isActive = true
         }
         // Same 100pt for every field in this panel, frequencyStart/Stop included -- keeps "Via
@@ -264,6 +281,7 @@ final class SimulationPropertiesViewController: NSViewController {
         fillingEpsilonField.doubleValue = document.config.viaFillingEpsilon
         frequencyStartField.doubleValue = document.config.frequencyStart
         frequencyStopField.doubleValue = document.config.frequencyStop
+        maxStepsField.integerValue = document.config.maxSteps
 
         guard let sim = selectedSimulation else {
             nameField.stringValue = ""
@@ -486,6 +504,7 @@ final class SimulationPropertiesViewController: NSViewController {
     @objc private func numberFieldChanged(_ sender: NSTextField) {
         guard let document else { return }
         var affectsGeometry = false
+        var affectsFDTD = false
         switch sender {
         case hullPaddingField:
             selectedSimulation?.hullPadding = sender.doubleValue
@@ -500,11 +519,17 @@ final class SimulationPropertiesViewController: NSViewController {
         case fillingEpsilonField: document.config.viaFillingEpsilon = sender.doubleValue
         case frequencyStartField: document.config.frequencyStart = sender.doubleValue
         case frequencyStopField: document.config.frequencyStop = sender.doubleValue
+        case maxStepsField:
+            document.config.maxSteps = sender.integerValue
+            affectsFDTD = true
         default: break
         }
         document.updateChangeCount(.changeDone)
         if affectsGeometry, let selectedIndex {
             onGeometryParametersChanged?(selectedIndex)
+        }
+        if affectsFDTD {
+            onFDTDParametersChanged?()
         }
     }
 }

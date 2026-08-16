@@ -3,13 +3,17 @@
 // churn in later refactor phases fails here at compile time rather than only being caught by a
 // full CLI re-run. Not a test framework -- plain asserts, pass/fail printed to stdout.
 
+#include <cmath>
+#include <complex>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <vector>
 
 #include "gerber2ems/config.hpp"
 #include "gerber2ems/constants.hpp"
 #include "gerber2ems/logging.hpp"
+#include "gerber2ems/postprocess.hpp"
 
 using namespace gerber2ems;
 
@@ -167,6 +171,102 @@ bool checkScaledToSimulationUnitsIsAPureCopy() {
     return ok;
 }
 
+// Exercises the raw numeric accessors Gerber2EMSStudio's results GUI drives directly (frequencies,
+// getDelay, getDiffPairSdd, getDiffPairImpedance) -- there's no existing Postprocessor coverage
+// here at all otherwise. Builds S-parameters by hand via setSParam() (the same "already have the
+// data" path SimulationResult itself uses, see postprocess_result.cpp), rather than a real FDTD
+// run, so this stays a fast, deterministic unit test.
+bool checkPostprocessorRawAccessors() {
+    SimulationConfig sim;
+    sim.setName("smoketest_sim");
+    for (int i = 0; i < 4; ++i) {
+        PortConfig port;
+        port.setName("P" + std::to_string(i));
+        port.setImpedance(50);
+        port.setExcite(true);
+        sim.ports().push_back(port);
+    }
+
+    // A differential pair over ports 0/1 (P) and 2/3 (N) -- resolvedIndex is normally set by
+    // port_resolution.cpp, but DifferentialPairConfig::correct() defaults to true and postInit()
+    // is only needed to *detect* unresolved refs, so setting the indices directly is enough here.
+    DifferentialPairConfig pair;
+    pair.startP().setResolvedIndex(0);
+    pair.startN().setResolvedIndex(1);
+    pair.stopP().setResolvedIndex(2);
+    pair.stopN().setResolvedIndex(3);
+    sim.diffPairs().push_back(pair);
+
+    const std::vector<double> freqs = {1e9, 2e9, 3e9};
+    Postprocessor post(freqs, sim);
+
+    for (int out = 0; out < 4; ++out) {
+        for (int in = 0; in < 4; ++in) {
+            std::vector<std::complex<double>> s(freqs.size());
+            for (std::size_t f = 0; f < freqs.size(); ++f) {
+                s[f] = (out == in) ? std::complex<double>(0.1 + 0.01 * static_cast<double>(f), 0.02 * static_cast<double>(f))
+                                    : std::complex<double>(0.01 * (out + 1), -0.01 * (in + 1));
+            }
+            post.setSParam(out, in, s);
+        }
+    }
+    post.processData();
+
+    bool ok = true;
+    if (post.frequencies() != freqs) {
+        std::cerr << "FAIL: Postprocessor::frequencies() didn't return what was passed in\n";
+        ok = false;
+    }
+
+    const auto delay = post.getDelay(0, 0);
+    if (!delay.has_value() || delay->size() != freqs.size()) {
+        std::cerr << "FAIL: Postprocessor::getDelay() didn't return a value for a computed S-parameter\n";
+        ok = false;
+    }
+    if (post.getDelay(0, 99).has_value()) {
+        std::cerr << "FAIL: Postprocessor::getDelay() should return nullopt for an out-of-range port\n";
+        ok = false;
+    }
+
+    const auto sdd = post.getDiffPairSdd(0);
+    if (!sdd.has_value() || !sdd->sdd11Db.has_value() || !sdd->sdd21Db.has_value() ||
+        sdd->sdd11Db->size() != freqs.size() || sdd->sdd21Db->size() != freqs.size()) {
+        std::cerr << "FAIL: Postprocessor::getDiffPairSdd() didn't return complete data for a fully-populated pair\n";
+        ok = false;
+    }
+    if (post.getDiffPairSdd(1).has_value()) {
+        std::cerr << "FAIL: Postprocessor::getDiffPairSdd() should return nullopt for an out-of-range pair index\n";
+        ok = false;
+    }
+    // Cross-check SDD11's first frequency point against the same mixed-mode formula
+    // renderDiffPairSParams uses, computed here from the raw S-parameters independently.
+    if (sdd.has_value() && sdd->sdd11Db.has_value()) {
+        const std::complex<double> spsp = post.getSParam(0, 0)->front();
+        const std::complex<double> snsp = post.getSParam(1, 0)->front();
+        const std::complex<double> spsn = post.getSParam(0, 1)->front();
+        const std::complex<double> snsn = post.getSParam(1, 1)->front();
+        const std::complex<double> expectedGamma = 0.5 * (spsp - snsp - spsn + snsn);
+        const double expectedDb = 20 * std::log10(std::abs(expectedGamma));
+        if (std::abs(sdd->sdd11Db->front() - expectedDb) > 1e-9) {
+            std::cerr << "FAIL: Postprocessor::getDiffPairSdd()'s SDD11 didn't match the mixed-mode formula "
+                          "(expected "
+                       << expectedDb << ", got " << sdd->sdd11Db->front() << ")\n";
+            ok = false;
+        }
+    }
+
+    const auto diffZ = post.getDiffPairImpedance(0);
+    if (!diffZ.has_value() || diffZ->magnitudeOhm.size() != freqs.size() || diffZ->angleDeg.size() != freqs.size()) {
+        std::cerr << "FAIL: Postprocessor::getDiffPairImpedance() didn't return complete data\n";
+        ok = false;
+    } else if (std::isnan(diffZ->magnitudeOhm.front()) || std::isnan(diffZ->angleDeg.front())) {
+        std::cerr << "FAIL: Postprocessor::getDiffPairImpedance() returned NaN for a fully-populated pair\n";
+        ok = false;
+    }
+
+    return ok;
+}
+
 bool checkLogging() {
     // Purely checks that logging.hpp's free functions link and run without crashing.
     setLogLevel(LogLevel::Error);
@@ -183,6 +283,7 @@ int main() {
     ok &= checkConfigParseFailsCleanly();
     ok &= checkConfigMutateSaveRoundTrip();
     ok &= checkScaledToSimulationUnitsIsAPureCopy();
+    ok &= checkPostprocessorRawAccessors();
     ok &= checkLogging();
 
     if (ok) {

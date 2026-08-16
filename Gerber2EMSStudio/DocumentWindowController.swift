@@ -34,6 +34,7 @@ final class DocumentWindowController: NSWindowController {
     private var currentSimulationIndex: Int?
 
     private var boardCandidates: [URL] = []
+    private let kicadFileWatcher = KicadFileWatcher()
 
     init(document: Document) {
         ownerDocument = document
@@ -56,6 +57,8 @@ final class DocumentWindowController: NSWindowController {
 
     private func buildUI() {
         guard let contentView = window?.contentView else { return }
+
+        kicadFileWatcher.onChange = { [weak self] in self?.handleLinkedKicadFilesChanged() }
 
         let projectPathLabel = NSTextField(labelWithString: "Project: ")
         projectPathLabel.setContentHuggingPriority(.required, for: .horizontal)
@@ -235,14 +238,15 @@ final class DocumentWindowController: NSWindowController {
         // comment. (This also fires for excitation-only edits, e.g. start time/phase, which don't
         // actually change the geometry -- an unnecessary cache clear there, not an incorrect one:
         // worst case is one avoidable re-run next time Geometry is opened.)
-        sourceListVC.onInvolvedNetsChanged = { [weak involvedNetsVC, weak geometryVC, weak self] in
+        let simulationResultsVC = SimulationResultsViewController(document: ownerDocument)
+        simulationResultsViewController = simulationResultsVC
+        sourceListVC.onInvolvedNetsChanged = { [weak involvedNetsVC, weak geometryVC, weak simulationResultsVC, weak self] in
             involvedNetsVC?.refresh()
             if let index = self?.currentSimulationIndex {
                 geometryVC?.invalidateCache(forSimulationIndex: index)
+                simulationResultsVC?.invalidateCache(forSimulationIndex: index)
             }
         }
-        let simulationResultsVC = SimulationResultsViewController()
-        simulationResultsViewController = simulationResultsVC
         let fieldViewerVC = FieldViewerViewController()
         fieldViewerViewController = fieldViewerVC
 
@@ -321,14 +325,29 @@ final class DocumentWindowController: NSWindowController {
         }
         // See SimulationPropertiesViewController.onGeometryParametersChanged's own doc comment --
         // a hull-padding/via/ground-net edit invalidates whichever simulation it belongs to.
-        propertiesVC.onGeometryParametersChanged = { [weak geometryVC] index in
+        propertiesVC.onGeometryParametersChanged = { [weak geometryVC, weak simulationResultsVC] index in
             geometryVC?.invalidateCache(forSimulationIndex: index)
+            simulationResultsVC?.invalidateCache(forSimulationIndex: index)
+        }
+        // See SimulationPropertiesViewController.onFDTDParametersChanged's own doc comment -- unlike
+        // onGeometryParametersChanged above, this only touches simulation results (max. timesteps
+        // doesn't affect the geometry step's output at all), and for every simulation in the document
+        // at once, since it's a document-level setting rather than a per-simulation one.
+        propertiesVC.onFDTDParametersChanged = { [weak simulationResultsVC, weak self] in
+            guard let simulationCount = self?.ownerDocument.config.simulations.count else { return }
+            for index in 0..<simulationCount {
+                simulationResultsVC?.invalidateCache(forSimulationIndex: index)
+            }
         }
         // See GeometryViewController.onRunStateChanged's doc comment -- the spinner next to a
         // simulation's "Geometry" row has no other way to know a background pipeline run started/
         // finished for it.
         geometryVC.onRunStateChanged = { [weak simulationListVC] index, isRunning in
             simulationListVC?.setGeometryRowBusy(isRunning, forSimulationIndex: index)
+        }
+        // Same relay, one row down, for the "Simulation Results" spinner.
+        simulationResultsVC.onRunStateChanged = { [weak simulationListVC] index, isRunning in
+            simulationListVC?.setSimulationResultsRowBusy(isRunning, forSimulationIndex: index)
         }
         simulationListVC.onSelectionChanged = { [weak self] selection in
             guard let self else { return }
@@ -356,7 +375,9 @@ final class DocumentWindowController: NSWindowController {
             case .geometry(let index):
                 showsGeometry = true
                 self.geometryViewController?.showGeometry(forSimulationIndex: index)
-            case .simulationResults: showsSimulationResults = true
+            case .simulationResults(let index):
+                showsSimulationResults = true
+                self.simulationResultsViewController?.showResults(forSimulationIndex: index)
             case .fieldViewer: showsFieldViewer = true
             case nil:
                 self.currentSimulationIndex = nil
@@ -484,7 +505,7 @@ final class DocumentWindowController: NSWindowController {
         let directory = pcbURL.deletingLastPathComponent()
         let siblings = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
 
-        let projectURL = siblings.first { $0.pathExtension == "kicad_pro" }
+        let projectURL = Self.siblingProjectURL(among: siblings)
         projectPathField.stringValue = (projectURL ?? pcbURL).lastPathComponent
 
         let siblingPCBs = siblings.filter { $0.pathExtension == "kicad_pcb" }
@@ -509,6 +530,7 @@ final class DocumentWindowController: NSWindowController {
 
         propertiesViewController?.refreshNetLists()
         sourceListViewController?.refreshBoardData()
+        kicadFileWatcher.startWatching(pcbPath: pcbURL.path, projectPath: projectURL?.path)
     }
 
     @objc private func chooseProject() {
@@ -600,6 +622,10 @@ final class DocumentWindowController: NSWindowController {
         sourceListViewController?.refreshBoardData()
         simulationListViewController?.setProjectAvailable(true)
 
+        let siblings = (try? FileManager.default.contentsOfDirectory(
+            at: boardURL.deletingLastPathComponent(), includingPropertiesForKeys: nil)) ?? []
+        kicadFileWatcher.startWatching(pcbPath: boardURL.path, projectPath: Self.siblingProjectURL(among: siblings)?.path)
+
         // A fresh simulation for every successfully linked board, named after it -- picking the
         // same board again (or a different board that happens to share a name) just gets a
         // deduplicated suffix rather than colliding with or replacing the existing one.
@@ -624,6 +650,28 @@ final class DocumentWindowController: NSWindowController {
         projectPathField.isEnabled = true
         boardPopUp.isEnabled = true
         statusLabel.stringValue = "Link failed: \(error.localizedDescription)"
+    }
+
+    private static func siblingProjectURL(among siblings: [URL]) -> URL? {
+        siblings.first { $0.pathExtension == "kicad_pro" }
+    }
+
+    /// Called whenever KicadFileWatcher notices the linked board (or its sibling project file) has
+    /// changed on disk -- typically the user editing/saving in KiCad itself while this document is
+    /// open. Refreshes the net/footprint pickers immediately (cheap, and this app owns their display
+    /// directly), but deliberately doesn't force geometry/simulation results to re-run: those are
+    /// expensive (an FDTD run can take minutes to hours) and GeometryViewController/
+    /// SimulationResultsViewController already re-run lazily, on next selection, once their cache is
+    /// cleared -- exactly the same deferred pattern used for an in-app involved-nets/properties edit
+    /// (see onInvolvedNetsChanged/onGeometryParametersChanged below).
+    private func handleLinkedKicadFilesChanged() {
+        guard ownerDocument.config.kicadPcbPath != nil else { return }
+        propertiesViewController?.refreshNetLists()
+        sourceListViewController?.refreshBoardData()
+        for index in ownerDocument.config.simulations.indices {
+            geometryViewController?.invalidateCache(forSimulationIndex: index)
+            simulationResultsViewController?.invalidateCache(forSimulationIndex: index)
+        }
     }
 
     private static func titleCased(_ raw: String) -> String {

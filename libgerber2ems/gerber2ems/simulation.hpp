@@ -46,7 +46,6 @@ public:
 
     std::expected<void, std::string> addMslPort(PortConfig& portConfig, std::int32_t portNumber, bool excite = false);
     std::expected<void, std::string> addResistivePort(PortConfig& portConfig, bool excite = false);
-    void addVirtualPort(const PortConfig& portConfig);
     void addPlane(double zHeight);
     void addSubstrates();
     std::expected<void, std::string> addVias();
@@ -67,7 +66,11 @@ public:
     void addNPTHHoles();
     void addDumpBoxes();
 
-    void setBoundaryConditions(bool pml = false);
+    /// PML is a far stronger absorber than MUR for the oblique-incidence/near-field content a board
+    /// floating in open space radiates close to the domain boundary -- MUR reflections can keep the
+    /// domain's total energy from ever decaying to the FDTD end criteria at all. Defaults to PML for
+    /// that reason; MUR exists as an option mainly for comparison/debugging.
+    void setBoundaryConditions(bool pml = true);
     void setExcitation();
     void setSinusExcitation(double freq);
 
@@ -96,7 +99,6 @@ public:
 
     void setupPorts(std::int32_t enabledIdx);
     std::expected<void, std::string> addPorts();
-    void addVirtualPorts();
 
     const std::vector<std::unique_ptr<Port>>& ports() const { return _ports; }
 

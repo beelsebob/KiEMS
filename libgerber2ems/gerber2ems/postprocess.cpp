@@ -83,6 +83,14 @@ std::string _sLabel(std::int32_t j, std::int32_t i) {
 
 } // namespace
 
+std::vector<double> unwrapPhaseDegrees(const std::vector<std::complex<double>>& values) {
+    std::vector<double> phaseDeg = _unwrap(_angles(values));
+    for (double& v : phaseDeg) {
+        v = v * 180.0 / M_PI;
+    }
+    return phaseDeg;
+}
+
 Postprocessor::Postprocessor(std::vector<double> frequencies, const SimulationConfig& simConfig)
     : _simConfig(simConfig),
       _frequencies(std::move(frequencies)),
@@ -212,6 +220,19 @@ std::optional<std::vector<std::complex<double>>> Postprocessor::getSParam(std::i
     return std::nullopt;
 }
 
+std::optional<std::vector<double>> Postprocessor::getDelay(std::int32_t outputPort, std::int32_t inputPort) const {
+    if (outputPort >= _count || inputPort >= _count) {
+        logError("Port no. " + std::to_string(outputPort) + " doesn't exist");
+        return std::nullopt;
+    }
+    const auto& delay = _delays[static_cast<std::size_t>(outputPort)][static_cast<std::size_t>(inputPort)];
+    if (std::any_of(delay.begin(), delay.end(), [](double v) { return std::isnan(v); })) {
+        logError("Delay " + std::to_string(inputPort) + ">" + std::to_string(outputPort) + " wasn't calculated");
+        return std::nullopt;
+    }
+    return delay;
+}
+
 void Postprocessor::setSParam(std::int32_t outputPort, std::int32_t inputPort, std::vector<std::complex<double>> value) {
     _sParams[static_cast<std::size_t>(outputPort)][static_cast<std::size_t>(inputPort)] = std::move(value);
 }
@@ -252,11 +273,7 @@ void Postprocessor::renderSParams(bool plotPhase, bool transparent, const std::f
                 if (!isValid(sParam)) {
                     continue;
                 }
-                std::vector<double> phaseDeg = _unwrap(_angles(sParam));
-                for (double& v : phaseDeg) {
-                    v = v * 180.0 / M_PI;
-                }
-                matplot::plot(ax2, freqGHz, phaseDeg);
+                matplot::plot(ax2, freqGHz, unwrapPhaseDegrees(sParam));
             }
             matplot::ylabel(ax2, "Phase [°]");
             matplot::grid(ax2, true);
@@ -267,50 +284,110 @@ void Postprocessor::renderSParams(bool plotPhase, bool transparent, const std::f
     }
 }
 
+std::optional<Postprocessor::DiffPairSdd> Postprocessor::getDiffPairSdd(std::int32_t diffPairIndex) const {
+    const auto& pairs = _simConfig.diffPairs();
+    if (diffPairIndex < 0 || static_cast<std::size_t>(diffPairIndex) >= pairs.size()) {
+        return std::nullopt;
+    }
+    const auto& pair = pairs[static_cast<std::size_t>(diffPairIndex)];
+    if (!pair.correct()) {
+        return std::nullopt;
+    }
+    const auto sp = static_cast<std::size_t>(*pair.startP().resolvedIndex());
+    const auto sn = static_cast<std::size_t>(*pair.startN().resolvedIndex());
+    const auto ep = static_cast<std::size_t>(*pair.stopP().resolvedIndex());
+    const auto en = static_cast<std::size_t>(*pair.stopN().resolvedIndex());
+    if (!isValid(_sParams[sp][sp]) || !isValid(_sParams[sn][sn])) {
+        return std::nullopt;
+    }
+
+    DiffPairSdd result;
+    if (isValid(_sParams[sp][sp]) && isValid(_sParams[sn][sp]) && isValid(_sParams[sp][sn]) &&
+        isValid(_sParams[sn][sn])) {
+        std::vector<double> sdd11(_frequencies.size());
+        for (std::size_t f = 0; f < _frequencies.size(); ++f) {
+            const std::complex<double> v =
+                0.5 * (_sParams[sp][sp][f] - _sParams[sn][sp][f] - _sParams[sp][sn][f] + _sParams[sn][sn][f]);
+            sdd11[f] = 20 * std::log10(std::abs(v));
+        }
+        result.sdd11Db = std::move(sdd11);
+    }
+    if (isValid(_sParams[ep][sp]) && isValid(_sParams[ep][sn]) && isValid(_sParams[en][sp]) &&
+        isValid(_sParams[en][sn])) {
+        std::vector<double> sdd21(_frequencies.size());
+        for (std::size_t f = 0; f < _frequencies.size(); ++f) {
+            const std::complex<double> v =
+                0.5 * (_sParams[ep][sp][f] - _sParams[ep][sn][f] - _sParams[en][sp][f] + _sParams[en][sn][f]);
+            sdd21[f] = 20 * std::log10(std::abs(v));
+        }
+        result.sdd21Db = std::move(sdd21);
+    }
+    if (!result.sdd11Db.has_value() && !result.sdd21Db.has_value()) {
+        return std::nullopt;
+    }
+    return result;
+}
+
+std::optional<Postprocessor::DiffPairImpedance> Postprocessor::getDiffPairImpedance(std::int32_t diffPairIndex) const {
+    const auto& pairs = _simConfig.diffPairs();
+    if (diffPairIndex < 0 || static_cast<std::size_t>(diffPairIndex) >= pairs.size()) {
+        return std::nullopt;
+    }
+    const auto& pair = pairs[static_cast<std::size_t>(diffPairIndex)];
+    if (!pair.correct()) {
+        return std::nullopt;
+    }
+    const auto sp = static_cast<std::size_t>(*pair.startP().resolvedIndex());
+    const auto sn = static_cast<std::size_t>(*pair.startN().resolvedIndex());
+    const auto ep = static_cast<std::size_t>(*pair.stopP().resolvedIndex());
+    const auto en = static_cast<std::size_t>(*pair.stopN().resolvedIndex());
+    if (!isValid(_sParams[sp][sp]) || !isValid(_sParams[sn][sn])) {
+        return std::nullopt;
+    }
+
+    if (!(_referenceZs[sp] == _referenceZs[sn] && _referenceZs[sn] == _referenceZs[ep] &&
+          _referenceZs[ep] == _referenceZs[en])) {
+        logError("Reference impedances for ports in differential pair " + pair.name().value_or("") +
+                  " are not all equal. Cannot calculate impedance");
+        return std::nullopt;
+    }
+
+    const double z0 = _referenceZs[sp];
+    DiffPairImpedance result;
+    result.magnitudeOhm.resize(_frequencies.size());
+    result.angleDeg.resize(_frequencies.size());
+    for (std::size_t f = 0; f < _frequencies.size(); ++f) {
+        const std::complex<double> s11 = _sParams[sp][sp][f];
+        const std::complex<double> s21 = _sParams[sn][sp][f];
+        const std::complex<double> s12 = _sParams[sp][sn][f];
+        const std::complex<double> s22 = _sParams[sn][sn][f];
+        const std::complex<double> gamma =
+            ((2.0 * s11 - s21) * (1.0 - s22 - s12) + (1.0 - s11 - s21) * (1.0 + s22 - 2.0 * s12)) /
+            ((2.0 - s21) * (1.0 - s22 - s12) + (1.0 - s11 - s21) * (1.0 + s22));
+        const std::complex<double> impedance = z0 * (1.0 + gamma) / (1.0 - gamma);
+        result.magnitudeOhm[f] = std::abs(impedance);
+        result.angleDeg[f] = std::arg(impedance) * 180.0 / M_PI;
+    }
+    return result;
+}
+
 void Postprocessor::renderDiffPairSParams(bool transparent, const std::filesystem::path& outputDir) const {
     logInfo("Rendering differential pair S-parameter plots");
     const std::vector<double> freqGHz = _scaleFreqGHz(_frequencies);
 
-    for (const auto& pair : _simConfig.diffPairs()) {
-        if (!pair.correct()) {
-            continue;
-        }
-        const auto sp = static_cast<std::size_t>(*pair.startP().resolvedIndex());
-        const auto sn = static_cast<std::size_t>(*pair.startN().resolvedIndex());
-        const auto ep = static_cast<std::size_t>(*pair.stopP().resolvedIndex());
-        const auto en = static_cast<std::size_t>(*pair.stopN().resolvedIndex());
-        if (!isValid(_sParams[sp][sp]) || !isValid(_sParams[sn][sn])) {
+    for (std::size_t idx = 0; idx < _simConfig.diffPairs().size(); ++idx) {
+        const std::optional<DiffPairSdd> sdd = getDiffPairSdd(static_cast<std::int32_t>(idx));
+        if (!sdd.has_value()) {
             continue;
         }
 
         auto fig = _newFigure();
         matplot::hold(true);
-        bool plottedAny = false;
-
-        if (isValid(_sParams[sp][sp]) && isValid(_sParams[sn][sp]) && isValid(_sParams[sp][sn]) &&
-            isValid(_sParams[sn][sn])) {
-            std::vector<double> sdd11(_frequencies.size());
-            for (std::size_t f = 0; f < _frequencies.size(); ++f) {
-                const std::complex<double> v =
-                    0.5 * (_sParams[sp][sp][f] - _sParams[sn][sp][f] - _sParams[sp][sn][f] + _sParams[sn][sn][f]);
-                sdd11[f] = 20 * std::log10(std::abs(v));
-            }
-            matplot::plot(freqGHz, sdd11)->display_name("$SDD_{11}$");
-            plottedAny = true;
+        if (sdd->sdd11Db.has_value()) {
+            matplot::plot(freqGHz, *sdd->sdd11Db)->display_name("$SDD_{11}$");
         }
-        if (isValid(_sParams[ep][sp]) && isValid(_sParams[ep][sn]) && isValid(_sParams[en][sp]) &&
-            isValid(_sParams[en][sn])) {
-            std::vector<double> sdd21(_frequencies.size());
-            for (std::size_t f = 0; f < _frequencies.size(); ++f) {
-                const std::complex<double> v =
-                    0.5 * (_sParams[ep][sp][f] - _sParams[ep][sn][f] - _sParams[en][sp][f] + _sParams[en][sn][f]);
-                sdd21[f] = 20 * std::log10(std::abs(v));
-            }
-            matplot::plot(freqGHz, sdd21)->display_name("$SDD_{21}$");
-            plottedAny = true;
-        }
-        if (!plottedAny) {
-            continue;
+        if (sdd->sdd21Db.has_value()) {
+            matplot::plot(freqGHz, *sdd->sdd21Db)->display_name("$SDD_{21}$");
         }
 
         matplot::legend();
@@ -325,52 +402,23 @@ void Postprocessor::renderDiffPairSParams(bool transparent, const std::filesyste
 
 void Postprocessor::renderDiffImpedance(bool transparent, const std::filesystem::path& outputDir) const {
     logInfo("Rendering differential pair impedance plots");
-    for (const auto& pair : _simConfig.diffPairs()) {
-        if (!pair.correct()) {
+    const std::vector<double> freqGHz = _scaleFreqGHz(_frequencies);
+    for (std::size_t idx = 0; idx < _simConfig.diffPairs().size(); ++idx) {
+        const std::optional<DiffPairImpedance> impedance = getDiffPairImpedance(static_cast<std::int32_t>(idx));
+        if (!impedance.has_value()) {
             continue;
-        }
-        const auto sp = static_cast<std::size_t>(*pair.startP().resolvedIndex());
-        const auto sn = static_cast<std::size_t>(*pair.startN().resolvedIndex());
-        const auto ep = static_cast<std::size_t>(*pair.stopP().resolvedIndex());
-        const auto en = static_cast<std::size_t>(*pair.stopN().resolvedIndex());
-        if (!isValid(_sParams[sp][sp]) || !isValid(_sParams[sn][sn])) {
-            continue;
-        }
-
-        if (!(_referenceZs[sp] == _referenceZs[sn] && _referenceZs[sn] == _referenceZs[ep] &&
-              _referenceZs[ep] == _referenceZs[en])) {
-            logError("Reference impedances for ports in differential pair " + pair.name().value_or("") +
-                      " are not all equal. Cannot calculate impedance");
-            continue;
-        }
-
-        const double z0 = _referenceZs[sp];
-        std::vector<double> impedanceMag(_frequencies.size());
-        std::vector<double> impedanceAngleDeg(_frequencies.size());
-        for (std::size_t f = 0; f < _frequencies.size(); ++f) {
-            const std::complex<double> s11 = _sParams[sp][sp][f];
-            const std::complex<double> s21 = _sParams[sn][sp][f];
-            const std::complex<double> s12 = _sParams[sp][sn][f];
-            const std::complex<double> s22 = _sParams[sn][sn][f];
-            const std::complex<double> gamma =
-                ((2.0 * s11 - s21) * (1.0 - s22 - s12) + (1.0 - s11 - s21) * (1.0 + s22 - 2.0 * s12)) /
-                ((2.0 - s21) * (1.0 - s22 - s12) + (1.0 - s11 - s21) * (1.0 + s22));
-            const std::complex<double> impedance = z0 * (1.0 + gamma) / (1.0 - gamma);
-            impedanceMag[f] = std::abs(impedance);
-            impedanceAngleDeg[f] = std::arg(impedance) * 180.0 / M_PI;
         }
 
         auto fig = _newFigure();
-        const std::vector<double> freqGHz = _scaleFreqGHz(_frequencies);
         matplot::axes_handle ax0 = matplot::subplot(2, 1, 0);
-        matplot::plot(ax0, freqGHz, impedanceMag);
+        matplot::plot(ax0, freqGHz, impedance->magnitudeOhm);
         ax0->ylabel("Magnitude, $|Z_{diff}| [\\Omega]$");
         matplot::grid(ax0, true);
         const auto ylim0 = ax0->ylim();
         ax0->ylim({std::min(ylim0[0], 0.0), std::max(ylim0[1], 200.0)});
 
         matplot::axes_handle ax1 = matplot::subplot(2, 1, 1);
-        matplot::plot(ax1, freqGHz, impedanceAngleDeg)->line_style("--").color("orange");
+        matplot::plot(ax1, freqGHz, impedance->angleDeg)->line_style("--").color("orange");
         ax1->ylabel("Angle, $arg(Z_{diff}) [^\\circ]$");
         ax1->xlabel("Frequency [GHz]");
         matplot::grid(ax1, true);

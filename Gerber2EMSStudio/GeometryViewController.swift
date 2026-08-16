@@ -41,6 +41,10 @@ final class GeometryViewController: NSViewController {
         statusLabel.alignment = .center
         statusLabel.lineBreakMode = .byWordWrapping
         statusLabel.maximumNumberOfLines = 0
+        // See SimulationResultsViewController's identical statusLabel setup for why this is needed --
+        // without it, this multi-line label's intrinsic width can come back unwrapped-and-huge,
+        // which an Auto-Layout-sized window then grows to accommodate.
+        statusLabel.preferredMaxLayoutWidth = 400
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(statusLabel)
 

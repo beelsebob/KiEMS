@@ -39,6 +39,13 @@ typedef NS_ENUM(NSInteger, EMSNetSelectorKind) {
 @property (nonatomic, nullable) NSNumber *width;
 @property (nonatomic, nullable) NSNumber *dBMargin;
 
+/// The MSLPort propagation direction, in degrees (0 = +X, 90 = +Y, ...) -- nil means "derive it
+/// automatically from the routed copper departing the pad" (see gerber2ems::_deriveDirection in
+/// port_resolution.cpp). Any value is accepted, not just the four cardinal directions -- the app's
+/// own direction popup snaps North/South/East/West to 90/270/0/180, but a "Custom" angle can be
+/// anything the port_resolution.cpp escape hatch supports.
+@property (nonatomic, nullable) NSNumber *direction;
+
 /// Only meaningful for a .Net-kind entry: whether the given pad is excluded from an otherwise-
 /// involved net (see gerber2ems::InvolvedNetConfig's own doc comment) -- the source list's per-pin
 /// "Included in Simulation" checkbox is really toggling this, not a separate per-pin entry.
@@ -114,6 +121,13 @@ typedef NS_ENUM(NSInteger, EMSNetSelectorKind) {
 /// the via fields above.
 @property (nonatomic) double frequencyStart;
 @property (nonatomic) double frequencyStop;
+
+/// The FDTD engine's hard cap on timesteps for every port's run -- the run stops here even if
+/// openEMS's own -60dB energy-decay end criteria hasn't been met yet (RunFDTD logs a warning to that
+/// effect when it happens). Document-level (EMSConfig), not per-simulation, same as the fields above.
+/// Too low a value truncates the recorded time-domain signal before it's decayed, which shows up as
+/// spurious ripple/rapid phase rotation in the post-processed S-parameters.
+@property (nonatomic) NSInteger maxSteps;
 
 /// Every copper layer's name, board-top to board-bottom, in the same 0-based order
 /// InvolvedNetConfig::plane()/PortConfig::plane() index into (substrate layers don't count towards

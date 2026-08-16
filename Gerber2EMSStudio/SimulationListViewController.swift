@@ -99,6 +99,11 @@ final class SimulationListViewController: NSViewController {
     /// that simulation's geometry-step pipeline run is in flight.
     private var busyGeometryIndices: Set<Int> = []
 
+    /// Same as busyGeometryIndices, for the "Simulation Results" row -- set by DocumentWindowController
+    /// (wired to SimulationResultsViewController.onRunStateChanged) while that simulation's full
+    /// geometry -> simulate -> postprocess pipeline run is in flight.
+    private var busySimulationResultsIndices: Set<Int> = []
+
     /// Fired whenever the selected row changes, including to nil when the list is empty or nothing
     /// is selected.
     var onSelectionChanged: ((SimulationListSelection?) -> Void)?
@@ -125,7 +130,9 @@ final class SimulationListViewController: NSViewController {
         // Server session rather than a real bug, since Liquid Glass rendering leans on the live
         // display. Its content MUST go through `contentView`, not as a regular subview -- per
         // Apple's docs, arbitrary direct subviews of a glass view aren't guaranteed correct z-order
-        // or legibility treatment against the glass.
+        // or legibility treatment against the glass. (Confirmed innocent: a bisection investigation
+        // into a real window-corruption bug swapped this out as a suspect and the bug persisted --
+        // the actual cause was DGCharts, a since-removed third-party charting dependency.)
         let glassView = NSGlassEffectView()
         // Matches the standard macOS window corner radius (no public API reports it -- this is the
         // long-standing value used since the Big Sur redesign) so the bottom-left corner, which sits
@@ -324,6 +331,25 @@ final class SimulationListViewController: NSViewController {
         outlineView.reloadItem(geometryNode)
     }
 
+    /// Same as setGeometryRowBusy, for the "Simulation Results" row -- see
+    /// SimulationResultsViewController.onRunStateChanged's doc comment.
+    func setSimulationResultsRowBusy(_ busy: Bool, forSimulationIndex index: Int) {
+        if busy {
+            busySimulationResultsIndices.insert(index)
+        } else {
+            busySimulationResultsIndices.remove(index)
+        }
+        guard let simulationNode = simulationNodes.first(where: {
+            if case .simulation(let i) = $0.kind { return i == index }
+            return false
+        }) else { return }
+        guard let resultsNode = simulationNode.children.first(where: {
+            if case .simulationResults = $0.kind { return true }
+            return false
+        }) else { return }
+        outlineView.reloadItem(resultsNode)
+    }
+
     @objc private func selectionChanged() {
         updateButtonEnabledState()
         let row = outlineView.selectedRow
@@ -396,9 +422,10 @@ extension SimulationListViewController: NSOutlineViewDelegate {
         case .geometry(let simulationIndex):
             return Self.makeChildCell(in: outlineView, owner: self, title: "Geometry", symbolName: "cube",
                                        showsSpinner: busyGeometryIndices.contains(simulationIndex))
-        case .simulationResults:
+        case .simulationResults(let simulationIndex):
             return Self.makeChildCell(in: outlineView, owner: self, title: "Simulation Results",
-                                       symbolName: "chart.bar", showsSpinner: false)
+                                       symbolName: "chart.bar",
+                                       showsSpinner: busySimulationResultsIndices.contains(simulationIndex))
         case .fieldViewer:
             return Self.makeChildCell(in: outlineView, owner: self, title: "Field Viewer",
                                        symbolName: "waveform", showsSpinner: false)

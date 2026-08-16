@@ -406,20 +406,6 @@ std::expected<void, std::string> Simulation::addResistivePort(PortConfig& portCo
     return {};
 }
 
-void Simulation::addVirtualPort(const PortConfig& portConfig) {
-    for (std::int32_t i = 0; i < 11; ++i) {
-        addGridLine(*_grid, "x", i);
-        addGridLine(*_grid, "y", i);
-    }
-    addGridLine(*_grid, "z", 0);
-    addGridLine(*_grid, "z", 10);
-
-    CSPropMetal* metal = addMetal(*_csx, "VirtualPort_" + std::to_string(_ports.size()));
-    _ports.push_back(std::make_unique<MSLPort>(*_csx, static_cast<std::int32_t>(_ports.size()), *metal,
-                                                Point3{0, 0, 0}, Point3{10, 10, 10}, "x", "z", 0.0,
-                                                portConfig.impedance(), 100));
-}
-
 void Simulation::addPlane(double zHeight) {
     addBox(*_planeMaterial, {_slicedBoard.xMin, _slicedBoard.yMin, zHeight},
            {_slicedBoard.xMin + _slicedBoard.width, _slicedBoard.yMin + _slicedBoard.height, zHeight}, 1);
@@ -769,13 +755,6 @@ std::expected<void, std::string> Simulation::addPorts() {
         }
     }
     return {};
-}
-
-void Simulation::addVirtualPorts() {
-    logInfo("Adding virtual ports");
-    for (const auto& portConfig : _simConfig.ports()) {
-        addVirtualPort(portConfig);
-    }
 }
 
 } // namespace gerber2ems

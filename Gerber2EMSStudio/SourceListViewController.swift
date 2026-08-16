@@ -175,6 +175,8 @@ final class SourceListViewController: NSViewController {
     private let planeComboBox = NSComboBox()
     private let widthField = NSTextField(string: "")
     private let dBMarginField = NSTextField(string: "")
+    private let directionPopUp = NSPopUpButton()
+    private let customDirectionField = NSTextField(string: "")
     // Styled like DocumentWindowController's noSelectionLabel ("No Simulation Selected") -- same
     // "big, muted placeholder text" look for the same kind of "nothing to show here yet" state.
     private let detailStatusLabel: NSTextField = {
@@ -238,6 +240,55 @@ final class SourceListViewController: NSViewController {
 
     private var rootNodes: [SourceListNode] = []
     private var selectedNode: SourceListNode?
+    /// Set by refreshBoardData() whenever the current scope's KicadBoardBridge query threw, so
+    /// showDetail(for: nil) can show *why* the list is empty (or incomplete) instead of the generic
+    /// "select something" placeholder, which used to look identical to a query that genuinely
+    /// succeeded with zero results.
+    private var boardDataError: String?
+
+    /// The choices in directionPopUp. North/South/East/West are fixed cardinal angles, matching
+    /// GeometryView's board-space convention (+X east/right, +Y north/up -- see its own isFlipped
+    /// doc comment) and the same 0/90/180/270 values gerber2ems::_deriveDirection snaps to
+    /// automatically. `custom` reveals customDirectionField for any other angle; `auto` clears the
+    /// override entirely, letting port_resolution.cpp derive it from routed copper as before.
+    private enum DirectionKind: Int, CaseIterable {
+        case auto, north, south, east, west, custom
+
+        var title: String {
+            switch self {
+            case .auto: return "Auto"
+            case .north: return "North"
+            case .south: return "South"
+            case .east: return "East"
+            case .west: return "West"
+            case .custom: return "Custom"
+            }
+        }
+
+        /// The fixed angle (degrees) for every case but .custom, whose angle instead comes from
+        /// customDirectionField -- and .auto, which has none at all (nil override).
+        var fixedDegrees: Double? {
+            switch self {
+            case .auto, .custom: return nil
+            case .north: return 90
+            case .south: return 270
+            case .east: return 0
+            case .west: return 180
+            }
+        }
+
+        /// Classifies a stored direction value (nil, or InvolvedNetConfig::direction()'s degrees)
+        /// back into one of these cases -- a fixed angle that happens to equal one of the cardinal
+        /// values reads back as that cardinal, not Custom, so re-opening a net set to due north still
+        /// shows "North" rather than "Custom (90°)".
+        static func kind(for direction: Double?) -> DirectionKind {
+            guard let direction else { return .auto }
+            for kind in DirectionKind.allCases where kind.fixedDegrees == direction {
+                return kind
+            }
+            return .custom
+        }
+    }
 
     private enum Scope: Int { case netClass, net, footprint }
     private var scope: Scope = .footprint
@@ -416,6 +467,16 @@ final class SourceListViewController: NSViewController {
         planeComboBox.alignment = .right
         planeComboBox.widthAnchor.constraint(equalToConstant: 140).isActive = true
 
+        directionPopUp.addItems(withTitles: DirectionKind.allCases.map(\.title))
+        directionPopUp.target = self
+        directionPopUp.action = #selector(directionChanged)
+
+        customDirectionField.formatter = Self.directionFormatter
+        customDirectionField.alignment = .right
+        customDirectionField.target = self
+        customDirectionField.action = #selector(detailFieldChanged(_:))
+        customDirectionField.widthAnchor.constraint(equalToConstant: 80).isActive = true
+
         excitationSeparator.wantsLayer = true
         excitationSeparator.layer?.backgroundColor = NSColor.separatorColor.cgColor
         excitationSeparator.heightAnchor.constraint(equalToConstant: 1).isActive = true
@@ -481,6 +542,11 @@ final class SourceListViewController: NSViewController {
         planeMainRow.orientation = .horizontal
         planeMainRow.spacing = 8
 
+        let directionRow = NSStackView(views: [directionPopUp, customDirectionField])
+        directionRow.orientation = .horizontal
+        directionRow.spacing = 8
+        let directionLabeledRow = labeled("Direction:", directionRow)
+
         widthDBAdvancedRow = NSStackView(views: [
             labeled("Width override:", widthField),
             labeled("dB margin override:", dBMarginField, labelWidth: 140),
@@ -493,7 +559,7 @@ final class SourceListViewController: NSViewController {
         // includedCheckbox is actually checked -- there's nothing meaningful to show for a net/pin
         // that isn't part of the simulation yet. widthDBAdvancedRow is handled alongside these in
         // that method, but separately, since it's also gated on widthDBAdvancedRowExpanded.
-        valueFieldRows = [impedanceRow, lengthRow, planeMainRow]
+        valueFieldRows = [impedanceRow, lengthRow, planeMainRow, directionLabeledRow]
 
         let detailStack = NSStackView(views: [
             includedRow,
@@ -663,6 +729,8 @@ final class SourceListViewController: NSViewController {
         return formatter
     }()
 
+    private static let directionFormatter = PhaseValueFormatter()
+
     private var selectedSimulation: EMSSimulationBridge? {
         guard let document, let selectedIndex else { return nil }
         let simulations = document.config.simulations
@@ -692,23 +760,40 @@ final class SourceListViewController: NSViewController {
         let currentScope = scope
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let nodes: [SourceListNode]
+            // Surfaced (see below) rather than swallowed by a bare `try?` -- a query failure used to
+            // just look identical to "board genuinely has zero nets/footprints," with no way to tell
+            // the two apart from the UI alone.
+            var queryError: String?
             switch currentScope {
             case .netClass:
-                let names = ((try? KicadBoardBridge.netClasses(forBoard: kicadPcbPath,
-                                                                 kicadQueryHelperPath: helperPath)) ?? [])
-                    .sorted(by: Self.byLocalizedStandardName)
+                let names: [String]
+                do {
+                    names = try KicadBoardBridge.netClasses(forBoard: kicadPcbPath, kicadQueryHelperPath: helperPath)
+                        .sorted(by: Self.byLocalizedStandardName)
+                } catch {
+                    names = []
+                    queryError = error.localizedDescription
+                }
                 nodes = names.map { SourceListNode(kind: .netClass($0)) }
             case .net:
-                let names = ((try? KicadBoardBridge.allNets(forBoard: kicadPcbPath,
-                                                              kicadQueryHelperPath: helperPath)) ?? [])
-                    .sorted(by: Self.byLocalizedStandardName)
-                let footprints = (try? KicadBoardBridge.footprints(forBoard: kicadPcbPath,
-                                                                     kicadQueryHelperPath: helperPath)) ?? []
+                var names: [String] = []
+                var footprints: [KicadFootprintInfo] = []
+                do {
+                    names = try KicadBoardBridge.allNets(forBoard: kicadPcbPath, kicadQueryHelperPath: helperPath)
+                        .sorted(by: Self.byLocalizedStandardName)
+                    footprints = try KicadBoardBridge.footprints(forBoard: kicadPcbPath, kicadQueryHelperPath: helperPath)
+                } catch {
+                    queryError = error.localizedDescription
+                }
                 nodes = Self.hierarchicalNetNodes(from: names, footprints: footprints)
             case .footprint:
-                let footprints = ((try? KicadBoardBridge.footprints(forBoard: kicadPcbPath,
-                                                                      kicadQueryHelperPath: helperPath)) ?? [])
-                    .sorted { Self.byLocalizedStandardName($0.reference, $1.reference) }
+                var footprints: [KicadFootprintInfo] = []
+                do {
+                    footprints = try KicadBoardBridge.footprints(forBoard: kicadPcbPath, kicadQueryHelperPath: helperPath)
+                        .sorted { Self.byLocalizedStandardName($0.reference, $1.reference) }
+                } catch {
+                    queryError = error.localizedDescription
+                }
 
                 var footprintsByCategory: [String: [KicadFootprintInfo]] = [:]
                 for footprint in footprints {
@@ -741,6 +826,7 @@ final class SourceListViewController: NSViewController {
             }
             DispatchQueue.main.async {
                 self?.rootNodes = nodes
+                self?.boardDataError = queryError
                 self?.outlineView.reloadData()
                 self?.showDetail(for: nil)
             }
@@ -966,7 +1052,11 @@ final class SourceListViewController: NSViewController {
         selectedNode = node
         guard let node else {
             setDetailFieldsHidden(true)
-            detailStatusLabel.stringValue = "Select a net, net class, or pin."
+            if let boardDataError {
+                detailStatusLabel.stringValue = "Couldn't read this board's data: \(boardDataError)"
+            } else {
+                detailStatusLabel.stringValue = "Select a net, net class, or pin."
+            }
             return
         }
         guard node.isSelectableForInclusion else {
@@ -993,6 +1083,9 @@ final class SourceListViewController: NSViewController {
             planeComboBox.stringValue = planeDisplayString(for: entry.plane)
             widthField.objectValue = entry.width
             dBMarginField.objectValue = entry.dBMargin
+            let kind = DirectionKind.kind(for: entry.direction?.doubleValue)
+            directionPopUp.selectItem(at: kind.rawValue)
+            customDirectionField.doubleValue = entry.direction?.doubleValue ?? 0
         } else {
             includedCheckbox.state = .off
             impedanceField.stringValue = ""
@@ -1000,7 +1093,10 @@ final class SourceListViewController: NSViewController {
             planeComboBox.stringValue = ""
             widthField.stringValue = ""
             dBMarginField.stringValue = ""
+            directionPopUp.selectItem(at: DirectionKind.auto.rawValue)
+            customDirectionField.stringValue = ""
         }
+        updateCustomDirectionFieldVisibility()
         updateValueFieldsVisibility()
 
         // Excitations are per-pin only -- hidden entirely for a net/net-class selection, and
@@ -1063,6 +1159,34 @@ final class SourceListViewController: NSViewController {
             row.isHidden = !included
         }
         widthDBAdvancedRow.isHidden = !included || !widthDBAdvancedRowExpanded
+    }
+
+    /// customDirectionField only makes sense (and is only shown) once "Custom" is picked -- every
+    /// other DirectionKind either has no angle at all (.auto) or a fixed one the popup itself already
+    /// names (.north/.south/.east/.west), so a free-text field next to them would just be confusing.
+    private func updateCustomDirectionFieldVisibility() {
+        customDirectionField.isHidden = DirectionKind(rawValue: directionPopUp.indexOfSelectedItem) != .custom
+    }
+
+    @objc private func directionChanged() {
+        guard let entry = selectedNode.flatMap(matchingEntry),
+              let kind = DirectionKind(rawValue: directionPopUp.indexOfSelectedItem)
+        else { return }
+        updateCustomDirectionFieldVisibility()
+        switch kind {
+        case .auto:
+            entry.direction = nil
+        case .north, .south, .east, .west:
+            entry.direction = kind.fixedDegrees.map { NSNumber(value: $0) }
+        case .custom:
+            // Keeps whatever angle was already showing (a previously-set fixed direction, or 0 if
+            // there wasn't one) rather than snapping straight to 0 the instant Custom is picked --
+            // switching from North to Custom should start from 90, not silently reset it.
+            customDirectionField.doubleValue = entry.direction?.doubleValue ?? customDirectionField.doubleValue
+            entry.direction = NSNumber(value: customDirectionField.doubleValue)
+        }
+        document?.updateChangeCount(.changeDone)
+        onInvolvedNetsChanged?()
     }
 
     @objc private func toggleWidthDBAdvancedRow() {
@@ -1178,6 +1302,7 @@ final class SourceListViewController: NSViewController {
             }
         case widthField: entry.width = sender.stringValue.isEmpty ? nil : NSNumber(value: sender.doubleValue)
         case dBMarginField: entry.dBMargin = sender.stringValue.isEmpty ? nil : NSNumber(value: sender.doubleValue)
+        case customDirectionField: entry.direction = NSNumber(value: sender.doubleValue)
         default: break
         }
         document?.updateChangeCount(.changeDone)

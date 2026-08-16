@@ -180,6 +180,21 @@ std::vector<CopperOp> _opsOnNets(const GerberFile& gerber, const std::unordered_
     return filtered;
 }
 
+/// The inverse of _opsOnNets: every copper op belonging to neither `nets` set -- used to find "every
+/// other net's" copper (including unnamed/net-less copper, e.g. an unassigned pour) so a stitching
+/// via can be kept off it. Two sets rather than one pre-unioned set purely so callers don't have to
+/// build that union themselves at every call site.
+std::vector<CopperOp> _opsNotOnNets(const GerberFile& gerber, const std::unordered_set<std::string>& netsA,
+                                     const std::unordered_set<std::string>& netsB) {
+    std::vector<CopperOp> filtered;
+    for (const CopperOp& op : gerber.copperOps()) {
+        if (netsA.count(op.net) == 0 && netsB.count(op.net) == 0) {
+            filtered.push_back(op);
+        }
+    }
+    return filtered;
+}
+
 std::optional<std::filesystem::path> _copperGerberForFileName(const std::filesystem::path& fabDir,
                                                                 const std::string& layerFileName) {
     const std::string suffix = "-" + layerFileName + ".gbr";
@@ -222,10 +237,16 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
     const BoundingBox& origin = *originResult;
     const std::vector<LayerConfig> metals = config.getMetals();
 
-    // Per layer: the involved-net and ground-net composites (pre-cutout), and the GerberFile they
-    // came from (kept alive for _opsOnNets' aperture lookups during compositing).
+    // Per layer: the involved-net, ground-net, and everything-else composites (pre-cutout), and the
+    // GerberFile they came from (kept alive for _opsOnNets' aperture lookups during compositing).
+    // otherPerLayer feeds the stitching-via placement loop below: a via is a full-depth barrel
+    // through every copper layer this pipeline models (blind/buried vias aren't supported anywhere
+    // in this codebase), so a candidate sitting on some *other* net's copper on even a single layer
+    // would short that net to ground -- it has to be checked against all of them, not just the
+    // layer(s) that happen to have ground copper.
     std::vector<Clipper2Lib::Paths64> signalPerLayer(metals.size());
     std::vector<Clipper2Lib::Paths64> groundPerLayer(metals.size());
+    std::vector<Clipper2Lib::Paths64> otherPerLayer(metals.size());
 
     Clipper2Lib::Paths64 signalUnionAllLayers;
     for (std::size_t layerIndex = 0; layerIndex < metals.size(); ++layerIndex) {
@@ -242,6 +263,8 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
             compositeOps(gerber, _opsOnNets(gerber, involvedNets), origin.xMin, origin.yMin, tessellationTolerance);
         groundPerLayer[layerIndex] =
             compositeOps(gerber, _opsOnNets(gerber, groundNets), origin.xMin, origin.yMin, tessellationTolerance);
+        otherPerLayer[layerIndex] = compositeOps(gerber, _opsNotOnNets(gerber, involvedNets, groundNets),
+                                                   origin.xMin, origin.yMin, tessellationTolerance);
 
         signalUnionAllLayers = Clipper2Lib::Union(signalUnionAllLayers, signalPerLayer[layerIndex],
                                                     Clipper2Lib::FillRule::NonZero);
@@ -319,6 +342,32 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
             }
         }
         return false;
+    };
+
+    // otherPerLayer, inflated by the candidate via's own annular-ring radius plus viaClearance --
+    // once up front here, not per candidate, since neither depends on where a given candidate lands.
+    // A stitching via must never *intersect* another net's copper (not just avoid its own center
+    // landing inside it): inflating the composite first, then doing a plain point check against it
+    // per candidate below, is equivalent to a disc-vs-polygon intersection test but far cheaper to
+    // evaluate per candidate than running Clipper2's own boolean-intersection per point.
+    std::vector<Clipper2Lib::Paths64> otherClearancePerLayer(otherPerLayer.size());
+    for (std::size_t layerIndex = 0; layerIndex < otherPerLayer.size(); ++layerIndex) {
+        if (otherPerLayer[layerIndex].empty()) {
+            continue;
+        }
+        otherClearancePerLayer[layerIndex] =
+            Clipper2Lib::InflatePaths(otherPerLayer[layerIndex], candidateRadius + config.via().viaClearance(),
+                                        Clipper2Lib::JoinType::Round, Clipper2Lib::EndType::Polygon, 2.0,
+                                        tessellationTolerance);
+    }
+    // A via is a full-depth barrel through every copper layer this pipeline models (no blind/buried
+    // via support anywhere in this codebase -- see otherPerLayer's own doc comment) -- so this checks
+    // every layer, not just the one(s) with ground copper at (x, y).
+    auto intersectsOtherNet = [&](double x, double y) {
+        const Clipper2Lib::Point64 pos(static_cast<std::int64_t>(std::llround(x)),
+                                         static_cast<std::int64_t>(std::llround(y)));
+        return std::any_of(otherClearancePerLayer.begin(), otherClearancePerLayer.end(),
+                            [&](const Clipper2Lib::Paths64& other) { return _pointInComposite(pos, other); });
     };
 
     // Stitching vias: walk every outer boundary loop of the cutout, classify each edge against the
@@ -410,6 +459,7 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
             }
             const double totalLength = cum;
 
+            const std::size_t stitchingViasBeforeRun = stitchingVias.size();
             const auto stepCount = static_cast<std::size_t>(std::max(1.0, std::floor(totalLength / sim.viaSpacing())));
             for (std::size_t step = 0; step <= stepCount; ++step) {
                 const double dist = totalLength * static_cast<double>(step) / static_cast<double>(stepCount);
@@ -449,9 +499,33 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
                 if (tooCloseToExistingVia(viaX, viaY)) {
                     continue;
                 }
+                // Never place a ground stitching via where it would intersect (or, with clearance,
+                // even just crowd) some other net's copper -- doing so would short that net straight
+                // to ground. See intersectsOtherNet's own doc comment for why every layer is checked,
+                // not just the one(s) with ground copper here.
+                if (intersectsOtherNet(viaX, viaY)) {
+                    continue;
+                }
                 stitchingVias.push_back(StitchingVia{viaX, viaY, config.via().stitchingViaHoleDiameter(),
                                                        config.via().stitchingViaAnnularRingDiameter()});
                 existingVias.push_back({viaX, viaY, candidateRadius, true});
+            }
+            // Every candidate along this run got rejected (no ground copper there, too close to
+            // another via, or too close to another net) -- this cut edge is left with no return-path
+            // connection at all, i.e. a floating plane segment. Physically, a plane segment that's
+            // only reconnected by sparse stitching vias (or not reconnected at all) behaves like a
+            // slot/comb resonator: it can trap energy near-field rather than letting it radiate or
+            // dissipate, which shows up as the FDTD's total domain energy plateauing instead of
+            // decaying toward the end criteria. Warned rather than failed outright, since a
+            // genuinely tiny cut edge with nowhere valid to stitch may be harmless -- but a long run
+            // with zero vias is worth a user's attention.
+            if (stitchingVias.size() == stitchingViasBeforeRun) {
+                logWarning("Simulation \"" + sim.name() + "\": a " + std::to_string(totalLength / constants::unitMultiplier) +
+                           " um cut edge of the ground/power plane got no stitching vias at all (every "
+                           "candidate position was rejected) -- this leaves that plane segment "
+                           "electrically floating, which can trap energy and prevent FDTD convergence. "
+                           "Consider a smaller via, tighter via_spacing, or more hull_padding so the cut "
+                           "falls somewhere with room to stitch.");
             }
         }
     }

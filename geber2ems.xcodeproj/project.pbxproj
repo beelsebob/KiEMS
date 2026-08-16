@@ -8,8 +8,14 @@
 
 /* Begin PBXBuildFile section */
 		2FBF45CFAE9FD71F5566E5AA /* gerber2ems_fdtd_worker in Embed Helper Tools */ = {isa = PBXBuildFile; fileRef = 1730AB8B76054706EB2AB0BA /* gerber2ems_fdtd_worker */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		3E7CD25FB948F81DEEC897B3 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CE532C213E2D6E98AA310B22 /* Cocoa.framework */; };
+		479136241E9A85AC3E2BFC9B /* GerberCharts.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DEC747CBEC864D957296A740 /* GerberCharts.framework */; };
 		56EDE8D10A5333B5213EC614 /* libkicad_smoketest in Embed Helper Tools */ = {isa = PBXBuildFile; fileRef = C6D729745136FAA65AEC601F /* libkicad_smoketest */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		5FE243961E65671FE35C65E0 /* libkicad_api.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0F1EB3900F88445339BD6FB8 /* libkicad_api.cpp */; settings = {COMPILER_FLAGS = "-std=c++23"; }; };
+		71AD3CE1302FAAD5006D5847 /* Copper.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71AD3CD6302FAAD5006D5847 /* Copper.framework */; };
+		71AD3CEB302FAAD5006D5847 /* Copper.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71AD3CD6302FAAD5006D5847 /* Copper.framework */; };
+		71AD3CEC302FAAD5006D5847 /* Copper.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 71AD3CD6302FAAD5006D5847 /* Copper.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		FC1671EFEBFEF5FCCCA74E90 /* GerberCharts.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = DEC747CBEC864D957296A740 /* GerberCharts.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -41,12 +47,40 @@
 			remoteGlobalIDString = 0D27BC0AB714B88FE14FFB28;
 			remoteInfo = libkicad_smoketest;
 		};
+		4A26F5AB0BDDD56E51069B55 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 07086D1AD104CA5BBA5AF140;
+			remoteInfo = GerberCharts;
+		};
 		68230F1D42F0B9E29C659103 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 71AD228A30263515006D5847 /* Project object */;
 			proxyType = 1;
 			remoteGlobalIDString = 0E08621C93A1CC737D3F6A93;
 			remoteInfo = libgerber2ems;
+		};
+		71AD3CE2302FAAD5006D5847 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 71AD3CD5302FAAD5006D5847;
+			remoteInfo = Copper;
+		};
+		71AD3CE4302FAAD5006D5847 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 2971163407AC90FC988D853B;
+			remoteInfo = Gerber2EMSStudio;
+		};
+		71AD3CE9302FAAD5006D5847 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 71AD3CD5302FAAD5006D5847;
+			remoteInfo = Copper;
 		};
 		7F0606D12D7446556C7E5509 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -86,6 +120,18 @@
 			);
 			runOnlyForDeploymentPostprocessing = 1;
 		};
+		F585E6E5DED45F393177F068 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				FC1671EFEBFEF5FCCCA74E90 /* GerberCharts.framework in Embed Frameworks */,
+				71AD3CEC302FAAD5006D5847 /* Copper.framework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
@@ -93,11 +139,25 @@
 		1730AB8B76054706EB2AB0BA /* gerber2ems_fdtd_worker */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = gerber2ems_fdtd_worker; sourceTree = BUILT_PRODUCTS_DIR; };
 		5653046AD79D4C9071AF237F /* Gerber2EMSStudio.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Gerber2EMSStudio.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		71AD229230263516006D5847 /* geber2ems */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = geber2ems; sourceTree = BUILT_PRODUCTS_DIR; };
+		71AD3CD6302FAAD5006D5847 /* Copper.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Copper.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		71AD3CE0302FAAD5006D5847 /* CopperTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CopperTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		922BA8FA4CD5D8901DCAC9DA /* libgerber2ems.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; name = libgerber2ems.a; path = liblibgerber2ems.a; sourceTree = BUILT_PRODUCTS_DIR; };
 		A2F04DD1DE94C7C82DF16CD5 /* libkicad.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; name = libkicad.a; path = liblibkicad.a; sourceTree = BUILT_PRODUCTS_DIR; };
 		C6D729745136FAA65AEC601F /* libkicad_smoketest */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = libkicad_smoketest; sourceTree = BUILT_PRODUCTS_DIR; };
 		CAE9E934278E88A4B6FDB4F0 /* libgerber2ems_smoketest */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = libgerber2ems_smoketest; sourceTree = BUILT_PRODUCTS_DIR; };
+		CE532C213E2D6E98AA310B22 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
+		DEC747CBEC864D957296A740 /* GerberCharts.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = GerberCharts.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		71AD3CED302FAAD5006D5847 /* Exceptions for "Copper" folder in "Copper" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			publicHeaders = (
+				Copper.h,
+			);
+			target = 71AD3CD5302FAAD5006D5847 /* Copper */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		006F3A1386AFF2AD46CD89E4 /* libgerber2ems */ = {
@@ -115,6 +175,11 @@
 			path = libgerber2ems_smoketest;
 			sourceTree = "<group>";
 		};
+		1E051C9DFB9D9A4CF7CB1120 /* GerberCharts */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = GerberCharts;
+			sourceTree = "<group>";
+		};
 		429F16897495224E3C8CB5A0 /* libkicad */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = libkicad;
@@ -123,6 +188,19 @@
 		71AD229430263516006D5847 /* geber2ems */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = geber2ems;
+			sourceTree = "<group>";
+		};
+		71AD3CD7302FAAD5006D5847 /* Copper */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				71AD3CED302FAAD5006D5847 /* Exceptions for "Copper" folder in "Copper" target */,
+			);
+			path = Copper;
+			sourceTree = "<group>";
+		};
+		71AD3CE6302FAAD5006D5847 /* CopperTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = CopperTests;
 			sourceTree = "<group>";
 		};
 		8290469707C87811FFCE548F /* gerber2ems_fdtd_worker */ = {
@@ -145,6 +223,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		0C4E4DE5C99212D3ADE4108A /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				3E7CD25FB948F81DEEC897B3 /* Cocoa.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		47D0366908946873BADB59D9 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -156,6 +242,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				479136241E9A85AC3E2BFC9B /* GerberCharts.framework in Frameworks */,
+				71AD3CEB302FAAD5006D5847 /* Copper.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -180,6 +268,21 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		71AD3CD3302FAAD5006D5847 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		71AD3CDD302FAAD5006D5847 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				71AD3CE1302FAAD5006D5847 /* Copper.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		945E3586B3A2D0D928F0F7AC /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -193,6 +296,7 @@
 		71AD228930263515006D5847 = {
 			isa = PBXGroup;
 			children = (
+				1E051C9DFB9D9A4CF7CB1120 /* GerberCharts */,
 				B7D891E5D67D73D341733A71 /* Gerber2EMSStudio */,
 				71AD229430263516006D5847 /* geber2ems */,
 				8290469707C87811FFCE548F /* gerber2ems_fdtd_worker */,
@@ -201,7 +305,10 @@
 				429F16897495224E3C8CB5A0 /* libkicad */,
 				9D2EF3F131A05169F6A8F5B8 /* libkicad_api */,
 				0BA7820838B85822C655B32A /* libkicad_smoketest */,
+				71AD3CD7302FAAD5006D5847 /* Copper */,
+				71AD3CE6302FAAD5006D5847 /* CopperTests */,
 				71AD229330263516006D5847 /* Products */,
+				77AE1A0D84F974CC1EDDD9F6 /* Frameworks */,
 			);
 			sourceTree = "<group>";
 		};
@@ -215,8 +322,19 @@
 				922BA8FA4CD5D8901DCAC9DA /* libgerber2ems.a */,
 				CAE9E934278E88A4B6FDB4F0 /* libgerber2ems_smoketest */,
 				1730AB8B76054706EB2AB0BA /* gerber2ems_fdtd_worker */,
+				DEC747CBEC864D957296A740 /* GerberCharts.framework */,
+				71AD3CD6302FAAD5006D5847 /* Copper.framework */,
+				71AD3CE0302FAAD5006D5847 /* CopperTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		77AE1A0D84F974CC1EDDD9F6 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				E45C2AB06E543A05FCB6DCC8 /* OS X */,
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 		9D2EF3F131A05169F6A8F5B8 /* libkicad_api */ = {
@@ -227,9 +345,55 @@
 			path = libkicad_api;
 			sourceTree = "<group>";
 		};
+		E45C2AB06E543A05FCB6DCC8 /* OS X */ = {
+			isa = PBXGroup;
+			children = (
+				CE532C213E2D6E98AA310B22 /* Cocoa.framework */,
+			);
+			name = "OS X";
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
+/* Begin PBXHeadersBuildPhase section */
+		71AD3CD1302FAAD5006D5847 /* Headers */ = {
+			isa = PBXHeadersBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B729BAF527C6CE60A457BB41 /* Headers */ = {
+			isa = PBXHeadersBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXHeadersBuildPhase section */
+
 /* Begin PBXNativeTarget section */
+		07086D1AD104CA5BBA5AF140 /* GerberCharts */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A7A05BDB98C84DE3CA4A2188 /* Build configuration list for PBXNativeTarget "GerberCharts" */;
+			buildPhases = (
+				B729BAF527C6CE60A457BB41 /* Headers */,
+				53AC52A1D605A6E26AFDD388 /* Sources */,
+				0C4E4DE5C99212D3ADE4108A /* Frameworks */,
+				B459FA9D725A1F82A1F56D0A /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				1E051C9DFB9D9A4CF7CB1120 /* GerberCharts */,
+			);
+			name = GerberCharts;
+			productName = GerberCharts;
+			productReference = DEC747CBEC864D957296A740 /* GerberCharts.framework */;
+			productType = "com.apple.product-type.framework";
+		};
 		0D27BC0AB714B88FE14FFB28 /* libkicad_smoketest */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = E96D43EDF887036033933493 /* Build configuration list for PBXNativeTarget "libkicad_smoketest" */;
@@ -246,8 +410,6 @@
 				0BA7820838B85822C655B32A /* libkicad_smoketest */,
 			);
 			name = libkicad_smoketest;
-			packageProductDependencies = (
-			);
 			productName = libkicad_smoketest;
 			productReference = C6D729745136FAA65AEC601F /* libkicad_smoketest */;
 			productType = "com.apple.product-type.tool";
@@ -267,8 +429,6 @@
 				006F3A1386AFF2AD46CD89E4 /* libgerber2ems */,
 			);
 			name = libgerber2ems;
-			packageProductDependencies = (
-			);
 			productName = libgerber2ems;
 			productReference = 922BA8FA4CD5D8901DCAC9DA /* libgerber2ems.a */;
 			productType = "com.apple.product-type.library.static";
@@ -280,6 +440,7 @@
 				0A4BFFE015AA0DAC88C73F59 /* Sources */,
 				626F031D915714BD531C01FA /* Frameworks */,
 				4EA49CEE0296035538A93916 /* Embed Helper Tools */,
+				F585E6E5DED45F393177F068 /* Embed Frameworks */,
 			);
 			buildRules = (
 			);
@@ -287,13 +448,13 @@
 				0E303C6421A10D82B635ADEB /* PBXTargetDependency */,
 				3E33A9C8EE26B6F26DDDE2A8 /* PBXTargetDependency */,
 				EDFF827E7F22C9DA08D011AC /* PBXTargetDependency */,
+				585312645C254E539E00095D /* PBXTargetDependency */,
+				71AD3CEA302FAAD5006D5847 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				B7D891E5D67D73D341733A71 /* Gerber2EMSStudio */,
 			);
 			name = Gerber2EMSStudio;
-			packageProductDependencies = (
-			);
 			productName = Gerber2EMSStudio;
 			productReference = 5653046AD79D4C9071AF237F /* Gerber2EMSStudio.app */;
 			productType = "com.apple.product-type.application";
@@ -314,8 +475,6 @@
 				8290469707C87811FFCE548F /* gerber2ems_fdtd_worker */,
 			);
 			name = gerber2ems_fdtd_worker;
-			packageProductDependencies = (
-			);
 			productName = gerber2ems_fdtd_worker;
 			productReference = 1730AB8B76054706EB2AB0BA /* gerber2ems_fdtd_worker */;
 			productType = "com.apple.product-type.tool";
@@ -336,8 +495,6 @@
 				1CE9917EFF9195A3FF4FC1AA /* libgerber2ems_smoketest */,
 			);
 			name = libgerber2ems_smoketest;
-			packageProductDependencies = (
-			);
 			productName = libgerber2ems_smoketest;
 			productReference = CAE9E934278E88A4B6FDB4F0 /* libgerber2ems_smoketest */;
 			productType = "com.apple.product-type.tool";
@@ -359,11 +516,56 @@
 				71AD229430263516006D5847 /* geber2ems */,
 			);
 			name = geber2ems;
-			packageProductDependencies = (
-			);
 			productName = geber2ems;
 			productReference = 71AD229230263516006D5847 /* geber2ems */;
 			productType = "com.apple.product-type.tool";
+		};
+		71AD3CD5302FAAD5006D5847 /* Copper */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 71AD3CEE302FAAD5006D5847 /* Build configuration list for PBXNativeTarget "Copper" */;
+			buildPhases = (
+				71AD3CD1302FAAD5006D5847 /* Headers */,
+				71AD3CD2302FAAD5006D5847 /* Sources */,
+				71AD3CD3302FAAD5006D5847 /* Frameworks */,
+				71AD3CD4302FAAD5006D5847 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				71AD3CD7302FAAD5006D5847 /* Copper */,
+			);
+			name = Copper;
+			packageProductDependencies = (
+			);
+			productName = Copper;
+			productReference = 71AD3CD6302FAAD5006D5847 /* Copper.framework */;
+			productType = "com.apple.product-type.framework";
+		};
+		71AD3CDF302FAAD5006D5847 /* CopperTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 71AD3CF1302FAAD5006D5847 /* Build configuration list for PBXNativeTarget "CopperTests" */;
+			buildPhases = (
+				71AD3CDC302FAAD5006D5847 /* Sources */,
+				71AD3CDD302FAAD5006D5847 /* Frameworks */,
+				71AD3CDE302FAAD5006D5847 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				71AD3CE3302FAAD5006D5847 /* PBXTargetDependency */,
+				71AD3CE5302FAAD5006D5847 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				71AD3CE6302FAAD5006D5847 /* CopperTests */,
+			);
+			name = CopperTests;
+			packageProductDependencies = (
+			);
+			productName = CopperTests;
+			productReference = 71AD3CE0302FAAD5006D5847 /* CopperTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
 		};
 		B0B651E8085482933DC2AFFE /* libkicad */ = {
 			isa = PBXNativeTarget;
@@ -380,8 +582,6 @@
 				429F16897495224E3C8CB5A0 /* libkicad */,
 			);
 			name = libkicad;
-			packageProductDependencies = (
-			);
 			productName = libkicad;
 			productReference = A2F04DD1DE94C7C82DF16CD5 /* libkicad.a */;
 			productType = "com.apple.product-type.library.static";
@@ -397,6 +597,13 @@
 				TargetAttributes = {
 					71AD229130263515006D5847 = {
 						CreatedOnToolsVersion = 26.6;
+					};
+					71AD3CD5302FAAD5006D5847 = {
+						CreatedOnToolsVersion = 26.6;
+					};
+					71AD3CDF302FAAD5006D5847 = {
+						CreatedOnToolsVersion = 26.6;
+						TestTargetID = 2971163407AC90FC988D853B;
 					};
 				};
 			};
@@ -421,9 +628,36 @@
 				5BC0C98C152C9B66E02544CD /* libgerber2ems_smoketest */,
 				5034717F4A638C8CC653DE57 /* gerber2ems_fdtd_worker */,
 				2971163407AC90FC988D853B /* Gerber2EMSStudio */,
+				07086D1AD104CA5BBA5AF140 /* GerberCharts */,
+				71AD3CD5302FAAD5006D5847 /* Copper */,
+				71AD3CDF302FAAD5006D5847 /* CopperTests */,
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		71AD3CD4302FAAD5006D5847 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		71AD3CDE302FAAD5006D5847 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B459FA9D725A1F82A1F56D0A /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		0A4BFFE015AA0DAC88C73F59 /* Sources */ = {
@@ -454,7 +688,28 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		53AC52A1D605A6E26AFDD388 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		71AD228E30263515006D5847 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		71AD3CD2302FAAD5006D5847 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		71AD3CDC302FAAD5006D5847 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -494,6 +749,27 @@
 			target = 0D27BC0AB714B88FE14FFB28 /* libkicad_smoketest */;
 			targetProxy = 3429B0B7F4066519273A0A7D /* PBXContainerItemProxy */;
 		};
+		585312645C254E539E00095D /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = GerberCharts;
+			target = 07086D1AD104CA5BBA5AF140 /* GerberCharts */;
+			targetProxy = 4A26F5AB0BDDD56E51069B55 /* PBXContainerItemProxy */;
+		};
+		71AD3CE3302FAAD5006D5847 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 71AD3CD5302FAAD5006D5847 /* Copper */;
+			targetProxy = 71AD3CE2302FAAD5006D5847 /* PBXContainerItemProxy */;
+		};
+		71AD3CE5302FAAD5006D5847 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 2971163407AC90FC988D853B /* Gerber2EMSStudio */;
+			targetProxy = 71AD3CE4302FAAD5006D5847 /* PBXContainerItemProxy */;
+		};
+		71AD3CEA302FAAD5006D5847 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 71AD3CD5302FAAD5006D5847 /* Copper */;
+			targetProxy = 71AD3CE9302FAAD5006D5847 /* PBXContainerItemProxy */;
+		};
 		7B143B2514242142CF40DD14 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = B0B651E8085482933DC2AFFE /* libkicad */;
@@ -517,6 +793,64 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		20964BB945CB5768EF92486D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				GENERATE_INFOPLIST_FILE = YES;
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.tomdavie.gerber-charts";
+				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				VERSIONING_SYSTEM = "apple-generic";
+				VERSION_INFO_PREFIX = "";
+			};
+			name = Debug;
+		};
+		54329134C4B1132CA2C1E347 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				GENERATE_INFOPLIST_FILE = YES;
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.tomdavie.gerber-charts";
+				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				VERSIONING_SYSTEM = "apple-generic";
+				VERSION_INFO_PREFIX = "";
+			};
+			name = Release;
+		};
 		5F377DF0AD36807A9154C726 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -932,6 +1266,108 @@
 					"-llibgerber2ems",
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = Release;
+		};
+		71AD3CEF302FAAD5006D5847 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_MODULE_VERIFIER = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
+				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++20";
+				PRODUCT_BUNDLE_IDENTIFIER = com.tomdavie.Copper;
+				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				VERSIONING_SYSTEM = "apple-generic";
+				VERSION_INFO_PREFIX = "";
+			};
+			name = Debug;
+		};
+		71AD3CF0302FAAD5006D5847 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_MODULE_VERIFIER = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
+				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++20";
+				PRODUCT_BUNDLE_IDENTIFIER = com.tomdavie.Copper;
+				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				VERSIONING_SYSTEM = "apple-generic";
+				VERSION_INFO_PREFIX = "";
+			};
+			name = Release;
+		};
+		71AD3CF2302FAAD5006D5847 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tomdavie.CopperTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Gerber2EMSStudio.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Gerber2EMSStudio";
+			};
+			name = Debug;
+		};
+		71AD3CF3302FAAD5006D5847 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tomdavie.CopperTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Gerber2EMSStudio.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Gerber2EMSStudio";
 			};
 			name = Release;
 		};
@@ -2024,11 +2460,38 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		71AD3CEE302FAAD5006D5847 /* Build configuration list for PBXNativeTarget "Copper" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				71AD3CEF302FAAD5006D5847 /* Debug */,
+				71AD3CF0302FAAD5006D5847 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		71AD3CF1302FAAD5006D5847 /* Build configuration list for PBXNativeTarget "CopperTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				71AD3CF2302FAAD5006D5847 /* Debug */,
+				71AD3CF3302FAAD5006D5847 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		A1979A925EE6A25050650435 /* Build configuration list for PBXNativeTarget "libgerber2ems_smoketest" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				5F377DF0AD36807A9154C726 /* Debug */,
 				62807348053ECB7AA6437231 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A7A05BDB98C84DE3CA4A2188 /* Build configuration list for PBXNativeTarget "GerberCharts" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				54329134C4B1132CA2C1E347 /* Release */,
+				20964BB945CB5768EF92486D /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

@@ -54,11 +54,7 @@
       </BuildableProductRunnable>
       <CommandLineArguments>
          <CommandLineArgument
-            argument = "-i"
-            isEnabled = "YES">
-         </CommandLineArgument>
-         <CommandLineArgument
-            argument = "/Users/tdavie/Documents/Keyboard\ Hub.sim/Keyboard\ Hub.kicad_pcb"
+            argument = "-p"
             isEnabled = "YES">
          </CommandLineArgument>
          <CommandLineArgument
@@ -66,11 +62,23 @@
             isEnabled = "YES">
          </CommandLineArgument>
          <CommandLineArgument
-            argument = "/Users/tdavie/Documents/Keyboard\ Hub.sim/simulation.json"
+            argument = "/private/var/folders/43/3rgt05lx6hj8t_rt5xmgjm5w0000gn/T/Gerber2EMSStudio-BACBB5D0-8FC0-40D2-9209-E5BEEC1F380D/simulation.json"
             isEnabled = "YES">
          </CommandLineArgument>
          <CommandLineArgument
-            argument = "-g"
+            argument = "-i"
+            isEnabled = "YES">
+         </CommandLineArgument>
+         <CommandLineArgument
+            argument = "/private/var/folders/43/3rgt05lx6hj8t_rt5xmgjm5w0000gn/T/Gerber2EMSStudio-BACBB5D0-8FC0-40D2-9209-E5BEEC1F380D/ems/simulation/"
+            isEnabled = "YES">
+         </CommandLineArgument>
+         <CommandLineArgument
+            argument = "-o"
+            isEnabled = "YES">
+         </CommandLineArgument>
+         <CommandLineArgument
+            argument = "/private/var/folders/43/3rgt05lx6hj8t_rt5xmgjm5w0000gn/T/Gerber2EMSStudio-BACBB5D0-8FC0-40D2-9209-E5BEEC1F380D/ems/simulation/"
             isEnabled = "YES">
          </CommandLineArgument>
       </CommandLineArguments>

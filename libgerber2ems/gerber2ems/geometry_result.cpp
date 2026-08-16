@@ -52,7 +52,13 @@ std::expected<GeometryResult, std::string> GeometryResult::build(EMSConfig confi
         if (options.exportField.has_value()) {
             sim.addDumpBoxes();
         }
-        sim.setBoundaryConditions(false);
+        // PML, not MUR (setBoundaryConditions's default) -- MUR is a much weaker absorber for
+        // oblique-incidence and near-field/evanescent content, which a PCB floating in open space
+        // radiates plenty of close to the domain boundary. Passing false here previously left every
+        // boundary on MUR, which showed up as the total domain energy plateauing well above the
+        // -60dB end criteria instead of decaying -- reflections off the boundary keep feeding energy
+        // back into the domain indefinitely rather than letting it actually leave.
+        sim.setBoundaryConditions(true);
         if (auto result = sim.addVias(); !result) {
             return std::unexpected(result.error());
         }

@@ -23,6 +23,12 @@
 
 namespace gerber2ems {
 
+/// Unwraps a complex series' phase angle (matching `std::arg`'s convention) into a continuous
+/// series in degrees -- no +-180 degree jumps where the true phase just happens to cross the
+/// branch cut. Shared by renderSParams's phase subplot and any caller (e.g. a GUI) that wants the
+/// same continuous phase curve without reimplementing the unwrapping.
+std::vector<double> unwrapPhaseDegrees(const std::vector<std::complex<double>>& values);
+
 /// Post-processes and displays simulation data.
 class Postprocessor {
 public:
@@ -39,8 +45,38 @@ public:
     /// Calculates impedance & group delay. Should be called after calculateSparams().
     void processData();
 
+    /// Frequency points every other per-port/per-parameter series here is sampled at, in Hz.
+    const std::vector<double>& frequencies() const { return _frequencies; }
+
     std::optional<std::vector<std::complex<double>>> getImpedance(std::int32_t port) const;
     std::optional<std::vector<std::complex<double>>> getSParam(std::int32_t outputPort, std::int32_t inputPort) const;
+    /// Group delay (seconds) looking from `inputPort` to `outputPort` -- nullopt if that S-parameter
+    /// wasn't (successfully) computed. Also the right accessor for a trace's or differential pair's
+    /// delay: a SingleEndedConfig/DifferentialPairConfig's delay is just this, evaluated at its own
+    /// resolved start/stop port indices (see e.g. renderTraceDelays).
+    std::optional<std::vector<double>> getDelay(std::int32_t outputPort, std::int32_t inputPort) const;
+
+    /// SDD11 (differential return loss, dB) and SDD21 (differential insertion loss, dB) for one
+    /// differential pair, mixed-mode-converted from its 4 constituent single-ended S-parameters.
+    /// Each has its own, independent validity condition (matching renderDiffPairSParams): nullopt
+    /// for either if the S-parameters it depends on weren't computed.
+    struct DiffPairSdd {
+        std::optional<std::vector<double>> sdd11Db;
+        std::optional<std::vector<double>> sdd21Db;
+    };
+    /// nullopt if `diffPairIndex` is out of range, the pair isn't `correct()`, or neither SDD11 nor
+    /// SDD21 could be computed (matching renderDiffPairSParams's own skip conditions).
+    std::optional<DiffPairSdd> getDiffPairSdd(std::int32_t diffPairIndex) const;
+
+    /// Mixed-mode differential impedance for one differential pair -- magnitude in Ohms, angle in
+    /// degrees, both derived from the same 4-S-parameter gamma computation renderDiffImpedance uses.
+    struct DiffPairImpedance {
+        std::vector<double> magnitudeOhm;
+        std::vector<double> angleDeg;
+    };
+    /// nullopt under the same conditions renderDiffImpedance itself skips a pair: out-of-range/
+    /// incorrect pair, missing S-parameters, or the 4 ports' reference impedances aren't all equal.
+    std::optional<DiffPairImpedance> getDiffPairImpedance(std::int32_t diffPairIndex) const;
 
     /// Injects an already-computed S-parameter directly, bypassing addPortData()+calculateSparams()
     /// -- lets a caller that already has S-parameter data in memory (e.g. SimulationResult, see
