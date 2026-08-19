@@ -1,6 +1,9 @@
-// Objective-C interface over the full geometry -> simulate -> postprocess pipeline (running a real
-// FDTD simulation) and a renderable snapshot of its result. Swift-visible; never exposes a C++
-// type. Mirrors GeometryPreviewBridge.h's own shape one stage further down the pipeline.
+// A renderable snapshot of one simulation's post-processed FDTD results (S-parameters, impedance,
+// diff-pair/trace delays) -- Swift-visible; never exposes a C++ type. Mirrors GeometryPreviewBridge.h's
+// own shape one stage further down the pipeline. Actually running the geometry -> simulate ->
+// postprocess pipeline that produces this data is EMSSimulationPipelineBridge's job now (see
+// EMSSimulationPipelineBridge.h) -- see SimulationResultsBridge+Private.h's buildResultsPreview()
+// for how that bridge turns an already-computed Postprocessor into one of these.
 #import <Foundation/Foundation.h>
 
 #import "EMSConfigBridge.h"
@@ -79,24 +82,6 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, readonly) NSArray<EMSResultsSmith *> *smithCharts;
 @property (nonatomic, copy, readonly) NSArray<EMSResultsDiffPair *> *diffPairs;
 @property (nonatomic, copy, readonly) NSArray<EMSResultsTrace *> *traces;
-@end
-
-/// Runs the real geometry -> simulate -> postprocess pipeline (kicad-cli gerber export, stackup
-/// import, port resolution, GeometryResult::build, a full FDTD run per excited port,
-/// PostprocessResult::compute -- the same steps `geber2ems -g -s -p` performs) for one simulation,
-/// then derives a renderable snapshot of its result. Synchronous and potentially very slow (a real
-/// FDTD run can take minutes to hours, with no progress callback) -- callers must run this off the
-/// main thread.
-@interface EMSResultsStepBridge : NSObject
-
-+ (nullable EMSResultsPreview *)runResultsStepForSimulationNamed:(NSString *)simulationName
-                                                            config:(EMSConfigBridge *)config
-                                                        packageDir:(NSString *)packageDir
-                                                      kicadCliPath:(NSString *)kicadCliPath
-                                              kicadQueryHelperPath:(NSString *)helperPath
-                                                    fdtdWorkerPath:(NSString *)workerPath
-                                                             error:(NSError **)error;
-
 @end
 
 NS_ASSUME_NONNULL_END

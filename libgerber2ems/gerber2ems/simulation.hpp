@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -13,6 +14,8 @@
 
 #include <CSXCAD/ContinuousStructure.h>
 #include <openEMS/openems.h>
+
+#include <nlohmann/json.hpp>
 
 #include "board_slicing.hpp"
 #include "config.hpp"
@@ -24,6 +27,59 @@
 
 namespace gerber2ems {
 
+class Simulation;
+
+/// Runs one excited port's FDTD pass on an already-geometry-populated/setExcitation()'d/
+/// setupPorts()'d Simulation, writing its probe files wherever that backend's own convention puts
+/// them -- the extension point that lets a caller outside libgerber2ems (which must never depend
+/// on Copper.framework -- see CopperFDTDRunner.h's own file comment) substitute an in-process GPU
+/// run for the default posix_spawn'd CPU worker (Simulation::run()). Declared here (rather than
+/// nested in SimulationResult, where it originally lived) so simulation_data.hpp's
+/// generateResults() can use the same type without simulation_result.hpp/geometry_result.hpp's own
+/// circular include back onto this header.
+using FDTDPortRunner = std::function<std::expected<void, std::string>(Simulation& sim, std::int32_t excitedPortNumber)>;
+
+/// The grid line positions Simulation::addGrid() placed along each axis -- see
+/// Simulation::computedGridLines()/adoptGridLines(). At namespace scope (not nested in Simulation,
+/// unlike an earlier version of this type) so it can have its own to_json/from_json below, found
+/// via ADL the same way every other serializable value type in this codebase is (see config.hpp) --
+/// nlohmann's ADL lookup for a nested class does not reach into its enclosing class the way it
+/// does an enclosing namespace.
+/// `pmlInner*` are the core mesh's own extent on X/Y, i.e. everywhere inside the PML band
+/// GridGenerator::generate() appends beyond it -- see GridGenerator::pmlInnerXMin()'s own doc
+/// comment. Purely diagnostic (GeometryView's "Show Grid" overlay colors PML-band lines
+/// differently); all 0 for a ComputedGridLines that didn't come from a fresh addGrid() call (e.g.
+/// one round-tripped through JSON from before these fields existed).
+struct ComputedGridLines {
+    std::vector<double> x;
+    std::vector<double> y;
+    std::vector<double> z;
+    double pmlInnerXMin = 0;
+    double pmlInnerXMax = 0;
+    double pmlInnerYMin = 0;
+    double pmlInnerYMax = 0;
+};
+
+inline void to_json(nlohmann::json& j, const ComputedGridLines& g) {
+    j = nlohmann::json{{"x", g.x},
+                        {"y", g.y},
+                        {"z", g.z},
+                        {"pmlInnerXMin", g.pmlInnerXMin},
+                        {"pmlInnerXMax", g.pmlInnerXMax},
+                        {"pmlInnerYMin", g.pmlInnerYMin},
+                        {"pmlInnerYMax", g.pmlInnerYMax}};
+}
+
+inline void from_json(const nlohmann::json& j, ComputedGridLines& g) {
+    j.at("x").get_to(g.x);
+    j.at("y").get_to(g.y);
+    j.at("z").get_to(g.z);
+    g.pmlInnerXMin = j.value("pmlInnerXMin", 0.0);
+    g.pmlInnerXMax = j.value("pmlInnerXMax", 0.0);
+    g.pmlInnerYMin = j.value("pmlInnerYMin", 0.0);
+    g.pmlInnerYMax = j.value("pmlInnerYMax", 0.0);
+}
+
 /// Interacts with openEMS/CSXCAD to build simulation geometry and run the FDTD simulation.
 class Simulation {
 public:
@@ -33,11 +89,57 @@ public:
 
     /// Slices simConfig's board geometry (see board_slicing.hpp) -- simConfig.ports() must already
     /// be populated (resolveSimulationPorts(), called before any Simulation is constructed). Must
-    /// be called before createMaterials()/addGerbers()/addGrid()/addSubstrates()/addVias(), which
-    /// all consume the result. Deliberately not done in the constructor: a `simulate()`-step
-    /// Simulation only ever calls loadGeometry() (reading the already-built geometry.xml a
-    /// `geometry()`-step Simulation saved earlier) and never needs sliced geometry recomputed.
+    /// be called (or adoptSlicedBoard() used instead) before createMaterials()/addGerbers()/
+    /// addGrid()/addSubstrates()/addVias(), which all consume the result.
     std::expected<void, std::string> sliceBoard();
+
+    /// Adopts an already-sliced board a *different* Simulation object computed (typically
+    /// GeometryResult::build()'s own, still held in memory via GeometryResult::slicedBoard()) --
+    /// the cheap alternative to sliceBoard() (which re-parses gerbers and re-runs the board-slicing
+    /// polygon algorithm from scratch) for a caller that just needs a second, independent
+    /// Simulation/ContinuousStructure built from geometry that was already sliced once this same
+    /// process. See populateGeometry()'s own doc comment for why a second Simulation is needed at
+    /// all rather than just reusing the first one directly.
+    void adoptSlicedBoard(SlicedBoard board) { _slicedBoard = std::move(board); }
+
+    const SlicedBoard& slicedBoard() const { return _slicedBoard; }
+
+    /// Snapshots _grid's current line arrays -- meaningful only once addGrid() (or adoptGridLines())
+    /// has actually populated them. GridGenerator::generate() (addGrid()'s own real work) re-parses
+    /// every gerber file to place these -- capturing the answer here is what lets a second
+    /// Simulation skip that entirely via adoptGridLines() instead of calling addGrid() itself. Named
+    /// distinctly from csx_grid_utils.hpp's own gridLines(CSRectGrid&, ...) free function (which
+    /// this is implemented in terms of) -- an unqualified call to that name from inside a Simulation
+    /// member function would otherwise resolve to this method instead (class-scope names hide
+    /// same-named free functions, even ones with a different signature), breaking
+    /// printGridStats()'s own existing use of it.
+    ComputedGridLines computedGridLines() const;
+
+    /// Restores grid lines a *different* Simulation's addGrid() already computed (see
+    /// computedGridLines()) -- must be called before populateGeometry() (which checks for
+    /// already-populated lines and skips its own addGrid() call when it finds them -- see
+    /// populateGeometry()'s own doc comment).
+    void adoptGridLines(const ComputedGridLines& lines);
+
+    /// createMaterials()/addGerbers()/addGrid()/addSubstrates()/addNPTHHoles()/(addDumpBoxes() if
+    /// options.exportField)/setBoundaryConditions(true)/addVias()/addPorts(), in the one order
+    /// that's actually valid (each one depends on state an earlier one sets up) -- sliceBoard() or
+    /// adoptSlicedBoard() must already have been called. addGrid() itself is skipped when
+    /// adoptGridLines() was already called (grid lines already present) -- GridGenerator::generate()
+    /// re-parses every gerber file, so a caller that already has the answer (see gridLines()) should
+    /// never pay for it twice. This is the exact sequence GeometryResult::build() runs once per
+    /// simulation to produce the canonical geometry, and that SimulationResult::run()'s own
+    /// per-excited-port Simulation re-runs against GeometryResult::slicedBoard()'s cached copy -- a
+    /// second, genuinely independent ContinuousStructure is unavoidable per excited port (openEMS's
+    /// own SetCSX()/Reset() give a freshly-constructed openEMS object exclusive ownership of its
+    /// ContinuousStructure, deleting it on destruction -- see _csx's own doc comment -- so N excited
+    /// ports need N separate ContinuousStructure instances, never one shared/reused across them),
+    /// but rebuilding CSXCAD primitives directly from the already-sliced-and-cached SlicedBoard (and
+    /// already-placed grid lines) is real, cheap, in-memory construction work, not serialization --
+    /// unlike the geometry.xml round-trip this replaces for any caller running in the same process
+    /// that already did the (comparatively expensive) gerber-parsing/board-slicing/grid-placement
+    /// work, there is no text encode/decode step anywhere in this path.
+    std::expected<void, std::string> populateGeometry();
 
     void createMaterials();
     void addGrid();
@@ -53,7 +155,14 @@ public:
     /// is the degenerate case where the two points coincide (see ViaHole's own doc comment).
     /// `diameter` is the drill hole; `outerDiameter` is the copper conductor's outer edge (the
     /// "annular ring" OD) -- callers compute this differently per via kind, see addVias().
-    void addVia(double xPos, double yPos, double x2Pos, double y2Pos, double diameter, double outerDiameter);
+    /// `cropToOutline`, when set, clips the via's cross-section to `_slicedBoard.outline` (via
+    /// Clipper2 intersection) before adding it -- for a real board via kept because its disc merely
+    /// *reaches* the cutout boundary (see _viaIntersectsOutline's own doc comment), this prevents
+    /// its geometry from extending past the simulation's own domain. A freshly-placed stitching via
+    /// is always positioned viaEdgeDistance() inward of the boundary by construction, so it never
+    /// needs this -- callers only set it for real board vias.
+    void addVia(double xPos, double yPos, double x2Pos, double y2Pos, double diameter, double outerDiameter,
+                bool cropToOutline = false);
     /// Cuts every non-plated through-hole (see SlicedBoard::npthHoleLoops) out of the substrate
     /// model: an explicit vacuum-epsilon material, extruded through the full substrate stack depth
     /// at a priority above every substrate layer's, so it overrides them wherever it overlaps --
@@ -75,22 +184,47 @@ public:
     void setSinusExcitation(double freq);
 
     /// Runs one port's FDTD pass in a dedicated posix_spawn'd worker process (see
-    /// paths.fdtdWorkerPath), rather than chdir'ing this process -- so the caller's own working
-    /// directory (and any other threads it owns) are never touched. The worker reconstructs its own
-    /// Simulation from paths.configFile/simConfig.name()/geometry.xml; it doesn't share memory with
-    /// this object. loadGeometry()/setExcitation()/setupPorts(excitedPortNumber) must already have
-    /// been called on *this* Simulation before run(), even though the worker redoes the same steps
-    /// on its own copy -- getPortParameters() afterwards still reads this object's _ports.
+    /// paths.fdtdWorkerPath/paths.copperFdtdWorkerPath, selected by options.backend), rather than
+    /// chdir'ing this process -- so the caller's own working directory (and any other threads it
+    /// owns) are never touched. The worker reconstructs its own Simulation from
+    /// paths.configFile/simConfig.name()'s own serialized SimulationData<Grid> (see
+    /// simulation_data.hpp's loadSimulationData()); it doesn't share memory with this object.
+    /// adoptSlicedBoard()/adoptGridLines()/populateGeometry()/setExcitation()/
+    /// setupPorts(excitedPortNumber) must already have been called on *this* Simulation before
+    /// run(), even though the worker redoes the same steps on its own copy -- getPortParameters()
+    /// afterwards still reads this object's _ports.
     std::expected<void, std::string> run(std::int32_t excitedPortNumber);
 
-    /// The actual FDTD execution: chdirs into this port's simulation directory, runs
-    /// SetupFDTD()/RunFDTD(), and restores the previous working directory. Only ever safe to call
-    /// from a freshly-spawned, single-purpose process (see gerber2ems_fdtd_worker's main()) -- never
-    /// called directly by run(), which spawns exactly such a process instead of calling this itself.
+    /// The chdir + SetOverSampling + SetupFDTD() prologue shared by both FDTD backends: chdirs into
+    /// this port's simulation directory and builds the real openEMS Yee grid/coefficients/excitation
+    /// signal (fdtdEngine()'s Operator afterwards), but does NOT run any timesteps and does NOT
+    /// restore the working directory on success (the caller -- runFDTDInPlace() for the CPU backend,
+    /// copper_fdtd_worker's main() for the GPU one -- does that once its own run is actually done, so
+    /// probe/dump files land next to whichever backend produced them). Restores the working directory
+    /// and returns an error if SetupFDTD() itself fails. Only ever safe to call from a freshly-spawned,
+    /// single-purpose process, same as runFDTDInPlace().
+    std::expected<void, std::string> setupFDTDOperator(std::int32_t excitedPortNumber);
+
+    /// The actual FDTD execution: setupFDTDOperator() + the real CPU RunFDTD(), then restores the
+    /// previous working directory. Only ever safe to call from a freshly-spawned, single-purpose
+    /// process (see gerber2ems_fdtd_worker's main()) -- never called directly by run(), which spawns
+    /// exactly such a process instead of calling this itself.
     std::expected<void, std::string> runFDTDInPlace(std::int32_t excitedPortNumber);
 
-    void saveGeometry() const;
-    std::expected<void, std::string> loadGeometry();
+    /// The real openEMS engine object -- exposed so a Copper GPU worker (which links this library
+    /// but this library never links it, see the Copper implementation plan's "no dependency on
+    /// Copper" rule) can reach setupFDTDOperator()'s already-built Operator via its own
+    /// copper::CopperOpenEMS::GetOperatorForGPU(), reached by `static_cast`ing this reference --
+    /// well-defined-in-practice the same way CopperOpenEMSAccess.hpp's own UPML/Excitation
+    /// accessors are (identical layout, no new data members/vtable), not because this object was
+    /// ever actually constructed as a CopperOpenEMS. Not used by anything in this library itself.
+    openEMS& fdtdEngine() { return _fdtd; }
+
+    /// The real CSXCAD geometry -- exposed for the same reason as fdtdEngine(): a Copper worker
+    /// needs it to discover probe boxes (see Copper/Internal/CopperProbes.hpp's discoverProbes()),
+    /// which the Operator alone doesn't carry. Non-owning (see _csx's own doc comment) -- valid for
+    /// as long as this Simulation (and therefore _fdtd) is alive.
+    ContinuousStructure& csx() { return *_csx; }
 
     /// Returns (reflected, incident) uf phasors per port, vs. `frequencies`.
     std::expected<std::pair<std::vector<std::vector<std::complex<double>>>, std::vector<std::vector<std::complex<double>>>>,
@@ -122,6 +256,9 @@ private:
     const RunOptions& _options;
     const PathsConfig& _paths;
     SlicedBoard _slicedBoard;
+    // Set by adoptGridLines(); checked (only) by populateGeometry() to skip its own addGrid() call
+    // -- see both their own doc comments.
+    bool _gridLinesAdopted = false;
 
     std::vector<std::unique_ptr<Port>> _ports;
     std::vector<CSProperties*> _gerberMaterials;   // owned by _csx

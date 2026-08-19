@@ -15,6 +15,7 @@
 #include <vector>
 
 #include <CSXCAD/ContinuousStructure.h>
+#include <CSXCAD/CSPropConductingSheet.h>
 #include <CSXCAD/CSPropDumpBox.h>
 #include <CSXCAD/CSPropExcitation.h>
 #include <CSXCAD/CSPropLumpedElement.h>
@@ -30,7 +31,17 @@ namespace gerber2ems {
 using Point3 = std::array<double, 3>;
 
 CSPropMetal* addMetal(ContinuousStructure& csx, const std::string& name);
-CSPropMaterial* addMaterial(ContinuousStructure& csx, const std::string& name, double epsilon);
+/// A thin conductive sheet with finite conductivity (S/m) and thickness (simulation units, same
+/// convention as every other length this codebase passes to CSXCAD) -- openEMS's own surface-
+/// impedance model for a real metal layer, letting a trace's own skin-effect/ohmic loss show up
+/// without needing to mesh the skin depth itself (a few microns, far finer than this pipeline's
+/// otherwise-copper-driven grid). A CSPropMetal subclass, so every existing CSPropMetal-typed use
+/// (priority ordering, etc.) still applies.
+CSPropConductingSheet* addConductingSheet(ContinuousStructure& csx, const std::string& name, double conductivity,
+                                            double thickness);
+/// `kappa` is the material's electric conductivity in S/m (dielectric loss) -- left at its default
+/// of 0 (a lossless dielectric) for callers that don't have a loss figure for this material.
+CSPropMaterial* addMaterial(ContinuousStructure& csx, const std::string& name, double epsilon, double kappa = 0);
 CSPropExcitation* addExcitation(ContinuousStructure& csx, const std::string& name, std::int32_t excType,
                                  const Point3& excVal, double delay = 0);
 CSPropProbeBox* addProbe(ContinuousStructure& csx, const std::string& name, std::int32_t pType, double weight = 1,

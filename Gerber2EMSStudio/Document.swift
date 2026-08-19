@@ -23,7 +23,26 @@ final class Document: NSDocument {
     /// still needs somewhere of its own to write, same as before the document was ever saved.
     private var scratchDirectory: URL?
 
+    /// One EMSSimulationPipelineBridge per simulation, keyed by simulation name -- shared by
+    /// GeometryViewController and SimulationResultsViewController so switching between a
+    /// simulation's Geometry and Simulation Results rows never redoes work the other row already
+    /// paid for (see EMSSimulationPipelineBridge.h's own doc comment). Keyed by name rather than
+    /// index/identity because that's the pipeline's own natural key (SimulationConfig::name(),
+    /// also how its on-disk output under pipelineDirectory is laid out) -- renaming a simulation
+    /// starts it a fresh pipeline rather than carrying an old one's cache across, which matches its
+    /// on-disk output becoming orphaned under the old name too.
+    private var pipelines: [String: EMSSimulationPipelineBridge] = [:]
+
     override class var autosavesInPlace: Bool { false }
+
+    func pipeline(forSimulationNamed name: String) -> EMSSimulationPipelineBridge {
+        if let existing = pipelines[name] {
+            return existing
+        }
+        let pipeline = EMSSimulationPipelineBridge(simulationName: name)
+        pipelines[name] = pipeline
+        return pipeline
+    }
 
     override func makeWindowControllers() {
         addWindowController(DocumentWindowController(document: self))

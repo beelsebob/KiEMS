@@ -9,10 +9,21 @@ CSPropMetal* addMetal(ContinuousStructure& csx, const std::string& name) {
     return prop;
 }
 
-CSPropMaterial* addMaterial(ContinuousStructure& csx, const std::string& name, double epsilon) {
+CSPropConductingSheet* addConductingSheet(ContinuousStructure& csx, const std::string& name, double conductivity,
+                                            double thickness) {
+    auto* prop = new CSPropConductingSheet(csx.GetParameterSet());
+    prop->SetName(name);
+    prop->SetConductivity(conductivity);
+    prop->SetThickness(thickness);
+    csx.AddProperty(prop);
+    return prop;
+}
+
+CSPropMaterial* addMaterial(ContinuousStructure& csx, const std::string& name, double epsilon, double kappa) {
     auto* prop = new CSPropMaterial(csx.GetParameterSet());
     prop->SetName(name);
     prop->SetEpsilon(epsilon);
+    prop->SetKappa(kappa);
     csx.AddProperty(prop);
     return prop;
 }

@@ -70,6 +70,7 @@ struct StackupLayer {
     std::string name;
     double thicknessMm = 0;
     double epsilonR = 0;
+    double lossTangent = 0;
 };
 
 /// The board's physical stackup, top-to-bottom. See netForFootprintPin for `context`.

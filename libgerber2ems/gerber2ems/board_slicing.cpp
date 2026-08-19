@@ -180,21 +180,6 @@ std::vector<CopperOp> _opsOnNets(const GerberFile& gerber, const std::unordered_
     return filtered;
 }
 
-/// The inverse of _opsOnNets: every copper op belonging to neither `nets` set -- used to find "every
-/// other net's" copper (including unnamed/net-less copper, e.g. an unassigned pour) so a stitching
-/// via can be kept off it. Two sets rather than one pre-unioned set purely so callers don't have to
-/// build that union themselves at every call site.
-std::vector<CopperOp> _opsNotOnNets(const GerberFile& gerber, const std::unordered_set<std::string>& netsA,
-                                     const std::unordered_set<std::string>& netsB) {
-    std::vector<CopperOp> filtered;
-    for (const CopperOp& op : gerber.copperOps()) {
-        if (netsA.count(op.net) == 0 && netsB.count(op.net) == 0) {
-            filtered.push_back(op);
-        }
-    }
-    return filtered;
-}
-
 std::optional<std::filesystem::path> _copperGerberForFileName(const std::filesystem::path& fabDir,
                                                                 const std::string& layerFileName) {
     const std::string suffix = "-" + layerFileName + ".gbr";
@@ -237,16 +222,16 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
     const BoundingBox& origin = *originResult;
     const std::vector<LayerConfig> metals = config.getMetals();
 
-    // Per layer: the involved-net, ground-net, and everything-else composites (pre-cutout), and the
-    // GerberFile they came from (kept alive for _opsOnNets' aperture lookups during compositing).
-    // otherPerLayer feeds the stitching-via placement loop below: a via is a full-depth barrel
-    // through every copper layer this pipeline models (blind/buried vias aren't supported anywhere
-    // in this codebase), so a candidate sitting on some *other* net's copper on even a single layer
-    // would short that net to ground -- it has to be checked against all of them, not just the
-    // layer(s) that happen to have ground copper.
+    // Per layer: the involved-net and ground-net composites (pre-cutout), and the GerberFile they
+    // came from (kept alive for _opsOnNets' aperture lookups during compositing). Every other net's
+    // copper (including unnamed/net-less pours) is deliberately never composited at all -- it never
+    // survives into layerTriangles below (only signalPerLayer/groundInCutout do), so it was never
+    // actually present in the simulated geometry for a stitching via's own full-depth barrel to
+    // short against; an earlier version of this function also rejected via candidates that merely
+    // sat over such copper *on the original, unsliced board*, which was overly conservative for
+    // exactly that reason -- see the stitching-via placement loop below.
     std::vector<Clipper2Lib::Paths64> signalPerLayer(metals.size());
     std::vector<Clipper2Lib::Paths64> groundPerLayer(metals.size());
-    std::vector<Clipper2Lib::Paths64> otherPerLayer(metals.size());
 
     Clipper2Lib::Paths64 signalUnionAllLayers;
     for (std::size_t layerIndex = 0; layerIndex < metals.size(); ++layerIndex) {
@@ -263,8 +248,6 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
             compositeOps(gerber, _opsOnNets(gerber, involvedNets), origin.xMin, origin.yMin, tessellationTolerance);
         groundPerLayer[layerIndex] =
             compositeOps(gerber, _opsOnNets(gerber, groundNets), origin.xMin, origin.yMin, tessellationTolerance);
-        otherPerLayer[layerIndex] = compositeOps(gerber, _opsNotOnNets(gerber, involvedNets, groundNets),
-                                                   origin.xMin, origin.yMin, tessellationTolerance);
 
         signalUnionAllLayers = Clipper2Lib::Union(signalUnionAllLayers, signalPerLayer[layerIndex],
                                                     Clipper2Lib::FillRule::NonZero);
@@ -344,32 +327,6 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
         return false;
     };
 
-    // otherPerLayer, inflated by the candidate via's own annular-ring radius plus viaClearance --
-    // once up front here, not per candidate, since neither depends on where a given candidate lands.
-    // A stitching via must never *intersect* another net's copper (not just avoid its own center
-    // landing inside it): inflating the composite first, then doing a plain point check against it
-    // per candidate below, is equivalent to a disc-vs-polygon intersection test but far cheaper to
-    // evaluate per candidate than running Clipper2's own boolean-intersection per point.
-    std::vector<Clipper2Lib::Paths64> otherClearancePerLayer(otherPerLayer.size());
-    for (std::size_t layerIndex = 0; layerIndex < otherPerLayer.size(); ++layerIndex) {
-        if (otherPerLayer[layerIndex].empty()) {
-            continue;
-        }
-        otherClearancePerLayer[layerIndex] =
-            Clipper2Lib::InflatePaths(otherPerLayer[layerIndex], candidateRadius + config.via().viaClearance(),
-                                        Clipper2Lib::JoinType::Round, Clipper2Lib::EndType::Polygon, 2.0,
-                                        tessellationTolerance);
-    }
-    // A via is a full-depth barrel through every copper layer this pipeline models (no blind/buried
-    // via support anywhere in this codebase -- see otherPerLayer's own doc comment) -- so this checks
-    // every layer, not just the one(s) with ground copper at (x, y).
-    auto intersectsOtherNet = [&](double x, double y) {
-        const Clipper2Lib::Point64 pos(static_cast<std::int64_t>(std::llround(x)),
-                                         static_cast<std::int64_t>(std::llround(y)));
-        return std::any_of(otherClearancePerLayer.begin(), otherClearancePerLayer.end(),
-                            [&](const Clipper2Lib::Paths64& other) { return _pointInComposite(pos, other); });
-    };
-
     // Stitching vias: walk every outer boundary loop of the cutout, classify each edge against the
     // real board outline (on/near it -> pre-existing, no stitching needed there), and place vias
     // along new-cut edges only -- spaced sim.viaSpacing() apart along the *whole contiguous run* of
@@ -382,6 +339,13 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
     // clusters of near-duplicate vias at every tessellated vertex, spaced by tessellation
     // granularity rather than viaSpacing.
     std::vector<StitchingVia> stitchingVias;
+    std::vector<Position> failedStitchingViaAttempts;
+    // TEMPORARY diagnostic counters -- see the "electrically floating" warning below, which can't
+    // currently tell "no ground copper reachable here at all" apart from "a real board via already
+    // sits right there, so a redundant stitching via was correctly skipped" -- those mean very
+    // different things for whether the edge is actually disconnected.
+    std::size_t diagNoGroundCopperCount = 0;
+    std::size_t diagTooCloseCount = 0;
     constexpr double kOnEdgeToleranceSimUnits = 100.0; // 10 microns, at 10 sim-units/micron
     for (const Clipper2Lib::Path64& loop : cutout) {
         const double area = Clipper2Lib::Area(loop);
@@ -459,11 +423,11 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
             }
             const double totalLength = cum;
 
-            const std::size_t stitchingViasBeforeRun = stitchingVias.size();
-            const auto stepCount = static_cast<std::size_t>(std::max(1.0, std::floor(totalLength / sim.viaSpacing())));
-            for (std::size_t step = 0; step <= stepCount; ++step) {
-                const double dist = totalLength * static_cast<double>(step) / static_cast<double>(stepCount);
-
+            // Via center (post viaEdgeDistance inward offset) at a given arc-length distance along
+            // this run -- the same interpolation the old fixed-step loop did inline, factored out so
+            // the adaptive walk below can probe arbitrary distances while searching for the next
+            // candidate.
+            auto viaCenterAtArcLength = [&](double dist) -> std::pair<double, double> {
                 std::size_t k = 0;
                 while (k + 2 < vertices.size() && vertices[k + 1].cumDist < dist) {
                     ++k;
@@ -479,40 +443,113 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
                 // paths).
                 const double dx = vertexSegLen > 1e-6 ? static_cast<double>(v1.point.x - v0.point.x) / vertexSegLen : 1.0;
                 const double dy = vertexSegLen > 1e-6 ? static_cast<double>(v1.point.y - v0.point.y) / vertexSegLen : 0.0;
-                const double inwardX = -dy;
-                const double inwardY = dx;
+                return {edgeX - dy * sim.viaEdgeDistance(), edgeY + dx * sim.viaEdgeDistance()};
+            };
 
-                const Clipper2Lib::Point64 viaPos(
-                    static_cast<std::int64_t>(std::llround(edgeX + inwardX * sim.viaEdgeDistance())),
-                    static_cast<std::int64_t>(std::llround(edgeY + inwardY * sim.viaEdgeDistance())));
+            // Walk the run placing candidates spaced sim.viaSpacing() apart by *straight-line*
+            // (crow-flies) distance between successive via centers, not by equal arc length -- on
+            // any edge that isn't dead straight, the arc length between two points always exceeds
+            // their straight-line distance, so stepping by a fixed arc length alone systematically
+            // overshoots on curvature: consecutive candidates land closer together (as the crow
+            // flies) than viaSpacing, and every other one then gets rejected by tooCloseToExistingVia
+            // below -- "every second via never appears" on any edge that isn't perfectly straight.
+            // Finds each next arc-length position with a simple secant-style correction: walk a
+            // guessed distance, measure the shortfall between the resulting straight-line distance
+            // and the target, and correct the walk by that shortfall (scaled by kViaWalkOvershoot so
+            // it converges in a handful of iterations for a gently-curved edge rather than creeping
+            // up on the target asymptotically); tooCloseToExistingVia below is still the actual
+            // safety net if a tight curve keeps this from converging exactly.
+            constexpr double kViaWalkOvershoot = 1.2;
+            constexpr int kViaWalkMaxIterations = 20;
+            const double viaWalkMinStep = std::max(sim.viaSpacing() * 0.01, kOnEdgeToleranceSimUnits);
 
+            std::vector<double> candidateDists{0.0};
+            {
+                double curDist = 0.0;
+                auto [curX, curY] = viaCenterAtArcLength(0.0);
+                while (curDist < totalLength) {
+                    // Search for the next arc-length position whose straight-line distance from
+                    // (curX, curY) reaches sim.viaSpacing() -- NOT decided by comparing against the
+                    // run's own endpoint up front: on a run that curves back near where it started
+                    // (an arc hugging a rounded board corner, or the whole-loop case where the run's
+                    // end literally coincides with its start), that chord can be far shorter than
+                    // viaSpacing even though there's plenty of arc length still ahead to place vias
+                    // along -- checking it early terminated the whole run after only one or two
+                    // candidates instead of walking it properly.
+                    double walk = std::min(totalLength - curDist, sim.viaSpacing() * kViaWalkOvershoot);
+                    double dist = curDist;
+                    double crow = 0.0;
+                    bool converged = false;
+                    for (int iter = 0; iter < kViaWalkMaxIterations; ++iter) {
+                        dist = std::min(curDist + walk, totalLength);
+                        const auto [x, y] = viaCenterAtArcLength(dist);
+                        crow = std::hypot(x - curX, y - curY);
+                        // A one-sided threshold, not "closest to the target": stop at the *first*
+                        // walk whose straight-line distance reaches sim.viaSpacing(), never one that
+                        // falls even slightly short of it. tooCloseToExistingVia() below rejects
+                        // anything strictly closer than sim.viaSpacing() to the previous via -- and
+                        // since this walk always continues from the last *computed* candidate
+                        // regardless of whether it end up accepted (see the accept/reject loop
+                        // below), a symmetric "closest approach" tolerance would let convergence land
+                        // just under the target roughly half the time, get rejected, and then have
+                        // the next candidate walk on from that same too-close point -- reproducing
+                        // exactly the "every second via never appears" bug this whole loop exists to
+                        // fix. Overshooting slightly is harmless; undershooting is not.
+                        if (crow >= sim.viaSpacing()) {
+                            converged = true;
+                            break;
+                        }
+                        if (dist >= totalLength) {
+                            break; // Can't walk any further even though we haven't converged.
+                        }
+                        const double error = sim.viaSpacing() - crow;
+                        walk = std::max(walk + error * kViaWalkOvershoot, viaWalkMinStep);
+                    }
+                    if (!converged && dist >= totalLength) {
+                        // Ran out of run before reaching a full viaSpacing crow-flies distance --
+                        // take the run's own end as one last candidate if it's a meaningfully
+                        // different point, then stop.
+                        if (crow > viaWalkMinStep) {
+                            candidateDists.push_back(totalLength);
+                        }
+                        break;
+                    }
+                    candidateDists.push_back(dist);
+                    curDist = dist;
+                    std::tie(curX, curY) = viaCenterAtArcLength(curDist);
+                }
+            }
+
+            const std::size_t stitchingViasBeforeRun = stitchingVias.size();
+            for (const double dist : candidateDists) {
+                const auto [viaXRaw, viaYRaw] = viaCenterAtArcLength(dist);
+                const Clipper2Lib::Point64 viaPos(static_cast<std::int64_t>(std::llround(viaXRaw)),
+                                                    static_cast<std::int64_t>(std::llround(viaYRaw)));
+
+                const double viaX = static_cast<double>(viaPos.x);
+                const double viaY = static_cast<double>(viaPos.y);
                 const bool onAnyGroundLayer = std::any_of(groundPerLayer.begin(), groundPerLayer.end(),
                                                             [&](const Clipper2Lib::Paths64& ground) {
                                                                 return _pointInComposite(viaPos, ground);
                                                             });
                 if (!onAnyGroundLayer) {
+                    failedStitchingViaAttempts.emplace_back(viaX, viaY);
+                    ++diagNoGroundCopperCount;
                     continue; // No ground copper here to stitch to -- skip rather than place a
                               // floating via.
                 }
-                const double viaX = static_cast<double>(viaPos.x);
-                const double viaY = static_cast<double>(viaPos.y);
                 if (tooCloseToExistingVia(viaX, viaY)) {
-                    continue;
-                }
-                // Never place a ground stitching via where it would intersect (or, with clearance,
-                // even just crowd) some other net's copper -- doing so would short that net straight
-                // to ground. See intersectsOtherNet's own doc comment for why every layer is checked,
-                // not just the one(s) with ground copper here.
-                if (intersectsOtherNet(viaX, viaY)) {
+                    failedStitchingViaAttempts.emplace_back(viaX, viaY);
+                    ++diagTooCloseCount;
                     continue;
                 }
                 stitchingVias.push_back(StitchingVia{viaX, viaY, config.via().stitchingViaHoleDiameter(),
                                                        config.via().stitchingViaAnnularRingDiameter()});
                 existingVias.push_back({viaX, viaY, candidateRadius, true});
             }
-            // Every candidate along this run got rejected (no ground copper there, too close to
-            // another via, or too close to another net) -- this cut edge is left with no return-path
-            // connection at all, i.e. a floating plane segment. Physically, a plane segment that's
+            // Every candidate along this run got rejected (no ground copper there, or too close to
+            // another via) -- this cut edge is left with no return-path connection at all, i.e. a
+            // floating plane segment. Physically, a plane segment that's
             // only reconnected by sparse stitching vias (or not reconnected at all) behaves like a
             // slot/comb resonator: it can trap energy near-field rather than letting it radiate or
             // dissipate, which shows up as the FDTD's total domain energy plateauing instead of
@@ -608,10 +645,13 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
     result.width = xMax - xMin;
     result.height = yMax - yMin;
     result.stitchingVias = std::move(stitchingVias);
+    result.failedStitchingViaAttempts = std::move(failedStitchingViaAttempts);
 
     logInfo("Simulation \"" + sim.name() + "\": sliced board to " + std::to_string(result.width) + "x" +
              std::to_string(result.height) + " sim units, " + std::to_string(result.stitchingVias.size()) +
-             " stitching via(s)");
+             " stitching via(s), " + std::to_string(result.failedStitchingViaAttempts.size()) +
+             " failed attempt(s) [DIAG: " + std::to_string(diagNoGroundCopperCount) + " no-ground-copper, " +
+             std::to_string(diagTooCloseCount) + " too-close-to-existing-via]");
     return result;
 }
 

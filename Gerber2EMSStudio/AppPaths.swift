@@ -10,10 +10,6 @@ enum AppPaths {
         Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/libkicad_smoketest").path
     }
 
-    static var fdtdWorkerPath: String {
-        Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/gerber2ems_fdtd_worker").path
-    }
-
     /// macOS's KiCad.app doesn't symlink kicad-cli anywhere on a typical PATH -- it ships only
     /// inside the app bundle. Mirrors main.cpp's resolveKicadCli(): scan $PATH first, then fall
     /// back to KiCad.app's own known location, then just hand back "kicad-cli" and let posix_spawnp

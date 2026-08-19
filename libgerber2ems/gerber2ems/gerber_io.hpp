@@ -13,6 +13,8 @@
 #include <variant>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 namespace gerber2ems {
 
 /// Plotting mode, matching the gerber file specification (G01, G02, G03).
@@ -43,9 +45,15 @@ public:
     void move(const Position& offset);
 
 private:
+    friend void to_json(nlohmann::json& j, const Position& p);
+    friend void from_json(const nlohmann::json& j, Position& p);
+
     double _x = 0;
     double _y = 0;
 };
+
+void to_json(nlohmann::json& j, const Position& p);
+void from_json(const nlohmann::json& j, Position& p);
 
 /// Metadata about a pad (which component/pin it belongs to).
 class PadMeta {

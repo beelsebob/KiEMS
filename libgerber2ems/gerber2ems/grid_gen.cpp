@@ -11,6 +11,7 @@
 #include "config.hpp"
 #include "constants.hpp"
 #include "csx_grid_utils.hpp"
+#include "gerber_composite.hpp"
 #include "logging.hpp"
 
 namespace gerber2ems {
@@ -46,6 +47,47 @@ double _solveScalar(const std::function<double(double)>& f, double initialGuess)
         x1 = x2;
     }
     return x1;
+}
+
+/// Appends `pmlCells` brand-new, uniformly sized cells beyond each end of `lines` (already fully
+/// generated, deduplicated, and sorted) -- rather than resizing any of the cells already there (see
+/// the reverted _regradePMLBand, which tried that and made a real board's CPU/GPU PML divergence
+/// worse, not better), this leaves the existing interior mesh -- including whatever margin cells the
+/// general-purpose densify fill already produced -- completely untouched, and gives Set_BC_PML()'s
+/// own outermost-`pmlCells`-cells classification genuinely new domain to work with instead of
+/// reclassifying part of the existing margin. Each new cell matches the width of the cell immediately
+/// adjacent to it (so there's no discontinuity where the new band starts) and stays that width for
+/// all `pmlCells` cells -- uniform, not grown -- so the PML's own depth-dependent loss grading is the
+/// only thing varying cell-to-cell, not an additional, independently-varying physical cell size
+/// compounding it.
+std::vector<double> _extendPMLBand(std::vector<double> lines, std::int32_t pmlCells) {
+    std::sort(lines.begin(), lines.end());
+    if (pmlCells < 1 || lines.size() < 2) {
+        return lines;
+    }
+    const double loWidth = lines[1] - lines[0];
+    const double hiWidth = lines[lines.size() - 1] - lines[lines.size() - 2];
+
+    std::vector<double> loExtra;
+    if (loWidth > 0) {
+        double pos = lines.front();
+        for (std::int32_t i = 0; i < pmlCells; ++i) {
+            pos -= loWidth;
+            loExtra.push_back(pos);
+        }
+    }
+    std::vector<double> hiExtra;
+    if (hiWidth > 0) {
+        double pos = lines.back();
+        for (std::int32_t i = 0; i < pmlCells; ++i) {
+            pos += hiWidth;
+            hiExtra.push_back(pos);
+        }
+    }
+
+    lines.insert(lines.begin(), loExtra.rbegin(), loExtra.rend());
+    lines.insert(lines.end(), hiExtra.begin(), hiExtra.end());
+    return lines;
 }
 
 /// Merge grid lines that are too close to each other.
@@ -525,22 +567,18 @@ public:
 
         resolveEdgeRegions();
         std::vector<double> grid;
-        if (_grid.margin().fromTrace()) {
-            _board.min = std::numeric_limits<double>::infinity();
-            _board.max = -std::numeric_limits<double>::infinity();
-            for (const auto* list : {&_edgeCells, &_diagonal, &_parallel, &_perpendicular}) {
-                for (const auto& r : *list) {
-                    _board.min = std::min(_board.min, r.min);
-                    _board.max = std::max(_board.max, r.max);
-                }
-            }
-            const double margin = _grid.margin().xy();
-            _board.min -= margin;
-            _board.max += margin;
-        } else {
-            _board.min += offset;
-            _board.max += offset;
-        }
+        // The mesh's own core extent is simply the real sliced board's own extent (+ margin,
+        // already baked into `_board` by the constructor) -- not reconstructed from trace/pad/
+        // region classification. An earlier version of this reconstructed it from wherever
+        // involved-net copper happened to land (`Grid::margin().fromTrace()`, since removed): a
+        // real board's own gerbers showed that heuristic can undershoot the true board size
+        // arbitrarily, even with every relevant net (including ground) correctly included, because
+        // it only sees per-segment local extents, not "this net's copper happens to reach every
+        // corner of the board." A too-small core extent isn't just an inefficiency -- it leaves
+        // GridGenerator's own PML band (appended just beyond it) wrapping around real, still-
+        // simulated copper instead of strictly outside it, a severe, fast-onset FDTD divergence.
+        _board.min += offset;
+        _board.max += offset;
 
         for (const auto& reg : _edgeCells) {
             grid.push_back(reg.min);
@@ -572,11 +610,43 @@ public:
 
         grid = _board.densifyRegionGrid(grid, _grid.max(), gridMin, cellRatio);
         grid = _dedupGrid(grid, gridMin, edgeGrid);
+        // Nothing above clips a region's own density-placed lines to `_board`'s own span --
+        // addLinesFromTrace()'s per-segment Region spans that segment's own local extent, and
+        // inBounds() (generate()'s own filter) only requires *one* endpoint to be near the
+        // simulated board, so a single long segment (a large ground-pour polygon edge, say) with
+        // just one endpoint inside can still place a line arbitrarily far outside the real domain.
+        // Removing anything outside [_board.min, _board.max] here, once, after every density source
+        // has already contributed, is the one place that actually guarantees the mesh never extends
+        // past the real simulated board regardless of which net/mechanism introduced a stray line.
+        grid.erase(std::remove_if(grid.begin(), grid.end(),
+                                   [this](double line) { return line < _board.min || line > _board.max; }),
+                   grid.end());
+        // _dedupGrid() sorts internally, so grid is already sorted here -- front()/back() are the
+        // core mesh's own extent, before _extendPMLBand() appends the PML band beyond it. Captured
+        // in the same coordinate space compileGrid()'s own returned lines end up in (see
+        // pmlInnerMin()/pmlInnerMax()'s own doc comment).
+        if (!grid.empty()) {
+            _pmlInnerMin = static_cast<double>(static_cast<std::int32_t>(grid.front() - offset));
+            _pmlInnerMax = static_cast<double>(static_cast<std::int32_t>(grid.back() - offset));
+        }
+        logInfo("### Grid Generator: " + _axis + " axis core mesh extent = [" + std::to_string(_pmlInnerMin) +
+                 ", " + std::to_string(_pmlInnerMax) + "] ###");
+        grid = _extendPMLBand(std::move(grid), constants::pmlDepthCells);
 
+        // `grid` is in the same absolute, Edge_Cuts-bounding-box-relative frame as every geometry
+        // primitive this Simulation adds (addSubstrates()/addGerbers()/addMslPort()/addVias() all
+        // place things directly from _slicedBoard.xMin/yMin, never offset) -- the real CSRectGrid
+        // added here must stay in that same absolute frame too, or every single primitive ends up
+        // with zero overlap against the mesh (confirmed: openEMS reported every primitive in the
+        // whole simulation, including Substrate boxes spanning the entire domain, as "unused", and
+        // the excited port never registered, so energy stayed at exactly 0 all run). Only
+        // _pmlInnerMin/_pmlInnerMax (a few lines up) are meant to stay local/offset-subtracted --
+        // those exist purely for the geometry preview's own diagnostic overlay, which re-adds this
+        // same offset itself (see GeometryPreviewBridge.mm).
         std::vector<double> intLines;
         intLines.reserve(grid.size());
         for (const double line : grid) {
-            intLines.push_back(static_cast<double>(static_cast<std::int32_t>(line - offset)));
+            intLines.push_back(static_cast<double>(static_cast<std::int32_t>(line)));
         }
 
         addGridLines(csgrid, _axis, intLines);
@@ -618,6 +688,20 @@ private:
     std::vector<Region> _diagonal;
     std::vector<Region> _perpendicular;
     const Grid& _grid;
+
+public:
+    /// The core mesh's own extent along this axis -- i.e. everywhere *inside* the PML band
+    /// _extendPMLBand() appends in compileGrid(), in the same coordinate space compileGrid()'s own
+    /// returned grid lines are in (post `-offset`, pre-cast rounding). Meaningful only after
+    /// compileGrid() has actually run; 0 before that. Exists purely for diagnostic display (see
+    /// GeometryView's "Show Grid" overlay, which colors PML-band lines differently) -- nothing in
+    /// the FDTD pipeline itself reads these.
+    double pmlInnerMin() const { return _pmlInnerMin; }
+    double pmlInnerMax() const { return _pmlInnerMax; }
+
+private:
+    double _pmlInnerMin = 0;
+    double _pmlInnerMax = 0;
 };
 
 } // namespace
@@ -663,6 +747,21 @@ struct GridGenerator::Impl {
         zLines = Region(offset - margin, zmin).densifyRegionGrid(zLines, gridMax, gridMin, cellRatio);
         zLines = _dedupGrid(zLines, gridMin, {});
 
+        {
+            // _dedupGrid() sorts internally, so zLines is already sorted here -- one entry per
+            // cell, positional (not just the worst-case ratio printGridStats() reports), in
+            // microns (sim units are 0.1 micron each, per constants::unitMultiplier).
+            std::string cells;
+            for (std::size_t i = 0; i + 1 < zLines.size(); ++i) {
+                if (!cells.empty()) {
+                    cells += ", ";
+                }
+                cells += std::to_string((zLines[i + 1] - zLines[i]) / constants::unitMultiplier);
+            }
+            logInfo("### Grid Generator: z axis cell thicknesses (um), " + std::to_string(zLines.size() - 1) +
+                     " cells = [" + cells + "] ###");
+        }
+
         std::vector<std::int32_t> result;
         result.reserve(zLines.size());
         for (const double v : zLines) {
@@ -673,6 +772,26 @@ struct GridGenerator::Impl {
 
     CSRectGrid& generate(CSRectGrid& grid, const SimulationConfig& simConfig, const std::filesystem::path& fabDir) {
         const double tessellationTolerance = static_cast<double>(_config.pixelSize()) * constants::unitMultiplier;
+        // GerberFile::load() itself returns raw, unshifted file coordinates -- every other consumer
+        // of trace/pad positions in this codebase (board_slicing.cpp, gerber_composite.cpp) re-origins
+        // by this same edgeCutsBoundingBox() before using them, matching xmin/xmax/ymin/ymax above
+        // (from GridGenerator's own constructor args, ultimately SlicedBoard::xMin/yMin -- see its own
+        // doc comment on being Edge_Cuts-bounding-box-relative) and _board (compileGrid()'s own core
+        // extent, the same frame). Without this, every trace/pad position parsed below is off by
+        // this same origin from everything else in this function -- inBounds() below would reject
+        // it outright (on a board whose Edge_Cuts doesn't happen to start near its own native gerber
+        // origin), and even where it didn't, addLinesFromTrace()/addLinesFromPads()'s own placements
+        // would land far outside _board's own span, discarded entirely once compileGrid() clips the
+        // final line list to the real domain -- leaving only _board's own uniform density, with none
+        // of the real per-trace/pad mesh refinement this whole nets/gerbers loop exists to produce.
+        auto originResult = edgeCutsBoundingBox(fabDir, tessellationTolerance);
+        if (!originResult) {
+            logError(originResult.error());
+            std::exit(1);
+        }
+        const BoundingBox& origin = *originResult;
+        auto reOrigin = [&](const Position& p) { return Position(p.x() - origin.xMin, p.y() - origin.yMin); };
+
         std::vector<GerberFile> gerbers;
         std::error_code ec;
         if (std::filesystem::is_directory(fabDir, ec)) {
@@ -689,20 +808,67 @@ struct GridGenerator::Impl {
             }
         }
 
-        // "Nets of interest" for mesh-density purposes are simply this simulation's own resolved
-        // involved nets (see SimulationConfig::resolvedNets(), populated by resolveSimulationPorts())
-        // -- board slicing has already reduced the board down to just these nets' (plus the ground
-        // net's) copper, so there's no longer a separate "guess which nets matter" step needed.
+        // "Nets of interest" for mesh-DENSITY placement purposes are this simulation's own resolved
+        // involved nets (see SimulationConfig::resolvedNets()'s own doc comment, populated by
+        // resolveSimulationPorts()). The mesh's core-boundary (domain SIZE) is floored directly from
+        // the sliced board's own extent below, independent of this list, so the ground net does not
+        // need to be included here -- its pour is already covered by that domain-sized core mesh.
         std::vector<std::string> nets = simConfig.resolvedNets();
+        {
+            std::string netsList;
+            for (const auto& n : nets) {
+                if (!netsList.empty()) {
+                    netsList += ", ";
+                }
+                netsList += n;
+            }
+            logInfo("### Grid Generator: mesh-sizing nets = [" + netsList + "] ###");
+        }
+
+        // gbr.traceForNet()/gbr.pads() match purely by net *name*, with no geometric restriction to
+        // this simulation's own sliced-board region -- fine on a gerber file that only ever contains
+        // one board, but a net name (especially a common one like "GND") isn't unique across a
+        // shared multi-DUT panel where several unrelated test coupons sit on the same physical
+        // board/gerber files. Without this filter, copper from a totally different coupon elsewhere
+        // on the panel gets pulled into this simulation's own mesh-*density* placement (the core
+        // extent itself is fixed from the sliced board's own real size regardless -- see
+        // compileGrid() -- so a stray far-away pad can no longer balloon the overall domain the way
+        // it once could; this filter now only guards against wasted density mesh lines outside the
+        // simulated region entirely). `filterMargin` reuses the grid's own configured margin as the
+        // tolerance for "close enough to the board to legitimately matter" -- the same distance the
+        // config already says is worth meshing past the board's own edge.
+        const double filterMargin = _config.grid().margin().xy();
+        const double filterXMin = xmin - filterMargin;
+        const double filterXMax = xmax + filterMargin;
+        const double filterYMin = ymin - filterMargin;
+        const double filterYMax = ymax + filterMargin;
+        auto inBounds = [&](const Position& p) {
+            return p.x() >= filterXMin && p.x() <= filterXMax && p.y() >= filterYMin && p.y() <= filterYMax;
+        };
 
         logInfo("### Grid Generator: parse gerber files ###");
         for (auto& gbr : gerbers) {
             for (const auto& net : nets) {
                 const Trace trace = gbr.traceForNet(net);
-                x.addLinesFromTrace(trace.segments());
-                y.addLinesFromTrace(trace.segments());
+                std::vector<TraceSegment> segments;
+                for (const auto& seg : trace.segments()) {
+                    const Position start = reOrigin(seg.start());
+                    const Position stop = reOrigin(seg.stop());
+                    if (inBounds(start) || inBounds(stop)) {
+                        segments.emplace_back(start, stop, seg.aperture(), seg.width(), seg.mode(), seg.normal());
+                    }
+                }
+                x.addLinesFromTrace(segments);
+                y.addLinesFromTrace(segments);
             }
-            std::vector<Pad> pads = gbr.pads();
+            std::vector<Pad> pads;
+            for (const auto& pad : gbr.pads()) {
+                const Position pos = reOrigin(pad.pos());
+                if (inBounds(pos)) {
+                    pads.emplace_back(pad.aperture(), pad.net(), pos, pad.pinRef(), pad.additive(), pad.mirror(),
+                                        pad.rotation(), pad.scale());
+                }
+            }
             pads.insert(pads.end(), addPads.begin(), addPads.end());
             gbr.addApertures(addApertures);
             nets.push_back("PORT");
@@ -741,6 +907,11 @@ std::vector<Pad>& GridGenerator::addPads() { return _impl->addPads; }
 std::unordered_map<std::string, Aperture>& GridGenerator::addApertures() { return _impl->addApertures; }
 double GridGenerator::xmin() const { return _impl->xmin; }
 double GridGenerator::ymin() const { return _impl->ymin; }
+
+double GridGenerator::pmlInnerXMin() const { return _impl->x.pmlInnerMin(); }
+double GridGenerator::pmlInnerXMax() const { return _impl->x.pmlInnerMax(); }
+double GridGenerator::pmlInnerYMin() const { return _impl->y.pmlInnerMin(); }
+double GridGenerator::pmlInnerYMax() const { return _impl->y.pmlInnerMax(); }
 
 CSRectGrid& GridGenerator::generate(CSRectGrid& grid, const SimulationConfig& simConfig,
                                      const std::filesystem::path& fabDir) {

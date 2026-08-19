@@ -24,7 +24,19 @@ NSErrorDomain const EMSConfigErrorDomain = @"EMSConfigErrorDomain";
 
 @interface EMSInvolvedNetBridge () {
 @public
-    __weak EMSSimulationBridge* _parentSim;
+    // Strong, not weak: unlike EMSSimulationBridge's own _parent (EMSConfigBridge, which is
+    // document-lifetime-stable -- see Document.swift's stored `config` property), the
+    // EMSSimulationBridge this points to is itself a fresh, uncached object returned by
+    // EMSConfigBridge.simulations/EMSSimulationBridge.involvedNets on every access (see their own
+    // implementations below) -- nothing else keeps it alive. A weak reference here let the parent
+    // deallocate out from under a still-live EMSInvolvedNetBridge/EMSExcitationBridge (most visibly
+    // when a caller only keeps the leaf wrapper past the statement that produced its parent, e.g.
+    // `selectedSimulation!.excitations[$0]` in SourceListViewController.swift), producing a
+    // message-to-nil on a method returning a C++ reference (cxxSim) -- undefined behaviour, not the
+    // "safely zero" convention ordinary ObjC message-to-nil gets, and a real crash reproduced via
+    // SourceListViewController's outline-row expand path. No retain-cycle risk in making this
+    // strong: a parent never stores a reference back to its children.
+    EMSSimulationBridge* _parentSim;
     NSInteger _index;
 }
 - (InvolvedNetConfig&)cxxNet;
@@ -32,7 +44,9 @@ NSErrorDomain const EMSConfigErrorDomain = @"EMSConfigErrorDomain";
 
 @interface EMSExcitationBridge () {
 @public
-    __weak EMSSimulationBridge* _parentSim;
+    // Strong, not weak -- see EMSInvolvedNetBridge's own _parentSim comment above; identical
+    // reasoning and identical crash.
+    EMSSimulationBridge* _parentSim;
     NSInteger _index;
 }
 - (ExcitationConfig&)cxxExcitation;

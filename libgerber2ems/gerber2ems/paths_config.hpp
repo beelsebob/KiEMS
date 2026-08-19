@@ -28,13 +28,19 @@ struct PathsConfig {
     std::filesystem::path kicadCliPath;
     std::filesystem::path kicadQueryHelperPath;
     std::filesystem::path fdtdWorkerPath;
+    // Same kind of path as fdtdWorkerPath -- posix_spawn'd instead of it when
+    // RunOptions::backend == FDTDBackend::CopperGPU (see Simulation::run()). Defaulted empty so
+    // every existing forConfigFile() call site keeps compiling unchanged; a caller that never
+    // selects the Copper backend never needs to set this.
+    std::filesystem::path copperFdtdWorkerPath;
 
     /// Builds every derived field from `configFile` and the helper-tool paths. The CLI's own
     /// convenience default: a GUI app is free to populate a PathsConfig by hand instead (e.g. to
     /// point kicadQueryHelperPath/fdtdWorkerPath at bundled copies rather than sibling binaries).
     static PathsConfig forConfigFile(std::filesystem::path configFile, std::filesystem::path kicadCliPath,
                                       std::filesystem::path kicadQueryHelperPath,
-                                      std::filesystem::path fdtdWorkerPath);
+                                      std::filesystem::path fdtdWorkerPath,
+                                      std::filesystem::path copperFdtdWorkerPath = {});
 };
 
 } // namespace gerber2ems

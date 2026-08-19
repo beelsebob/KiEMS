@@ -22,31 +22,78 @@ private enum ResultsCategory: CaseIterable {
 }
 
 /// Content for a simulation's "Simulation Results" sub-entry, selected via
-/// SimulationListViewController's outline view. Runs the real geometry -> simulate -> postprocess
-/// pipeline (SimulationResultsBridge, which mirrors `geber2ems -g -s -p`) in the background the
-/// first time a given simulation's Results entry is shown -- the same run/cache/error/spinner
-/// pattern GeometryViewController uses, just one stage further down the pipeline (and, since it
-/// includes a real FDTD run with no progress callback, potentially far slower: minutes to hours,
-/// not seconds). Results (and errors) are cached per simulation index, so re-selecting an
-/// already-run simulation's Results entry doesn't re-run the pipeline.
+/// SimulationListViewController's outline view. Runs the shared per-simulation pipeline
+/// (Document.pipeline(forSimulationNamed:), EMSSimulationPipelineBridge) up through its Results
+/// stage in the background the first time a given simulation's Results entry is shown -- the same
+/// run/error/spinner pattern GeometryViewController uses, just one stage further down the pipeline
+/// (and, since it includes a real FDTD run with no progress callback, potentially far slower:
+/// minutes to hours, not seconds). If this simulation's Geometry entry was already shown first, the
+/// pipeline reuses that same sliced board/grid lines rather than redoing them. The pipeline itself
+/// caches the built results; this view controller only tracks its own in-flight/error state, since
+/// "is the results step running" and "did it just fail" aren't things the shared pipeline remembers
+/// on its own.
 final class SimulationResultsViewController: NSViewController {
     private weak var document: Document?
 
     private let statusLabel = NSTextField(labelWithString: "")
+    private let progressBar = NSProgressIndicator()
+    /// Shown left of progressBar only while EMSPipelineProgress.duringExcitation is true (the
+    /// excitation pulse is still actively being injected, as opposed to the run just observing
+    /// decay afterward) -- see that property's own doc comment.
+    private let excitationIcon = NSImageView()
+    private let timeEstimateLabel = NSTextField(labelWithString: "")
+    /// Shows the energy-decay end-criteria's current value against its own dB target while the FDTD
+    /// run is in progress -- see EMSPipelineProgress's own energyChangeDB/targetEnergyChangeDB doc
+    /// comment. `n/10` divisions, where n is the target itself (e.g. 60dB -> 6 divisions) -- set
+    /// dynamically in progressReceived() once the real target is known, not a fixed value here.
+    private let energyLevelIndicator = NSLevelIndicator()
     private let categoryControl = NSSegmentedControl()
     private let scrollView = NSScrollView()
     private let stack = NSStackView()
 
-    private var previews: [Int: EMSResultsPreview] = [:]
+    // NSLevelIndicator's doubleValue, unlike NSProgressIndicator's, isn't animatable through the
+    // standard `.animator()` proxy -- setting it that way just jumps instantly, no interpolation.
+    // setLevelIndicatorValue(_:animated:) below drives it manually on a repeating Timer instead; this
+    // is the in-flight one, invalidated/replaced every time a new target value comes in so rapid
+    // progress ticks don't pile up competing animations.
+    private var levelIndicatorAnimation: Timer?
+
     private var errors: [Int: String] = [:]
     private var runningIndices: Set<Int> = []
+    // Latest known progress per simulation, from this VC's own in-flight ensureStage: call -- see
+    // GeometryViewController's identical progressFraction field for why refreshDisplay() needs this
+    // rather than relying solely on the live progress callback.
+    private var latestProgress: [Int: EMSPipelineProgress] = [:]
+    // When the *current phase* of a simulation's in-flight run began -- the basis for the elapsed-
+    // time/fraction extrapolation behind timeEstimateLabel's own text (see progressReceived()). Reset
+    // whenever the reported phase changes, not just once at the start of the whole run: `fraction`
+    // itself restarts from 0 at the geometry -> simulation boundary (see EMSPipelineProgressPhase's
+    // own doc comment), so elapsed time has to restart its extrapolation basis there too, or the
+    // estimate would be computed against the wrong phase's elapsed time.
+    private var phaseStartTime: [Int: Date] = [:]
+    private var lastReportedPhase: [Int: EMSPipelineProgressPhase] = [:]
+    // Latest known time-remaining text per simulation, mirroring latestProgress's own "so
+    // refreshDisplay() can restore state on re-selection" role.
+    private var timeEstimateText: [Int: String] = [:]
     private var currentIndex: Int?
     private var availableCategories: [ResultsCategory] = []
     private var selectedCategory: ResultsCategory = .sParameters
 
-    /// Fired whenever a given simulation's results step starts/finishes running, so
-    /// DocumentWindowController can relay it to SimulationListViewController's spinner.
-    var onRunStateChanged: ((Int, Bool) -> Void)?
+    /// Fired with every EMSPipelineProgress this VC's own in-flight ensureStage: call reports (both
+    /// .geometry-phase, on the way to the FDTD run, and .simulation-phase, for the run itself), so
+    /// DocumentWindowController can relay each to SimulationListViewController's own "Geometry"/
+    /// "Simulation Results" row -- see GeometryViewController.onProgressChanged's identical doc
+    /// comment for the phase-based row split.
+    var onProgressChanged: ((Int, EMSPipelineProgress) -> Void)?
+
+    /// Fired once this VC's own ensureStage:.results run finishes for a given simulation, with the
+    /// EMSPipelineProgressPhase it had reached (from the last progress report before finishing) and
+    /// whether it succeeded. The phase matters because this run computes geometry as an unavoidable
+    /// first step (see EMSPipelineProgressPhase's own doc comment) -- a failure can originate in
+    /// either stage, and DocumentWindowController needs to know which one to attribute the outcome
+    /// to (the "Geometry" row vs the "Simulation Results" row). Reaching .simulation at all means
+    /// geometry itself already succeeded, regardless of how this run ultimately finishes.
+    var onRunFinished: ((Int, EMSPipelineProgressPhase, Bool) -> Void)?
 
     init(document: Document) {
         self.document = document
@@ -78,6 +125,41 @@ final class SimulationResultsViewController: NSViewController {
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(statusLabel)
 
+        progressBar.style = .bar
+        progressBar.isIndeterminate = false
+        progressBar.minValue = 0
+        progressBar.maxValue = 1
+        progressBar.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(progressBar)
+
+        excitationIcon.image = NSImage(systemSymbolName: "waveform.path.ecg.rectangle",
+                                        accessibilityDescription: "Exciting")
+        excitationIcon.contentTintColor = .systemOrange
+        excitationIcon.isHidden = true
+        excitationIcon.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(excitationIcon)
+
+        timeEstimateLabel.font = .systemFont(ofSize: 11)
+        timeEstimateLabel.textColor = .tertiaryLabelColor
+        timeEstimateLabel.alignment = .center
+        timeEstimateLabel.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(timeEstimateLabel)
+
+        energyLevelIndicator.levelIndicatorStyle = .discreteCapacity
+        energyLevelIndicator.minValue = 0
+        // Placeholder -- replaced with the real dB target (and number of divisions) as soon as the
+        // first Simulation-phase progress report arrives (see refreshDisplay()). Counts down: shows
+        // dB *remaining* until the target, not dB decayed so far -- starts full, drains to 0 as the
+        // simulation approaches its end criterion.
+        energyLevelIndicator.maxValue = 60
+        // warningValue/criticalValue left at their own (max-exceeding) defaults, deliberately -- with
+        // the countdown direction above, NSLevelIndicator's usual "getting low is bad" semantics would
+        // actually point the wrong way here too (getting low means getting *close to done*), so
+        // there's still no "this is bad, turn it red" threshold that makes sense to set.
+        energyLevelIndicator.isEditable = false
+        energyLevelIndicator.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(energyLevelIndicator)
+
         categoryControl.segmentStyle = .texturedRounded
         categoryControl.target = self
         categoryControl.action = #selector(categoryChanged)
@@ -103,6 +185,13 @@ final class SimulationResultsViewController: NSViewController {
         scrollView.isHidden = true
         container.addSubview(scrollView)
 
+        // See GeometryViewController's identical contentGuide for why: vertically centers the whole
+        // statusLabel...energyLevelIndicator block, not just statusLabel itself, so the extra rows
+        // added below it don't leave the block's visual center sitting below the container's true
+        // center.
+        let contentGuide = NSLayoutGuide()
+        container.addLayoutGuide(contentGuide)
+
         NSLayoutConstraint.activate([
             categoryControl.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
             categoryControl.centerXAnchor.constraint(equalTo: container.centerXAnchor),
@@ -113,10 +202,30 @@ final class SimulationResultsViewController: NSViewController {
             scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             stack.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
 
+            contentGuide.topAnchor.constraint(equalTo: statusLabel.topAnchor),
+            contentGuide.bottomAnchor.constraint(equalTo: energyLevelIndicator.bottomAnchor),
+            contentGuide.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+
             statusLabel.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            statusLabel.centerYAnchor.constraint(equalTo: container.centerYAnchor),
             statusLabel.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor, constant: 24),
             statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -24),
+
+            progressBar.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 12),
+            progressBar.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            progressBar.widthAnchor.constraint(equalToConstant: 240),
+
+            excitationIcon.trailingAnchor.constraint(equalTo: progressBar.leadingAnchor, constant: -8),
+            excitationIcon.centerYAnchor.constraint(equalTo: progressBar.centerYAnchor),
+            excitationIcon.widthAnchor.constraint(equalToConstant: 16),
+            excitationIcon.heightAnchor.constraint(equalToConstant: 16),
+
+            timeEstimateLabel.topAnchor.constraint(equalTo: progressBar.bottomAnchor, constant: 6),
+            timeEstimateLabel.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+
+            energyLevelIndicator.topAnchor.constraint(equalTo: timeEstimateLabel.bottomAnchor, constant: 12),
+            energyLevelIndicator.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            energyLevelIndicator.widthAnchor.constraint(equalToConstant: 240),
+            energyLevelIndicator.heightAnchor.constraint(equalToConstant: 16),
         ])
 
         view = container
@@ -130,81 +239,235 @@ final class SimulationResultsViewController: NSViewController {
         currentIndex = index
         refreshDisplay()
 
-        guard previews[index] == nil, errors[index] == nil, !runningIndices.contains(index) else { return }
-        runResultsStep(forSimulationIndex: index)
+        guard let document, index < document.config.simulations.count else { return }
+        let name = document.config.simulations[index].name
+        let pipeline = document.pipeline(forSimulationNamed: name)
+        guard !pipeline.hasStage(.results), errors[index] == nil, !runningIndices.contains(index) else { return }
+        runResultsStep(forSimulationIndex: index, simulationName: name, pipeline: pipeline)
     }
 
     /// Called by DocumentWindowController whenever something that would change this simulation's
-    /// results changes -- the same edits that invalidate GeometryViewController's own cache
-    /// (hull-padding/via/ground-net edits, involved-nets membership/impedance/plane/width changes)
-    /// -- so a stale cached result (or error) from before the edit doesn't keep being shown.
-    /// Deliberately doesn't re-run immediately: just clears the cache, so the next explicit Results
-    /// selection is what triggers the real re-run.
+    /// results changes -- either the same edits that invalidate GeometryViewController's own cache
+    /// (hull-padding/via/ground-net edits, involved-nets membership/impedance/plane/width changes,
+    /// which also invalidate geometry) or an FDTD-only parameter change (SimulationPropertiesViewController.
+    /// onFDTDParametersChanged) that leaves the sliced geometry/grid untouched -- so a stale cached
+    /// result (or error) from before the edit doesn't keep being shown. Deliberately doesn't re-run
+    /// immediately: just invalidates the shared pipeline's cache from the Results stage onward
+    /// (Geometry and grid lines stay valid and don't get recomputed) and clears this VC's own error,
+    /// so the next explicit Results selection is what triggers the real re-run.
     func invalidateCache(forSimulationIndex index: Int) {
-        previews[index] = nil
         errors[index] = nil
+        guard let document, index < document.config.simulations.count else { return }
+        document.pipeline(forSimulationNamed: document.config.simulations[index].name)
+            .invalidate(from: .results)
     }
 
-    private func refreshDisplay() {
-        guard let currentIndex else { return }
-        if let preview = previews[currentIndex] {
+    /// Manually interpolates energyLevelIndicator's doubleValue over ~0.2s -- see
+    /// levelIndicatorAnimation's own doc comment for why this can't just use `.animator()` the way
+    /// progressBar does. `animated: false` snaps immediately, which also cancels any interpolation
+    /// already in flight (so a phase-boundary reset can't be fought by a stale animation still
+    /// chasing the previous phase's final value).
+    private func setLevelIndicatorValue(_ target: Double, animated: Bool) {
+        levelIndicatorAnimation?.invalidate()
+        guard animated else {
+            energyLevelIndicator.doubleValue = target
+            return
+        }
+        let start = energyLevelIndicator.doubleValue
+        let duration = 0.2
+        let startTime = Date()
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            let t = min(1, Date().timeIntervalSince(startTime) / duration)
+            energyLevelIndicator.doubleValue = start + (target - start) * t
+            if t >= 1 { timer.invalidate() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        levelIndicatorAnimation = timer
+    }
+
+    /// `animated` smooths just the progress bar's/level indicator's own doubleValue transitions --
+    /// meant for live ticks from progressReceived() (small, incremental deltas within the same
+    /// simulation), not for the other call sites (selection changes, run start/finish), where the
+    /// value can jump to represent an unrelated simulation's own progress and animating that jump
+    /// would be misleading motion, not a smooth update.
+    private func refreshDisplay(animated: Bool = false) {
+        guard let currentIndex, let document, currentIndex < document.config.simulations.count else { return }
+        let name = document.config.simulations[currentIndex].name
+        let pipeline = document.pipeline(forSimulationNamed: name)
+        if let preview = pipeline.resultsPreview() {
+            // These default to visible (NSControl's own isHidden default) until a run's own
+            // running/error/idle branch below first sets them -- a simulation whose results are
+            // already cached before this VC's very first refreshDisplay() call (e.g. from a
+            // previous session) would otherwise skip that and show them at their AppKit defaults,
+            // stacked on top of the just-shown charts.
+            progressBar.isHidden = true
+            excitationIcon.isHidden = true
+            timeEstimateLabel.isHidden = true
+            energyLevelIndicator.isHidden = true
             showCategories(for: preview)
         } else if let error = errors[currentIndex] {
             categoryControl.isHidden = true
             scrollView.isHidden = true
             statusLabel.stringValue = error
             statusLabel.isHidden = false
+            progressBar.isHidden = true
+            excitationIcon.isHidden = true
+            timeEstimateLabel.isHidden = true
+            energyLevelIndicator.isHidden = true
         } else if runningIndices.contains(currentIndex) {
             categoryControl.isHidden = true
             scrollView.isHidden = true
-            statusLabel.stringValue = "Running simulation…\n\nA full FDTD run can take several minutes."
+            let progress = latestProgress[currentIndex]
+            switch progress?.phase {
+            case .simulation:
+                statusLabel.stringValue = "Running simulation…\n\nA full FDTD run can take several minutes."
+            default:
+                statusLabel.stringValue = "Building geometry…"
+            }
             statusLabel.isHidden = false
+            if animated {
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.2
+                    progressBar.animator().doubleValue = progress?.fraction ?? 0
+                }
+            } else {
+                progressBar.doubleValue = progress?.fraction ?? 0
+            }
+            progressBar.isHidden = false
+            excitationIcon.isHidden = !(progress?.phase == .simulation && (progress?.duringExcitation ?? false))
+            timeEstimateLabel.stringValue = timeEstimateText[currentIndex]
+                ?? TimeRemainingFormatter.string(secondsRemaining: nil)
+            timeEstimateLabel.isHidden = false
+            if let progress, progress.phase == .simulation {
+                energyLevelIndicator.maxValue = max(progress.targetEnergyChangeDB, 1)
+                // n/10 divisions, per this level indicator's own design brief.
+                energyLevelIndicator.numberOfMajorTickMarks = max(1, Int(progress.targetEnergyChangeDB / 10))
+                // Counts down, not up: starts full (no decay yet) and drains toward 0 as
+                // energyChangeDB approaches its target -- i.e. remaining dB still to decay, not dB
+                // decayed so far.
+                let remainingDB = max(0, progress.targetEnergyChangeDB - progress.energyChangeDB)
+                setLevelIndicatorValue(remainingDB, animated: animated)
+                energyLevelIndicator.isHidden = false
+            } else {
+                energyLevelIndicator.isHidden = true
+            }
         } else {
             categoryControl.isHidden = true
             scrollView.isHidden = true
             statusLabel.isHidden = true
+            progressBar.isHidden = true
+            excitationIcon.isHidden = true
+            timeEstimateLabel.isHidden = true
+            energyLevelIndicator.isHidden = true
         }
     }
 
-    private func runResultsStep(forSimulationIndex index: Int) {
-        guard let document, index < document.config.simulations.count else { return }
-
-        let simulationName = document.config.simulations[index].name
+    private func runResultsStep(forSimulationIndex index: Int, simulationName: String,
+                                 pipeline: EMSSimulationPipelineBridge) {
+        guard let document else { return }
         let config = document.config
         // Always a private scratch directory, migrated into the real package only at save time --
         // see pipelineDirectory's doc comment. Doesn't require saving first either way.
         let packageDir = document.pipelineDirectory.path
         let kicadCliPath = AppPaths.resolveKicadCli()
         let helperPath = AppPaths.kicadQueryHelperPath
-        let workerPath = AppPaths.fdtdWorkerPath
 
         runningIndices.insert(index)
-        onRunStateChanged?(index, true)
         refreshDisplay()
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
-                let preview = try EMSResultsStepBridge.runResultsStep(
-                    forSimulationNamed: simulationName, config: config, packageDir: packageDir,
-                    kicadCliPath: kicadCliPath, kicadQueryHelperPath: helperPath, fdtdWorkerPath: workerPath)
+                try pipeline.ensureStage(.results, config: config, packageDir: packageDir,
+                                          kicadCliPath: kicadCliPath, kicadQueryHelperPath: helperPath,
+                                          progress: { progress in
+                                              DispatchQueue.main.async {
+                                                  self?.progressReceived(progress, forSimulationIndex: index)
+                                              }
+                                          })
                 DispatchQueue.main.async {
-                    self?.resultsStepFinished(forSimulationIndex: index, preview: preview, error: nil)
+                    self?.resultsStepFinished(forSimulationIndex: index, error: nil)
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self?.resultsStepFinished(forSimulationIndex: index, preview: nil, error: error)
+                    self?.resultsStepFinished(forSimulationIndex: index, error: error)
                 }
             }
         }
     }
 
-    private func resultsStepFinished(forSimulationIndex index: Int, preview: EMSResultsPreview?, error: Error?) {
-        runningIndices.remove(index)
-        onRunStateChanged?(index, false)
-        if let preview {
-            previews[index] = preview
+    /// Common handler for every EMSPipelineProgress report from this VC's own in-flight ensureStage:
+    /// call -- relayed outward via onProgressChanged (for the source-list row) and, if this is the
+    /// currently-shown simulation, applied to this VC's own progress bar/time estimate/level
+    /// indicator too.
+    private func progressReceived(_ progress: EMSPipelineProgress, forSimulationIndex index: Int) {
+        latestProgress[index] = progress
+        onProgressChanged?(index, progress)
+        let name = simulationName(forIndex: index)
+        let percent = Int((progress.fraction * 100).rounded())
+        switch progress.phase {
+        case .simulation:
+            print("[\(name)] Simulation: \(percent)% (energy ~\(String(format: "%.2e", progress.absoluteEnergy))"
+                + ", \(String(format: "%.1f", progress.energyChangeDB))"
+                + "/\(String(format: "%.1f", progress.targetEnergyChangeDB)) dB)")
+        default:
+            print("[\(name)] Geometry: \(percent)%")
+        }
+        // See phaseStartTime's own doc comment for why this resets on every phase change, not just
+        // once per run.
+        if lastReportedPhase[index] != progress.phase {
+            lastReportedPhase[index] = progress.phase
+            phaseStartTime[index] = Date()
+            // Snap immediately, not animated -- without this, the very next (animated) update below
+            // would visibly slide from wherever the *previous* phase left off (e.g. the Geometry bar
+            // sitting at 100%) down to this new phase's own starting point, transiently reading as
+            // some confusing intermediate "half complete" value instead of genuinely restarting from
+            // scratch the moment the new phase begins.
+            if currentIndex == index {
+                progressBar.doubleValue = 0
+                if progress.phase == .simulation {
+                    energyLevelIndicator.maxValue = max(progress.targetEnergyChangeDB, 1)
+                }
+                setLevelIndicatorValue(energyLevelIndicator.maxValue, animated: false)
+            }
+        }
+        let secondsRemaining: Double?
+        if let start = phaseStartTime[index], progress.fraction > 0 {
+            let elapsed = Date().timeIntervalSince(start)
+            secondsRemaining = max(0, elapsed / progress.fraction - elapsed)
         } else {
-            errors[index] = error?.localizedDescription ?? "Simulation failed."
+            secondsRemaining = nil
+        }
+        timeEstimateText[index] = TimeRemainingFormatter.string(secondsRemaining: secondsRemaining)
+        if currentIndex == index, runningIndices.contains(index) {
+            refreshDisplay(animated: true)
+        }
+    }
+
+    private func simulationName(forIndex index: Int) -> String {
+        guard let document, index < document.config.simulations.count else { return "simulation \(index)" }
+        return document.config.simulations[index].name
+    }
+
+    private func resultsStepFinished(forSimulationIndex index: Int, error: Error?) {
+        runningIndices.remove(index)
+        // Read before clearing -- the last phase reported before this run stopped, so
+        // onRunFinished's caller knows which stage the outcome belongs to.
+        let reachedPhase = latestProgress[index]?.phase ?? .geometry
+        latestProgress[index] = nil
+        lastReportedPhase[index] = nil
+        phaseStartTime[index] = nil
+        timeEstimateText[index] = nil
+        // Immediate, not animated -- see GeometryViewController.stepFinished's identical reset for
+        // why: this run's own progress bar/level indicator shouldn't leave a stale value behind for
+        // the next run to animate away from.
+        progressBar.doubleValue = 0
+        setLevelIndicatorValue(0, animated: false)
+        onRunFinished?(index, reachedPhase, error == nil)
+        if let error {
+            errors[index] = error.localizedDescription
+        } else {
+            document?.updateChangeCount(.changeDone)
         }
         refreshDisplay()
     }
@@ -249,7 +512,9 @@ final class SimulationResultsViewController: NSViewController {
 
     @objc private func categoryChanged() {
         guard categoryControl.selectedSegment >= 0, categoryControl.selectedSegment < availableCategories.count,
-              let currentIndex, let preview = previews[currentIndex] else { return }
+              let currentIndex, let document, currentIndex < document.config.simulations.count,
+              let preview = document.pipeline(forSimulationNamed: document.config.simulations[currentIndex].name)
+                  .resultsPreview() else { return }
         selectedCategory = availableCategories[categoryControl.selectedSegment]
         rebuildStack(for: preview)
     }

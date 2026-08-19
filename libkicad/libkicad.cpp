@@ -459,6 +459,7 @@ RawStackupResult stackupRaw(const std::string& projectPath, const std::string& b
             layer.name = "Dielectric " + std::to_string(item->GetDielectricLayerId());
             layer.thicknessMm = pcbIUScale.IUTomm(item->GetThickness());
             layer.epsilonR = item->GetEpsilonR();
+            layer.lossTangent = item->GetLossTangent();
         } else {
             // Solder mask/paste/silkscreen -- not part of the layer stack a field simulation cares
             // about.

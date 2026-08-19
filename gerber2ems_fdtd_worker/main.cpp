@@ -18,6 +18,7 @@
 #include "gerber2ems/logging.hpp"
 #include "gerber2ems/paths_config.hpp"
 #include "gerber2ems/simulation.hpp"
+#include "gerber2ems/simulation_data.hpp"
 
 using namespace gerber2ems;
 
@@ -89,8 +90,24 @@ int main(int argc, char** argv) {
     // it only reloads the geometry a prior stage already saved to disk.
     const PathsConfig paths = PathsConfig::forConfigFile(configPath, "", "", "");
 
+    // Deserializes the exact same SimulationData<Grid> (sliced board + placed grid lines --
+    // see simulation_data.hpp) GeometryResult::build()/load() would have in memory in-process --
+    // this worker is a genuinely separate process, so a file is the only way to get it. Rebuilding
+    // this Simulation's ContinuousStructure from that (populateGeometry(), including its own
+    // setBoundaryConditions(true)) happens on *this* freshly-constructed Simulation's own `_fdtd`,
+    // not a reload of some other object's state -- unlike the old geometry.xml round trip (which
+    // only ever restored `_csx`, leaving `_fdtd`'s separate boundary-condition state at openEMS's
+    // own PEC default), there's no second, explicit setBoundaryConditions() call needed here.
+    auto simDataResult = loadSimulationData(*simConfig, simulationDataFile(paths, simName));
+    if (!simDataResult) {
+        writeError(simPath, simDataResult.error());
+        return EXIT_FAILURE;
+    }
+
     Simulation simulation(*simConfig, config, options, paths);
-    if (auto result = simulation.loadGeometry(); !result) {
+    simulation.adoptSlicedBoard(simDataResult->geometry().slicedBoard);
+    simulation.adoptGridLines(simDataResult->grid().gridLines);
+    if (auto result = simulation.populateGeometry(); !result) {
         writeError(simPath, result.error());
         return EXIT_FAILURE;
     }

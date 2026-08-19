@@ -1,33 +1,19 @@
 #import "SimulationResultsBridge.h"
-#import "EMSConfigBridge+Private.h"
+#import "SimulationResultsBridge+Private.h"
 
 #include <algorithm>
 #include <cmath>
 #include <complex>
-#include <optional>
 #include <string>
 #include <vector>
 
 #include "gerber2ems/config.hpp"
-#include "gerber2ems/geometry_result.hpp"
-#include "gerber2ems/importer.hpp"
-#include "gerber2ems/paths_config.hpp"
-#include "gerber2ems/port_resolution.hpp"
 #include "gerber2ems/postprocess.hpp"
-#include "gerber2ems/postprocess_result.hpp"
-#include "gerber2ems/simulation_result.hpp"
 
-using gerber2ems::EMSConfig;
-using gerber2ems::PathsConfig;
-using gerber2ems::RunOptions;
+using gerber2ems::Postprocessor;
+using gerber2ems::SimulationConfig;
 
 namespace {
-
-NSError* makeError(const std::string& message) {
-    return [NSError errorWithDomain:EMSConfigErrorDomain
-                                code:1
-                            userInfo:@{NSLocalizedDescriptionKey : @(message.c_str())}];
-}
 
 // Non-finite values are a real possibility in this data, not just a theoretical edge case: an
 // S-parameter magnitude of exactly 0 makes 20*log10(...) equal to -Infinity, and impedance
@@ -196,87 +182,10 @@ NSString* responseLabel(const gerber2ems::PortConfig& measuredPort) {
 }
 @end
 
-@implementation EMSResultsStepBridge
-
-+ (nullable EMSResultsPreview *)runResultsStepForSimulationNamed:(NSString *)simulationName
-                                                            config:(EMSConfigBridge *)config
-                                                        packageDir:(NSString *)packageDir
-                                                      kicadCliPath:(NSString *)kicadCliPath
-                                              kicadQueryHelperPath:(NSString *)helperPath
-                                                    fdtdWorkerPath:(NSString *)workerPath
-                                                             error:(NSError **)error {
-    EMSConfig& liveConfig = config.cxxConfig;
-    if (!liveConfig.kicadPcbPath().has_value()) {
-        if (error != nil) *error = makeError("No KiCad board linked to this document yet.");
-        return nil;
-    }
-
-    const PathsConfig paths = PathsConfig::forConfigFile(
-        std::filesystem::path(packageDir.UTF8String) / "simulation.json", kicadCliPath.UTF8String,
-        helperPath.UTF8String, workerPath.UTF8String);
-
-    if (auto result = gerber2ems::exportKicadPcb(paths, *liveConfig.kicadPcbPath()); !result) {
-        if (error != nil) *error = makeError(result.error());
-        return nil;
-    }
-    if (auto result = gerber2ems::importStackup(paths, liveConfig); !result) {
-        if (error != nil) *error = makeError(result.error());
-        return nil;
-    }
-    if (auto result = gerber2ems::resolveSimulationPorts(liveConfig, paths); !result) {
-        if (error != nil) *error = makeError(result.error());
-        return nil;
-    }
-
-    // Unlike the geometry step, this one needs simulation.json to actually exist on disk at
-    // paths.configFile: SimulationResult::run() below posix_spawns one FDTD worker process per
-    // excited port, and that worker is a *separate process* that can't share liveConfig in memory
-    // -- it re-parses simulation.json itself (see job.json's "config_path", written by
-    // Simulation::run()). packageDir is always a private scratch directory (see
-    // Document.pipelineDirectory's own doc comment) that only ever gets fab/ems written into it;
-    // simulation.json itself is only ever saved into the real, user-visible package. Saving the
-    // live, already-port-resolved config here -- matching what GeometryResult::build() below is
-    // about to use -- is what makes it discoverable by the worker.
-    if (auto result = liveConfig.save(paths.configFile); !result) {
-        if (error != nil) *error = makeError(result.error());
-        return nil;
-    }
-
-    auto geometryResult = gerber2ems::GeometryResult::build(liveConfig, RunOptions{}, paths);
-    if (!geometryResult.has_value()) {
-        if (error != nil) *error = makeError(geometryResult.error());
-        return nil;
-    }
-
-    // The expensive step: one FDTD worker process per excited port, run and waited on serially,
-    // with no progress callback -- see this method's own doc comment in the header.
-    auto simulationResult = gerber2ems::SimulationResult::run(*geometryResult, RunOptions{});
-    if (!simulationResult.has_value()) {
-        if (error != nil) *error = makeError(simulationResult.error());
-        return nil;
-    }
-
-    auto postprocessResult = gerber2ems::PostprocessResult::compute(*simulationResult);
-    if (!postprocessResult.has_value()) {
-        if (error != nil) *error = makeError(postprocessResult.error());
-        return nil;
-    }
-
-    const std::string targetName = simulationName.UTF8String;
-    const auto& simulations = postprocessResult->config().simulations();
-    const auto simIt = std::find_if(simulations.begin(), simulations.end(),
-                                     [&](const auto& sim) { return sim.name() == targetName; });
-    if (simIt == simulations.end()) {
-        if (error != nil) *error = makeError("Simulation \"" + targetName + "\" not found.");
-        return nil;
-    }
-    const gerber2ems::SimulationConfig& simConfig = *simIt;
+EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const SimulationConfig& simConfig) {
     const auto portCount = static_cast<std::int32_t>(simConfig.ports().size());
 
-    NSArray<NSNumber*>* freqsGHz = @[];
-    if (auto freqs = postprocessResult->frequencies(targetName); freqs.has_value()) {
-        freqsGHz = toNSArray(*freqs, 1e-9);
-    }
+    NSArray<NSNumber*>* freqsGHz = toNSArray(postprocessor.frequencies(), 1e-9);
 
     NSMutableArray<EMSResultsPort*>* ports = [NSMutableArray arrayWithCapacity:simConfig.ports().size()];
     for (std::int32_t i = 0; i < portCount; ++i) {
@@ -294,14 +203,14 @@ NSString* responseLabel(const gerber2ems::PortConfig& measuredPort) {
         if (!simConfig.ports()[static_cast<std::size_t>(i)].excite()) {
             continue;
         }
-        const auto selfParam = postprocessResult->getSParam(targetName, i, i);
+        const auto selfParam = postprocessor.getSParam(i, i);
         if (!selfParam.has_value()) {
             continue;
         }
 
         NSMutableArray<EMSResultsSParamCurve*>* curves = [NSMutableArray array];
         for (std::int32_t j = 0; j < portCount; ++j) {
-            const auto sParam = postprocessResult->getSParam(targetName, j, i);
+            const auto sParam = postprocessor.getSParam(j, i);
             if (!sParam.has_value()) {
                 continue;
             }
@@ -340,7 +249,7 @@ NSString* responseLabel(const gerber2ems::PortConfig& measuredPort) {
 
     NSMutableArray<EMSResultsImpedance*>* impedances = [NSMutableArray array];
     for (std::int32_t i = 0; i < portCount; ++i) {
-        const auto impedance = postprocessResult->getImpedance(targetName, i);
+        const auto impedance = postprocessor.getImpedance(i);
         if (!impedance.has_value()) {
             continue;
         }
@@ -361,8 +270,8 @@ NSString* responseLabel(const gerber2ems::PortConfig& measuredPort) {
         if (!pair.correct()) {
             continue;
         }
-        const auto sdd = postprocessResult->getDiffPairSdd(targetName, static_cast<std::int32_t>(idx));
-        const auto diffZ = postprocessResult->getDiffPairImpedance(targetName, static_cast<std::int32_t>(idx));
+        const auto sdd = postprocessor.getDiffPairSdd(static_cast<std::int32_t>(idx));
+        const auto diffZ = postprocessor.getDiffPairImpedance(static_cast<std::int32_t>(idx));
 
         NSArray<NSNumber*>* sdd11 = (sdd.has_value() && sdd->sdd11Db.has_value()) ? toNSArray(*sdd->sdd11Db) : nil;
         NSArray<NSNumber*>* sdd21 = (sdd.has_value() && sdd->sdd21Db.has_value()) ? toNSArray(*sdd->sdd21Db) : nil;
@@ -371,16 +280,14 @@ NSString* responseLabel(const gerber2ems::PortConfig& measuredPort) {
 
         NSArray<NSNumber*>* nDelay = nil;
         if (pair.startN().resolvedIndex().has_value() && pair.stopN().resolvedIndex().has_value()) {
-            if (const auto d = postprocessResult->getDelay(targetName, *pair.stopN().resolvedIndex(),
-                                                             *pair.startN().resolvedIndex());
+            if (const auto d = postprocessor.getDelay(*pair.stopN().resolvedIndex(), *pair.startN().resolvedIndex());
                 d.has_value()) {
                 nDelay = toNSArray(*d, 1e9);
             }
         }
         NSArray<NSNumber*>* pDelay = nil;
         if (pair.startP().resolvedIndex().has_value() && pair.stopP().resolvedIndex().has_value()) {
-            if (const auto d = postprocessResult->getDelay(targetName, *pair.stopP().resolvedIndex(),
-                                                             *pair.startP().resolvedIndex());
+            if (const auto d = postprocessor.getDelay(*pair.stopP().resolvedIndex(), *pair.startP().resolvedIndex());
                 d.has_value()) {
                 pDelay = toNSArray(*d, 1e9);
             }
@@ -406,7 +313,7 @@ NSString* responseLabel(const gerber2ems::PortConfig& measuredPort) {
         if (!trace.correct() || !trace.start().resolvedIndex().has_value() || !trace.stop().resolvedIndex().has_value()) {
             continue;
         }
-        const auto d = postprocessResult->getDelay(targetName, *trace.stop().resolvedIndex(), *trace.start().resolvedIndex());
+        const auto d = postprocessor.getDelay(*trace.stop().resolvedIndex(), *trace.start().resolvedIndex());
         if (!d.has_value()) {
             continue;
         }
@@ -423,5 +330,3 @@ NSString* responseLabel(const gerber2ems::PortConfig& measuredPort) {
                                                     diffPairs:diffPairs
                                                        traces:traces];
 }
-
-@end

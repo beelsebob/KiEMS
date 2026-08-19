@@ -38,7 +38,7 @@ std::string _stackupLayerKindName(libkicad::StackupLayerKind kind) {
 
 void _printStackupLayer(const libkicad::StackupLayer& layer) {
     std::cout << _stackupLayerKindName(layer.kind) << '\t' << layer.name << '\t' << _formatDouble(layer.thicknessMm)
-               << '\t' << _formatDouble(layer.epsilonR) << '\n';
+               << '\t' << _formatDouble(layer.epsilonR) << '\t' << _formatDouble(layer.lossTangent) << '\n';
 }
 
 // One line per pin (not one line per footprint): the caller groups by the reference column, same

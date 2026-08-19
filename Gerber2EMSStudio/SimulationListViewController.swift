@@ -19,6 +19,18 @@ enum SimulationListSelection: Equatable {
     }
 }
 
+/// A "Geometry"/"Simulation Results" row's own status -- drives its trailing indicator: a
+/// determinate circular progress ring while `.running`, otherwise a small tinted status icon (blue
+/// "not started" outline, green filled "completed", or yellow "error" triangle). Absence of an
+/// entry in the owning dictionary is treated as `.notStarted` -- see SimulationListViewController's
+/// own geometryRowStatus/simulationResultsRowStatus.
+private enum SimulationRowStatus {
+    case notStarted
+    case running(fraction: Double)
+    case completed
+    case error
+}
+
 /// A simulation row's name field -- just a plain label; all the rename mechanics live on
 /// SimulationOutlineView/SimulationListViewController instead of on the field itself. This exists
 /// only so SimulationListViewController's NSTextFieldDelegate methods can type-check which fields
@@ -94,15 +106,19 @@ final class SimulationListViewController: NSViewController {
     /// item identity (and therefore expansion/selection) survives a cosmetic-only reload.
     private var simulationNodes: [SimulationListNode] = []
 
-    /// Simulation indices whose "Geometry" row should show a spinner instead of its usual icon --
-    /// set by DocumentWindowController (wired to GeometryViewController.onRunStateChanged) while
-    /// that simulation's geometry-step pipeline run is in flight.
-    private var busyGeometryIndices: Set<Int> = []
+    /// Per-simulation status for the "Geometry" row's trailing indicator -- missing entries read as
+    /// `.notStarted`. Driven by DocumentWindowController, wired to GeometryViewController's
+    /// onRunStateChanged (-> `.running`), onProgressChanged (fraction while `.running`), and
+    /// onRunFinished (-> `.completed`/`.error`).
+    private var geometryRowStatus: [Int: SimulationRowStatus] = [:]
 
-    /// Same as busyGeometryIndices, for the "Simulation Results" row -- set by DocumentWindowController
-    /// (wired to SimulationResultsViewController.onRunStateChanged) while that simulation's full
-    /// geometry -> simulate -> postprocess pipeline run is in flight.
-    private var busySimulationResultsIndices: Set<Int> = []
+    /// Same as geometryRowStatus, for the "Simulation Results" row -- except there's no equivalent
+    /// of geometryRowStatus's own eager onRunStateChanged(true) transition into `.running`, since
+    /// SimulationResultsViewController's own run starting doesn't mean *this* stage has: it computes
+    /// geometry first (see EMSPipelineProgressPhase's own doc comment), so this row only ever enters
+    /// `.running` once onProgressChanged actually reports the .simulation phase beginning -- see
+    /// setSimulationResultsProgress's own doc comment.
+    private var simulationResultsRowStatus: [Int: SimulationRowStatus] = [:]
 
     /// Fired whenever the selected row changes, including to nil when the list is empty or nothing
     /// is selected.
@@ -309,17 +325,12 @@ final class SimulationListViewController: NSViewController {
         }
     }
 
-    /// Called by DocumentWindowController (wired to GeometryViewController.onRunStateChanged)
-    /// whenever a simulation's geometry-step pipeline run starts or finishes -- swaps that
-    /// simulation's "Geometry" row between its usual icon and a spinner. Only reloads the one
-    /// affected row (unlike includedToggled's full reloadData(), this state is purely local to a
-    /// single row, not something that can leave a sibling row's cached icon stale).
-    func setGeometryRowBusy(_ busy: Bool, forSimulationIndex index: Int) {
-        if busy {
-            busyGeometryIndices.insert(index)
-        } else {
-            busyGeometryIndices.remove(index)
-        }
+    /// Finds and reloads just the "Geometry" sub-row for `index`, after geometryRowStatus[index] has
+    /// already been updated -- shared by every geometryRowStatus mutator below so each one stays a
+    /// one-line status update. Only reloads the one affected row (unlike includedToggled's full
+    /// reloadData(), this state is purely local to a single row, not something that can leave a
+    /// sibling row's cached icon stale).
+    private func reloadGeometryRow(forSimulationIndex index: Int) {
         guard let simulationNode = simulationNodes.first(where: {
             if case .simulation(let i) = $0.kind { return i == index }
             return false
@@ -331,14 +342,8 @@ final class SimulationListViewController: NSViewController {
         outlineView.reloadItem(geometryNode)
     }
 
-    /// Same as setGeometryRowBusy, for the "Simulation Results" row -- see
-    /// SimulationResultsViewController.onRunStateChanged's doc comment.
-    func setSimulationResultsRowBusy(_ busy: Bool, forSimulationIndex index: Int) {
-        if busy {
-            busySimulationResultsIndices.insert(index)
-        } else {
-            busySimulationResultsIndices.remove(index)
-        }
+    /// Same as reloadGeometryRow, for the "Simulation Results" row.
+    private func reloadSimulationResultsRow(forSimulationIndex index: Int) {
         guard let simulationNode = simulationNodes.first(where: {
             if case .simulation(let i) = $0.kind { return i == index }
             return false
@@ -348,6 +353,60 @@ final class SimulationListViewController: NSViewController {
             return false
         }) else { return }
         outlineView.reloadItem(resultsNode)
+    }
+
+    /// Called by DocumentWindowController (wired to GeometryViewController.onRunStateChanged)
+    /// whenever a simulation's geometry-step pipeline run starts or finishes. Only the `busy == true`
+    /// transition is handled here (-> `.running(fraction: 0)`); the matching "finished" transition
+    /// always arrives via setGeometryRowCompleted(_:forSimulationIndex:) instead (see its own doc
+    /// comment), so `busy == false` is a deliberate no-op rather than resetting to `.notStarted`.
+    /// GeometryViewController's own run starting really does mean the Geometry stage has started
+    /// (unlike the Simulation Results row -- see simulationResultsRowStatus's own doc comment for why
+    /// there's no equivalent eager setSimulationResultsRowBusy).
+    func setGeometryRowBusy(_ busy: Bool, forSimulationIndex index: Int) {
+        guard busy else { return }
+        geometryRowStatus[index] = .running(fraction: 0)
+        reloadGeometryRow(forSimulationIndex: index)
+    }
+
+    /// Called by DocumentWindowController (wired to GeometryViewController.onProgressChanged)
+    /// whenever the in-flight geometry pipeline run reports a new fraction -- updates the
+    /// "Geometry" row's own circular progress indicator without disturbing its busy state. A no-op
+    /// if that row isn't currently `.running` (e.g. a stale report arriving after the row already
+    /// finished).
+    func setGeometryProgress(_ fraction: Double, forSimulationIndex index: Int) {
+        guard case .running = geometryRowStatus[index] else { return }
+        geometryRowStatus[index] = .running(fraction: fraction)
+        reloadGeometryRow(forSimulationIndex: index)
+    }
+
+    /// Called by DocumentWindowController (wired to SimulationResultsViewController.onProgressChanged)
+    /// whenever the in-flight results pipeline run reports a new .simulation-phase fraction -- the
+    /// *only* place the "Simulation Results" row ever enters `.running` (unconditionally, unlike
+    /// setGeometryProgress's guarded update -- there's no earlier busy(true) call for this row to
+    /// guard against pre-empting; see simulationResultsRowStatus's own doc comment for why). This is
+    /// what keeps the row showing its blue "not started" circle for as long as the same combined run
+    /// is still only in its .geometry phase.
+    func setSimulationResultsProgress(_ fraction: Double, forSimulationIndex index: Int) {
+        simulationResultsRowStatus[index] = .running(fraction: fraction)
+        reloadSimulationResultsRow(forSimulationIndex: index)
+    }
+
+    /// Called by DocumentWindowController (wired to GeometryViewController.onRunFinished) once a
+    /// simulation's geometry-step pipeline run finishes, successfully or not -- swaps the "Geometry"
+    /// row's trailing indicator from its circular progress ring to a green filled "completed" dot or
+    /// a yellow "error" triangle. This is the only place a `.running` row ever leaves that state (see
+    /// setGeometryRowBusy's own doc comment for why `busy == false` alone doesn't do it).
+    func setGeometryRowCompleted(_ success: Bool, forSimulationIndex index: Int) {
+        geometryRowStatus[index] = success ? .completed : .error
+        reloadGeometryRow(forSimulationIndex: index)
+    }
+
+    /// Same as setGeometryRowCompleted, for the "Simulation Results" row -- see
+    /// SimulationResultsViewController.onRunFinished's doc comment.
+    func setSimulationResultsRowCompleted(_ success: Bool, forSimulationIndex index: Int) {
+        simulationResultsRowStatus[index] = success ? .completed : .error
+        reloadSimulationResultsRow(forSimulationIndex: index)
     }
 
     @objc private func selectionChanged() {
@@ -421,14 +480,16 @@ extension SimulationListViewController: NSOutlineViewDelegate {
             return cell
         case .geometry(let simulationIndex):
             return Self.makeChildCell(in: outlineView, owner: self, title: "Geometry", symbolName: "cube",
-                                       showsSpinner: busyGeometryIndices.contains(simulationIndex))
+                                       status: geometryRowStatus[simulationIndex] ?? .notStarted)
         case .simulationResults(let simulationIndex):
             return Self.makeChildCell(in: outlineView, owner: self, title: "Simulation Results",
                                        symbolName: "chart.bar",
-                                       showsSpinner: busySimulationResultsIndices.contains(simulationIndex))
+                                       status: simulationResultsRowStatus[simulationIndex] ?? .notStarted)
         case .fieldViewer:
+            // Not a pipeline stage yet -- always shown as "not started" (there's no running/
+            // completed/error state to track until it actually does something).
             return Self.makeChildCell(in: outlineView, owner: self, title: "Field Viewer",
-                                       symbolName: "waveform", showsSpinner: false)
+                                       symbolName: "waveform", status: .notStarted)
         }
     }
 
@@ -518,25 +579,51 @@ extension SimulationListViewController: NSOutlineViewDelegate {
     }
 
     private static let spinnerIdentifier = NSUserInterfaceItemIdentifier("SimulationListChildCell.spinner")
+    private static let statusImageIdentifier = NSUserInterfaceItemIdentifier("SimulationListChildCell.statusImage")
+
+    /// Not-yet-started/completed/error glyphs for makeChildCell's trailing status indicator --
+    /// template images so contentTintColor (set fresh per state in makeChildCell) actually colors
+    /// them, built once and reused across every cell/state.
+    private static let notStartedImage: NSImage = {
+        let image = NSImage(systemSymbolName: "circle", accessibilityDescription: "Not started")!
+        image.isTemplate = true
+        return image
+    }()
+    private static let completedImage: NSImage = {
+        let image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "Completed")!
+        image.isTemplate = true
+        return image
+    }()
+    private static let errorImage: NSImage = {
+        let image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Error")!
+        image.isTemplate = true
+        return image
+    }()
 
     /// Sub-entry rows (Geometry/Simulation Results/Field Viewer) are identical in every simulation,
     /// so a distinct reuse identifier per symbol (rather than per node) is enough to recycle them.
-    /// `showsSpinner` swaps the row's icon for a small spinner (used for "Geometry" while that
-    /// simulation's geometry step is running) -- the spinner subview is built once and reused
-    /// alongside the rest of the cell, just toggled/animated fresh on every call.
+    /// `status` drives the row's trailing indicator: a determinate circular progress ring while
+    /// `.running`, otherwise a small tinted status glyph (blue outline "not started", green filled
+    /// "completed", yellow triangle "error") -- every child row gets one, including Field Viewer,
+    /// which has no pipeline logic behind it yet and so is always `.notStarted`. Both indicator
+    /// subviews are built once and reused alongside the rest of the cell, just re-valued/re-toggled
+    /// fresh on every call.
     private static func makeChildCell(
-        in outlineView: NSOutlineView, owner: Any?, title: String, symbolName: String, showsSpinner: Bool
+        in outlineView: NSOutlineView, owner: Any?, title: String, symbolName: String, status: SimulationRowStatus
     ) -> NSTableCellView {
         let identifier = NSUserInterfaceItemIdentifier("SimulationListChildCell-\(symbolName)")
         let cell: NSTableCellView
         let imageView: NSImageView
         let spinner: NSProgressIndicator
+        let statusImageView: NSImageView
         if let reused = outlineView.makeView(withIdentifier: identifier, owner: owner) as? NSTableCellView,
            let reusedImageView = reused.imageView,
-           let reusedSpinner = reused.subviews.first(where: { $0.identifier == spinnerIdentifier }) as? NSProgressIndicator {
+           let reusedSpinner = reused.subviews.first(where: { $0.identifier == spinnerIdentifier }) as? NSProgressIndicator,
+           let reusedStatusImageView = reused.subviews.first(where: { $0.identifier == statusImageIdentifier }) as? NSImageView {
             cell = reused
             imageView = reusedImageView
             spinner = reusedSpinner
+            statusImageView = reusedStatusImageView
         } else {
             cell = NSTableCellView()
             cell.identifier = identifier
@@ -555,11 +642,26 @@ extension SimulationListViewController: NSOutlineViewDelegate {
             spinner.style = .spinning
             spinner.controlSize = .small
             spinner.isDisplayedWhenStopped = false
+            spinner.isIndeterminate = false
+            spinner.minValue = 0
+            spinner.maxValue = 1
             spinner.translatesAutoresizingMaskIntoConstraints = false
+
+            statusImageView = NSImageView()
+            statusImageView.identifier = statusImageIdentifier
+            statusImageView.translatesAutoresizingMaskIntoConstraints = false
+            // A slight drop shadow to lift the status dot/triangle off the row background --
+            // layer-backing is required for CALayer's own shadow* properties to take effect.
+            statusImageView.wantsLayer = true
+            statusImageView.layer?.shadowColor = NSColor.black.cgColor
+            statusImageView.layer?.shadowOpacity = 0.5
+            statusImageView.layer?.shadowRadius = 1
+            statusImageView.layer?.shadowOffset = CGSize(width: 0, height: -1)
 
             cell.addSubview(imageView)
             cell.addSubview(textField)
             cell.addSubview(spinner)
+            cell.addSubview(statusImageView)
             cell.textField = textField
             cell.imageView = imageView
             NSLayoutConstraint.activate([
@@ -576,17 +678,37 @@ extension SimulationListViewController: NSOutlineViewDelegate {
                 spinner.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
                 spinner.widthAnchor.constraint(equalToConstant: 14),
                 spinner.heightAnchor.constraint(equalToConstant: 14),
+
+                statusImageView.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
+                statusImageView.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                statusImageView.widthAnchor.constraint(equalToConstant: 14),
+                statusImageView.heightAnchor.constraint(equalToConstant: 14),
             ])
         }
 
         cell.textField?.stringValue = title
-        // Both shown at once while busy -- the spinner sits at the row's trailing edge, well clear
-        // of the leading-edge icon, so there's no overlap to avoid by hiding one or the other.
-        spinner.isHidden = !showsSpinner
-        if showsSpinner {
-            spinner.startAnimation(nil)
-        } else {
-            spinner.stopAnimation(nil)
+        // At most one of the two trailing indicators is ever visible at once -- they share the same
+        // slot at the row's trailing edge, well clear of the leading-edge icon.
+        switch status {
+        case .running(let fraction):
+            spinner.isHidden = false
+            spinner.doubleValue = fraction
+            statusImageView.isHidden = true
+        case .notStarted:
+            spinner.isHidden = true
+            statusImageView.isHidden = false
+            statusImageView.image = Self.notStartedImage
+            statusImageView.contentTintColor = .systemBlue
+        case .completed:
+            spinner.isHidden = true
+            statusImageView.isHidden = false
+            statusImageView.image = Self.completedImage
+            statusImageView.contentTintColor = .systemGreen
+        case .error:
+            spinner.isHidden = true
+            statusImageView.isHidden = false
+            statusImageView.image = Self.errorImage
+            statusImageView.contentTintColor = .systemYellow
         }
         return cell
     }

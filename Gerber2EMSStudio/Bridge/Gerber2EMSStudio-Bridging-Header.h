@@ -2,3 +2,4 @@
 #import "KicadBoardBridge.h"
 #import "GeometryPreviewBridge.h"
 #import "SimulationResultsBridge.h"
+#import "EMSSimulationPipelineBridge.h"

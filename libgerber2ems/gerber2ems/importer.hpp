@@ -24,6 +24,14 @@ struct Triangle {
     Position c;
 };
 
+inline void to_json(nlohmann::json& j, const Triangle& t) { j = nlohmann::json{{"a", t.a}, {"b", t.b}, {"c", t.c}}; }
+
+inline void from_json(const nlohmann::json& j, Triangle& t) {
+    j.at("a").get_to(t.a);
+    j.at("b").get_to(t.b);
+    j.at("c").get_to(t.c);
+}
+
 /// Already re-origined the same way (see getVias()) -- safe to use directly alongside a
 /// SlicedBoard's outline/layerTriangles, both in the same [0, pcbWidth] x [0, pcbHeight] frame. A
 /// plated through-hole is a capsule/stadium shape between (x, y) and (x2, y2) with `diameter` as

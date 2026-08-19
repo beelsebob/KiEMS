@@ -27,13 +27,14 @@ enum class StackupLayerKind {
 };
 
 /// One layer of a board's physical stackup (BOARD_DESIGN_SETTINGS::GetStackupDescriptor()), in
-/// top-to-bottom order. thicknessMm/epsilonR come straight off BOARD_STACKUP_ITEM; epsilonR is
-/// meaningless (left at 0) for Copper layers.
+/// top-to-bottom order. thicknessMm/epsilonR/lossTangent come straight off BOARD_STACKUP_ITEM;
+/// epsilonR/lossTangent are meaningless (left at 0) for Copper layers.
 struct StackupLayer {
     StackupLayerKind kind = StackupLayerKind::Copper;
     std::string name; // BOARD_STACKUP_ITEM::GetLayerName(), e.g. "F.Cu", "Dielectric 1"
     double thicknessMm = 0;
     double epsilonR = 0;
+    double lossTangent = 0;
 };
 
 /// One pad on a resolved net: identity (for matching against an ExcitationConfig's footprint+pin),

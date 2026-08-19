@@ -1,5 +1,5 @@
 #import "GeometryPreviewBridge.h"
-#import "EMSConfigBridge+Private.h"
+#import "GeometryPreviewBridge+Private.h"
 
 #include <algorithm>
 #include <cmath>
@@ -15,23 +15,16 @@
 #include "gerber2ems/config.hpp"
 #include "gerber2ems/constants.hpp"
 #include "gerber2ems/gerber_composite.hpp"
-#include "gerber2ems/geometry_result.hpp"
 #include "gerber2ems/importer.hpp"
 #include "gerber2ems/libkicad_query.hpp"
 #include "gerber2ems/paths_config.hpp"
-#include "gerber2ems/port_resolution.hpp"
 
 using gerber2ems::EMSConfig;
 using gerber2ems::PathsConfig;
-using gerber2ems::RunOptions;
+using gerber2ems::SimulationConfig;
+using gerber2ems::SlicedBoard;
 
 namespace {
-
-NSError* makeError(const std::string& message) {
-    return [NSError errorWithDomain:EMSConfigErrorDomain
-                                code:1
-                            userInfo:@{NSLocalizedDescriptionKey : @(message.c_str())}];
-}
 
 CGPoint toCGPoint(const gerber2ems::Position& position) {
     return CGPointMake(position.x(), position.y());
@@ -276,7 +269,14 @@ bool viaIntersectsOutline(double x, double y, double diameter, const std::vector
 - (instancetype)initWithLayers:(NSArray<EMSGeometryLayer*>*)layers
                         outline:(NSArray<NSValue*>*)outline
                            vias:(NSArray<EMSGeometryVia*>*)vias
+              failedViaAttempts:(NSArray<NSValue*>*)failedViaAttempts
                           ports:(NSArray<EMSGeometryPort*>*)ports
+                     gridLinesX:(NSArray<NSNumber*>*)gridLinesX
+                     gridLinesY:(NSArray<NSNumber*>*)gridLinesY
+                    pmlInnerXMin:(double)pmlInnerXMin
+                    pmlInnerXMax:(double)pmlInnerXMax
+                    pmlInnerYMin:(double)pmlInnerYMin
+                    pmlInnerYMax:(double)pmlInnerYMax
                            xMin:(double)xMin
                            yMin:(double)yMin
                           width:(double)width
@@ -286,7 +286,14 @@ bool viaIntersectsOutline(double x, double y, double diameter, const std::vector
         _layers = [layers copy];
         _outline = [outline copy];
         _vias = [vias copy];
+        _failedViaAttempts = [failedViaAttempts copy];
         _ports = [ports copy];
+        _gridLinesX = [gridLinesX copy];
+        _gridLinesY = [gridLinesY copy];
+        _pmlInnerXMin = pmlInnerXMin;
+        _pmlInnerXMax = pmlInnerXMax;
+        _pmlInnerYMin = pmlInnerYMin;
+        _pmlInnerYMax = pmlInnerYMax;
         _xMin = xMin;
         _yMin = yMin;
         _width = width;
@@ -296,66 +303,9 @@ bool viaIntersectsOutline(double x, double y, double diameter, const std::vector
 }
 @end
 
-@implementation EMSGeometryStepBridge
-
-+ (nullable EMSGeometryPreview *)runGeometryStepForSimulationNamed:(NSString *)simulationName
-                                                              config:(EMSConfigBridge *)config
-                                                          packageDir:(NSString *)packageDir
-                                                        kicadCliPath:(NSString *)kicadCliPath
-                                                kicadQueryHelperPath:(NSString *)helperPath
-                                                      fdtdWorkerPath:(NSString *)workerPath
-                                                               error:(NSError **)error {
-    EMSConfig& liveConfig = config.cxxConfig;
-    if (!liveConfig.kicadPcbPath().has_value()) {
-        if (error != nil) *error = makeError("No KiCad board linked to this document yet.");
-        return nil;
-    }
-
-    const PathsConfig paths = PathsConfig::forConfigFile(
-        std::filesystem::path(packageDir.UTF8String) / "simulation.json", kicadCliPath.UTF8String,
-        helperPath.UTF8String, workerPath.UTF8String);
-
-    if (auto result = gerber2ems::exportKicadPcb(paths, *liveConfig.kicadPcbPath()); !result) {
-        if (error != nil) *error = makeError(result.error());
-        return nil;
-    }
-    if (auto result = gerber2ems::importStackup(paths, liveConfig); !result) {
-        if (error != nil) *error = makeError(result.error());
-        return nil;
-    }
-    if (auto result = gerber2ems::resolveSimulationPorts(liveConfig, paths); !result) {
-        if (error != nil) *error = makeError(result.error());
-        return nil;
-    }
-
-    // The real geometry step -- writes geometry.xml under paths.geometryDir, exactly like
-    // `geber2ems -g`. Passed a copy (build() takes EMSConfig by value and owns it from there) so
-    // liveConfig stays valid for the render-preview slicing below.
-    if (auto result = gerber2ems::GeometryResult::build(liveConfig, RunOptions{}, paths); !result) {
-        if (error != nil) *error = makeError(result.error());
-        return nil;
-    }
-
-    // Renderable preview: re-slice the same simulation independently (sliceBoardForSimulation is
-    // pure and fast -- no CSXCAD/FDTD involved) on a scaled-to-simulation-units copy, mirroring
-    // exactly what GeometryResult::build() just did internally via Simulation::sliceBoard(), so the
-    // shapes shown match what was actually built.
-    EMSConfig scaledConfig = liveConfig.scaledToSimulationUnits();
-    const std::string targetName = simulationName.UTF8String;
-    auto simIt = std::find_if(scaledConfig.simulations().begin(), scaledConfig.simulations().end(),
-                               [&](const auto& sim) { return sim.name() == targetName; });
-    if (simIt == scaledConfig.simulations().end()) {
-        if (error != nil) *error = makeError("Simulation \"" + targetName + "\" not found.");
-        return nil;
-    }
-
-    auto slicedResult = gerber2ems::sliceBoardForSimulation(*simIt, scaledConfig, paths);
-    if (!slicedResult) {
-        if (error != nil) *error = makeError(slicedResult.error());
-        return nil;
-    }
-    const gerber2ems::SlicedBoard& sliced = *slicedResult;
-
+EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const SimulationConfig& simConfig,
+                                          const EMSConfig& scaledConfig, const PathsConfig& paths,
+                                          const gerber2ems::ComputedGridLines* gridLines) {
     // Best-effort: the board's own KiCad color theme, if readable (see layerColors's own doc
     // comment for what "readable" means outside a full GUI session) -- a lookup failure here isn't
     // fatal to the geometry step itself, it just leaves every layer's hexColor nil, which callers
@@ -397,6 +347,12 @@ bool viaIntersectsOutline(double x, double y, double diameter, const std::vector
         [outline addObject:[NSValue valueWithPoint:NSMakePoint(point.x(), point.y())]];
     }
 
+    NSMutableArray<NSValue*>* failedViaAttempts =
+        [NSMutableArray arrayWithCapacity:sliced.failedStitchingViaAttempts.size()];
+    for (const auto& point : sliced.failedStitchingViaAttempts) {
+        [failedViaAttempts addObject:[NSValue valueWithPoint:NSMakePoint(point.x(), point.y())]];
+    }
+
     NSMutableArray<EMSGeometryVia*>* vias = [NSMutableArray arrayWithCapacity:sliced.stitchingVias.size()];
     for (const auto& via : sliced.stitchingVias) {
         // Always a plain round hole in a plain round pad -- board-slicing only ever invents round
@@ -414,12 +370,12 @@ bool viaIntersectsOutline(double x, double y, double diameter, const std::vector
     // Real board vias (from the board's own drill file) -- kept only where they still overlap this
     // simulation's sliced outline, exactly like Simulation::addVias() itself (see
     // viaIntersectsOutline's own doc comment for why that's a disc test, not just the via center).
-    // These are already baked into the actual FDTD geometry GeometryResult::build() just wrote;
-    // without adding them here too, the preview only ever showed the synthetic stitching vias,
-    // never the board's own real ones. getVias() needs the same Edge_Cuts-bounding-box re-origin
-    // every other coordinate this preview uses already has (see getVias()'s own doc comment) --
-    // re-derived here rather than threaded through, matching sliceBoardForSimulation()'s own
-    // internal re-derivation of the identical value.
+    // These are already baked into the actual FDTD geometry the geometry step just built; without
+    // adding them here too, the preview only ever showed the synthetic stitching vias, never the
+    // board's own real ones. getVias() needs the same Edge_Cuts-bounding-box re-origin every other
+    // coordinate this preview uses already has (see getVias()'s own doc comment) -- re-derived here
+    // rather than threaded through, matching sliceBoardForSimulation()'s own internal re-derivation
+    // of the identical value.
     if (auto originResult = gerber2ems::edgeCutsBoundingBox(
             paths.fabDir, static_cast<double>(scaledConfig.pixelSize()) * gerber2ems::constants::unitMultiplier);
         originResult) {
@@ -473,8 +429,8 @@ bool viaIntersectsOutline(double x, double y, double diameter, const std::vector
         }
     }
 
-    NSMutableArray<EMSGeometryPort*>* ports = [NSMutableArray arrayWithCapacity:simIt->ports().size()];
-    for (const auto& port : simIt->ports()) {
+    NSMutableArray<EMSGeometryPort*>* ports = [NSMutableArray arrayWithCapacity:simConfig.ports().size()];
+    for (const auto& port : simConfig.ports()) {
         if (!port.position().has_value()) {
             continue;
         }
@@ -485,14 +441,41 @@ bool viaIntersectsOutline(double x, double y, double diameter, const std::vector
                                                             length:port.length()]];
     }
 
+    // gridLines->x/y come straight out of CSXCAD, which GridGenerator populates in the same
+    // absolute, Edge_Cuts-bounding-box-relative frame every other position here (layers/outline/
+    // vias/ports/xMin/yMin itself) is in -- GridGeneratorAxis::compileGrid() writes its lines to
+    // the real mesh in that same absolute frame (not offset-subtracted; see its own comment), since
+    // that's the frame the actual simulation geometry (addSubstrates()/addGerbers()/addMslPort()/
+    // etc, none of which subtract this offset) is placed in too. No translation needed here.
+    // pmlInner* is the one exception -- it's diagnostic-only (see GridGeneratorAxis::pmlInnerMin()'s
+    // own doc comment) and deliberately stays local/offset-subtracted at the source, so it still
+    // needs sliced.xMin/yMin added back below.
+    NSMutableArray<NSNumber*>* gridLinesX = [NSMutableArray array];
+    NSMutableArray<NSNumber*>* gridLinesY = [NSMutableArray array];
+    if (gridLines) {
+        gridLinesX = [NSMutableArray arrayWithCapacity:gridLines->x.size()];
+        for (const double line : gridLines->x) {
+            [gridLinesX addObject:@(line)];
+        }
+        gridLinesY = [NSMutableArray arrayWithCapacity:gridLines->y.size()];
+        for (const double line : gridLines->y) {
+            [gridLinesY addObject:@(line)];
+        }
+    }
+
     return [[EMSGeometryPreview alloc] initWithLayers:layers
                                                 outline:outline
                                                    vias:vias
+                                      failedViaAttempts:failedViaAttempts
                                                   ports:ports
+                                             gridLinesX:gridLinesX
+                                             gridLinesY:gridLinesY
+                                           pmlInnerXMin:gridLines ? gridLines->pmlInnerXMin + sliced.xMin : 0
+                                           pmlInnerXMax:gridLines ? gridLines->pmlInnerXMax + sliced.xMin : 0
+                                           pmlInnerYMin:gridLines ? gridLines->pmlInnerYMin + sliced.yMin : 0
+                                           pmlInnerYMax:gridLines ? gridLines->pmlInnerYMax + sliced.yMin : 0
                                                    xMin:sliced.xMin
                                                    yMin:sliced.yMin
                                                   width:sliced.width
                                                  height:sliced.height];
 }
-
-@end

@@ -6,7 +6,8 @@ namespace gerber2ems {
 
 PathsConfig PathsConfig::forConfigFile(std::filesystem::path configFile, std::filesystem::path kicadCliPath,
                                         std::filesystem::path kicadQueryHelperPath,
-                                        std::filesystem::path fdtdWorkerPath) {
+                                        std::filesystem::path fdtdWorkerPath,
+                                        std::filesystem::path copperFdtdWorkerPath) {
     PathsConfig paths;
     const std::filesystem::path configDir = configFile.parent_path();
     paths.fabDir = configDir / "fab";
@@ -19,6 +20,7 @@ PathsConfig PathsConfig::forConfigFile(std::filesystem::path configFile, std::fi
     paths.kicadCliPath = std::move(kicadCliPath);
     paths.kicadQueryHelperPath = std::move(kicadQueryHelperPath);
     paths.fdtdWorkerPath = std::move(fdtdWorkerPath);
+    paths.copperFdtdWorkerPath = std::move(copperFdtdWorkerPath);
     paths.configDir = configDir;
     paths.configFile = std::move(configFile);
     return paths;

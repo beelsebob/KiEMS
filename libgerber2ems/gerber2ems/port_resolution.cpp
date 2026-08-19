@@ -299,11 +299,6 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
             return std::unexpected("Simulation \"" + sim.name() + "\": involved_nets resolved to zero nets");
         }
         sim.resolvedNets() = orderedNets;
-        // Resolved purely to confirm the ground net(s) actually exist -- the ground copper itself
-        // is consumed by board_slicing.cpp, not here.
-        if (auto ground = libkicad_query::resolveGroundNetNames(paths, sim.groundNet()); !ground) {
-            return std::unexpected(std::move(ground).error());
-        }
 
         for (const std::string& netName : orderedNets) {
             const InvolvedNetConfig& entry = *netOwner.at(netName);

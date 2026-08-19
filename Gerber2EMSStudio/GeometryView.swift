@@ -7,8 +7,9 @@ import MetalKit
 /// the way a real board does from above); vias (both real board ones and board-slicing's own
 /// synthetic stitching vias) as an annular ring in the top layer's color, a gold stroke, and a
 /// black hole -- matching how KiCad's own PCB editor renders a drilled hole as genuinely empty,
-/// not another highlighted color; resolved ports as blue dots; the simulation's own cutout outline
-/// stroked on top of everything. Metal-backed (not Core Graphics)
+/// not another highlighted color; resolved ports as blue dots; rejected stitching-via candidate
+/// positions as black crosses (see EMSGeometryPreview.failedViaAttempts); the simulation's own
+/// cutout outline stroked on top of everything. Metal-backed (not Core Graphics)
 /// specifically so panning/zooming a real board's few hundred thousand via/copper vertices stays
 /// smooth -- see scrollWheel(with:)/magnify(with:) for the interaction itself. Purely a passive
 /// renderer otherwise -- GeometryViewController owns running the pipeline step and just assigns
@@ -21,6 +22,15 @@ final class GeometryView: MTKView, MTKViewDelegate {
             rebuildLegend()
             needsDisplay = true
         }
+    }
+
+    /// Whether to draw `preview.gridLinesX/Y` -- purely a display toggle, independent of whether
+    /// grid data is actually available yet (GeometryViewController is responsible for not turning
+    /// this on before the Grid pipeline stage has run; an empty gridLinesX/Y just draws nothing).
+    /// Doesn't rebuild buffers on its own, since the grid buffers were already built from the same
+    /// `preview` this toggles visibility for.
+    var showGrid: Bool = false {
+        didSet { needsDisplay = true }
     }
 
     // Top-left origin, Y increasing downward -- purely an internal bookkeeping choice for this
@@ -41,6 +51,12 @@ final class GeometryView: MTKView, MTKViewDelegate {
     private var outlinePositionBuffer: MTLBuffer?
     private var outlineColorBuffer: MTLBuffer?
     private var outlineVertexCount = 0
+    private var crossPositionBuffer: MTLBuffer?
+    private var crossColorBuffer: MTLBuffer?
+    private var crossVertexCount = 0
+    private var gridPositionBuffer: MTLBuffer?
+    private var gridColorBuffer: MTLBuffer?
+    private var gridVertexCount = 0
 
     // Board-space (simulation units, Y increasing upward) -> view-pixel-space (Y increasing
     // downward, matching isFlipped) affine transform: pixel = (board.x, -board.y) * viewScale +
@@ -133,12 +149,49 @@ final class GeometryView: MTKView, MTKViewDelegate {
             encoder.setVertexBuffer(colors, offset: 0, index: 1)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: fillVertexCount)
         }
+        // Drawn after the fills (like the outline below), not before -- with fully opaque copper
+        // (see rebuildBuffers()), grid lines drawn first would just be painted over wherever copper
+        // covers them, defeating the point of a mesh-resolution overlay that's meant to show where
+        // cell boundaries fall relative to the actual geometry, copper included.
+        if showGrid, gridVertexCount > 1, let positions = gridPositionBuffer, let colors = gridColorBuffer {
+            encoder.setVertexBuffer(positions, offset: 0, index: 0)
+            encoder.setVertexBuffer(colors, offset: 0, index: 1)
+            encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: gridVertexCount)
+        }
         // Drawn after the fills, not before -- with fully opaque copper (see rebuildBuffers()),
         // an outline drawn first would just be painted over wherever copper covers it.
         if outlineVertexCount > 1, let positions = outlinePositionBuffer, let colors = outlineColorBuffer {
             encoder.setVertexBuffer(positions, offset: 0, index: 0)
             encoder.setVertexBuffer(colors, offset: 0, index: 1)
             encoder.drawPrimitives(type: .lineStrip, vertexStart: 0, vertexCount: outlineVertexCount)
+        }
+        // Each cross is two independent 2-vertex segments (see appendCross()) -- .line, not
+        // .lineStrip, draws vertex pairs (0,1), (2,3), ... as disconnected segments rather than
+        // joining every cross into one continuous zigzag.
+        if crossVertexCount > 1, let positions = crossPositionBuffer, let colors = crossColorBuffer {
+            encoder.setVertexBuffer(positions, offset: 0, index: 0)
+            encoder.setVertexBuffer(colors, offset: 0, index: 1)
+            encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: crossVertexCount)
+        }
+        // Diagnostic-only (see the PML-overlap investigation this is part of): the hull-cut
+        // extent -- preview.xMin/yMin/width/height, i.e. SlicedBoard's own bounding box, the same
+        // quantity GridGenerator's core-mesh boundary is now floored at -- traced as a bold 2pt
+        // frame, drawn last (on top of everything) and rebuilt every frame (not cached in
+        // rebuildBuffers()) so its thickness tracks the *current* viewScale and stays a constant
+        // 2pt on screen through interactive zooming rather than a fixed board-space size.
+        if let preview, preview.width > 0, preview.height > 0 {
+            var hullPositions: [SIMD2<Float>] = []
+            var hullColors: [SIMD4<Float>] = []
+            let halfThickness = Float(1.0 / max(viewScale, 0.0001)) // 2pt total, centered on the edge.
+            Self.appendThickRectOutline(minX: Float(preview.xMin), minY: Float(preview.yMin),
+                                         maxX: Float(preview.xMin + preview.width),
+                                         maxY: Float(preview.yMin + preview.height),
+                                         halfThickness: halfThickness, color: Self.hullExtentColor,
+                                         positions: &hullPositions, colors: &hullColors)
+            encoder.setVertexBytes(hullPositions, length: MemoryLayout<SIMD2<Float>>.stride * hullPositions.count,
+                                     index: 0)
+            encoder.setVertexBytes(hullColors, length: MemoryLayout<SIMD4<Float>>.stride * hullColors.count, index: 1)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: hullPositions.count)
         }
 
         encoder.endEncoding()
@@ -246,6 +299,29 @@ final class GeometryView: MTKView, MTKViewDelegate {
     // A fixed light grey, not the adaptive tertiaryLabelColor the outline used to use -- that
     // reads as near-invisible against the fixed dark canvas below in light-appearance mode.
     private static let outlineColor = SIMD4<Float>(0.7, 0.7, 0.7, 1)
+    // A muted cyan -- distinct from the plain grey outline/legend text and every copper color in
+    // kicadDefaultLayerColors, so a mesh line stays identifiable crossing any layer's fill. Drawn
+    // with no blending (see draw(in:)'s own note on painter's-algorithm-only compositing), so this
+    // is the color that actually appears on screen, not a blended tint -- picked dim rather than
+    // bright so a dense real-board mesh doesn't turn the whole preview into a cyan haze.
+    private static let gridLineColor = SIMD4<Float>(0.3, 0.75, 0.8, 1)
+    // A dim magenta -- distinct from the cyan core-mesh color above, marking a line that falls in
+    // the PML band GridGenerator appends beyond the core mesh's own extent (outside
+    // preview.pmlInnerXMin/XMax/YMin/YMax), so it's visually obvious which of a run's grid lines
+    // are actual physical mesh vs. absorbing-boundary padding.
+    private static let pmlLineColor = SIMD4<Float>(0.85, 0.25, 0.85, 1)
+    // Bright, saturated yellow -- deliberately the boldest color in this whole view (see
+    // draw(in:)'s own diagnostic-overlay comment), so the hull-cut extent reads as a distinct
+    // reference frame at a glance rather than blending in with the grid/outline/copper colors.
+    private static let hullExtentColor = SIMD4<Float>(1, 0.85, 0, 1)
+    // Solid black -- distinct from every other marker color here (copper fills, gold via stroke,
+    // blue ports), reads unambiguously as "nothing was placed here" rather than another kind of
+    // real geometry.
+    private static let failedViaAttemptColor = SIMD4<Float>(0, 0, 0, 1)
+    // Board-space (sim units) fallback half-length for a failed-via-attempt cross, used only when
+    // this preview has no real/stitching via to size it off of (see rebuildBuffers()) -- 0.15mm at
+    // 10 sim units/micron (see SlicedBoard's own doc comment on the sim-unit convention).
+    private static let failedViaAttemptFallbackHalfLength: CGFloat = 1500
     // 80% dark grey -- fixed regardless of light/dark appearance, matching the common EDA-tool
     // convention of a dark canvas independent of the rest of the app's own theme.
     private static let backgroundColor = MTLClearColor(red: 0.2, green: 0.2, blue: 0.2, alpha: 1)
@@ -254,6 +330,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
         guard let device, let preview else {
             fillVertexCount = 0
             outlineVertexCount = 0
+            gridVertexCount = 0
             return
         }
 
@@ -272,6 +349,27 @@ final class GeometryView: MTKView, MTKViewDelegate {
                 fillPositions.append(SIMD2(Float(triangle.c.x), Float(triangle.c.y)))
                 fillColors.append(contentsOf: [color, color, color])
             }
+        }
+
+        // Diagnostic only (see the PML-overlap investigation this is part of) -- compares the
+        // *actually rendered* copper's own bounding box (every layer triangle vertex, exactly what
+        // the fill/via/port geometry above draws) against pmlInner{X,Y}{Min,Max}, numerically, so
+        // there's no ambiguity from eyeballing a screenshot about whether copper still reaches past
+        // the core mesh's own boundary, and if so by how much (in the same simulation-unit
+        // micrometers as everything else here).
+        if !fillPositions.isEmpty {
+            let copperXMin = fillPositions.map(\.x).min()!
+            let copperXMax = fillPositions.map(\.x).max()!
+            let copperYMin = fillPositions.map(\.y).min()!
+            let copperYMax = fillPositions.map(\.y).max()!
+            let pmlXMin = Float(preview.pmlInnerXMin)
+            let pmlXMax = Float(preview.pmlInnerXMax)
+            let pmlYMin = Float(preview.pmlInnerYMin)
+            let pmlYMax = Float(preview.pmlInnerYMax)
+            print("[GeometryView] copper bbox = [\(copperXMin), \(copperXMax)] x [\(copperYMin), \(copperYMax)]"
+                + " -- core mesh bbox = [\(pmlXMin), \(pmlXMax)] x [\(pmlYMin), \(pmlYMax)]"
+                + " -- overrun: left \(pmlXMin - copperXMin), right \(copperXMax - pmlXMax),"
+                + " bottom \(pmlYMin - copperYMin), top \(copperYMax - pmlYMax)")
         }
 
         // Vias (both real board vias and board-slicing's own synthetic stitching vias -- see
@@ -327,6 +425,48 @@ final class GeometryView: MTKView, MTKViewDelegate {
         fillColorBuffer = fillColors.isEmpty ? nil : device.makeBuffer(
             bytes: fillColors, length: MemoryLayout<SIMD4<Float>>.stride * fillColors.count)
 
+        // Each grid line as one independent 2-vertex segment (.line, not .lineStrip -- same
+        // disconnected-segments convention as the failed-via-attempt crosses below), spanning the
+        // *grid's own* domain on the axis it doesn't run parallel to -- not the sliced board's own
+        // (much smaller) bounding box. The FDTD domain extends well past the board itself (grid
+        // margin, plus GridGenerator's own PML band -- see _extendPMLBand()), so an X-axis line
+        // genuinely does run the full Y extent of gridLinesY, not just [yMin, yMin+height]; sizing
+        // this off the board's own box instead (an earlier version of this code did) drew every line
+        // at its correct position but cut short to the board's own height/width, which reads as two
+        // dense cross-shaped smears radiating out from the board rather than an actual mesh, since
+        // most lines' visible segment ends up nowhere near where the line itself actually is.
+        var gridPositions: [SIMD2<Float>] = []
+        var gridColors: [SIMD4<Float>] = []
+        let xLines = preview.gridLinesX.map { Float(truncating: $0) }
+        let yLines = preview.gridLinesY.map { Float(truncating: $0) }
+        // A line outside the core mesh's own extent (see pmlLineColor's own doc comment) is part of
+        // the PML band, regardless of what the *other* axis's coordinate along it is -- an X line's
+        // own X position alone decides its color, not where it happens to cross a Y line.
+        let pmlInnerXMin = Float(preview.pmlInnerXMin)
+        let pmlInnerXMax = Float(preview.pmlInnerXMax)
+        let pmlInnerYMin = Float(preview.pmlInnerYMin)
+        let pmlInnerYMax = Float(preview.pmlInnerYMax)
+        if let yMin = yLines.min(), let yMax = yLines.max() {
+            for x in xLines {
+                let color = (x < pmlInnerXMin || x > pmlInnerXMax) ? Self.pmlLineColor : Self.gridLineColor
+                gridPositions.append(contentsOf: [SIMD2(x, yMin), SIMD2(x, yMax)])
+                gridColors.append(contentsOf: [color, color])
+            }
+        }
+        if let xMin = xLines.min(), let xMax = xLines.max() {
+            for y in yLines {
+                let color = (y < pmlInnerYMin || y > pmlInnerYMax) ? Self.pmlLineColor : Self.gridLineColor
+                gridPositions.append(contentsOf: [SIMD2(xMin, y), SIMD2(xMax, y)])
+                gridColors.append(contentsOf: [color, color])
+            }
+        }
+
+        gridVertexCount = gridPositions.count
+        gridPositionBuffer = gridPositions.isEmpty ? nil : device.makeBuffer(
+            bytes: gridPositions, length: MemoryLayout<SIMD2<Float>>.stride * gridPositions.count)
+        gridColorBuffer = gridColors.isEmpty ? nil : device.makeBuffer(
+            bytes: gridColors, length: MemoryLayout<SIMD4<Float>>.stride * gridColors.count)
+
         var outlinePositions = preview.outline.map { value -> SIMD2<Float> in
             let point = value.pointValue
             return SIMD2(Float(point.x), Float(point.y))
@@ -341,6 +481,68 @@ final class GeometryView: MTKView, MTKViewDelegate {
             bytes: outlinePositions, length: MemoryLayout<SIMD2<Float>>.stride * outlinePositions.count)
         outlineColorBuffer = outlineColors.isEmpty ? nil : device.makeBuffer(
             bytes: outlineColors, length: MemoryLayout<SIMD4<Float>>.stride * outlineColors.count)
+
+        // (appendThickRectOutline is called directly from draw(in:), not here -- see its own doc
+        // comment for why it can't be precomputed once in rebuildBuffers() the way everything else
+        // in this method is.)
+
+        // Sized off a real via's own hole diameter when this preview has one (either a placed
+        // stitching via or a real board via -- both use the same EMSGeometryVia.diameter field), so
+        // a cross reads as roughly "the via that didn't get placed here" rather than an arbitrary
+        // mark; falls back to a fixed board-space size only for the degenerate case of a preview
+        // with failed attempts but no successfully-placed via anywhere to size off of.
+        let crossHalfLength = preview.vias.first.map { CGFloat($0.diameter) / 2 } ?? Self.failedViaAttemptFallbackHalfLength
+        var crossPositions: [SIMD2<Float>] = []
+        var crossColors: [SIMD4<Float>] = []
+        for value in preview.failedViaAttempts {
+            Self.appendCross(center: value.pointValue, halfLength: crossHalfLength, color: Self.failedViaAttemptColor,
+                              positions: &crossPositions, colors: &crossColors)
+        }
+        crossVertexCount = crossPositions.count
+        crossPositionBuffer = crossPositions.isEmpty ? nil : device.makeBuffer(
+            bytes: crossPositions, length: MemoryLayout<SIMD2<Float>>.stride * crossPositions.count)
+        crossColorBuffer = crossColors.isEmpty ? nil : device.makeBuffer(
+            bytes: crossColors, length: MemoryLayout<SIMD4<Float>>.stride * crossColors.count)
+    }
+
+    /// A thick axis-aligned rectangle outline (frame), `halfThickness` board-space units on each
+    /// side of the actual edge -- unlike every other shape in this file (built once in
+    /// rebuildBuffers(), drawn as hairline .line/.lineStrip primitives), this needs an actual filled
+    /// triangle frame so it can be drawn at a deliberate, bold on-screen thickness (see draw(in:)'s
+    /// own diagnostic-overlay comment for why: it's meant to stand out clearly from the thin
+    /// grid/outline lines it's being compared against). Built from 4 overlapping edge quads, each
+    /// extended `halfThickness` past its own corner so the frame's corners are fully covered without
+    /// a gap -- not mitered, since every caller here only ever draws axis-aligned rects, where
+    /// overlapping-quad corners and a proper miter look identical.
+    private static func appendThickRectOutline(minX: Float, minY: Float, maxX: Float, maxY: Float,
+                                                  halfThickness: Float, color: SIMD4<Float>,
+                                                  positions: inout [SIMD2<Float>], colors: inout [SIMD4<Float>]) {
+        guard halfThickness > 0 else { return }
+        func appendQuad(_ x0: Float, _ y0: Float, _ x1: Float, _ y1: Float) {
+            positions.append(contentsOf: [
+                SIMD2(x0, y0), SIMD2(x1, y0), SIMD2(x1, y1),
+                SIMD2(x0, y0), SIMD2(x1, y1), SIMD2(x0, y1),
+            ])
+            colors.append(contentsOf: [color, color, color, color, color, color])
+        }
+        appendQuad(minX - halfThickness, minY - halfThickness, maxX + halfThickness, minY + halfThickness) // Bottom
+        appendQuad(minX - halfThickness, maxY - halfThickness, maxX + halfThickness, maxY + halfThickness) // Top
+        appendQuad(minX - halfThickness, minY - halfThickness, minX + halfThickness, maxY + halfThickness) // Left
+        appendQuad(maxX - halfThickness, minY - halfThickness, maxX + halfThickness, maxY + halfThickness) // Right
+    }
+
+    /// An X shape, as two independent line segments -- see the .line draw call in draw(in:).
+    private static func appendCross(center: CGPoint, halfLength: CGFloat, color: SIMD4<Float>,
+                                      positions: inout [SIMD2<Float>], colors: inout [SIMD4<Float>]) {
+        guard halfLength > 0 else { return }
+        let cx = Float(center.x)
+        let cy = Float(center.y)
+        let h = Float(halfLength)
+        positions.append(contentsOf: [
+            SIMD2(cx - h, cy - h), SIMD2(cx + h, cy + h),
+            SIMD2(cx - h, cy + h), SIMD2(cx + h, cy - h),
+        ])
+        colors.append(contentsOf: [color, color, color, color])
     }
 
     private static func appendDisc(center: CGPoint, radius: CGFloat, color: SIMD4<Float>,
@@ -455,7 +657,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
 
     /// KiCad's own built-in default color theme, for boards whose active color theme couldn't be
     /// read at all (see EMSGeometryLayer.hexColor's doc comment) -- the same fallback
-    /// EMSGeometryStepBridge's own libkicad_query::layerColors() call resolves to when nothing
+    /// EMSSimulationPipelineBridge's own libkicad_query::layerColors() call resolves to when nothing
     /// project-specific is configured, kept here too since that call can fail outright (no
     /// wx-headless color settings available at all) rather than just come back empty.
     private static let kicadDefaultLayerColors: [String: NSColor] = [

@@ -25,6 +25,17 @@ struct StitchingVia {
     double annularRingDiameter = 0; // Pad OD, from EMSConfig::via().stitchingViaAnnularRingDiameter().
 };
 
+inline void to_json(nlohmann::json& j, const StitchingVia& v) {
+    j = nlohmann::json{{"x", v.x}, {"y", v.y}, {"diameter", v.diameter}, {"annularRingDiameter", v.annularRingDiameter}};
+}
+
+inline void from_json(const nlohmann::json& j, StitchingVia& v) {
+    j.at("x").get_to(v.x);
+    j.at("y").get_to(v.y);
+    j.at("diameter").get_to(v.diameter);
+    j.at("annularRingDiameter").get_to(v.annularRingDiameter);
+}
+
 /// The board geometry actually fed to a Simulation for one SimulationConfig: only the involved
 /// nets' and the ground net's own copper survive, clipped to a padded region ("cutout") around the
 /// involved nets' own extent.
@@ -46,6 +57,12 @@ struct SlicedBoard {
     /// Ground-net stitching vias, placed only along cutout edges that don't already coincide with
     /// the board's real Edge_Cuts outline.
     std::vector<StitchingVia> stitchingVias;
+    /// Every candidate stitching-via position that was considered along a new-cut edge but rejected
+    /// (no ground copper there, or too close to another via) -- see sliceBoardForSimulation()'s doc
+    /// comment and the "electrically floating" warning it logs
+    /// when a whole run's candidates are all rejected. Kept purely for diagnostics/visualization (the
+    /// geometry preview marks these with a black cross); never fed back into the FDTD geometry itself.
+    std::vector<Position> failedStitchingViaAttempts;
     /// Every non-plated through-hole (mechanical/alignment hole -- e.g. a USB connector's elongated
     /// mounting slots) on the board, as an already-tessellated capsule/stadium polygon loop (one
     /// loop per hole, round holes included -- a capsule with coincident endpoints). Already
@@ -53,6 +70,32 @@ struct SlicedBoard {
     /// cut the same holes out of the substrate model, which layerTriangles alone can't do.
     std::vector<std::vector<Position>> npthHoleLoops;
 };
+
+/// Serialized/deserialized whole -- see simulation_data.hpp's saveSimulationData()/
+/// loadSimulationData(), which persist a SlicedBoard as part of a SimulationData<Grid>'s own
+/// on-disk representation, replacing the old geometry.xml CSXCAD dump.
+inline void to_json(nlohmann::json& j, const SlicedBoard& b) {
+    j = nlohmann::json{{"layerTriangles", b.layerTriangles}, {"outline", b.outline},       {"xMin", b.xMin},
+                        {"yMin", b.yMin},                     {"width", b.width},           {"height", b.height},
+                        {"stitchingVias", b.stitchingVias},   {"npthHoleLoops", b.npthHoleLoops},
+                        {"failedStitchingViaAttempts", b.failedStitchingViaAttempts}};
+}
+
+inline void from_json(const nlohmann::json& j, SlicedBoard& b) {
+    j.at("layerTriangles").get_to(b.layerTriangles);
+    j.at("outline").get_to(b.outline);
+    j.at("xMin").get_to(b.xMin);
+    j.at("yMin").get_to(b.yMin);
+    j.at("width").get_to(b.width);
+    j.at("height").get_to(b.height);
+    j.at("stitchingVias").get_to(b.stitchingVias);
+    j.at("npthHoleLoops").get_to(b.npthHoleLoops);
+    // Absent in geometry.json written before this field existed -- defaults to empty rather than
+    // failing to load an otherwise-valid cached geometry stage.
+    if (j.contains("failedStitchingViaAttempts")) {
+        j.at("failedStitchingViaAttempts").get_to(b.failedStitchingViaAttempts);
+    }
+}
 
 /// Slices `sim`'s board geometry. Algorithm:
 /// 1. Resolve involved-net and ground-net names (libkicad_query, same as port_resolution.cpp).

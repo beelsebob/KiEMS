@@ -38,6 +38,16 @@ public:
     /// port_resolution.cpp).
     CSRectGrid& generate(CSRectGrid& grid, const SimulationConfig& simConfig, const std::filesystem::path& fabDir);
 
+    /// The core mesh's own extent along each axis -- everywhere *inside* the PML band generate()
+    /// appends beyond it (see GridGeneratorAxis::pmlInnerMin()/pmlInnerMax()'s own doc comment, in
+    /// grid_gen.cpp). Meaningful only after generate() has run; purely diagnostic (GeometryView's
+    /// "Show Grid" overlay uses these to color PML-band lines differently) -- nothing in the FDTD
+    /// pipeline itself reads these.
+    double pmlInnerXMin() const;
+    double pmlInnerXMax() const;
+    double pmlInnerYMin() const;
+    double pmlInnerYMax() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> _impl;

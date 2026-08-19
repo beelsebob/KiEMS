@@ -14,6 +14,24 @@
 
 namespace gerber2ems {
 
+/// Which FDTD engine actually runs the per-port simulation -- see Simulation::run(), which
+/// posix_spawns paths.fdtdWorkerPath or paths.copperFdtdWorkerPath depending on this.
+enum class FDTDBackend { OpenEMSCPU, CopperGPU };
+
+/// Which PML formulation the GPU backend's boundary uses -- only meaningful when `backend` is
+/// CopperGPU (the CPU backend always uses openEMS's own UPML, unmodified). Plain UPML can diverge
+/// numerically on very long runs (confirmed: stable through ~250,000 timesteps, then exponential
+/// blowup by step ~740,000 on a real board) -- a well-documented FDTD phenomenon ("late-time PML
+/// instability"), not a bug specific to this codebase's own GPU port. CPML fixes it structurally,
+/// and is this codebase's own default (validated on the exact real-board scenario that exposed
+/// UPML's own failure: same board, same 1,000,000-timestep run, CPML showed no divergence at all --
+/// see copper::CopperBoundaryKind's own doc comment). UPML stays available (openEMS's own formula,
+/// untouched) for comparison/fallback. This enum stays libgerber2ems-native (no Copper dependency,
+/// matching `FDTDBackend`'s own convention) -- translated to `copper::CopperBoundaryKind` only at
+/// the call sites that already link Copper (geber2ems/main.cpp, Gerber2EMSStudio's
+/// EMSSimulationPipelineBridge.mm).
+enum class PMLKind { UPML, CPML };
+
 /// Command line arguments. Ported from the argparse::Namespace fields used by config.py/main.py.
 /// Populated incrementally by the (not yet ported) command-line parser, hence the public setters.
 class Arguments {
@@ -60,6 +78,12 @@ public:
     const std::optional<std::string>& logLevel() const { return _logLevel; }
     void setLogLevel(std::optional<std::string> value) { _logLevel = std::move(value); }
 
+    FDTDBackend backend() const { return _backend; }
+    void setBackend(FDTDBackend value) { _backend = value; }
+
+    PMLKind pmlKind() const { return _pmlKind; }
+    void setPmlKind(PMLKind value) { _pmlKind = value; }
+
 private:
     std::optional<std::string> _configPath;
     bool _updateConfig = false;
@@ -75,6 +99,8 @@ private:
     std::filesystem::path _output;
     bool _debug = false;
     std::optional<std::string> _logLevel;
+    FDTDBackend _backend = FDTDBackend::OpenEMSCPU;
+    PMLKind _pmlKind = PMLKind::CPML;
 };
 
 /// Class representing a single simulation port. Never (de)serialized directly -- populated by
@@ -401,16 +427,18 @@ enum class LayerKind {
 /// already scaled to simulation units.
 class LayerConfig {
 public:
-    /// `thicknessMm` is scaled to simulation units internally; `epsilon` is ignored (left at 0) for
-    /// `LayerKind::Metal`. For `LayerKind::Metal`, `file()` is derived from `name` by replacing '.'
-    /// with '_' (matching how gerber2ems already names its own Gerber-derived layer files).
-    LayerConfig(LayerKind kind, std::string name, double thicknessMm, double epsilon = 0);
+    /// `thicknessMm` is scaled to simulation units internally; `epsilon`/`lossTangent` are ignored
+    /// (left at 0) for `LayerKind::Metal`. For `LayerKind::Metal`, `file()` is derived from `name` by
+    /// replacing '.' with '_' (matching how gerber2ems already names its own Gerber-derived layer
+    /// files).
+    LayerConfig(LayerKind kind, std::string name, double thicknessMm, double epsilon = 0, double lossTangent = 0);
 
     LayerKind kind() const { return _kind; }
     double thickness() const { return _thickness; }
     const std::string& name() const { return _name; }
     const std::string& file() const { return _file; }       // only meaningful when kind() == Metal
     double epsilon() const { return _epsilon; }              // only meaningful when kind() == Substrate
+    double lossTangent() const { return _lossTangent; }      // only meaningful when kind() == Substrate
 
 private:
     LayerKind _kind;
@@ -418,6 +446,7 @@ private:
     std::string _name;
     std::string _file;
     double _epsilon = 0;
+    double _lossTangent = 0;
 };
 
 /// Frequency config.
@@ -492,8 +521,6 @@ public:
     void setXy(double value) { _xy = value; }
     double z() const { return _z; }
     void setZ(double value) { _z = value; }
-    bool fromTrace() const { return _fromTrace; }
-    void setFromTrace(bool value) { _fromTrace = value; }
 
     void scaleToSimulationUnits(std::int32_t unitMultiplier);
 
@@ -503,7 +530,6 @@ private:
 
     double _xy = 1500;
     double _z = 2000;
-    bool _fromTrace = true;
 };
 
 void to_json(nlohmann::json& j, const Margin& m);
@@ -601,8 +627,12 @@ public:
     const std::vector<PortConfig>& ports() const { return _ports; }
 
     /// Every net name resolved from involvedNets() (populated once by resolveSimulationPorts(),
-    /// alongside ports()) -- cached here so grid_gen.cpp's mesh-density hint doesn't need to
-    /// re-resolve net_class/footprint+pin entries via another libkicad_query round trip.
+    /// alongside ports()) -- cached here so grid_gen.cpp's mesh-density placement doesn't need to
+    /// re-resolve net_class/footprint+pin entries via another libkicad_query round trip. The mesh's
+    /// own core-boundary (domain size) is derived directly from the sliced board's own extent, not
+    /// from this list, so it does not need the ground net included; grid_gen.cpp's density placement
+    /// doesn't need it either (the ground pour's own extent is already covered by the domain-sized
+    /// core mesh).
     std::vector<std::string>& resolvedNets() { return _resolvedNets; }
     const std::vector<std::string>& resolvedNets() const { return _resolvedNets; }
 
@@ -644,6 +674,8 @@ struct RunOptions {
     std::optional<std::vector<std::string>> exportField;
     bool transparent = false;
     bool plotPhase = false;
+    FDTDBackend backend = FDTDBackend::OpenEMSCPU;
+    PMLKind pmlKind = PMLKind::CPML;
 };
 
 /// Parsed simulation.json configuration, plus the stackup imported into it separately (see

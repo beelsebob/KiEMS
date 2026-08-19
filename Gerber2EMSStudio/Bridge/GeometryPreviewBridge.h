@@ -1,5 +1,8 @@
-// Objective-C interface over the geometry-building pipeline stage (gerber2ems::GeometryResult) and
-// a renderable snapshot of its result. Swift-visible; never exposes a C++ type.
+// A renderable snapshot of one simulation's sliced board geometry -- Swift-visible; never exposes a
+// C++ type. Actually running the geometry-building pipeline stage that produces this data is
+// EMSSimulationPipelineBridge's job now (see EMSSimulationPipelineBridge.h) -- see
+// GeometryPreviewBridge+Private.h's buildGeometryPreview() for how that bridge turns an
+// already-sliced gerber2ems::SlicedBoard into one of these.
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>
 
@@ -63,27 +66,30 @@ NS_ASSUME_NONNULL_BEGIN
 /// This simulation's own cutout outline, a single closed polygon loop.
 @property (nonatomic, copy, readonly) NSArray<NSValue *> *outline; // NSValue-wrapped CGPoint
 @property (nonatomic, copy, readonly) NSArray<EMSGeometryVia *> *vias;
+/// Stitching-via candidate positions board-slicing considered but rejected (no ground copper there,
+/// or too close to another via) -- see gerber2ems::SlicedBoard::failedStitchingViaAttempts's own
+/// doc comment. NSValue-wrapped CGPoint, same convention as `outline`.
+@property (nonatomic, copy, readonly) NSArray<NSValue *> *failedViaAttempts;
 @property (nonatomic, copy, readonly) NSArray<EMSGeometryPort *> *ports;
+/// Grid line positions GridGenerator placed along the X/Y axes (see gerber2ems::ComputedGridLines),
+/// in the same board-relative simulation-unit frame as everything else here -- empty (not nil)
+/// until the Grid pipeline stage has actually run (see EMSPipelineStageGrid), which the Geometry
+/// stage alone doesn't do. Z isn't exposed: this preview is a flattened top-down view, and a
+/// per-layer Z line wouldn't correspond to anything drawable on it.
+@property (nonatomic, copy, readonly) NSArray<NSNumber *> *gridLinesX;
+@property (nonatomic, copy, readonly) NSArray<NSNumber *> *gridLinesY;
+/// The core mesh's own extent on X/Y -- everywhere *inside* these bounds is the regular densified
+/// mesh; everywhere outside is the PML band GridGenerator appends beyond it (see
+/// gerber2ems::ComputedGridLines's own doc comment). All 0 alongside empty gridLinesX/Y, before the
+/// Grid stage has run.
+@property (nonatomic, readonly) double pmlInnerXMin;
+@property (nonatomic, readonly) double pmlInnerXMax;
+@property (nonatomic, readonly) double pmlInnerYMin;
+@property (nonatomic, readonly) double pmlInnerYMax;
 @property (nonatomic, readonly) double xMin;
 @property (nonatomic, readonly) double yMin;
 @property (nonatomic, readonly) double width;
 @property (nonatomic, readonly) double height;
-@end
-
-/// Runs the real geometry-building pipeline stage (kicad-cli gerber export, stackup import, port
-/// resolution, GeometryResult::build -- the same steps `geber2ems -g` performs) for one simulation,
-/// then derives a renderable preview of its result. Synchronous and potentially slow (shells out to
-/// kicad-cli, runs board-slicing polygon booleans) -- callers must run this off the main thread.
-@interface EMSGeometryStepBridge : NSObject
-
-+ (nullable EMSGeometryPreview *)runGeometryStepForSimulationNamed:(NSString *)simulationName
-                                                              config:(EMSConfigBridge *)config
-                                                          packageDir:(NSString *)packageDir
-                                                        kicadCliPath:(NSString *)kicadCliPath
-                                                kicadQueryHelperPath:(NSString *)helperPath
-                                                      fdtdWorkerPath:(NSString *)workerPath
-                                                               error:(NSError **)error;
-
 @end
 
 NS_ASSUME_NONNULL_END

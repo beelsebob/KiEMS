@@ -289,7 +289,7 @@ void from_json(const nlohmann::json& j, SingleEndedConfig& p) {
     }
 }
 
-LayerConfig::LayerConfig(LayerKind kind, std::string name, double thicknessMm, double epsilon)
+LayerConfig::LayerConfig(LayerKind kind, std::string name, double thicknessMm, double epsilon, double lossTangent)
     : _kind(kind), _thickness(thicknessMm / 1000 / constants::baseUnit * constants::unitMultiplier),
       _name(std::move(name)) {
     if (_kind == LayerKind::Metal) {
@@ -297,6 +297,7 @@ LayerConfig::LayerConfig(LayerKind kind, std::string name, double thicknessMm, d
         std::replace(_file.begin(), _file.end(), '.', '_');
     } else if (_kind == LayerKind::Substrate) {
         _epsilon = epsilon;
+        _lossTangent = lossTangent;
     }
 }
 
@@ -338,15 +339,16 @@ void Margin::scaleToSimulationUnits(std::int32_t unitMultiplier) {
     _z *= unitMultiplier;
 }
 
-void to_json(nlohmann::json& j, const Margin& m) {
-    j = nlohmann::json{{"xy", m._xy}, {"z", m._z}, {"from_trace", m._fromTrace}};
-}
+void to_json(nlohmann::json& j, const Margin& m) { j = nlohmann::json{{"xy", m._xy}, {"z", m._z}}; }
 
 void from_json(const nlohmann::json& j, Margin& m) {
     const Margin def;
     m._xy = j.value("xy", def._xy);
     m._z = j.value("z", def._z);
-    m._fromTrace = j.value("from_trace", def._fromTrace);
+    // "from_trace" (a config key that used to control how the mesh's own core extent was
+    // determined) is silently ignored, not just dropped -- an old saved simulation.json with it
+    // still round-trips fine; see GridGeneratorAxis::compileGrid()'s own doc comment for why that
+    // toggle was removed entirely rather than kept as dead config.
 }
 
 void to_json(nlohmann::json& j, const CellRatio& c) { j = nlohmann::json{{"xy", c._xy}, {"z", c._z}}; }

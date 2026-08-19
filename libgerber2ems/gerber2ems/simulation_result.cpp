@@ -5,6 +5,7 @@
 #include "constants.hpp"
 #include "logging.hpp"
 #include "simulation.hpp"
+#include "simulation_data.hpp"
 
 namespace gerber2ems {
 
@@ -34,7 +35,7 @@ std::expected<void, std::string> createDir(const std::filesystem::path& director
 } // namespace
 
 SimulationResult::SimulationResult(GeometryResult geometry, std::vector<double> frequencies,
-                                    std::map<std::string, std::unique_ptr<Postprocessor>> postprocessors)
+                                    std::map<std::string, std::shared_ptr<Postprocessor>> postprocessors)
     : _geometry(std::move(geometry)), _frequencies(std::move(frequencies)), _postprocessors(std::move(postprocessors)) {}
 
 const Postprocessor* SimulationResult::_postprocessorFor(const std::string& simulationName) const {
@@ -61,12 +62,13 @@ void SimulationResult::sparamToFile(const std::string& simulationName, const std
 }
 
 std::expected<SimulationResult, std::string> SimulationResult::run(const GeometryResult& geometry,
-                                                                     const RunOptions& options) {
+                                                                     const RunOptions& options,
+                                                                     const FDTDPortRunner& portRunner) {
     std::vector<double> frequencies =
         linspace(geometry.config().frequency().start(), geometry.config().frequency().stop(),
                  constants::frequencySampleCount);
 
-    std::map<std::string, std::unique_ptr<Postprocessor>> postprocessors;
+    std::map<std::string, std::shared_ptr<Postprocessor>> postprocessors;
 
     // GeometryResult grants SimulationResult friend access to its owned (shared, address-stable)
     // EMSConfig specifically so Simulation's constructor -- which needs a mutable SimulationConfig&
@@ -76,65 +78,41 @@ std::expected<SimulationResult, std::string> SimulationResult::run(const Geometr
             return std::unexpected(dirResult.error());
         }
 
-        std::optional<Simulation> sim;
-        auto& ports = simConfig.ports();
-        for (std::size_t index = 0; index < ports.size(); ++index) {
-            if (!ports[index].excite()) {
-                continue;
-            }
-            sim.emplace(simConfig, geometry.config(), options, geometry.paths());
-            logInfo("[" + simConfig.name() + "] Simulating with excitation on port #" + std::to_string(index));
-            if (auto result = sim->loadGeometry(); !result) {
-                return std::unexpected(result.error());
-            }
-            sim->setExcitation();
-            sim->setupPorts(static_cast<std::int32_t>(index));
-            if (auto result = sim->run(static_cast<std::int32_t>(index)); !result) {
-                return std::unexpected(result.error());
+        // Always populated -- build() and load() both produce a real SimulationData<Grid> for
+        // every simulation in config() (see GeometryResult::simulationData()'s own doc comment), so
+        // there is exactly one code path here regardless of which one produced `geometry`.
+        const SimulationData<SimulationStage::Grid>* gridData = geometry.simulationData(simConfig.name());
+
+        // generateResults() below runs every excited port's own FDTD pass internally (see
+        // simulation_data.hpp) -- logged here, per port, before the (single) call that actually
+        // does the work, so this still reads the same as before that restructure: one line per
+        // excited port, not just one for the whole simulation.
+        for (std::size_t index = 0; index < simConfig.ports().size(); ++index) {
+            if (simConfig.ports()[index].excite()) {
+                logInfo("[" + simConfig.name() + "] Simulating with excitation on port #" + std::to_string(index));
             }
         }
-        if (!sim.has_value()) {
+        auto resultsResult = generateResults(*gridData, geometry.config(), options, geometry.paths(), frequencies,
+                                              portRunner);
+        if (!resultsResult) {
+            return std::unexpected(resultsResult.error());
+        }
+        if (resultsResult->byExcitedPort.empty()) {
             logError("[" + simConfig.name() + "] No port is configured to excite; nothing to simulate.");
             continue;
         }
-        // loadGeometry() (called above, once per excited port) only repopulates _csx/_grid from the
-        // saved geometry.xml -- it never rebuilds the lightweight C++-side _ports bookkeeping (the
-        // real addPorts() call that did that lives on a *different*, geometry-step-only Simulation
-        // object). Without this, sim->ports() is always empty here, and getPortParameters() below
-        // used to silently fall back to addVirtualPorts() -- a fixed, board-position-independent
-        // dummy port box at (0,0,0)-(10,10,10). MSLPort's constructor derives the measurement-plane
-        // grid spacing (_uDelta/_iDelta, the denominator in its Zref = sqrt(et*det/(ht*dht)) formula)
-        // from wherever the port's own box sits in the mesh; a fixed dummy box picks up whatever grid
-        // spacing happens to exist at that unrelated location instead of the real, much finer spacing
-        // at the actual port, producing wildly wrong per-port impedance normalization -- exactly the
-        // "orders of magnitude too much response on an unconnected port" symptom this fixes. The real
-        // probe/excitation data files on disk are keyed by port number, not geometry, so re-adding the
-        // real ports here (matching every port's true position) reads the same real recorded data but
-        // normalizes it correctly. This duplicates CSX properties already loaded from geometry.xml,
-        // but harmlessly: the FDTD run already happened in a separate worker process before this point,
-        // and this Simulation's _csx is discarded once getPortParameters() below finishes.
-        if (auto result = sim->addPorts(); !result) {
-            return std::unexpected(result.error());
-        }
 
-        auto post = std::make_unique<Postprocessor>(frequencies, simConfig);
-        for (std::size_t index = 0; index < ports.size(); ++index) {
-            if (!ports[index].excite()) {
-                continue;
-            }
-            auto paramsResult = sim->getPortParameters(static_cast<std::int32_t>(index), frequencies);
-            if (!paramsResult) {
-                return std::unexpected(paramsResult.error());
-            }
-            auto& [reflected, incident] = *paramsResult;
-            for (std::size_t i = 0; i < ports.size(); ++i) {
-                post->addPortData(static_cast<std::int32_t>(i), static_cast<std::int32_t>(index), incident[i],
-                                   reflected[i]);
-            }
-        }
-        post->calculateSparams();
+        // The two remaining stages -- see simulation_data.hpp's own doc comment on why
+        // SimulationData<Results>/<Postprocessing> carry every earlier stage's data forward too
+        // (not needed here, but keeps the chain's own invariant: a SimulationData<Postprocessing>
+        // could still answer geometry()/grid()/results() if some future caller wanted them).
+        const SimulationData<SimulationStage::Results> resultsData(*gridData, std::move(*resultsResult));
+        const SimulationData<SimulationStage::Postprocessing> postprocessingData(
+            resultsData, generatePostprocessing(resultsData, frequencies));
+
+        const std::shared_ptr<Postprocessor>& post = postprocessingData.postprocessing().postprocessor;
         post->sparamToFile(geometry.paths().simulationDir / simConfig.name());
-        postprocessors.emplace(simConfig.name(), std::move(post));
+        postprocessors.emplace(simConfig.name(), post);
     }
 
     return SimulationResult(geometry, std::move(frequencies), std::move(postprocessors));
@@ -146,9 +124,9 @@ std::expected<SimulationResult, std::string> SimulationResult::load(const Geomet
         linspace(geometry.config().frequency().start(), geometry.config().frequency().stop(),
                  constants::frequencySampleCount);
 
-    std::map<std::string, std::unique_ptr<Postprocessor>> postprocessors;
+    std::map<std::string, std::shared_ptr<Postprocessor>> postprocessors;
     for (const auto& simConfig : geometry.config().simulations()) {
-        auto post = std::make_unique<Postprocessor>(frequencies, simConfig);
+        auto post = std::make_shared<Postprocessor>(frequencies, simConfig);
         if (auto result = post->loadSparams(inputDir / simConfig.name()); !result) {
             return std::unexpected(result.error());
         }

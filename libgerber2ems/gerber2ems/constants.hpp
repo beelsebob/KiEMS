@@ -36,6 +36,15 @@ inline const std::filesystem::path fabProjectFile = "fab/board.kicad_pro";
 // Via geometry is approximated using n-sided right prism
 inline constexpr std::int32_t viaPolygon = 12;
 
+// PML boundary shell depth, in cells, on every one of the domain's 6 faces -- shared between
+// Simulation::setBoundaryConditions() (which tells openEMS to actually treat this many outermost
+// cells as PML) and GridGenerator's own outermost-cell regrading (which makes sure those same cells
+// are smoothly, predictably sized rather than whatever the general-purpose mesh densification
+// produced there). 16, not openEMS's own PML_8 default -- doubling it was found to fix a CPU/GPU
+// divergence traced to near-cancelling UPML flux-update coefficients (vvfo/vvfn) that a shallower
+// PML's larger per-cell loss grading pushed into float32's precision limits.
+inline constexpr std::int32_t pmlDepthCells = 16;
+
 inline constexpr std::string_view configFormatVersion = "2.0";
 
 // Number of frequency-domain sample points S-parameters/impedance/delay are computed and plotted

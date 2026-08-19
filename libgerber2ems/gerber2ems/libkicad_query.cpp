@@ -161,6 +161,7 @@ StackupLayer _parseStackupLine(const std::string& line) {
     layer.name = fields.at(1);
     layer.thicknessMm = std::stod(fields.at(2));
     layer.epsilonR = std::stod(fields.at(3));
+    layer.lossTangent = std::stod(fields.at(4));
     return layer;
 }
 

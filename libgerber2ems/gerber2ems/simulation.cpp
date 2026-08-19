@@ -3,18 +3,19 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <limits>
 #include <map>
-#include <regex>
 #include <sstream>
 
 #include <spawn.h>
 #include <sys/wait.h>
 
+#include <clipper2/clipper.h>
 #include <nlohmann/json.hpp>
 
 #include "constants.hpp"
@@ -145,6 +146,51 @@ std::pair<std::vector<double>, std::vector<double>> _viaPolygon(double x1, doubl
     return {xs, ys};
 }
 
+Clipper2Lib::Path64 _xyToPath64(const std::vector<double>& xs, const std::vector<double>& ys) {
+    Clipper2Lib::Path64 path;
+    path.reserve(xs.size());
+    for (std::size_t i = 0; i < xs.size(); ++i) {
+        path.emplace_back(static_cast<std::int64_t>(std::llround(xs[i])), static_cast<std::int64_t>(std::llround(ys[i])));
+    }
+    return path;
+}
+
+std::pair<std::vector<double>, std::vector<double>> _path64ToXY(const Clipper2Lib::Path64& path) {
+    std::vector<double> xs;
+    std::vector<double> ys;
+    xs.reserve(path.size());
+    ys.reserve(path.size());
+    for (const auto& pt : path) {
+        xs.push_back(static_cast<double>(pt.x));
+        ys.push_back(static_cast<double>(pt.y));
+    }
+    return {xs, ys};
+}
+
+/// Clips a via cross-section polygon (xs/ys, as produced by _viaPolygon) to the sliced board's own
+/// outline via Clipper2 intersection -- a real via kept because its disc merely *reaches* the cutout
+/// boundary (see _viaIntersectsOutline's own doc comment) would otherwise be added at its full,
+/// uncropped geometric extent, sticking out past the simulation's own domain past the hull-padding
+/// trim line. Usually a single loop; can (rarely) come back as more than one if the outline's own
+/// boundary is concave enough to split the via's disc into disjoint pieces.
+std::vector<std::pair<std::vector<double>, std::vector<double>>> _clipPolygonToOutline(
+    const std::vector<double>& xs, const std::vector<double>& ys, const std::vector<Position>& outline) {
+    const Clipper2Lib::Path64 subject = _xyToPath64(xs, ys);
+    Clipper2Lib::Path64 clip;
+    clip.reserve(outline.size());
+    for (const auto& p : outline) {
+        clip.emplace_back(static_cast<std::int64_t>(std::llround(p.x())), static_cast<std::int64_t>(std::llround(p.y())));
+    }
+    const Clipper2Lib::Paths64 result =
+        Clipper2Lib::Intersect(Clipper2Lib::Paths64{subject}, Clipper2Lib::Paths64{clip}, Clipper2Lib::FillRule::NonZero);
+    std::vector<std::pair<std::vector<double>, std::vector<double>>> loops;
+    loops.reserve(result.size());
+    for (const auto& loop : result) {
+        loops.push_back(_path64ToXY(loop));
+    }
+    return loops;
+}
+
 } // namespace
 
 Simulation::Simulation(SimulationConfig& simConfig, const EMSConfig& config, const RunOptions& options,
@@ -179,14 +225,70 @@ std::expected<void, std::string> Simulation::sliceBoard() {
     return {};
 }
 
+ComputedGridLines Simulation::computedGridLines() const {
+    // _gridGen is only populated by addGrid() -- a Simulation that instead had its lines adopted via
+    // adoptGridLines() (see that method's own doc comment) never gets a GridGenerator of its own, so
+    // there's no PML-inner-bounds diagnostic to report; the 0-default is fine since these are display
+    // only, not read anywhere in the FDTD pipeline itself.
+    if (!_gridGen) {
+        return {gridLines(*_grid, "x"), gridLines(*_grid, "y"), gridLines(*_grid, "z")};
+    }
+    return {gridLines(*_grid, "x"),      gridLines(*_grid, "y"),      gridLines(*_grid, "z"),
+            _gridGen->pmlInnerXMin(),    _gridGen->pmlInnerXMax(),    _gridGen->pmlInnerYMin(),
+            _gridGen->pmlInnerYMax()};
+}
+
+void Simulation::adoptGridLines(const ComputedGridLines& lines) {
+    _grid->ClearLines(0);
+    _grid->ClearLines(1);
+    _grid->ClearLines(2);
+    _grid->AddDiscLines(0, static_cast<int>(lines.x.size()), const_cast<double*>(lines.x.data()));
+    _grid->AddDiscLines(1, static_cast<int>(lines.y.size()), const_cast<double*>(lines.y.data()));
+    _grid->AddDiscLines(2, static_cast<int>(lines.z.size()), const_cast<double*>(lines.z.data()));
+    _gridLinesAdopted = true;
+}
+
+std::expected<void, std::string> Simulation::populateGeometry() {
+    createMaterials();
+    addGerbers();
+    if (!_gridLinesAdopted) {
+        addGrid();
+    }
+    addSubstrates();
+    addNPTHHoles();
+    if (_options.exportField.has_value()) {
+        addDumpBoxes();
+    }
+    setBoundaryConditions(true);
+    if (auto result = addVias(); !result) {
+        return std::unexpected(result.error());
+    }
+    if (auto result = addPorts(); !result) {
+        return std::unexpected(result.error());
+    }
+    return {};
+}
+
 void Simulation::createMaterials() {
     const auto metals = _config.getMetals();
     for (std::size_t i = 0; i < metals.size(); ++i) {
         _gerberMaterials.push_back(addMetal(*_csx, "Gerber_" + std::to_string(i)));
     }
+    // Dielectric loss tangent -> conductivity (kappa = 2*pi*f*eps0*epsilonR*lossTangent), evaluated
+    // at a single fixed frequency rather than modeled as properly dispersive -- CSXCAD's
+    // CSPropMaterial::SetKappa() takes one frequency-independent conductivity, but loss tangent
+    // implies a conductivity that scales with frequency, so any single value is only exact at the
+    // frequency it's evaluated at. 2.5 GHz is a placeholder for testing (chosen directly, not
+    // derived from this simulation's own frequency sweep) -- TODO: replace with a configurable
+    // per-simulation (or per-material) frequency once there's UI for it, rather than this constant.
+    constexpr double kLossTangentFrequencyHz = 2.5e9;
+    constexpr double kVacuumPermittivity = 8.85418781762e-12; // F/m
     const auto substrates = _config.getSubstrates();
     for (std::size_t i = 0; i < substrates.size(); ++i) {
-        _substrateMaterials.push_back(addMaterial(*_csx, "Substrate_" + std::to_string(i), substrates[i].epsilon()));
+        const double kappa = 2 * M_PI * kLossTangentFrequencyHz * kVacuumPermittivity * substrates[i].epsilon() *
+                              substrates[i].lossTangent();
+        _substrateMaterials.push_back(
+            addMaterial(*_csx, "Substrate_" + std::to_string(i), substrates[i].epsilon(), kappa));
     }
 }
 
@@ -243,8 +345,14 @@ void Simulation::addPortGrid() {
         const double height = w * std::round(std::sin(angle)) + h * std::round(std::cos(angle));
 
         const auto [posX, posY] = *portConfig.position();
-        _gridGen->addPads().emplace_back(
-            ap, "PORT", Position(posX + _gridGen->xmin() + width / 2, posY + _gridGen->ymin()));
+        // portConfig.position() is already in the same absolute, Edge_Cuts-bounding-box-relative
+        // frame GridGenerator::generate() re-origins its own gerber-parsed trace/pad positions into
+        // (see port_resolution.cpp's _edgeCutsOrigin()/_padPositionInSimFrame() and
+        // gerber_composite.hpp's BoundingBox doc comment) -- adding _gridGen->xmin()/ymin() here
+        // (SlicedBoard::xMin/yMin, itself already an absolute coordinate in that same frame) would
+        // double-count the offset and place this density pad millions of sim units away from the
+        // real port, discarded once compileGrid() clips lines outside the real domain.
+        _gridGen->addPads().emplace_back(ap, "PORT", Position(posX + width / 2, posY));
         _gridGen->addApertures().insert_or_assign(
             ap, Aperture("", std::make_shared<ApertureRect>(width, height)));
     }
@@ -455,9 +563,12 @@ std::expected<void, std::string> Simulation::addVias() {
             // A real via's own copper pad on each layer is already modeled separately (it's part
             // of that layer's composited copper, read straight from the Gerbers) -- this outer
             // ring only needs to be wide enough for the drilled barrel's actual conductive wall,
-            // not a full pad, unlike a stitching via below.
+            // not a full pad, unlike a stitching via below. Cropped to the sliced outline
+            // (cropToOutline=true) since this via was kept precisely because its disc *reaches*
+            // that boundary, not because it's fully inside it -- left uncropped, it would extend
+            // past the hull-padding trim line into the simulation's own PML/boundary region.
             const double outerDiameter = via.diameter + 2 * _config.via().platingThickness();
-            addVia(via.x, via.y, via.x2, via.y2, via.diameter, outerDiameter);
+            addVia(via.x, via.y, via.x2, via.y2, via.diameter, outerDiameter, /*cropToOutline=*/true);
         }
     }
 
@@ -474,17 +585,35 @@ std::expected<void, std::string> Simulation::addVias() {
     return {};
 }
 
-void Simulation::addVia(double xPos, double yPos, double x2Pos, double y2Pos, double diameter, double outerDiameter) {
+void Simulation::addVia(double xPos, double yPos, double x2Pos, double y2Pos, double diameter, double outerDiameter,
+                          bool cropToOutline) {
     double thickness = 0;
     for (const auto& layer : _config.getSubstrates()) {
         thickness += layer.thickness();
     }
 
+    auto addCrossSection = [&](CSProperties& material, const std::vector<double>& xs, const std::vector<double>& ys,
+                                std::int32_t priority) {
+        if (!cropToOutline) {
+            addLinPoly(material, xs, ys, axisIndex("z"), -thickness, thickness, priority);
+            return;
+        }
+        // A degenerate (<3-point) loop can fall out of Clipper2's intersection at a boundary that
+        // grazes the via's disc only tangentially -- skipped rather than fed to addLinPoly, which
+        // expects a genuine polygon.
+        for (const auto& [loopXs, loopYs] : _clipPolygonToOutline(xs, ys, _slicedBoard.outline)) {
+            if (loopXs.size() < 3) {
+                continue;
+            }
+            addLinPoly(material, loopXs, loopYs, axisIndex("z"), -thickness, thickness, priority);
+        }
+    };
+
     auto [fillXs, fillYs] = _viaPolygon(xPos, yPos, x2Pos, y2Pos, diameter, false);
-    addLinPoly(*_viaFillingMaterial, fillXs, fillYs, axisIndex("z"), -thickness, thickness, 51);
+    addCrossSection(*_viaFillingMaterial, fillXs, fillYs, 51);
 
     auto [outerXs, outerYs] = _viaPolygon(xPos, yPos, x2Pos, y2Pos, outerDiameter, true);
-    addLinPoly(*_viaMaterial, outerXs, outerYs, axisIndex("z"), -thickness, thickness, 50);
+    addCrossSection(*_viaMaterial, outerXs, outerYs, 50);
 }
 
 void Simulation::addNPTHHoles() {
@@ -570,8 +699,12 @@ void Simulation::addDumpBoxes() {
 void Simulation::setBoundaryConditions(bool pml) {
     if (pml) {
         logInfo("Adding perfectly matched layer boundary condition");
+        // See constants::pmlDepthCells's own doc comment for why 16, not openEMS's own PML_8
+        // default -- and GridGenerator's own outermost-cell regrading, which keeps this many cells
+        // on each face smoothly, predictably sized rather than whatever the general-purpose mesh
+        // densification produced there.
         for (std::int32_t i = 0; i < 6; ++i) {
-            _fdtd.Set_BC_PML(i, 8);
+            _fdtd.Set_BC_PML(i, constants::pmlDepthCells);
         }
     } else {
         logInfo("Adding MUR boundary condition");
@@ -626,7 +759,9 @@ std::expected<void, std::string> Simulation::run(std::int32_t excitedPortNumber)
     std::error_code removeEc;
     std::filesystem::remove(errorPath, removeEc);
 
-    std::string workerPathStr = _paths.fdtdWorkerPath.string();
+    const std::filesystem::path& workerPath =
+        (_options.backend == FDTDBackend::CopperGPU) ? _paths.copperFdtdWorkerPath : _paths.fdtdWorkerPath;
+    std::string workerPathStr = workerPath.string();
     std::string jobPathStr = jobPath.string();
     std::array<char*, 3> argv = {workerPathStr.data(), jobPathStr.data(), nullptr};
     pid_t pid = 0;
@@ -651,7 +786,7 @@ std::expected<void, std::string> Simulation::run(std::int32_t excitedPortNumber)
     return {};
 }
 
-std::expected<void, std::string> Simulation::runFDTDInPlace(std::int32_t excitedPortNumber) {
+std::expected<void, std::string> Simulation::setupFDTDOperator(std::int32_t excitedPortNumber) {
     const std::filesystem::path cwd = std::filesystem::current_path();
     const std::filesystem::path simPath = _paths.simulationDir / _simConfig.name() / std::to_string(excitedPortNumber);
     std::error_code dirEc;
@@ -662,42 +797,25 @@ std::expected<void, std::string> Simulation::runFDTDInPlace(std::int32_t excited
     std::filesystem::current_path(simPath);
 
     _fdtd.SetOverSampling(_options.oversampling);
+    const auto setupStart = std::chrono::steady_clock::now();
     const int rc = _fdtd.SetupFDTD();
+    const double setupSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - setupStart).count();
+    logInfo("openEMS::SetupFDTD() took " + std::to_string(setupSeconds) + "s");
     if (rc != 0) {
         std::filesystem::current_path(cwd);
         return std::unexpected("Run: Setup failed, error code: " + std::to_string(rc));
     }
-    _fdtd.RunFDTD();
-
-    std::filesystem::current_path(cwd);
     return {};
 }
 
-void Simulation::saveGeometry() const {
-    const std::filesystem::path filename = _paths.geometryDir / _simConfig.name() / "geometry.xml";
-    logInfo("Saving geometry to " + filename.string());
-    _csx->Write2XML(filename.string());
-
-    // Replacing , with . for numerals in the file (openEMS bug mitigation for locales that use ,
-    // as the decimal separator).
-    std::ifstream inFile(filename);
-    std::stringstream buffer;
-    buffer << inFile.rdbuf();
-    inFile.close();
-    static const std::regex commaDecimal(R"(([0-9]+),([0-9]+e))");
-    const std::string newContent = std::regex_replace(buffer.str(), commaDecimal, "$1.$2");
-    std::ofstream outFile(filename);
-    outFile << newContent;
-}
-
-std::expected<void, std::string> Simulation::loadGeometry() {
-    const std::filesystem::path filename = _paths.geometryDir / _simConfig.name() / "geometry.xml";
-    logInfo("Loading geometry from " + filename.string());
-    if (!std::filesystem::exists(filename)) {
-        return std::unexpected("Geometry file does not exist. Did you run geometry step? (" + filename.string() + ")");
+std::expected<void, std::string> Simulation::runFDTDInPlace(std::int32_t excitedPortNumber) {
+    const std::filesystem::path cwd = std::filesystem::current_path();
+    if (auto result = setupFDTDOperator(excitedPortNumber); !result) {
+        return result;
     }
-    _csx->ReadFromXML(filename.string());
-    _grid = _csx->GetGrid();
+    _fdtd.RunFDTD();
+
+    std::filesystem::current_path(cwd);
     return {};
 }
 

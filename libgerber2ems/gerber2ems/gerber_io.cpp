@@ -446,6 +446,13 @@ void Position::move(const Position& offset) {
     _y += offset._y;
 }
 
+void to_json(nlohmann::json& j, const Position& p) { j = nlohmann::json{{"x", p._x}, {"y", p._y}}; }
+
+void from_json(const nlohmann::json& j, Position& p) {
+    j.at("x").get_to(p._x);
+    j.at("y").get_to(p._y);
+}
+
 // ---- TraceSegment ----
 
 bool TraceSegment::dominantX() const {

@@ -7,17 +7,32 @@
 		<key>Copper.xcscheme_^#shared#^_</key>
 		<dict>
 			<key>orderHint</key>
-			<integer>8</integer>
+			<integer>10</integer>
+		</dict>
+		<key>Copper_smoketest.xcscheme_^#shared#^_</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>6</integer>
+		</dict>
+		<key>Gerber2EMSStudio (Release).xcscheme_^#shared#^_</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>11</integer>
 		</dict>
 		<key>Gerber2EMSStudio.xcscheme_^#shared#^_</key>
 		<dict>
 			<key>orderHint</key>
-			<integer>7</integer>
+			<integer>9</integer>
 		</dict>
 		<key>GerberCharts.xcscheme_^#shared#^_</key>
 		<dict>
 			<key>orderHint</key>
 			<integer>3</integer>
+		</dict>
+		<key>copper_fdtd_worker.xcscheme_^#shared#^_</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>7</integer>
 		</dict>
 		<key>geber2ems.xcscheme_^#shared#^_</key>
 		<dict>
@@ -32,12 +47,12 @@
 		<key>libgerber2ems.xcscheme_^#shared#^_</key>
 		<dict>
 			<key>orderHint</key>
-			<integer>5</integer>
+			<integer>8</integer>
 		</dict>
 		<key>libgerber2ems_smoketest.xcscheme_^#shared#^_</key>
 		<dict>
 			<key>orderHint</key>
-			<integer>6</integer>
+			<integer>5</integer>
 		</dict>
 		<key>libkicad.xcscheme_^#shared#^_</key>
 		<dict>
@@ -57,7 +72,17 @@
 			<key>primary</key>
 			<true/>
 		</dict>
+		<key>2971163407AC90FC988D853B</key>
+		<dict>
+			<key>primary</key>
+			<true/>
+		</dict>
 		<key>71AD229130263515006D5847</key>
+		<dict>
+			<key>primary</key>
+			<true/>
+		</dict>
+		<key>71AD3CDF302FAAD5006D5847</key>
 		<dict>
 			<key>primary</key>
 			<true/>

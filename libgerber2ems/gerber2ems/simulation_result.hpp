@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -17,17 +18,38 @@
 
 namespace gerber2ems {
 
+class Simulation;
+
 /// S-parameters computed from FDTD runs (one posix_spawn'd worker process per excited port -- see
 /// Simulation::run()) for every simulation in the GeometryResult it was built from. Carries that
 /// GeometryResult (and, through it, the EMSConfig) forward, so PostprocessResult only ever needs
 /// *this*, never the original config or geometry again.
 class SimulationResult {
 public:
+    /// See gerber2ems::FDTDPortRunner (simulation.hpp) -- defined there, not here, so
+    /// simulation_data.hpp's generateResults() can share the same type without an include cycle
+    /// back through this header. Defaults to `sim.run(excitedPortNumber)` -- see run()'s own
+    /// `portRunner` parameter.
+    using FDTDPortRunner = gerber2ems::FDTDPortRunner;
+
     /// Runs FDTD for every excited port of every simulation in `geometry`, then computes
     /// S-parameters from the resulting incident/reflected phasors. Also writes Sx<port>.csv into
     /// `geometry.paths().simulationDir` per simulation (the same files `load()` reads back), so a
     /// later `-p`-only invocation in a separate process can resume from this run's output.
-    static std::expected<SimulationResult, std::string> run(const GeometryResult& geometry, const RunOptions& options);
+    ///
+    /// `portRunner`, if given, replaces the default `sim.run(excitedPortNumber)` (posix_spawn'd
+    /// worker) call for every excited port -- letting a caller outside libgerber2ems (which must
+    /// never depend on Copper.framework -- see CopperFDTDRunner.h's own file comment) substitute an
+    /// in-process GPU run instead, without this function needing to know Copper exists. The
+    /// Simulation passed to it has already had adoptSlicedBoard()/adoptGridLines()/
+    /// populateGeometry() (which includes its own setBoundaryConditions())/setExcitation()/
+    /// setupPorts() called -- see simulation_data.hpp's generateResults(), which actually drives
+    /// this sequence now; it does NOT yet have setupFDTDOperator() applied (unlike
+    /// Simulation::run()'s own spawned-worker path, whose worker process does that itself) -- an
+    /// in-process portRunner must do that part itself (see gerber2ems_fdtd_worker/main.cpp and
+    /// copper_fdtd_worker/main.cpp for the exact sequence to mirror).
+    static std::expected<SimulationResult, std::string> run(const GeometryResult& geometry, const RunOptions& options,
+                                                              const FDTDPortRunner& portRunner = {});
 
     /// Reconstructs a SimulationResult by reading back Sx<port>.csv files from `inputDir` (usually
     /// `geometry.paths().simulationDir`, wherever a previous `run()` wrote them -- exposed as an
@@ -51,13 +73,17 @@ public:
 
 private:
     SimulationResult(GeometryResult geometry, std::vector<double> frequencies,
-                      std::map<std::string, std::unique_ptr<Postprocessor>> postprocessors);
+                      std::map<std::string, std::shared_ptr<Postprocessor>> postprocessors);
 
     const Postprocessor* _postprocessorFor(const std::string& simulationName) const;
 
     GeometryResult _geometry;
     std::vector<double> _frequencies;
-    std::map<std::string, std::unique_ptr<Postprocessor>> _postprocessors;
+    // shared_ptr, not unique_ptr: run() below gets these straight out of a
+    // SimulationData<Postprocessing>'s own SimulationPostprocessing (simulation_data.hpp), which
+    // holds a shared_ptr itself so that type can stay cheaply copyable despite Postprocessor not
+    // being copyable.
+    std::map<std::string, std::shared_ptr<Postprocessor>> _postprocessors;
 };
 
 } // namespace gerber2ems

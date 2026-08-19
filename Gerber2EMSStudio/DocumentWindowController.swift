@@ -345,9 +345,55 @@ final class DocumentWindowController: NSWindowController {
         geometryVC.onRunStateChanged = { [weak simulationListVC] index, isRunning in
             simulationListVC?.setGeometryRowBusy(isRunning, forSimulationIndex: index)
         }
-        // Same relay, one row down, for the "Simulation Results" spinner.
-        simulationResultsVC.onRunStateChanged = { [weak simulationListVC] index, isRunning in
-            simulationListVC?.setSimulationResultsRowBusy(isRunning, forSimulationIndex: index)
+        // Deliberately no equivalent relay of simulationResultsVC.onRunStateChanged here -- that
+        // fires as soon as the *combined* run starts, before it's known whether the Simulation
+        // Results stage itself has actually begun (it computes geometry first). The "Simulation
+        // Results" row's own .running transition instead comes only from onProgressChanged's
+        // .simulation-phase case below, via setSimulationResultsProgress -- see that method's own
+        // doc comment.
+        //
+        // Drives the "Geometry" row's own progress fraction while GeometryViewController's own run
+        // is in flight (selecting the Geometry row directly).
+        geometryVC.onProgressChanged = { [weak simulationListVC] index, progress in
+            simulationListVC?.setGeometryProgress(progress.fraction, forSimulationIndex: index)
+        }
+        // simulationResultsVC's own ensureStage:.results run computes geometry/grid as an
+        // unavoidable first step (see EMSPipelineProgressPhase's own doc comment) -- reuse the
+        // "Geometry" row to show that part of the same run too, then switch to the "Simulation
+        // Results" row's own progress once the FDTD phase begins. Since geometryVC itself isn't the
+        // one running here, its row's busy state is driven directly rather than via onRunStateChanged.
+        simulationResultsVC.onProgressChanged = { [weak simulationListVC] index, progress in
+            switch progress.phase {
+            case .geometry:
+                simulationListVC?.setGeometryRowBusy(true, forSimulationIndex: index)
+                simulationListVC?.setGeometryProgress(progress.fraction, forSimulationIndex: index)
+            case .simulation:
+                // Reaching the FDTD phase at all means geometry itself already succeeded.
+                simulationListVC?.setGeometryRowCompleted(true, forSimulationIndex: index)
+                simulationListVC?.setSimulationResultsProgress(progress.fraction, forSimulationIndex: index)
+            @unknown default:
+                break
+            }
+        }
+        // See GeometryViewController.onRunFinished's doc comment -- swaps the "Geometry" row's
+        // circular progress ring for its green/yellow completed/error status icon.
+        geometryVC.onRunFinished = { [weak simulationListVC] index, success in
+            simulationListVC?.setGeometryRowCompleted(success, forSimulationIndex: index)
+        }
+        // simulationResultsVC's own run can fail in either its geometry or simulation phase (see its
+        // onRunFinished's own doc comment) -- attribute the outcome to whichever row was actually in
+        // flight when it stopped. A failure during .geometry never reached the Simulation Results row
+        // at all, so that row is left untouched (still .notStarted).
+        simulationResultsVC.onRunFinished = { [weak simulationListVC] index, reachedPhase, success in
+            switch reachedPhase {
+            case .geometry:
+                simulationListVC?.setGeometryRowCompleted(success, forSimulationIndex: index)
+            case .simulation:
+                simulationListVC?.setGeometryRowCompleted(true, forSimulationIndex: index)
+                simulationListVC?.setSimulationResultsRowCompleted(success, forSimulationIndex: index)
+            @unknown default:
+                break
+            }
         }
         simulationListVC.onSelectionChanged = { [weak self] selection in
             guard let self else { return }

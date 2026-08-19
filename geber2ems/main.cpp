@@ -8,6 +8,8 @@
 #include <array>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <optional>
 #include <sstream>
@@ -27,7 +29,18 @@
 #include "gerber2ems/paths_config.hpp"
 #include "gerber2ems/port_resolution.hpp"
 #include "gerber2ems/postprocess_result.hpp"
+#include "gerber2ems/simulation.hpp"
 #include "gerber2ems/simulation_result.hpp"
+
+// Forward-declare-only boundary header (see its own file comment) -- safe to include alongside
+// every gerber2ems header above despite those using the *installed* CSXCAD/openEMS forms and
+// Copper's own internals using the flat/source-checkout forms, for exactly the same reason
+// copper_fdtd_worker/main.cpp can: this header never exposes a complete openEMS/ContinuousStructure
+// definition itself. This is what lets the CLI run Copper's GPU engine in-process (see
+// runGPUPortInProcess() below) instead of posix_spawning copper_fdtd_worker as a separate process --
+// the CLI links Copper.framework directly (see the Xcode project's own build settings), while
+// libgerber2ems itself still never does.
+#include "CopperFDTDRunner.h"
 
 using namespace gerber2ems;
 
@@ -67,7 +80,11 @@ void printUsage() {
                  "                                 (via kicad-cli) into ./fab/ before running\n"
                  "  -o, --output OUTPUT        [p] Directory where results will be placed\n"
                  "  -d, --debug                Enable debug logging\n"
-                 "  -l, --log LEVEL            Set log level (DEBUG, INFO, WARNING, ERROR)\n";
+                 "  -l, --log LEVEL            Set log level (DEBUG, INFO, WARNING, ERROR)\n"
+                 "  --backend {cpu,gpu}        [s] FDTD engine: openEMS CPU (default) or Copper GPU\n"
+                 "  --pml {upml,cpml}          [s] GPU boundary: CPML (default, fixes UPML's late-time\n"
+                 "                                 numerical instability on very long runs -- see\n"
+                 "                                 PMLKind's own doc comment) or openEMS's own UPML\n";
 }
 
 [[noreturn]] void printUsageAndExit(int code) {
@@ -165,6 +182,30 @@ Arguments parseArguments(int argc, char** argv) {
                 printUsageAndExit(2);
             }
             args.setLogLevel(tokens[i]);
+        } else if (tok == "--backend") {
+            if (++i >= tokens.size()) {
+                missingValue(tok);
+            }
+            if (tokens[i] == "cpu") {
+                args.setBackend(FDTDBackend::OpenEMSCPU);
+            } else if (tokens[i] == "gpu") {
+                args.setBackend(FDTDBackend::CopperGPU);
+            } else {
+                std::cerr << "argument --backend: invalid choice: '" << tokens[i] << "'\n";
+                printUsageAndExit(2);
+            }
+        } else if (tok == "--pml") {
+            if (++i >= tokens.size()) {
+                missingValue(tok);
+            }
+            if (tokens[i] == "upml") {
+                args.setPmlKind(PMLKind::UPML);
+            } else if (tokens[i] == "cpml") {
+                args.setPmlKind(PMLKind::CPML);
+            } else {
+                std::cerr << "argument --pml: invalid choice: '" << tokens[i] << "'\n";
+                printUsageAndExit(2);
+            }
         } else {
             std::cerr << "Unknown argument: " << tok << "\n";
             printUsageAndExit(2);
@@ -284,6 +325,100 @@ void saveAndRenderResults(const PostprocessResult& results, const Arguments& arg
     }
 }
 
+/// Renders one GeometryProgress update -- the CLI's own consumer of GeometryResult::build()'s
+/// progress contract (which simulation, out of how many, and which of its two phases -- see
+/// GeometryPhase's own doc comment), in the same plain logInfo()-per-update style as
+/// printCopperProgress() below.
+void printGeometryProgress(const GeometryProgress& progress) {
+    std::ostringstream line;
+    line << "[Geometry] [" << progress.simulationName << " " << (progress.simulationIndex + 1) << "/"
+         << progress.simulationCount << "] ";
+    switch (progress.phase) {
+    case GeometryPhase::SlicingBoard:
+        line << "Slicing board: " << (progress.currentStep == 0 ? "starting..." : "complete");
+        break;
+    case GeometryPhase::PlacingGrid:
+        line << "Placing grid: " << (progress.currentStep == 0 ? "starting..." : "complete");
+        break;
+    }
+    logInfo(line.str());
+}
+
+/// Renders one copper::CopperFDTDProgress update -- the CLI's own consumer of the 3-axis progress
+/// contract (major phase / progress through that phase's own step count / progress toward the
+/// energy-decay end criteria) copper::runFDTDPortOnGPU() reports, in place of its own default
+/// stdout printing (see CopperFDTDRunner.h's own doc comment on `onProgress`). Deliberately a plain
+/// logInfo() line per update (matching every other stage's own "Creating geometry"/"Running
+/// simulation" style in this file) rather than an in-place-updating status line -- keeps this
+/// readable in a piped/redirected log too, not just an interactive terminal.
+void printCopperProgress(const copper::CopperFDTDProgress& progress) {
+    std::ostringstream line;
+    line << "[Copper] ";
+    switch (progress.phase) {
+    case copper::CopperFDTDPhase::Setup:
+        line << "Setup: " << (progress.currentStep == 0 ? "starting..." : "complete");
+        break;
+    case copper::CopperFDTDPhase::FDTDRun: {
+        const double stepPercent = progress.totalSteps > 0
+                                        ? 100.0 * static_cast<double>(progress.currentStep) /
+                                              static_cast<double>(progress.totalSteps)
+                                        : 0.0;
+        const double energyPercent =
+            progress.targetEnergyChangeDB > 0.0
+                ? std::min(100.0, 100.0 * progress.energyChangeDB / progress.targetEnergyChangeDB)
+                : 0.0;
+        line << "FDTD run: step " << progress.currentStep << "/" << progress.totalSteps << " (" << std::fixed
+             << std::setprecision(1) << stepPercent << "%) | energy decay " << std::setprecision(2)
+             << progress.energyChangeDB << "/" << progress.targetEnergyChangeDB << "dB (" << std::setprecision(1)
+             << energyPercent << "%)";
+        break;
+    }
+    case copper::CopperFDTDPhase::Postprocessing:
+        line << "Postprocessing...";
+        break;
+    }
+    logInfo(line.str());
+}
+
+/// The SimulationResult::FDTDPortRunner passed to SimulationResult::run() when
+/// RunOptions::backend == FDTDBackend::CopperGPU -- runs Copper's GPU engine directly in this
+/// process instead of the default sim.run(excitedPortNumber), which posix_spawns a separate worker.
+/// By the time generateResults() (simulation_data.hpp) hands `sim` to this callback, it has already
+/// had adoptSlicedBoard()/adoptGridLines()/populateGeometry() (which includes its own
+/// setBoundaryConditions(true)) /setExcitation()/setupPorts() called on it -- this only needs to
+/// do the FDTD-specific part (setupFDTDOperator()/runFDTDPortOnGPU()), mirroring
+/// copper_fdtd_worker/main.cpp's own sequence; the only difference is *where* it runs: here, in the
+/// CLI's own process, rather than a spawned child's.
+std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32_t excitedPortNumber,
+                                                       PMLKind pmlKind) {
+    const std::filesystem::path cwd = std::filesystem::current_path();
+    if (auto result = sim.setupFDTDOperator(excitedPortNumber); !result) {
+        return std::unexpected(result.error());
+    }
+    const std::filesystem::path probeDir = std::filesystem::current_path();
+    const copper::CopperBoundaryKind boundaryKind =
+        pmlKind == PMLKind::CPML ? copper::CopperBoundaryKind::CPML : copper::CopperBoundaryKind::UPML;
+    const copper::CopperFDTDRunResult gpuResult =
+        copper::runFDTDPortOnGPU(sim.fdtdEngine(), sim.csx(), printCopperProgress, boundaryKind);
+    std::filesystem::current_path(cwd);
+    if (!gpuResult.success) {
+        return std::unexpected(gpuResult.errorMessage);
+    }
+
+    // runFDTDPortOnGPU() no longer writes probe files itself -- write them explicitly here so
+    // getPortParameters()'s existing on-disk S-parameter pipeline keeps working unmodified (see
+    // copper_fdtd_worker/main.cpp's own identical step) via CopperProbeResult::data().
+    for (const copper::CopperProbeResult& probeResult : gpuResult.probes) {
+        std::ofstream probeFile(probeDir / probeResult.name);
+        if (!probeFile.is_open()) {
+            return std::unexpected("Failed to open probe file for writing: " +
+                                    (probeDir / probeResult.name).string());
+        }
+        probeFile << probeResult.data();
+    }
+    return {};
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -307,7 +442,8 @@ int main(int argc, char** argv) {
 
     const PathsConfig paths =
         PathsConfig::forConfigFile(cfgPath, resolveKicadCli(), executableDir() / "libkicad_smoketest",
-                                    executableDir() / "gerber2ems_fdtd_worker");
+                                    executableDir() / "gerber2ems_fdtd_worker",
+                                    executableDir() / "copper_fdtd_worker");
 
     if (args.input().extension() == ".kicad_pcb") {
         if (auto result = exportKicadPcb(paths, args.input()); !result) {
@@ -353,6 +489,8 @@ int main(int argc, char** argv) {
     options.exportField = args.exportField();
     options.transparent = args.transparent();
     options.plotPhase = args.plotPhase();
+    options.backend = args.backend();
+    options.pmlKind = args.pmlKind();
 
     // Each stage's result carries its own EMSConfig forward (see geometry_result.hpp), so `config`
     // itself is only ever consumed once, by whichever of build()/load() below runs first -- every
@@ -364,7 +502,7 @@ int main(int argc, char** argv) {
     if (args.geometry() || args.all()) {
         logInfo("Creating geometry");
         createDir(paths.geometryDir, true);
-        auto result = GeometryResult::build(std::move(config), options, paths);
+        auto result = GeometryResult::build(std::move(config), options, paths, printGeometryProgress);
         if (!result) {
             logError(result.error());
             return EXIT_FAILURE;
@@ -375,7 +513,7 @@ int main(int argc, char** argv) {
         logInfo("Running simulation");
         createDir(paths.simulationDir, true);
         if (!geometryResult.has_value()) {
-            // -s invoked standalone, in a separate process from whichever -g produced geometry.xml.
+            // -s invoked standalone, in a separate process from whichever -g produced this data.
             auto loaded = GeometryResult::load(std::move(config), paths);
             if (!loaded) {
                 logError(loaded.error());
@@ -383,7 +521,17 @@ int main(int argc, char** argv) {
             }
             geometryResult = std::move(*loaded);
         }
-        auto result = SimulationResult::run(*geometryResult, options);
+        // Copper's GPU backend runs directly in this process (see runGPUPortInProcess()'s own doc
+        // comment for why, and why libgerber2ems itself still never depends on Copper) rather than
+        // posix_spawning copper_fdtd_worker -- the whole point being live progress reporting through
+        // this process's own stdout, not a separate process's.
+        const PMLKind pmlKind = options.pmlKind;
+        auto result = options.backend == FDTDBackend::CopperGPU
+                          ? SimulationResult::run(*geometryResult, options,
+                                                   [pmlKind](Simulation& sim, std::int32_t excitedPortNumber) {
+                                                       return runGPUPortInProcess(sim, excitedPortNumber, pmlKind);
+                                                   })
+                          : SimulationResult::run(*geometryResult, options);
         if (!result) {
             logError(result.error());
             return EXIT_FAILURE;
