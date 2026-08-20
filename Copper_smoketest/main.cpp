@@ -13,6 +13,7 @@
 // libkicad_smoketest convention -- not XCTest.
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
@@ -30,7 +31,9 @@
 // pulls in two independent copies of the same classes (no shared include guards between an
 // installed copy and a source-checkout copy) and fails to compile with "redefinition" errors.
 #include <CSPropExcitation.h>
+#include <CSPropLumpedElement.h>
 #include <CSPropMaterial.h>
+#include <CSPropMetal.h>
 #include <CSPropProbeBox.h>
 #include <CSPrimBox.h>
 #include <CSRectGrid.h>
@@ -115,6 +118,26 @@ ContinuousStructure* buildPecCavityNoExcitation() {
     return csx;
 }
 
+/// TEMPORARY diagnostic fixture: same PEC vacuum cavity shape as buildPecCavityNoExcitation(), but
+/// at the real Keyboard Hub board's own length scale -- SetDeltaUnit(1e-6) (1 micron, not 1mm) and
+/// 50-native-unit (50 micron) cell spacing, matching that board's own near-port cell size -- to
+/// isolate whether openEMS's own vi/vv coefficients scale differently at this drawing-unit/cell-size
+/// combination than the existing 1mm fixture, independent of any hand-derived (and, twice now,
+/// wrong) dimensional-analysis reasoning about what "should" happen.
+ContinuousStructure* buildMicronScaleVacuumGrid() {
+    auto* csx = new ContinuousStructure();
+    CSRectGrid* grid = csx->GetGrid();
+    grid->SetDeltaUnit(1e-6);
+    for (int i = 0; i <= 10; ++i) {
+        grid->AddDiscLine(0, static_cast<double>(i) * 50.0);
+        grid->AddDiscLine(1, static_cast<double>(i) * 50.0);
+    }
+    grid->AddDiscLine(2, 0.0);
+    grid->AddDiscLine(2, 50.0);
+    grid->AddDiscLine(2, 100.0);
+    return csx;
+}
+
 /// A wider vacuum box (40 lines in x, instead of buildPecCavityNoExcitation()'s 10) with PML on the
 /// x-min/x-max faces and PEC everywhere else, no excitation box -- used for Phase 3's CPU-vs-GPU PML
 /// parity check. Needs to be wide enough that Operator_Ext_UPML::Create_UPML doesn't fall back to
@@ -133,6 +156,26 @@ ContinuousStructure* buildPmlCavityNoExcitation() {
     grid->AddDiscLine(2, 0.0);
     grid->AddDiscLine(2, 1.0);
     grid->AddDiscLine(2, 2.0);
+    return csx;
+}
+
+/// A cube large enough on all 3 axes to hold buildCPMLShells()'s own uniform-6-face
+/// kPmlDepthCellsForTest (8) PML shells with real interior left over -- unlike
+/// buildPmlCavityNoExcitation() (deliberately thin, 2 cells, in Z; fine for Phase 3's own X-only
+/// UPML test, but buildCPMLShells() now always builds all 6 faces uniformly, see its own doc
+/// comment, so it needs every axis to comfortably exceed 2*pmlDepthCells). No boundary condition set
+/// here -- callers must use Set_BC_Type()+MUR (or PEC) on every face, never Set_BC_PML(), matching
+/// how a real CPML run is actually configured (see Simulation::setBoundaryConditions()'s own
+/// comment) -- so buildCPMLShells() is the only thing providing PML absorption at all.
+ContinuousStructure* buildCpmlCavityNoExcitation() {
+    auto* csx = new ContinuousStructure();
+    CSRectGrid* grid = csx->GetGrid();
+    grid->SetDeltaUnit(1e-3);
+    for (int axis = 0; axis < 3; ++axis) {
+        for (int i = 0; i <= 30; ++i) {
+            grid->AddDiscLine(axis, static_cast<double>(i));
+        }
+    }
     return csx;
 }
 
@@ -414,6 +457,595 @@ int main() {
         }
 
         const copper::CopperYeeGrid cavityGrid = copper::buildYeeGrid(*cavityOp);
+        // TEMPORARY diagnostic: sanity-check coefficient magnitude on a simple, well-understood
+        // 1mm-cell vacuum cavity -- comparing against a real board's own ~1e-9-magnitude vi/iv to
+        // determine whether that's a plausible physical scale or a sign of a units/extraction bug.
+        {
+            const std::uint32_t idx = copper::copperGridIndex(cavityGrid.dims, 5, 5, 1);
+            std::printf("[DIAG] 1mm vacuum cavity: dt=%.6e vv2=%.6e vi2=%.6e (cellCount=%u)\n",
+                        cavityGrid.timestepSeconds, cavityGrid.vv[2][idx], cavityGrid.vi[2][idx],
+                        cavityGrid.dims.cellCount());
+        }
+        {
+            // TEMPORARY diagnostic: same PEC vacuum cavity, but at the real board's own drawing
+            // unit (1 micron) and cell size (50 microns) -- see buildMicronScaleVacuumGrid()'s own
+            // doc comment.
+            copper::CopperOpenEMS micronFdtd;
+            micronFdtd.SetCSX(buildMicronScaleVacuumGrid());
+            micronFdtd.SetGaussExcite(2.5e9, 2.5e9);
+            for (int side = 0; side < 6; ++side) {
+                micronFdtd.Set_BC_Type(side, 0);
+            }
+            micronFdtd.SetNumberOfTimeSteps(10);
+            if (micronFdtd.SetupFDTD() != 0) {
+                fail("[DIAG] micron-scale fixture: openEMS::SetupFDTD() returned non-zero");
+            }
+            Operator* micronOp = micronFdtd.GetOperatorForGPU();
+            if (micronOp == nullptr) {
+                fail("[DIAG] micron-scale fixture: GetOperatorForGPU() returned null");
+            }
+            const copper::CopperYeeGrid micronGrid = copper::buildYeeGrid(*micronOp);
+            const std::uint32_t idx = copper::copperGridIndex(micronGrid.dims, 5, 5, 1);
+            std::printf("[DIAG] 50-micron vacuum cavity (same code, real board's own drawing unit): dt=%.6e "
+                        "vv2=%.6e vi2=%.6e (cellCount=%u)\n",
+                        micronGrid.timestepSeconds, micronGrid.vv[2][idx], micronGrid.vi[2][idx],
+                        micronGrid.dims.cellCount());
+        }
+        {
+            // TEMPORARY diagnostic: same 50-micron cavity, but filled with a uniform eps_r=4.5
+            // dielectric (matching this board's own substrate) -- isolates whether a plain
+            // dielectric at this cell size reproduces the real board's own anomalous vi, or whether
+            // it's specific to the real board's own graded, non-uniform mesh.
+            auto* dielCsx = new ContinuousStructure();
+            CSRectGrid* dielGridLines = dielCsx->GetGrid();
+            dielGridLines->SetDeltaUnit(1e-6);
+            for (int i = 0; i <= 10; ++i) {
+                dielGridLines->AddDiscLine(0, static_cast<double>(i) * 50.0);
+                dielGridLines->AddDiscLine(1, static_cast<double>(i) * 50.0);
+            }
+            dielGridLines->AddDiscLine(2, 0.0);
+            dielGridLines->AddDiscLine(2, 50.0);
+            dielGridLines->AddDiscLine(2, 100.0);
+            auto* dielectric = new CSPropMaterial(dielCsx->GetParameterSet());
+            dielectric->SetEpsilon(4.5);
+            dielCsx->AddProperty(dielectric);
+            auto* box = new CSPrimBox(dielCsx->GetParameterSet(), dielectric);
+            box->SetCoord(0, 0.0);
+            box->SetCoord(1, 500.0);
+            box->SetCoord(2, 0.0);
+            box->SetCoord(3, 500.0);
+            box->SetCoord(4, 0.0);
+            box->SetCoord(5, 100.0);
+
+            copper::CopperOpenEMS dielFdtd;
+            dielFdtd.SetCSX(dielCsx);
+            dielFdtd.SetGaussExcite(2.5e9, 2.5e9);
+            for (int side = 0; side < 6; ++side) {
+                dielFdtd.Set_BC_Type(side, 0);
+            }
+            dielFdtd.SetNumberOfTimeSteps(10);
+            if (dielFdtd.SetupFDTD() != 0) {
+                fail("[DIAG] micron-scale dielectric fixture: openEMS::SetupFDTD() returned non-zero");
+            }
+            Operator* dielOp = dielFdtd.GetOperatorForGPU();
+            if (dielOp == nullptr) {
+                fail("[DIAG] micron-scale dielectric fixture: GetOperatorForGPU() returned null");
+            }
+            const copper::CopperYeeGrid dielGrid = copper::buildYeeGrid(*dielOp);
+            const std::uint32_t idx = copper::copperGridIndex(dielGrid.dims, 5, 5, 1);
+            std::printf("[DIAG] 50-micron eps_r=4.5 dielectric cavity (same code/scale, uniform dielectric): "
+                        "dt=%.6e vv2=%.6e vi2=%.6e (cellCount=%u)\n",
+                        dielGrid.timestepSeconds, dielGrid.vv[2][idx], dielGrid.vi[2][idx],
+                        dielGrid.dims.cellCount());
+        }
+        {
+            // TEMPORARY diagnostic: same 50-micron eps_r=4.5 dielectric, but now sandwiched between
+            // two PEC (copper) planes in Z -- top and bottom of the domain -- matching the real
+            // board's own trace/dielectric/reference-plane cross-section at the excited port (unlike
+            // the plain-dielectric fixture above, which has no conductor anywhere nearby). Z gets 4
+            // cells (5 lines) instead of 2, so the sampled cell isn't immediately adjacent to *both*
+            // PEC planes at once -- closer to the real excitation gap's own 4-cell Z span.
+            auto* sandwichCsx = new ContinuousStructure();
+            CSRectGrid* sandwichGridLines = sandwichCsx->GetGrid();
+            sandwichGridLines->SetDeltaUnit(1e-6);
+            for (int i = 0; i <= 10; ++i) {
+                sandwichGridLines->AddDiscLine(0, static_cast<double>(i) * 50.0);
+                sandwichGridLines->AddDiscLine(1, static_cast<double>(i) * 50.0);
+            }
+            for (int i = 0; i <= 4; ++i) {
+                sandwichGridLines->AddDiscLine(2, static_cast<double>(i) * 50.0);
+            }
+            auto* sandwichDielectric = new CSPropMaterial(sandwichCsx->GetParameterSet());
+            sandwichDielectric->SetEpsilon(4.5);
+            sandwichCsx->AddProperty(sandwichDielectric);
+            auto* sandwichBox = new CSPrimBox(sandwichCsx->GetParameterSet(), sandwichDielectric);
+            sandwichBox->SetCoord(0, 0.0);
+            sandwichBox->SetCoord(1, 500.0);
+            sandwichBox->SetCoord(2, 0.0);
+            sandwichBox->SetCoord(3, 500.0);
+            sandwichBox->SetCoord(4, 0.0);
+            sandwichBox->SetCoord(5, 200.0);
+            auto* pec = new CSPropMetal(sandwichCsx->GetParameterSet());
+            sandwichCsx->AddProperty(pec);
+            auto* bottomPlane = new CSPrimBox(sandwichCsx->GetParameterSet(), pec);
+            bottomPlane->SetCoord(0, 0.0);
+            bottomPlane->SetCoord(1, 500.0);
+            bottomPlane->SetCoord(2, 0.0);
+            bottomPlane->SetCoord(3, 500.0);
+            bottomPlane->SetCoord(4, 0.0);
+            bottomPlane->SetCoord(5, 0.0);
+            auto* topPlane = new CSPrimBox(sandwichCsx->GetParameterSet(), pec);
+            topPlane->SetCoord(0, 0.0);
+            topPlane->SetCoord(1, 500.0);
+            topPlane->SetCoord(2, 0.0);
+            topPlane->SetCoord(3, 500.0);
+            topPlane->SetCoord(4, 200.0);
+            topPlane->SetCoord(5, 200.0);
+
+            copper::CopperOpenEMS sandwichFdtd;
+            sandwichFdtd.SetCSX(sandwichCsx);
+            sandwichFdtd.SetGaussExcite(2.5e9, 2.5e9);
+            for (int side = 0; side < 6; ++side) {
+                sandwichFdtd.Set_BC_Type(side, 0);
+            }
+            sandwichFdtd.SetNumberOfTimeSteps(10);
+            if (sandwichFdtd.SetupFDTD() != 0) {
+                fail("[DIAG] PEC-sandwich fixture: openEMS::SetupFDTD() returned non-zero");
+            }
+            Operator* sandwichOp = sandwichFdtd.GetOperatorForGPU();
+            if (sandwichOp == nullptr) {
+                fail("[DIAG] PEC-sandwich fixture: GetOperatorForGPU() returned null");
+            }
+            const copper::CopperYeeGrid sandwichGrid = copper::buildYeeGrid(*sandwichOp);
+            const std::uint32_t idx = copper::copperGridIndex(sandwichGrid.dims, 5, 5, 2);
+            std::printf("[DIAG] 50-micron eps_r=4.5 dielectric BETWEEN two PEC planes (microstrip-like Z "
+                        "cross-section): dt=%.6e vv2=%.6e vi2=%.6e (cellCount=%u)\n",
+                        sandwichGrid.timestepSeconds, sandwichGrid.vv[2][idx], sandwichGrid.vi[2][idx],
+                        sandwichGrid.dims.cellCount());
+        }
+        {
+            // TEMPORARY diagnostic: same uniform eps_r=4.5 dielectric, no PEC, but with the real
+            // Keyboard Hub board's own actual Z-axis cell thicknesses (36 cells, 25um to 551um, up
+            // to a ~4x neighbor-to-neighbor grading ratio) instead of a uniform 50um spacing --
+            // isolates whether the *grading itself* (not a material discontinuity) is what triggers
+            // the anomaly. X/Y stay uniform, 50um, matching every fixture above.
+            static const double kRealZThicknessesUm[] = {
+                551.031647, 500.000000, 358.618138, 233.393072, 151.895067, 98.855168,  64.336153,
+                41.870756,  27.250000,  27.250000,  27.250000,  27.250000,  25.000000,  25.000000,
+                25.000000,  25.000000,  101.500000, 101.500000, 101.500000, 101.500000, 25.000000,
+                25.000000,  25.000000,  25.000000,  27.250000,  27.250000,  27.250000,  27.250000,
+                42.345938,  65.804713,  102.259166, 158.908634, 246.940738, 383.740811, 500.000000,
+                500.000000,
+            };
+            auto* gradedCsx = new ContinuousStructure();
+            CSRectGrid* gradedGridLines = gradedCsx->GetGrid();
+            gradedGridLines->SetDeltaUnit(1e-6);
+            for (int i = 0; i <= 10; ++i) {
+                gradedGridLines->AddDiscLine(0, static_cast<double>(i) * 50.0);
+                gradedGridLines->AddDiscLine(1, static_cast<double>(i) * 50.0);
+            }
+            double zPos = 0.0;
+            gradedGridLines->AddDiscLine(2, zPos);
+            for (const double thickness : kRealZThicknessesUm) {
+                zPos += thickness;
+                gradedGridLines->AddDiscLine(2, zPos);
+            }
+            const double zTotal = zPos;
+            auto* gradedDielectric = new CSPropMaterial(gradedCsx->GetParameterSet());
+            gradedDielectric->SetEpsilon(4.5);
+            gradedCsx->AddProperty(gradedDielectric);
+            auto* gradedBox = new CSPrimBox(gradedCsx->GetParameterSet(), gradedDielectric);
+            gradedBox->SetCoord(0, 0.0);
+            gradedBox->SetCoord(1, 500.0);
+            gradedBox->SetCoord(2, 0.0);
+            gradedBox->SetCoord(3, 500.0);
+            gradedBox->SetCoord(4, 0.0);
+            gradedBox->SetCoord(5, zTotal);
+
+            copper::CopperOpenEMS gradedFdtd;
+            gradedFdtd.SetCSX(gradedCsx);
+            gradedFdtd.SetGaussExcite(2.5e9, 2.5e9);
+            for (int side = 0; side < 6; ++side) {
+                gradedFdtd.Set_BC_Type(side, 0);
+            }
+            gradedFdtd.SetNumberOfTimeSteps(10);
+            if (gradedFdtd.SetupFDTD() != 0) {
+                fail("[DIAG] graded-Z fixture: openEMS::SetupFDTD() returned non-zero");
+            }
+            Operator* gradedOp = gradedFdtd.GetOperatorForGPU();
+            if (gradedOp == nullptr) {
+                fail("[DIAG] graded-Z fixture: GetOperatorForGPU() returned null");
+            }
+            const copper::CopperYeeGrid gradedGrid = copper::buildYeeGrid(*gradedOp);
+            // Sample around z-index 24, matching the real excitation's own relative position (24 of
+            // 37 lines) in this identically-36-cell Z axis.
+            const std::uint32_t idx = copper::copperGridIndex(gradedGrid.dims, 5, 5, 24);
+            std::printf("[DIAG] 50-micron XY, real board's own graded Z (36 cells, uniform eps_r=4.5, no PEC): "
+                        "dt=%.6e vv2=%.6e vi2=%.6e (cellCount=%u)\n",
+                        gradedGrid.timestepSeconds, gradedGrid.vv[2][idx], gradedGrid.vi[2][idx],
+                        gradedGrid.dims.cellCount());
+        }
+        {
+            // TEMPORARY diagnostic: the full real stackup -- same graded Z axis as above, but now
+            // cells 0..7 and 28..35 (the PML/margin region above/below the actual board, per the
+            // real log's own 8+20+8 structure) are left as vacuum/air, cells 8..27 are the real
+            // 5-layer substrate (eps_r 4.1/4.6/4.16/4.6/4.1, matching the real board's own KiCad
+            // stackup exactly), and thin PEC (copper) planes sit at each of the 6 layer boundaries
+            // (F.Cu/In1-4.Cu/B.Cu). The closest reproduction yet of the real excited cell's own
+            // surroundings, short of the real (irregular) copper trace/via/pad geometry itself.
+            static const double kRealZThicknessesUm2[] = {
+                551.031647, 500.000000, 358.618138, 233.393072, 151.895067, 98.855168,  64.336153,
+                41.870756,  27.250000,  27.250000,  27.250000,  27.250000,  25.000000,  25.000000,
+                25.000000,  25.000000,  101.500000, 101.500000, 101.500000, 101.500000, 25.000000,
+                25.000000,  25.000000,  25.000000,  27.250000,  27.250000,  27.250000,  27.250000,
+                42.345938,  65.804713,  102.259166, 158.908634, 246.940738, 383.740811, 500.000000,
+                500.000000,
+            };
+            std::vector<double> zLines;
+            zLines.push_back(0.0);
+            double cum = 0.0;
+            for (const double thickness : kRealZThicknessesUm2) {
+                cum += thickness;
+                zLines.push_back(cum);
+            }
+            auto* stackCsx = new ContinuousStructure();
+            CSRectGrid* stackGridLines = stackCsx->GetGrid();
+            stackGridLines->SetDeltaUnit(1e-6);
+            for (int i = 0; i <= 10; ++i) {
+                stackGridLines->AddDiscLine(0, static_cast<double>(i) * 50.0);
+                stackGridLines->AddDiscLine(1, static_cast<double>(i) * 50.0);
+            }
+            for (const double z : zLines) {
+                stackGridLines->AddDiscLine(2, z);
+            }
+
+            const std::array<double, 5> layerEpsilon = {4.1, 4.6, 4.16, 4.6, 4.1};
+            const std::array<std::uint32_t, 5> layerStartIdx = {8, 12, 16, 20, 24}; // indices into zLines
+            for (std::size_t layer = 0; layer < layerEpsilon.size(); ++layer) {
+                auto* layerMat = new CSPropMaterial(stackCsx->GetParameterSet());
+                layerMat->SetEpsilon(layerEpsilon[layer]);
+                stackCsx->AddProperty(layerMat);
+                auto* layerBox = new CSPrimBox(stackCsx->GetParameterSet(), layerMat);
+                layerBox->SetCoord(0, 0.0);
+                layerBox->SetCoord(1, 500.0);
+                layerBox->SetCoord(2, 0.0);
+                layerBox->SetCoord(3, 500.0);
+                layerBox->SetCoord(4, zLines[layerStartIdx[layer]]);
+                layerBox->SetCoord(5, zLines[layerStartIdx[layer] + 4]);
+            }
+            auto* stackCopper = new CSPropMetal(stackCsx->GetParameterSet());
+            stackCsx->AddProperty(stackCopper);
+            for (const std::uint32_t boundaryIdx : {8u, 12u, 16u, 20u, 24u, 28u}) {
+                auto* copperPlane = new CSPrimBox(stackCsx->GetParameterSet(), stackCopper);
+                copperPlane->SetCoord(0, 0.0);
+                copperPlane->SetCoord(1, 500.0);
+                copperPlane->SetCoord(2, 0.0);
+                copperPlane->SetCoord(3, 500.0);
+                copperPlane->SetCoord(4, zLines[boundaryIdx]);
+                copperPlane->SetCoord(5, zLines[boundaryIdx]);
+            }
+
+            copper::CopperOpenEMS stackFdtd;
+            stackFdtd.SetCSX(stackCsx);
+            stackFdtd.SetGaussExcite(2.5e9, 2.5e9);
+            for (int side = 0; side < 6; ++side) {
+                stackFdtd.Set_BC_Type(side, 0);
+            }
+            stackFdtd.SetNumberOfTimeSteps(10);
+            if (stackFdtd.SetupFDTD() != 0) {
+                fail("[DIAG] full-stackup fixture: openEMS::SetupFDTD() returned non-zero");
+            }
+            Operator* stackOp = stackFdtd.GetOperatorForGPU();
+            if (stackOp == nullptr) {
+                fail("[DIAG] full-stackup fixture: GetOperatorForGPU() returned null");
+            }
+            const copper::CopperYeeGrid stackGrid = copper::buildYeeGrid(*stackOp);
+            // Sample at z-index 25, inside the eps_r=4.1 layer 5 -- matches the real excited cell's
+            // own layer (24..27) as closely as this fixture's coarser 4-cells-per-layer allows.
+            const std::uint32_t idx = copper::copperGridIndex(stackGrid.dims, 5, 5, 25);
+            std::printf("[DIAG] full 5-layer stackup (real eps_r per layer, PEC layer boundaries, air "
+                        "margin): dt=%.6e vv2=%.6e vi2=%.6e (cellCount=%u)\n",
+                        stackGrid.timestepSeconds, stackGrid.vv[2][idx], stackGrid.vi[2][idx],
+                        stackGrid.dims.cellCount());
+        }
+        {
+            // TEMPORARY diagnostic: identical fixture to the block above (same real Z stackup,
+            // same real epsilon per layer, same PEC layer boundaries), but with the real board's
+            // own XY line COUNT (137 x 136, not 11 x 11) at uniform 50um spacing -- isolates
+            // whether domain *scale* (not structure -- every fixture so far used a tiny ~10x10
+            // cell XY domain) is the missing variable, since a structurally-identical small-domain
+            // fixture did not reproduce the anomaly.
+            static const double kRealZThicknessesUm4[] = {
+                551.031647, 500.000000, 358.618138, 233.393072, 151.895067, 98.855168,  64.336153,
+                41.870756,  27.250000,  27.250000,  27.250000,  27.250000,  25.000000,  25.000000,
+                25.000000,  25.000000,  101.500000, 101.500000, 101.500000, 101.500000, 25.000000,
+                25.000000,  25.000000,  25.000000,  27.250000,  27.250000,  27.250000,  27.250000,
+                42.345938,  65.804713,  102.259166, 158.908634, 246.940738, 383.740811, 500.000000,
+                500.000000,
+            };
+            std::vector<double> bigZLines;
+            bigZLines.push_back(0.0);
+            double bigCum = 0.0;
+            for (const double thickness : kRealZThicknessesUm4) {
+                bigCum += thickness;
+                bigZLines.push_back(bigCum);
+            }
+            auto* bigCsx = new ContinuousStructure();
+            CSRectGrid* bigGridLines = bigCsx->GetGrid();
+            bigGridLines->SetDeltaUnit(1e-6);
+            for (int i = 0; i <= 136; ++i) {
+                bigGridLines->AddDiscLine(0, static_cast<double>(i) * 50.0);
+            }
+            for (int i = 0; i <= 135; ++i) {
+                bigGridLines->AddDiscLine(1, static_cast<double>(i) * 50.0);
+            }
+            for (const double z : bigZLines) {
+                bigGridLines->AddDiscLine(2, z);
+            }
+            const double bigXMax = 136.0 * 50.0;
+            const double bigYMax = 135.0 * 50.0;
+            const std::array<double, 5> bigLayerEpsilon = {4.1, 4.6, 4.16, 4.6, 4.1};
+            const std::array<std::uint32_t, 5> bigLayerStartIdx = {8, 12, 16, 20, 24};
+            for (std::size_t layer = 0; layer < bigLayerEpsilon.size(); ++layer) {
+                auto* layerMat = new CSPropMaterial(bigCsx->GetParameterSet());
+                layerMat->SetEpsilon(bigLayerEpsilon[layer]);
+                bigCsx->AddProperty(layerMat);
+                auto* layerBox = new CSPrimBox(bigCsx->GetParameterSet(), layerMat);
+                layerBox->SetCoord(0, 0.0);
+                layerBox->SetCoord(1, bigXMax);
+                layerBox->SetCoord(2, 0.0);
+                layerBox->SetCoord(3, bigYMax);
+                layerBox->SetCoord(4, bigZLines[bigLayerStartIdx[layer]]);
+                layerBox->SetCoord(5, bigZLines[bigLayerStartIdx[layer] + 4]);
+            }
+            auto* bigCopper = new CSPropMetal(bigCsx->GetParameterSet());
+            bigCsx->AddProperty(bigCopper);
+            for (const std::uint32_t boundaryIdx : {8u, 12u, 16u, 20u, 24u, 28u}) {
+                auto* copperPlane = new CSPrimBox(bigCsx->GetParameterSet(), bigCopper);
+                copperPlane->SetCoord(0, 0.0);
+                copperPlane->SetCoord(1, bigXMax);
+                copperPlane->SetCoord(2, 0.0);
+                copperPlane->SetCoord(3, bigYMax);
+                copperPlane->SetCoord(4, bigZLines[boundaryIdx]);
+                copperPlane->SetCoord(5, bigZLines[boundaryIdx]);
+            }
+
+            copper::CopperOpenEMS bigFdtd;
+            bigFdtd.SetCSX(bigCsx);
+            bigFdtd.SetGaussExcite(2.5e9, 2.5e9);
+            for (int side = 0; side < 6; ++side) {
+                bigFdtd.Set_BC_Type(side, 0);
+            }
+            bigFdtd.SetNumberOfTimeSteps(10);
+            if (bigFdtd.SetupFDTD() != 0) {
+                fail("[DIAG] real-scale-XY fixture: openEMS::SetupFDTD() returned non-zero");
+            }
+            Operator* bigOp = bigFdtd.GetOperatorForGPU();
+            if (bigOp == nullptr) {
+                fail("[DIAG] real-scale-XY fixture: GetOperatorForGPU() returned null");
+            }
+            const copper::CopperYeeGrid bigGrid = copper::buildYeeGrid(*bigOp);
+            const std::uint32_t bigCenterIdx = copper::copperGridIndex(bigGrid.dims, 68, 68, 25);
+            const std::uint32_t bigThickIdx = copper::copperGridIndex(bigGrid.dims, 68, 68, 18);
+            std::printf("[DIAG] REAL-SCALE XY (137x136), real Z stackup, sampled in a thin layer "
+                        "(68,68,25): dt=%.6e vv2=%.6e vi2=%.6e (cellCount=%u)\n",
+                        bigGrid.timestepSeconds, bigGrid.vv[2][bigCenterIdx], bigGrid.vi[2][bigCenterIdx],
+                        bigGrid.dims.cellCount());
+            std::printf("[DIAG] REAL-SCALE XY (137x136), real Z stackup, sampled in the thick layer "
+                        "(68,68,18): dt=%.6e vv2=%.6e vi2=%.6e\n",
+                        bigGrid.timestepSeconds, bigGrid.vv[2][bigThickIdx], bigGrid.vi[2][bigThickIdx]);
+        }
+        {
+            // TEMPORARY diagnostic: the same full 5-layer stackup, freshly rebuilt (not reusing the
+            // already-SetupFDTD()'d fixture above), plus a 200um-square copper via barrel straight
+            // through the whole Z stack at x/y=[150,350] -- roughly the real board's own via
+            // drill+annular-ring scale. Tests whether a *localized* copper feature (mixed
+            // copper/dielectric material averaging within/around a handful of cells), unlike every
+            // full-XY-extent flat plane tested so far, is what triggers the anomaly -- sampled both
+            // inside the via's own footprint and at/outside its edge.
+            static const double kRealZThicknessesUm3[] = {
+                551.031647, 500.000000, 358.618138, 233.393072, 151.895067, 98.855168,  64.336153,
+                41.870756,  27.250000,  27.250000,  27.250000,  27.250000,  25.000000,  25.000000,
+                25.000000,  25.000000,  101.500000, 101.500000, 101.500000, 101.500000, 25.000000,
+                25.000000,  25.000000,  25.000000,  27.250000,  27.250000,  27.250000,  27.250000,
+                42.345938,  65.804713,  102.259166, 158.908634, 246.940738, 383.740811, 500.000000,
+                500.000000,
+            };
+            std::vector<double> viaZLines;
+            viaZLines.push_back(0.0);
+            double viaCum = 0.0;
+            for (const double thickness : kRealZThicknessesUm3) {
+                viaCum += thickness;
+                viaZLines.push_back(viaCum);
+            }
+            const double viaZTotal = viaCum;
+
+            auto* viaCsx = new ContinuousStructure();
+            CSRectGrid* viaGridLines = viaCsx->GetGrid();
+            viaGridLines->SetDeltaUnit(1e-6);
+            for (int i = 0; i <= 10; ++i) {
+                viaGridLines->AddDiscLine(0, static_cast<double>(i) * 50.0);
+                viaGridLines->AddDiscLine(1, static_cast<double>(i) * 50.0);
+            }
+            for (const double z : viaZLines) {
+                viaGridLines->AddDiscLine(2, z);
+            }
+            const std::array<double, 5> viaLayerEpsilon = {4.1, 4.6, 4.16, 4.6, 4.1};
+            const std::array<std::uint32_t, 5> viaLayerStartIdx = {8, 12, 16, 20, 24};
+            for (std::size_t layer = 0; layer < viaLayerEpsilon.size(); ++layer) {
+                auto* layerMat = new CSPropMaterial(viaCsx->GetParameterSet());
+                layerMat->SetEpsilon(viaLayerEpsilon[layer]);
+                viaCsx->AddProperty(layerMat);
+                auto* layerBox = new CSPrimBox(viaCsx->GetParameterSet(), layerMat);
+                layerBox->SetCoord(0, 0.0);
+                layerBox->SetCoord(1, 500.0);
+                layerBox->SetCoord(2, 0.0);
+                layerBox->SetCoord(3, 500.0);
+                layerBox->SetCoord(4, viaZLines[viaLayerStartIdx[layer]]);
+                layerBox->SetCoord(5, viaZLines[viaLayerStartIdx[layer] + 4]);
+            }
+            auto* viaCopper = new CSPropMetal(viaCsx->GetParameterSet());
+            viaCsx->AddProperty(viaCopper);
+            for (const std::uint32_t boundaryIdx : {8u, 12u, 16u, 20u, 24u, 28u}) {
+                auto* copperPlane = new CSPrimBox(viaCsx->GetParameterSet(), viaCopper);
+                copperPlane->SetCoord(0, 0.0);
+                copperPlane->SetCoord(1, 500.0);
+                copperPlane->SetCoord(2, 0.0);
+                copperPlane->SetCoord(3, 500.0);
+                copperPlane->SetCoord(4, viaZLines[boundaryIdx]);
+                copperPlane->SetCoord(5, viaZLines[boundaryIdx]);
+            }
+            // Offset from the mesh's own 50um grid lines (150/350) by 25um -- 175/325 -- so the
+            // via's own edge falls *mid-cell* (cells x=3 [150,200] and x=6 [300,350] are genuinely
+            // half copper/half dielectric), not exactly on a cell boundary like the first attempt
+            // (which made every cell either fully inside or fully outside, never actually exercising
+            // quarter-cell averaging at all).
+            auto* viaBarrel = new CSPrimBox(viaCsx->GetParameterSet(), viaCopper);
+            viaBarrel->SetCoord(0, 175.0);
+            viaBarrel->SetCoord(1, 325.0);
+            viaBarrel->SetCoord(2, 175.0);
+            viaBarrel->SetCoord(3, 325.0);
+            viaBarrel->SetCoord(4, 0.0);
+            viaBarrel->SetCoord(5, viaZTotal);
+            // Higher priority than the dielectric layer boxes (left at CSXCAD's own default, 0) --
+            // without this, the via has no visible effect at all (confirmed: identical vi2 whether
+            // sampled inside, outside, or at the via's own edge), matching the real gerber2ems code's
+            // own convention of always setting explicit priorities for overlapping primitives.
+            viaBarrel->SetPriority(10);
+
+            copper::CopperOpenEMS viaFdtd;
+            viaFdtd.SetCSX(viaCsx);
+            viaFdtd.SetGaussExcite(2.5e9, 2.5e9);
+            for (int side = 0; side < 6; ++side) {
+                viaFdtd.Set_BC_Type(side, 0);
+            }
+            viaFdtd.SetNumberOfTimeSteps(10);
+            if (viaFdtd.SetupFDTD() != 0) {
+                fail("[DIAG] via-barrel fixture: openEMS::SetupFDTD() returned non-zero");
+            }
+            Operator* viaOp = viaFdtd.GetOperatorForGPU();
+            if (viaOp == nullptr) {
+                fail("[DIAG] via-barrel fixture: GetOperatorForGPU() returned null");
+            }
+            const copper::CopperYeeGrid viaGrid = copper::buildYeeGrid(*viaOp);
+            const std::uint32_t insideIdx = copper::copperGridIndex(viaGrid.dims, 5, 5, 25);
+            const std::uint32_t outsideIdx = copper::copperGridIndex(viaGrid.dims, 8, 8, 25);
+            const std::uint32_t edgeIdx = copper::copperGridIndex(viaGrid.dims, 3, 5, 25);
+            std::printf("[DIAG] full stackup + 200um copper via barrel, sampled INSIDE via footprint "
+                        "(x=5,y=5): dt=%.6e vv2=%.6e vi2=%.6e\n",
+                        viaGrid.timestepSeconds, viaGrid.vv[2][insideIdx], viaGrid.vi[2][insideIdx]);
+            std::printf("[DIAG] full stackup + 200um copper via barrel, sampled OUTSIDE via footprint "
+                        "(x=8,y=8): dt=%.6e vv2=%.6e vi2=%.6e\n",
+                        viaGrid.timestepSeconds, viaGrid.vv[2][outsideIdx], viaGrid.vi[2][outsideIdx]);
+            std::printf("[DIAG] full stackup + 200um copper via barrel, sampled at via's own EDGE, "
+                        "genuinely mixed copper/dielectric cell (x=3,y=5): dt=%.6e vv2=%.6e vi2=%.6e\n",
+                        viaGrid.timestepSeconds, viaGrid.vv[2][edgeIdx], viaGrid.vi[2][edgeIdx]);
+        }
+        {
+            // TEMPORARY diagnostic: the real remaining untested piece -- LumpedPort places a
+            // CSPropLumpedElement (resistance=portConfig.impedance(), here 45 ohms, matching the
+            // real board's own involved_nets entry) at the *exact same box* as the excitation
+            // itself (ports.cpp's own LumpedPort constructor). Unlike every plain dielectric/metal
+            // material tested so far, a lumped element directly rewrites vv/vi within its own box
+            // via Operator_Ext_LumpedRLC -- the same *category* of mechanism (coefficient
+            // overwriting) as PML, just for a different reason. Small XY footprint (100um square,
+            // matching the real port's own ~150-200um scale) placed in the thin layer nearest the
+            // board's own top (z-index 24..27 in this fixture, matching the real excited cell's own
+            // Z range), sampled both inside the resistor box and just outside it.
+            static const double kRealZThicknessesUm5[] = {
+                551.031647, 500.000000, 358.618138, 233.393072, 151.895067, 98.855168,  64.336153,
+                41.870756,  27.250000,  27.250000,  27.250000,  27.250000,  25.000000,  25.000000,
+                25.000000,  25.000000,  101.500000, 101.500000, 101.500000, 101.500000, 25.000000,
+                25.000000,  25.000000,  25.000000,  27.250000,  27.250000,  27.250000,  27.250000,
+                42.345938,  65.804713,  102.259166, 158.908634, 246.940738, 383.740811, 500.000000,
+                500.000000,
+            };
+            std::vector<double> leZLines;
+            leZLines.push_back(0.0);
+            double leCum = 0.0;
+            for (const double thickness : kRealZThicknessesUm5) {
+                leCum += thickness;
+                leZLines.push_back(leCum);
+            }
+            auto* leCsx = new ContinuousStructure();
+            CSRectGrid* leGridLines = leCsx->GetGrid();
+            leGridLines->SetDeltaUnit(1e-6);
+            for (int i = 0; i <= 10; ++i) {
+                leGridLines->AddDiscLine(0, static_cast<double>(i) * 50.0);
+                leGridLines->AddDiscLine(1, static_cast<double>(i) * 50.0);
+            }
+            for (const double z : leZLines) {
+                leGridLines->AddDiscLine(2, z);
+            }
+            const std::array<double, 5> leLayerEpsilon = {4.1, 4.6, 4.16, 4.6, 4.1};
+            const std::array<std::uint32_t, 5> leLayerStartIdx = {8, 12, 16, 20, 24};
+            for (std::size_t layer = 0; layer < leLayerEpsilon.size(); ++layer) {
+                auto* layerMat = new CSPropMaterial(leCsx->GetParameterSet());
+                layerMat->SetEpsilon(leLayerEpsilon[layer]);
+                leCsx->AddProperty(layerMat);
+                auto* layerBox = new CSPrimBox(leCsx->GetParameterSet(), layerMat);
+                layerBox->SetCoord(0, 0.0);
+                layerBox->SetCoord(1, 500.0);
+                layerBox->SetCoord(2, 0.0);
+                layerBox->SetCoord(3, 500.0);
+                layerBox->SetCoord(4, leZLines[leLayerStartIdx[layer]]);
+                layerBox->SetCoord(5, leZLines[leLayerStartIdx[layer] + 4]);
+            }
+            auto* leCopper = new CSPropMetal(leCsx->GetParameterSet());
+            leCsx->AddProperty(leCopper);
+            for (const std::uint32_t boundaryIdx : {8u, 12u, 16u, 20u, 24u, 28u}) {
+                auto* copperPlane = new CSPrimBox(leCsx->GetParameterSet(), leCopper);
+                copperPlane->SetCoord(0, 0.0);
+                copperPlane->SetCoord(1, 500.0);
+                copperPlane->SetCoord(2, 0.0);
+                copperPlane->SetCoord(3, 500.0);
+                copperPlane->SetCoord(4, leZLines[boundaryIdx]);
+                copperPlane->SetCoord(5, leZLines[boundaryIdx]);
+            }
+            // The lumped resistor, exactly mirroring LumpedPort::LumpedPort's own addLumpedElement()
+            // call: direction=2 (z, the excitation axis), caps=true, resistance=45 (this board's own
+            // involved_nets impedance), placed as a box spanning the thin layer at z-index 24..27,
+            // a small 100x100um XY footprint (matching the real port's own scale), NOT the full
+            // domain (a real port's own gap is small, not a full-plane feature).
+            auto* resistProp = new CSPropLumpedElement(leCsx->GetParameterSet());
+            resistProp->SetDirection(2);
+            resistProp->SetCaps(true);
+            resistProp->SetResistance(45.0);
+            resistProp->SetLEtype(CSPropLumpedElement::PARALLEL);
+            leCsx->AddProperty(resistProp);
+            auto* resistBox = new CSPrimBox(leCsx->GetParameterSet(), resistProp);
+            resistBox->SetCoord(0, 175.0);
+            resistBox->SetCoord(1, 275.0);
+            resistBox->SetCoord(2, 175.0);
+            resistBox->SetCoord(3, 275.0);
+            resistBox->SetCoord(4, leZLines[24]);
+            resistBox->SetCoord(5, leZLines[28]);
+            resistBox->SetPriority(10);
+
+            copper::CopperOpenEMS leFdtd;
+            leFdtd.SetCSX(leCsx);
+            leFdtd.SetGaussExcite(2.5e9, 2.5e9);
+            for (int side = 0; side < 6; ++side) {
+                leFdtd.Set_BC_Type(side, 0);
+            }
+            leFdtd.SetNumberOfTimeSteps(10);
+            if (leFdtd.SetupFDTD() != 0) {
+                fail("[DIAG] lumped-element fixture: openEMS::SetupFDTD() returned non-zero");
+            }
+            Operator* leOp = leFdtd.GetOperatorForGPU();
+            if (leOp == nullptr) {
+                fail("[DIAG] lumped-element fixture: GetOperatorForGPU() returned null");
+            }
+            const copper::CopperYeeGrid leGrid = copper::buildYeeGrid(*leOp);
+            const std::uint32_t leInsideIdx = copper::copperGridIndex(leGrid.dims, 5, 5, 25);
+            const std::uint32_t leOutsideIdx = copper::copperGridIndex(leGrid.dims, 8, 8, 25);
+            std::printf("[DIAG] full stackup + 45-ohm LumpedElement resistor (matches real LumpedPort), "
+                        "sampled INSIDE resistor box (5,5,25): dt=%.6e vv2=%.6e vi2=%.6e\n",
+                        leGrid.timestepSeconds, leGrid.vv[2][leInsideIdx], leGrid.vi[2][leInsideIdx]);
+            std::printf("[DIAG] full stackup + 45-ohm LumpedElement resistor, sampled OUTSIDE resistor "
+                        "box (8,8,25): dt=%.6e vv2=%.6e vi2=%.6e\n",
+                        leGrid.timestepSeconds, leGrid.vv[2][leOutsideIdx], leGrid.vi[2][leOutsideIdx]);
+        }
         copper::CopperEngine gpuEngine(cavityGrid);
 
         // Interior cell, away from every wall -- chosen the same way as the earlier vv/vi sample.
@@ -568,18 +1200,21 @@ int main() {
     // exponential of a non-negative exponent, so it's bounded to (0,1] for every physically real
     // sigma/alpha/dT; c[w] = sigma_w*(b[w]-1)/(sigma_w+alpha_w) is a product of a non-negative
     // fraction (sigma_w/(sigma_w+alpha_w) in [0,1]) and a non-positive term (b[w]-1 in [-1,0]), so
-    // it's bounded to [-1,0]. Same shell geometry (count/dims/start) as buildPMLShells() too, since
-    // both walk the identical Operator_Ext_UPML extension list.
+    // it's bounded to [-1,0]. Fixture uses MUR on every face, never Set_BC_PML() -- buildCPMLShells()
+    // no longer discovers its own shells from an actual Operator_Ext_UPML extension at all (see
+    // CopperCPML.hpp's own top comment for why: openEMS unconditionally overwrites grid.vv/vi/ii/iv
+    // at PML cells the moment Set_BC_PML() is ever called, regardless of which algorithm the caller
+    // actually wants), so there's no buildPMLShells() reference to diff shell geometry against here
+    // any more either -- this phase now only checks buildCPMLShells()'s own coefficients are
+    // well-formed and it built the expected 6 (one per face; the whole domain, unlike Phase 3's own
+    // thin-in-Z fixture, is large enough on every axis for a uniform 6-face shell).
     {
         copper::CopperOpenEMS cpmlFdtd;
-        cpmlFdtd.SetCSX(buildPmlCavityNoExcitation());
+        cpmlFdtd.SetCSX(buildCpmlCavityNoExcitation());
         cpmlFdtd.SetGaussExcite(2.5e9, 2.5e9);
-        cpmlFdtd.Set_BC_PML(0, 8);
-        cpmlFdtd.Set_BC_PML(1, 8);
-        cpmlFdtd.Set_BC_Type(2, 0);
-        cpmlFdtd.Set_BC_Type(3, 0);
-        cpmlFdtd.Set_BC_Type(4, 0);
-        cpmlFdtd.Set_BC_Type(5, 0);
+        for (int side = 0; side < 6; ++side) {
+            cpmlFdtd.Set_BC_Type(side, 2); // MUR -- see this phase's own comment for why never PML.
+        }
         cpmlFdtd.SetNumberOfTimeSteps(30);
         if (cpmlFdtd.SetupFDTD() != 0) {
             fail("Phase 3b fixture: openEMS::SetupFDTD() returned non-zero");
@@ -589,19 +1224,12 @@ int main() {
             fail("Phase 3b fixture: GetOperatorForGPU() returned null");
         }
 
-        const std::vector<copper::CopperPMLShell> refShells = copper::buildPMLShells(*cpmlOp);
+        constexpr std::uint32_t kPmlDepthCellsForTest = 8;
         const double alphaMax = 2 * M_PI * 100e6 * EPS0; // matches runFDTDPortOnGPU's own default
-        const std::vector<copper::CopperCPMLShell> cpmlShells = copper::buildCPMLShells(*cpmlOp, alphaMax);
-        if (cpmlShells.size() != refShells.size()) {
-            fail("Phase 3b: buildCPMLShells() returned a different number of shells than buildPMLShells()");
-        }
-        for (std::size_t s = 0; s < cpmlShells.size(); ++s) {
-            const copper::CopperPMLShell& ref = refShells[s];
-            const copper::CopperCPMLShell& cpml = cpmlShells[s];
-            if (cpml.dims.nx != ref.dims.nx || cpml.dims.ny != ref.dims.ny || cpml.dims.nz != ref.dims.nz ||
-                cpml.startX != ref.startX || cpml.startY != ref.startY || cpml.startZ != ref.startZ) {
-                fail("Phase 3b: buildCPMLShells()'s shell geometry doesn't match buildPMLShells()'s");
-            }
+        const std::vector<copper::CopperCPMLShell> cpmlShells =
+            copper::buildCPMLShells(*cpmlOp, alphaMax, kPmlDepthCellsForTest);
+        if (cpmlShells.size() != 6) {
+            fail("Phase 3b: expected exactly 6 CPML shells (one per domain face)");
         }
 
         std::size_t checkedCount = 0;
@@ -643,14 +1271,11 @@ int main() {
     // PML were reflecting the impulse back into the domain undamped.
     {
         copper::CopperOpenEMS cpmlRunFdtd;
-        cpmlRunFdtd.SetCSX(buildPmlCavityNoExcitation());
+        cpmlRunFdtd.SetCSX(buildCpmlCavityNoExcitation());
         cpmlRunFdtd.SetGaussExcite(2.5e9, 2.5e9);
-        cpmlRunFdtd.Set_BC_PML(0, 8);
-        cpmlRunFdtd.Set_BC_PML(1, 8);
-        cpmlRunFdtd.Set_BC_Type(2, 0);
-        cpmlRunFdtd.Set_BC_Type(3, 0);
-        cpmlRunFdtd.Set_BC_Type(4, 0);
-        cpmlRunFdtd.Set_BC_Type(5, 0);
+        for (int side = 0; side < 6; ++side) {
+            cpmlRunFdtd.Set_BC_Type(side, 2); // MUR -- see Phase 3b's own comment for why never PML.
+        }
         cpmlRunFdtd.SetNumberOfTimeSteps(30);
         if (cpmlRunFdtd.SetupFDTD() != 0) {
             fail("Phase 3c fixture: openEMS::SetupFDTD() returned non-zero");
@@ -660,21 +1285,24 @@ int main() {
             fail("Phase 3c fixture: GetOperatorForGPU() returned null");
         }
 
+        constexpr std::uint32_t kPmlDepthCellsForTest = 8;
         const copper::CopperYeeGrid cpmlRunGrid = copper::buildYeeGrid(*cpmlRunOp);
         const double alphaMax = 2 * M_PI * 100e6 * EPS0;
-        const std::vector<copper::CopperCPMLShell> cpmlRunShells = copper::buildCPMLShells(*cpmlRunOp, alphaMax);
-        if (cpmlRunShells.size() != 2) {
-            fail("Phase 3c fixture: expected exactly 2 CPML shells (x-min, x-max)");
+        const std::vector<copper::CopperCPMLShell> cpmlRunShells =
+            copper::buildCPMLShells(*cpmlRunOp, alphaMax, kPmlDepthCellsForTest);
+        if (cpmlRunShells.size() != 6) {
+            fail("Phase 3c fixture: expected exactly 6 CPML shells (one per domain face)");
         }
         copper::CopperEngine cpmlEngine(cpmlRunGrid, {}, {}, cpmlRunShells);
 
-        // Same seed position/value as Phase 3 -- inside the x-min PML's own depth-8 box, so the run
-        // exercises cpml_correct_e/h directly on the seeded cell from step 0.
-        const std::uint32_t seedX = 6, seedY = 5, seedZ = 1;
+        // Inside the x-min shell's own depth-8 box, comfortably interior on Y/Z (only one shell's own
+        // correction should apply here, matching the original single-face-PML seed's own intent) --
+        // so the run exercises cpml_correct_e/h directly on the seeded cell from step 0.
+        const std::uint32_t seedX = 6, seedY = 15, seedZ = 15;
         cpmlEngine.writeFieldCell(copper::CopperEngine::Field::Ez, seedX, seedY, seedZ, 1.0F);
 
         const double energyAtStart = cpmlEngine.estimateEnergy();
-        const std::uint32_t steps = 60; // several round trips across this fixture's 41-cell x extent
+        const std::uint32_t steps = 60; // several round trips across this fixture's 30-cell x extent
         cpmlEngine.run(steps);
         const double energyAfter = cpmlEngine.estimateEnergy();
 

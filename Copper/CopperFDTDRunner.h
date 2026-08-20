@@ -70,17 +70,58 @@ struct CopperProbeResult {
     std::string data() const;
 };
 
+/// Deliberately a distinct, self-contained type rather than reusing Internal/CopperYeeGrid.hpp's
+/// own CopperGridDims -- see this file's own top comment on why the public boundary header can't
+/// pull in an Internal/ header (flat vs. installed openEMS include forms can't mix in one
+/// translation unit).
+struct CopperFieldGridDims {
+    std::uint32_t nx = 0;
+    std::uint32_t ny = 0;
+    std::uint32_t nz = 0;
+};
+
+/// One full-grid energy snapshot at a single point in the run -- for spatial visualization (e.g. a
+/// 3D field/energy viewer's own timeline scrubber), not for anything read every timestep (see
+/// CopperFDTDRunner.cpp's own comment on why per-timestep probe sampling deliberately avoids a
+/// full-grid read). `cellEnergy` is `dims.nx*ny*nz` floats (see CopperFieldSnapshot::dims), one per
+/// cell, in Yee-grid x-fastest-varying order (matches CopperYeeGrid's own copperGridIndex()):
+/// `EPS0*(Ex^2+Ey^2+Ez^2) + MUE0*(Hx^2+Hy^2+Hz^2)`, each component read at the *same* global index
+/// with no attempt to interpolate across the Yee-cell's own half-cell E/H staggering -- a
+/// deliberate, cheap simplification (sub-cell-scale error) acceptable for a spatial visualization,
+/// not a rigorously co-located energy density.
+struct CopperFieldFrame {
+    std::uint32_t timestep = 0;
+    double timeSeconds = 0.0;
+    std::vector<float> cellEnergy;
+};
+
+/// A time series of full-grid energy snapshots captured periodically across a run -- see
+/// CopperFDTDRunner.cpp's own comment for the capture cadence (a bounded frame budget, not a fixed
+/// wall-clock interval, so an hours-long run doesn't produce thousands of multi-megabyte frames).
+/// `lineX/Y/Z` are the primary (E) mesh's own line positions, metres, in the same absolute frame
+/// every other Copper coordinate is in (matches Internal/CopperYeeGrid.hpp's `lineX/Y/Z`) --
+/// `lineW.size()` is `dims.nW+1` (cell *boundaries*, not centers) -- shared by every frame, since
+/// the mesh itself never changes mid-run, only the field state does.
+struct CopperFieldSnapshot {
+    CopperFieldGridDims dims;
+    std::vector<float> lineX, lineY, lineZ;
+    std::vector<CopperFieldFrame> frames; // timestep order
+};
+
 /// `probes` is only meaningful when `success` -- one entry per probe box discovered on the board
 /// (voltage and current), each carrying every timestep's sample in memory rather than on disk (see
 /// runFDTDPortOnGPU's own doc comment for why runFDTDPortOnGPU itself no longer writes files: it's
 /// a pure compute function now, and persisting the result -- if a caller needs to at all, e.g. to
 /// keep gerber2ems's existing on-disk S-parameter pipeline working unmodified -- is an explicit,
 /// visible step in that caller's own code, via CopperProbeResult::data() above, not an implicit
-/// side effect buried in here).
+/// side effect buried in here). `fieldSnapshot` is likewise only meaningful when `success`; always
+/// populated with at least one frame (the extra full-grid reads are a handful of MB each, negligible
+/// against a real run's own runtime -- see CopperFDTDRunner.cpp for the capture cadence).
 struct CopperFDTDRunResult {
     bool success = false;
     std::string errorMessage; // only meaningful when !success
     std::vector<CopperProbeResult> probes;
+    CopperFieldSnapshot fieldSnapshot;
 };
 
 /// Which major stage of runFDTDPortOnGPU a CopperFDTDProgress report describes. `Setup` covers
@@ -142,10 +183,47 @@ using CopperFDTDProgressCallback = std::function<void(const CopperFDTDProgress&)
 /// alpha (CFS) parameter, in S/m (see Internal/CopperCPML.hpp's own doc comment); defaults to
 /// `2*pi*100MHz*EPS0`, matching this codebase's own real boards' lowest excited frequency to date --
 /// a caller whose simulation's own frequency sweep floor differs should pass `2*pi*f_low*EPS0` for
-/// that simulation's own value instead.
+/// that simulation's own value instead. `pmlDepthCells` is only meaningful when `boundaryKind` is
+/// CPML -- see Internal/CopperCPML.hpp's own top comment for why a CPML run must never have called
+/// openEMS's own Set_BC_PML() (the caller is responsible for that; this is just told the depth it
+/// would otherwise have passed there, in cells, uniform on all 6 faces) and instead computes its own
+/// shell geometry directly from this value. Defaults to 16, matching gerber2ems::constants::
+/// pmlDepthCells -- a caller linking gerber2ems should pass that constant explicitly rather than rely
+/// on this default staying in sync with it.
 CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
                                       const CopperFDTDProgressCallback& onProgress = {},
                                       CopperBoundaryKind boundaryKind = CopperBoundaryKind::CPML,
-                                      double cpmlAlphaMax = -1.0);
+                                      double cpmlAlphaMax = -1.0, std::uint32_t pmlDepthCells = 16);
+
+/// One-off diagnostic, NOT part of the normal run path: sets up exactly like runFDTDPortOnGPU() (same
+/// grid/coefficient/excitation extraction, same CopperEngine), then instead of running to completion,
+/// steps the engine one timestep at a time for `frameCount` steps, writing every raw field component
+/// (Ex/Ey/Ez/Hx/Hy/Hz) after each step -- plus the static per-cell coupling coefficients
+/// (vv0-2/vi0-2/ii0-2/iv0-2) once, up front -- to `outputDir`, cropped to a box around the excitation
+/// cells (their own bounding box, expanded by `marginCells` in every direction, clamped to the grid).
+/// Exists to answer "where and why does energy stop spreading" by hand/offline (e.g. in Python) when
+/// comparing against a real openEMS CPU run isn't practical -- see this function's own .cpp for the
+/// exact file layout. Returns an error string on failure (mirrors CopperFDTDRunResult's own contract,
+/// but this has no probes/field-snapshot payload of its own -- everything of interest is on disk).
+std::string dumpEarlyFrames(openEMS& fdtd, ContinuousStructure& csx, const std::filesystem::path& outputDir,
+                             std::uint32_t frameCount = 100, std::uint32_t marginCells = 25,
+                             CopperBoundaryKind boundaryKind = CopperBoundaryKind::CPML,
+                             double cpmlAlphaMax = -1.0, std::uint32_t pmlDepthCells = 16);
+
+/// A second one-off diagnostic, even more targeted than dumpEarlyFrames(): instead of just before/
+/// after field snapshots, prints every *intermediate* term of the update formula -- the raw neighbor
+/// reads that make up each curl difference, the vv/vi (or ii/iv) coefficient applied, the resulting
+/// product, and (for excited cells) the exact excitation signal sample and its own contribution --
+/// for every cell in a small (`boxSide`-per-axis, e.g. 4 => 64 cells) box centered on the excitation,
+/// over just `stepCount` timesteps. Where dumpEarlyFrames() answers "what does the field look like",
+/// this answers "which specific term in the formula is small" -- e.g. whether a tiny result comes
+/// from a tiny coupling coefficient, a tiny (already-decayed) neighbor read, or something else
+/// entirely -- without needing a separate offline reconstruction pass. Prints directly to stdout
+/// (plain text, not a binary file -- the whole point is a bounded amount of output a human or an
+/// agent can read directly). Returns an error string on failure, matching dumpEarlyFrames()'s own
+/// contract.
+std::string dumpDetailedTrace(openEMS& fdtd, ContinuousStructure& csx, std::uint32_t stepCount = 4,
+                               std::uint32_t boxSide = 4, CopperBoundaryKind boundaryKind = CopperBoundaryKind::CPML,
+                               double cpmlAlphaMax = -1.0, std::uint32_t pmlDepthCells = 16);
 
 } // namespace copper

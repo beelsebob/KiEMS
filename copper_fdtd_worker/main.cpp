@@ -21,8 +21,11 @@
 #include <nlohmann/json.hpp>
 
 #include "gerber2ems/config.hpp"
+#include "gerber2ems/constants.hpp"
+#include "gerber2ems/importer.hpp"
 #include "gerber2ems/logging.hpp"
 #include "gerber2ems/paths_config.hpp"
+#include "gerber2ems/port_resolution.hpp"
 #include "gerber2ems/simulation.hpp"
 #include "gerber2ems/simulation_data.hpp"
 
@@ -63,10 +66,12 @@ int main(int argc, char** argv) {
     std::filesystem::path configPath;
     std::string simName;
     std::int32_t excitedPort = 0;
+    std::filesystem::path kicadQueryHelperPath;
     try {
         configPath = job.at("config_path").get<std::string>();
         simName = job.at("simulation_name").get<std::string>();
         excitedPort = job.at("excited_port").get<std::int32_t>();
+        kicadQueryHelperPath = job.at("kicad_query_helper_path").get<std::string>();
     } catch (const nlohmann::json::exception& error) {
         writeError(simPath, std::string("Malformed job file: ") + error.what());
         return EXIT_FAILURE;
@@ -82,6 +87,23 @@ int main(int argc, char** argv) {
     }
     EMSConfig config = std::move(*configResult);
 
+    // No kicad-cli/worker paths needed -- this process never exports gerbers or spawns a further
+    // worker, it only reloads the geometry a prior stage already saved to disk. kicadQueryHelperPath
+    // *is* needed though: simConfig.ports() isn't (de)serialized (see PortConfig's own doc comment
+    // in config.hpp), so it must be rebuilt fresh below via importStackup()+resolveSimulationPorts(),
+    // exactly like main.cpp's own -s/-p path does, using the same helper path the spawning process
+    // already resolved (passed through job.json rather than re-derived here).
+    const PathsConfig paths = PathsConfig::forConfigFile(configPath, "", kicadQueryHelperPath, "");
+
+    if (auto result = importStackup(paths, config); !result) {
+        writeError(simPath, result.error());
+        return EXIT_FAILURE;
+    }
+    if (auto result = resolveSimulationPorts(config, paths); !result) {
+        writeError(simPath, result.error());
+        return EXIT_FAILURE;
+    }
+
     SimulationConfig* simConfig = nullptr;
     for (auto& sim : config.simulations()) {
         if (sim.name() == simName) {
@@ -93,10 +115,6 @@ int main(int argc, char** argv) {
         writeError(simPath, "Simulation \"" + simName + "\" not found in " + configPath.string());
         return EXIT_FAILURE;
     }
-
-    // No kicad-cli/kicad_query_helper/worker paths needed -- this process never shells out further,
-    // it only reloads the geometry a prior stage already saved to disk.
-    const PathsConfig paths = PathsConfig::forConfigFile(configPath, "", "", "");
 
     // Deserializes the exact same SimulationData<Grid> (sliced board + placed grid lines -- see
     // simulation_data.hpp) GeometryResult::build()/load() would have in memory in-process -- this
@@ -135,7 +153,13 @@ int main(int argc, char** argv) {
     }
 
     const std::filesystem::path probeDir = std::filesystem::current_path();
-    const copper::CopperFDTDRunResult gpuResult = copper::runFDTDPortOnGPU(simulation.fdtdEngine(), simulation.csx());
+    // pmlDepthCells passed explicitly (matching gerber2ems::constants::pmlDepthCells, the same
+    // value Simulation::setBoundaryConditions() used -- or, for a CPML run, deliberately did *not*
+    // pass to openEMS's own Set_BC_PML() -- see that function's own comment) rather than relying on
+    // runFDTDPortOnGPU()'s own default staying in sync with it.
+    const copper::CopperFDTDRunResult gpuResult = copper::runFDTDPortOnGPU(
+        simulation.fdtdEngine(), simulation.csx(), {}, copper::CopperBoundaryKind::CPML, -1.0,
+        gerber2ems::constants::pmlDepthCells);
     std::filesystem::current_path(cwd);
     if (!gpuResult.success) {
         writeError(simPath, gpuResult.errorMessage);

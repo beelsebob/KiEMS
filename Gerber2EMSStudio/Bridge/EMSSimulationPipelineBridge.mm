@@ -1,5 +1,6 @@
 #import "EMSSimulationPipelineBridge.h"
 #import "EMSConfigBridge+Private.h"
+#import "FieldSnapshotBridge+Private.h"
 #import "GeometryPreviewBridge+Private.h"
 #import "SimulationResultsBridge+Private.h"
 
@@ -94,9 +95,16 @@ std::vector<double> linspace(double start, double stop, std::int32_t num) {
 /// run, rather than resetting to 0 and confusingly re-climbing to 1 once per port -- `portsCompleted`
 /// is a plain `std::size_t&` (not atomic/thread-safety-guarded) because generateResults() calls this
 /// FDTDPortRunner for each excited port strictly sequentially, never concurrently.
+///
+/// `outFieldSnapshot`, if non-null, is overwritten with this port's own full-grid field snapshot on
+/// success (see copper::CopperFDTDRunResult::fieldSnapshot) -- for a multi-port simulation this
+/// means whichever port runs *last* wins; the Field Viewer only ever shows one snapshot at a time
+/// and there's no per-port selector yet, so "the most recently computed port's own field state" is
+/// the simplest reasonable default rather than keeping one per port.
 std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32_t excitedPortNumber,
                                                        EMSPipelineProgressHandler progressHandler,
-                                                       std::size_t totalExcitedPorts, std::size_t& portsCompleted) {
+                                                       std::size_t totalExcitedPorts, std::size_t& portsCompleted,
+                                                       copper::CopperFieldSnapshot* outFieldSnapshot) {
     const std::filesystem::path cwd = std::filesystem::current_path();
     if (auto result = sim.setupFDTDOperator(excitedPortNumber); !result) {
         return std::unexpected(result.error());
@@ -106,7 +114,10 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     // Internal/CopperCPML.hpp -- with alphaMax = 2*pi*100MHz*EPS0) -- matches the CLI's own default;
     // no app-side toggle for gerber2ems::PMLKind yet (plain UPML, openEMS's own original formulation,
     // is reachable via `--pml upml` on the CLI for comparison/fallback -- see PMLKind's own doc
-    // comment).
+    // comment). pmlDepthCells passed explicitly (matching gerber2ems::constants::pmlDepthCells, the
+    // same value Simulation::setBoundaryConditions() used -- or, for a CPML run, deliberately did
+    // *not* pass to openEMS's own Set_BC_PML() -- see that function's own comment) rather than
+    // relying on runFDTDPortOnGPU()'s own default staying in sync with it.
     copper::CopperFDTDProgressCallback onCopperProgress;
     if (progressHandler) {
         onCopperProgress = [&](const copper::CopperFDTDProgress& p) {
@@ -126,13 +137,17 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
             progressHandler(progress);
         };
     }
-    const copper::CopperFDTDRunResult gpuResult =
-        copper::runFDTDPortOnGPU(sim.fdtdEngine(), sim.csx(), onCopperProgress);
+    const copper::CopperFDTDRunResult gpuResult = copper::runFDTDPortOnGPU(
+        sim.fdtdEngine(), sim.csx(), onCopperProgress, copper::CopperBoundaryKind::CPML, -1.0,
+        gerber2ems::constants::pmlDepthCells);
     std::filesystem::current_path(cwd);
     if (!gpuResult.success) {
         return std::unexpected(gpuResult.errorMessage);
     }
     ++portsCompleted;
+    if (outFieldSnapshot != nullptr) {
+        *outFieldSnapshot = gpuResult.fieldSnapshot;
+    }
 
     for (const copper::CopperProbeResult& probeResult : gpuResult.probes) {
         std::ofstream probeFile(probeDir / probeResult.name);
@@ -163,6 +178,11 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     std::optional<SimulationData<SimulationStage::Grid>> _grid;
     std::optional<SimulationData<SimulationStage::Results>> _results;
     std::optional<SimulationData<SimulationStage::Postprocessing>> _postprocessing;
+
+    // The last excited port's own full-grid field snapshot, captured alongside `_results` -- see
+    // runGPUPortInProcess()'s own doc comment for why "last port wins" rather than one per port.
+    // Reset together with `_results` (see -invalidateFromStage:).
+    std::optional<copper::CopperFieldSnapshot> _lastFieldSnapshot;
 }
 
 - (instancetype)initWithSimulationName:(NSString*)simulationName {
@@ -353,9 +373,11 @@ kicadQueryHelperPath:(NSString*)helperPath
         // call below -- generateResults() calls its FDTDPortRunner once per excited port strictly
         // sequentially, never concurrently, so there's no real data race to guard against.
         std::size_t portsCompleted = 0;
-        auto portRunner = [progressHandler, totalExcitedPorts, &portsCompleted](
+        copper::CopperFieldSnapshot capturedFieldSnapshot;
+        auto portRunner = [progressHandler, totalExcitedPorts, &portsCompleted, &capturedFieldSnapshot](
                                Simulation& sim, std::int32_t excitedPortNumber) {
-            return runGPUPortInProcess(sim, excitedPortNumber, progressHandler, totalExcitedPorts, portsCompleted);
+            return runGPUPortInProcess(sim, excitedPortNumber, progressHandler, totalExcitedPorts, portsCompleted,
+                                        &capturedFieldSnapshot);
         };
         auto resultsResult =
             gerber2ems::generateResults(*_grid, *_scaledConfig, options, *_paths, frequencies, portRunner);
@@ -368,6 +390,7 @@ kicadQueryHelperPath:(NSString*)helperPath
             return NO;
         }
         _results.emplace(*_grid, std::move(*resultsResult));
+        _lastFieldSnapshot = std::move(capturedFieldSnapshot);
     }
 
     if (!_postprocessing.has_value()) {
@@ -402,6 +425,24 @@ kicadQueryHelperPath:(NSString*)helperPath
     return buildResultsPreview(*_postprocessing->postprocessing().postprocessor, *_simConfig);
 }
 
+- (nullable EMSFieldSnapshot*)fieldSnapshot {
+    if (!_lastFieldSnapshot.has_value()) {
+        return nil;
+    }
+    // Board top is always Z=0, bottom is the substrate stack's own total thickness below that --
+    // matches GridGenerator::Impl::_generateZ()'s own convention exactly (offset starts at 0,
+    // decreases by each substrate layer's thickness() -- see grid_gen.cpp), computed independently
+    // here since GridGenerator has no public accessor for it (only xmin()/ymin()). `.thickness()`
+    // is already in simulation units (LayerConfig's own doc comment), same frame buildFieldSnapshot
+    // converts Copper's own metres-based lineZ into -- no further scaling needed.
+    double boardThickness = 0.0;
+    const std::vector<gerber2ems::LayerConfig> substrates = _scaledConfig->getSubstrates();
+    for (const auto& substrate : substrates) {
+        boardThickness += substrate.thickness();
+    }
+    return buildFieldSnapshot(*_lastFieldSnapshot, -boardThickness, 0.0);
+}
+
 - (void)invalidateFromStage:(EMSPipelineStage)stage {
     switch (stage) {
     case EMSPipelineStageGeometry:
@@ -411,6 +452,7 @@ kicadQueryHelperPath:(NSString*)helperPath
         // differently, e.g. hull padding).
         _postprocessing.reset();
         _results.reset();
+        _lastFieldSnapshot.reset();
         _grid.reset();
         _geometry.reset();
         _configured.reset();
@@ -422,6 +464,7 @@ kicadQueryHelperPath:(NSString*)helperPath
         // Geometry stays valid -- only the grid lines (and anything built from them) get redone.
         _postprocessing.reset();
         _results.reset();
+        _lastFieldSnapshot.reset();
         _grid.reset();
         break;
     case EMSPipelineStageResults:
@@ -429,6 +472,7 @@ kicadQueryHelperPath:(NSString*)helperPath
         // postprocessing get redone.
         _postprocessing.reset();
         _results.reset();
+        _lastFieldSnapshot.reset();
         break;
     }
 }

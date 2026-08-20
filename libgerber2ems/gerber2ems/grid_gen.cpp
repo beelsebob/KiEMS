@@ -730,7 +730,16 @@ struct GridGenerator::Impl {
 
         std::vector<double> zLines = {0};
         double offset = 0;
+        double firstLayerCellWidth = 0;
+        double lastLayerCellWidth = 0;
+        bool sawFirstLayer = false;
         for (const auto& layer : _config.getSubstrates()) {
+            const double cellWidth = layer.thickness() / static_cast<double>(zCount);
+            if (!sawFirstLayer) {
+                firstLayerCellWidth = cellWidth;
+                sawFirstLayer = true;
+            }
+            lastLayerCellWidth = cellWidth;
             for (std::int32_t i = 0; i < zCount; ++i) {
                 zLines.push_back(offset - layer.thickness() +
                                   (layer.thickness() * static_cast<double>(i)) / static_cast<double>(zCount));
@@ -739,6 +748,12 @@ struct GridGenerator::Impl {
         }
         const double zmin = *std::min_element(zLines.begin(), zLines.end());
         const double zmax = *std::max_element(zLines.begin(), zLines.end());
+        // One genuine, ordinary (non-PML) transition cell immediately outside the board on each
+        // side, matching the immediately-adjacent substrate layer's own per-cell width -- so the
+        // dedicated PML band appended below starts from a real physical buffer cell, not directly
+        // against the board's own top/bottom copper.
+        zLines.push_back(zmax + firstLayerCellWidth);
+        zLines.push_back(offset - lastLayerCellWidth);
         zLines.push_back(gridCfg.margin().z());
         zLines.push_back(offset - gridCfg.margin().z());
 
@@ -746,6 +761,39 @@ struct GridGenerator::Impl {
         zLines = Region(zmax, margin).densifyRegionGrid(zLines, gridMax, gridMin, cellRatio);
         zLines = Region(offset - margin, zmin).densifyRegionGrid(zLines, gridMax, gridMin, cellRatio);
         zLines = _dedupGrid(zLines, gridMin, {});
+        // Captured *after* the margin above is fully densified but *before* _extendPMLBand() below
+        // appends the genuinely-dedicated PML cells -- i.e. "board + real margin," exactly mirroring
+        // GridGeneratorAxis::compileGrid()'s own pmlInnerMin/Max capture for X/Y (a few hundred
+        // lines up in this same file, from grid.front()/back() at the identical point in its own
+        // sequence) -- X/Y's own _board region already includes margin.xy() on each side, so its
+        // "inner" bound was never just the bare board either. Capturing from the bare substrate
+        // zmin/zmax instead (an earlier version of this fix did) made the real, legitimate margin
+        // band -- genuine mesh, not PML -- look identical to true PML in GeometryView's "Show Grid"
+        // overlay, which colors anything outside pmlInnerZMin/Max magenta: the whole ~2mm margin
+        // read as PML crammed right against the board, even though Set_BC_PML()'s own actual
+        // 16-cell-deep shell sits comfortably beyond it. Diagnostic only either way -- nothing in
+        // the FDTD pipeline itself reads these. No offset re-basing needed here the way X/Y's own
+        // pmlInner values need (see GridGenerator::pmlInnerZMin()'s own doc comment in grid_gen.hpp):
+        // Z has no separate per-axis local origin to begin with.
+        // zLines is already sorted here (see _dedupGrid()'s own comment), so front()/back() are its
+        // current extent -- same as GridGeneratorAxis::compileGrid()'s own grid.front()/back().
+        if (!zLines.empty()) {
+            _pmlInnerZMin = zLines.front();
+            _pmlInnerZMax = zLines.back();
+        }
+        logInfo("### Grid Generator: z axis core mesh extent = [" + std::to_string(_pmlInnerZMin) + ", " +
+                 std::to_string(_pmlInnerZMax) + "] ###");
+        // Appends constants::pmlDepthCells brand-new, dedicated PML-only cells beyond each end --
+        // exactly mirroring GridGeneratorAxis::compileGrid()'s own identical call for X/Y (a few
+        // hundred lines up in this same file). Without this, Set_BC_PML()'s outermost-N-cells
+        // classification (constants::pmlDepthCells = 16) reclassified part of the *margin* band
+        // above as PML -- and since that margin band is only ~8 cells deep in Z (unlike X/Y's own,
+        // comfortably wider than 16), the other 8 cells of "PML" landed squarely inside the real
+        // substrate stack, overwriting perfectly correct dielectric vv/vi coefficients with PML's
+        // own absorbing-boundary ones in every substrate layer within 16 cells of either Z face --
+        // every one of them except the thick middle layer, which was the entire pattern behind the
+        // vi/vv "collapse" this was traced back from.
+        zLines = _extendPMLBand(std::move(zLines), constants::pmlDepthCells);
 
         {
             // _dedupGrid() sorts internally, so zLines is already sorted here -- one entry per
@@ -895,6 +943,8 @@ struct GridGenerator::Impl {
     double xmax = 0;
     double ymin = 0;
     double ymax = 0;
+    double _pmlInnerZMin = 0;
+    double _pmlInnerZMax = 0;
     const EMSConfig& _config;
 };
 
@@ -912,6 +962,8 @@ double GridGenerator::pmlInnerXMin() const { return _impl->x.pmlInnerMin(); }
 double GridGenerator::pmlInnerXMax() const { return _impl->x.pmlInnerMax(); }
 double GridGenerator::pmlInnerYMin() const { return _impl->y.pmlInnerMin(); }
 double GridGenerator::pmlInnerYMax() const { return _impl->y.pmlInnerMax(); }
+double GridGenerator::pmlInnerZMin() const { return _impl->_pmlInnerZMin; }
+double GridGenerator::pmlInnerZMax() const { return _impl->_pmlInnerZMax; }
 
 CSRectGrid& GridGenerator::generate(CSRectGrid& grid, const SimulationConfig& simConfig,
                                      const std::filesystem::path& fabDir) {

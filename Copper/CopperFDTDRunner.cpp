@@ -1,13 +1,16 @@
 #include "CopperFDTDRunner.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <fstream>
 #include <limits>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "Internal/CopperCPML.hpp"
@@ -51,7 +54,8 @@ private:
 
 CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
                                       const CopperFDTDProgressCallback& onProgress,
-                                      CopperBoundaryKind boundaryKind, double cpmlAlphaMax) {
+                                      CopperBoundaryKind boundaryKind, double cpmlAlphaMax,
+                                      std::uint32_t pmlDepthCells) {
     CopperFDTDRunResult result;
     // See CopperFDTDRunner.h's own doc comment on cpmlAlphaMax's default -- 100MHz is every real
     // board this codebase has actually simulated so far, not an arbitrary round number.
@@ -84,12 +88,33 @@ CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
             timer.mark("buildYeeGrid (reading Operator's already-computed vv/vi/ii/iv coefficients)");
         }
 
+        // [DIAG] Temporary: compares grid.vv[0]/vi[0] (Ex axis) at a hand-picked corner cell (near
+        // both a low-Y and low-Z PML face simultaneously), two flat-face cells (only one of Y/Z in
+        // PML), and a fully-interior cell -- to check whether the anomalous base coefficient is
+        // specific to edge/corner overlap or present generally wherever UPML's own BuildExtension()
+        // (always run unconditionally inside Operator::CalcECOperator(), regardless of which
+        // boundary kind Copper itself will use) has touched a cell.
+        {
+            auto dumpCell = [&](const char* label, std::uint32_t x, std::uint32_t y, std::uint32_t z) {
+                if (x >= grid.dims.nx || y >= grid.dims.ny || z >= grid.dims.nz) {
+                    return;
+                }
+                const std::uint32_t idx = copperGridIndex(grid.dims, x, y, z);
+                std::fprintf(stdout, "[DIAG-COEFF] %s (%u,%u,%u): vv=%g vi=%g\n", label, x, y, z,
+                             static_cast<double>(grid.vv[0][idx]), static_cast<double>(grid.vi[0][idx]));
+            };
+            dumpCell("corner (low-Y, low-Z)", 45, 16, 1);
+            dumpCell("flat-Z only (mid-Y, low-Z)", 45, grid.dims.ny / 2, 1);
+            dumpCell("flat-Y only (low-Y, mid-Z)", 45, 16, grid.dims.nz / 2);
+            dumpCell("interior (mid-Y, mid-Z)", 45, grid.dims.ny / 2, grid.dims.nz / 2);
+        }
+
         std::vector<CopperPMLShell> upmlShells;
         std::vector<CopperCPMLShell> cpmlShells;
         std::uint64_t pmlCellTotal = 0;
         std::size_t shellCount = 0;
         if (boundaryKind == CopperBoundaryKind::CPML) {
-            cpmlShells = buildCPMLShells(*op, cpmlAlphaMax);
+            cpmlShells = buildCPMLShells(*op, cpmlAlphaMax, pmlDepthCells);
             shellCount = cpmlShells.size();
             for (const CopperCPMLShell& shell : cpmlShells) {
                 pmlCellTotal += shell.dims.cellCount();
@@ -154,6 +179,41 @@ CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
             return engine.readFieldCell(static_cast<CopperEngine::Field>(static_cast<int>(axis) + 3), x, y, z);
         };
 
+        // Field-frame time series for spatial visualization (see CopperFDTDRunResult's own doc
+        // comment) -- mesh geometry is static for the whole run, captured once here; per-frame
+        // energy is captured periodically inside the timestep loop below, at a cadence bounded by
+        // kFieldFrameBudget rather than a fixed wall-clock interval, so an hours-long run doesn't
+        // accumulate thousands of multi-megabyte frames.
+        result.fieldSnapshot.dims = {grid.dims.nx, grid.dims.ny, grid.dims.nz};
+        result.fieldSnapshot.lineX.assign(grid.lineX.begin(), grid.lineX.end());
+        result.fieldSnapshot.lineY.assign(grid.lineY.begin(), grid.lineY.end());
+        result.fieldSnapshot.lineZ.assign(grid.lineZ.begin(), grid.lineZ.end());
+        constexpr std::uint32_t kFieldFrameBudget = 90;
+        const std::uint32_t minCaptureStepSpacing = std::max<std::uint32_t>(1, steps / kFieldFrameBudget);
+        std::uint32_t lastCaptureStep = 0;
+        bool anyFrameCaptured = false;
+        auto captureFieldFrame = [&](std::uint32_t globalTimestep) {
+            CopperFieldFrame frame;
+            frame.timestep = globalTimestep;
+            frame.timeSeconds = static_cast<double>(globalTimestep) * grid.timestepSeconds;
+            const std::vector<float> ex = engine.readField(CopperEngine::Field::Ex);
+            const std::vector<float> ey = engine.readField(CopperEngine::Field::Ey);
+            const std::vector<float> ez = engine.readField(CopperEngine::Field::Ez);
+            const std::vector<float> hx = engine.readField(CopperEngine::Field::Hx);
+            const std::vector<float> hy = engine.readField(CopperEngine::Field::Hy);
+            const std::vector<float> hz = engine.readField(CopperEngine::Field::Hz);
+            const std::size_t cellCount = ex.size();
+            frame.cellEnergy.resize(cellCount);
+            for (std::size_t i = 0; i < cellCount; ++i) {
+                const float eSq = ex[i] * ex[i] + ey[i] * ey[i] + ez[i] * ez[i];
+                const float hSq = hx[i] * hx[i] + hy[i] * hy[i] + hz[i] * hz[i];
+                frame.cellEnergy[i] = static_cast<float>(EPS0) * eSq + static_cast<float>(MUE0) * hSq;
+            }
+            result.fieldSnapshot.frames.push_back(std::move(frame));
+            lastCaptureStep = globalTimestep;
+            anyFrameCaptured = true;
+        };
+
         // Energy-decay end criteria, matching openEMS's own RunFDTD() loop (openems.cpp) exactly:
         // `endCrit = 1e-6` is openEMS's own default (-60dB, `endCrit = pow(10, -dB/10)`; openEMS
         // itself hardcodes this same default, see openems.cpp's own `endCrit = 1e-6` -- not
@@ -170,9 +230,85 @@ CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
         double energyChange = 1.0; // matches RunFDTD()'s own `double change=1;` initial value
         bool endCriteriaReached = false;
         std::uint32_t stepsActuallyRun = 0;
+        // [DIAG] Temporary: pinpoints exactly which timestep/cell/field a real run first goes
+        // NaN/Inf at. The normal energy check below only runs every ~4s of wall time, by which point
+        // corruption may already have spread across the whole domain, making "where did it start"
+        // impossible to tell from that alone.
+        bool nanDiagnosed = false;
 
         engine.runWithProbeSampling(steps, [&](std::uint32_t globalTimestep) -> bool {
             stepsActuallyRun = globalTimestep;
+
+            if (!nanDiagnosed && globalTimestep % 100 == 0) {
+                struct FieldEntry {
+                    CopperEngine::Field field;
+                    const char* name;
+                    std::uint32_t axis; // 0=x, 1=y, 2=z
+                    bool isH;
+                };
+                static const std::array<FieldEntry, 6> kFields = {{
+                    {CopperEngine::Field::Ex, "Ex", 0, false},
+                    {CopperEngine::Field::Ey, "Ey", 1, false},
+                    {CopperEngine::Field::Ez, "Ez", 2, false},
+                    {CopperEngine::Field::Hx, "Hx", 0, true},
+                    {CopperEngine::Field::Hy, "Hy", 1, true},
+                    {CopperEngine::Field::Hz, "Hz", 2, true},
+                }};
+                for (const FieldEntry& fieldEntry : kFields) {
+                    const std::vector<float> values = engine.readField(fieldEntry.field);
+                    for (std::size_t i = 0; i < values.size(); ++i) {
+                        if (std::isnan(values[i]) || std::isinf(values[i])) {
+                            const std::uint32_t x = static_cast<std::uint32_t>(i % grid.dims.nx);
+                            const std::uint32_t y = static_cast<std::uint32_t>((i / grid.dims.nx) % grid.dims.ny);
+                            const std::uint32_t z = static_cast<std::uint32_t>(i / (grid.dims.nx * grid.dims.ny));
+                            std::fprintf(stdout,
+                                         "[DIAG-NAN] First NaN/Inf at globalTimestep=%u field=%s cell=(%u,%u,%u) "
+                                         "value=%g domain=(%u,%u,%u)\n",
+                                         globalTimestep, fieldEntry.name, x, y, z, static_cast<double>(values[i]),
+                                         grid.dims.nx, grid.dims.ny, grid.dims.nz);
+                            // [DIAG] Base (non-PML-corrected) coefficient at this exact cell/axis --
+                            // CopperCPMLShell's own doc comment assumes vacuum (a real, non-zero,
+                            // non-PEC decaying-medium coefficient) everywhere its additive psi
+                            // correction applies; if this cell is actually PEC (vv/ii == 0) or has
+                            // some other degenerate base coefficient, that assumption is violated.
+                            const std::uint32_t coeffIdx = copperGridIndex(grid.dims, x, y, z);
+                            const float baseVV = fieldEntry.isH ? grid.ii[fieldEntry.axis][coeffIdx]
+                                                                 : grid.vv[fieldEntry.axis][coeffIdx];
+                            const float baseVI = fieldEntry.isH ? grid.iv[fieldEntry.axis][coeffIdx]
+                                                                 : grid.vi[fieldEntry.axis][coeffIdx];
+                            std::fprintf(stdout, "[DIAG-NAN]   base coefficient at this cell: %s=%g %s=%g\n",
+                                         fieldEntry.isH ? "ii" : "vv", static_cast<double>(baseVV),
+                                         fieldEntry.isH ? "iv" : "vi", static_cast<double>(baseVI));
+                            // [DIAG] Grid-line spacing around this cell, on whichever axis this
+                            // field's own coefficient is computed along -- a degenerate (near-zero
+                            // or duplicate) line spacing there would explain a base coefficient this
+                            // far outside the ~217 a healthy vacuum cell reads regardless of size.
+                            auto printLines = [&](const char* axisName, const std::vector<float>& lines,
+                                                   std::uint32_t center) {
+                                std::fprintf(stdout, "[DIAG-NAN]   %s lines around index %u:", axisName, center);
+                                const std::uint32_t lo = center >= 2 ? center - 2 : 0;
+                                const std::uint32_t hi = std::min<std::uint32_t>(
+                                    center + 2, static_cast<std::uint32_t>(lines.size()) - 1);
+                                for (std::uint32_t idx = lo; idx <= hi; ++idx) {
+                                    std::fprintf(stdout, " [%u]=%.9g", idx, static_cast<double>(lines[idx]));
+                                }
+                                std::fprintf(stdout, "\n");
+                            };
+                            printLines("lineX", grid.lineX, x);
+                            printLines("lineY", grid.lineY, y);
+                            printLines("lineZ", grid.lineZ, z);
+                            printLines("dualLineX", grid.dualLineX, x);
+                            printLines("dualLineY", grid.dualLineY, y);
+                            printLines("dualLineZ", grid.dualLineZ, z);
+                            nanDiagnosed = true;
+                            break;
+                        }
+                    }
+                    if (nanDiagnosed) {
+                        break;
+                    }
+                }
+            }
 
             for (std::size_t i = 0; i < probes.size(); ++i) {
                 const CopperProbe& probe = probes[i];
@@ -223,8 +359,23 @@ CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
                     endCriteriaReached = true;
                 }
             }
+            // Piggybacks on the same >4s wall-clock check above (so a field-frame capture never
+            // adds its own separate timing pass), but only actually captures once at least
+            // minCaptureStepSpacing steps have passed since the last one -- bounding the total
+            // frame count to roughly kFieldFrameBudget regardless of how long the run itself takes.
+            // Always captures the very last step's own state, whatever the spacing landed on.
+            if (sinceLastPrint > 4.0 &&
+                (globalTimestep - lastCaptureStep >= minCaptureStepSpacing || globalTimestep == steps)) {
+                captureFieldFrame(globalTimestep);
+            }
             return !endCriteriaReached;
         });
+        if (!anyFrameCaptured) {
+            // A run that ends (max steps or early-stop) before ever crossing the >4s cadence above
+            // -- a short/fast simulation -- would otherwise leave the field snapshot with zero
+            // frames; always guarantee at least the final state.
+            captureFieldFrame(stepsActuallyRun);
+        }
         if (!onProgress) {
             timer.mark("FDTD run (all timesteps + per-timestep probe sampling)");
             if (endCriteriaReached) {
@@ -238,11 +389,554 @@ CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
             }
         }
 
+        if (!onProgress) {
+            timer.mark("field snapshot capture (6x readField + per-cell energy, per frame)");
+            std::fprintf(stdout, "Copper: captured %zu field frame(s)\n", result.fieldSnapshot.frames.size());
+        }
+
         result.success = true;
     } catch (const std::exception& error) {
         result.errorMessage = std::string("Copper GPU FDTD run failed: ") + error.what();
     }
     return result;
+}
+
+std::string dumpEarlyFrames(openEMS& fdtd, ContinuousStructure& /*csx*/, const std::filesystem::path& outputDir,
+                             std::uint32_t frameCount, std::uint32_t marginCells, CopperBoundaryKind boundaryKind,
+                             double cpmlAlphaMax, std::uint32_t pmlDepthCells) {
+    constexpr double kDefaultCpmlLowFrequencyHz = 100e6;
+    if (cpmlAlphaMax < 0.0) {
+        cpmlAlphaMax = 2 * M_PI * kDefaultCpmlLowFrequencyHz * EPS0;
+    }
+    try {
+        auto& copperFdtd = static_cast<CopperOpenEMS&>(fdtd);
+        Operator* op = copperFdtd.GetOperatorForGPU();
+        if (op == nullptr) {
+            return "Copper dumpEarlyFrames: GetOperatorForGPU() returned null -- was SetupFDTD() run first?";
+        }
+
+        const CopperYeeGrid grid = buildYeeGrid(*op);
+        std::fprintf(stdout, "Copper dumpEarlyFrames: grid %ux%ux%u\n", grid.dims.nx, grid.dims.ny, grid.dims.nz);
+
+        std::vector<CopperPMLShell> upmlShells;
+        std::vector<CopperCPMLShell> cpmlShells;
+        if (boundaryKind == CopperBoundaryKind::CPML) {
+            cpmlShells = buildCPMLShells(*op, cpmlAlphaMax, pmlDepthCells);
+        } else {
+            upmlShells = buildPMLShells(*op);
+        }
+        const CopperExcitation excitation = buildExcitation(*op);
+        std::fprintf(stdout, "Copper dumpEarlyFrames: %zu voltage excitation cell(s), %zu current\n",
+                     excitation.voltageCells.size(), excitation.currentCells.size());
+        CopperEngine engine(grid, upmlShells, excitation, cpmlShells);
+
+        // Crop box: the excitation cells' own bounding box, expanded by marginCells in every
+        // direction, clamped to the grid -- small enough to write/analyze quickly while still
+        // covering plenty of margin beyond wherever propagation is supposed to reach in
+        // `frameCount` timesteps (a correctly-coupled leapfrog stencil advances its domain of
+        // dependence by exactly one cell per timestep, so `frameCount` >> marginCells would mean
+        // the crop itself, not the physics, is what's limiting how far this dump can show -- keep
+        // frameCount comparable to or smaller than marginCells for this dump to stay meaningful).
+        std::uint32_t x0 = grid.dims.nx, x1 = 0, y0 = grid.dims.ny, y1 = 0, z0 = grid.dims.nz, z1 = 0;
+        bool anyExcitationCell = false;
+        auto expand = [&](const CopperExcitationCell& cell) {
+            anyExcitationCell = true;
+            x0 = std::min(x0, cell.x);
+            x1 = std::max(x1, cell.x);
+            y0 = std::min(y0, cell.y);
+            y1 = std::max(y1, cell.y);
+            z0 = std::min(z0, cell.z);
+            z1 = std::max(z1, cell.z);
+        };
+        for (const CopperExcitationCell& cell : excitation.voltageCells) {
+            expand(cell);
+        }
+        for (const CopperExcitationCell& cell : excitation.currentCells) {
+            expand(cell);
+        }
+        if (!anyExcitationCell) {
+            return "Copper dumpEarlyFrames: no excitation cells found to center the crop box on";
+        }
+        auto clampSub = [](std::uint32_t v, std::uint32_t margin) -> std::uint32_t {
+            return margin > v ? 0 : v - margin;
+        };
+        const std::uint32_t cropX0 = clampSub(x0, marginCells);
+        const std::uint32_t cropY0 = clampSub(y0, marginCells);
+        const std::uint32_t cropZ0 = clampSub(z0, marginCells);
+        const std::uint32_t cropX1 = std::min(x1 + marginCells, grid.dims.nx - 1);
+        const std::uint32_t cropY1 = std::min(y1 + marginCells, grid.dims.ny - 1);
+        const std::uint32_t cropZ1 = std::min(z1 + marginCells, grid.dims.nz - 1);
+        const std::uint32_t cropNx = cropX1 - cropX0 + 1;
+        const std::uint32_t cropNy = cropY1 - cropY0 + 1;
+        const std::uint32_t cropNz = cropZ1 - cropZ0 + 1;
+        std::fprintf(stdout,
+                     "Copper dumpEarlyFrames: crop [%u..%u]x[%u..%u]x[%u..%u] (%ux%ux%u = %llu cell(s))\n", cropX0,
+                     cropX1, cropY0, cropY1, cropZ0, cropZ1, cropNx, cropNy, cropNz,
+                     static_cast<unsigned long long>(cropNx) * cropNy * cropNz);
+
+        std::error_code mkdirError;
+        std::filesystem::create_directories(outputDir, mkdirError);
+
+        // meta.txt: everything needed to interpret coefficients.bin/fields.bin without guessing --
+        // grid/crop dims, per-axis primary mesh line positions (metres), the excitation cell list
+        // (so the reader knows exactly which crop-local cell(s) are being directly driven each
+        // step, as opposed to which are receiving coupled energy), and the timestep itself.
+        {
+            std::ofstream meta(outputDir / "meta.txt");
+            meta << "nx " << grid.dims.nx << "\n";
+            meta << "ny " << grid.dims.ny << "\n";
+            meta << "nz " << grid.dims.nz << "\n";
+            meta << "cropX0 " << cropX0 << "\n";
+            meta << "cropY0 " << cropY0 << "\n";
+            meta << "cropZ0 " << cropZ0 << "\n";
+            meta << "cropNx " << cropNx << "\n";
+            meta << "cropNy " << cropNy << "\n";
+            meta << "cropNz " << cropNz << "\n";
+            meta << "frameCount " << frameCount << "\n";
+            meta << "timestepSeconds " << grid.timestepSeconds << "\n";
+            meta << "boundaryKind " << (boundaryKind == CopperBoundaryKind::CPML ? "CPML" : "UPML") << "\n";
+            meta << "fieldOrder Ex Ey Ez Hx Hy Hz\n";
+            meta << "coefficientOrder vv0 vv1 vv2 vi0 vi1 vi2 ii0 ii1 ii2 iv0 iv1 iv2\n";
+            meta.precision(9);
+            meta << "excitationCells";
+            for (const CopperExcitationCell& cell : excitation.voltageCells) {
+                meta << " V:" << cell.x << "," << cell.y << "," << cell.z << "," << cell.axis << ","
+                     << cell.amplitude;
+            }
+            for (const CopperExcitationCell& cell : excitation.currentCells) {
+                meta << " I:" << cell.x << "," << cell.y << "," << cell.z << "," << cell.axis << ","
+                     << cell.amplitude;
+            }
+            meta << "\n";
+            meta << "lineX";
+            for (float v : grid.lineX) {
+                meta << " " << v;
+            }
+            meta << "\n";
+            meta << "lineY";
+            for (float v : grid.lineY) {
+                meta << " " << v;
+            }
+            meta << "\n";
+            meta << "lineZ";
+            for (float v : grid.lineZ) {
+                meta << " " << v;
+            }
+            meta << "\n";
+        }
+
+        // A cropped, flattened (x fastest-varying, matching copperGridIndex()) copy of one full-grid
+        // array -- shared by both the coefficient dump (static, from `grid`) and the per-step field
+        // dump (from `engine.readFieldCell()`) below.
+        auto writeCroppedFullArray = [&](std::ofstream& out, const std::vector<float>& full) {
+            for (std::uint32_t z = cropZ0; z <= cropZ1; ++z) {
+                for (std::uint32_t y = cropY0; y <= cropY1; ++y) {
+                    for (std::uint32_t x = cropX0; x <= cropX1; ++x) {
+                        const float v = full[copperGridIndex(grid.dims, x, y, z)];
+                        out.write(reinterpret_cast<const char*>(&v), sizeof(float));
+                    }
+                }
+            }
+        };
+
+        // coefficients.bin: 12 cropped arrays back-to-back, order matches meta.txt's own
+        // "coefficientOrder" line -- static for the whole run (openEMS bakes material/boundary
+        // condition into these once, at setup), so this is the one part of the dump that's only
+        // written once, not per-step.
+        {
+            std::ofstream coeffFile(outputDir / "coefficients.bin", std::ios::binary);
+            for (unsigned axis = 0; axis < 3; ++axis) {
+                writeCroppedFullArray(coeffFile, grid.vv[axis]);
+            }
+            for (unsigned axis = 0; axis < 3; ++axis) {
+                writeCroppedFullArray(coeffFile, grid.vi[axis]);
+            }
+            for (unsigned axis = 0; axis < 3; ++axis) {
+                writeCroppedFullArray(coeffFile, grid.ii[axis]);
+            }
+            for (unsigned axis = 0; axis < 3; ++axis) {
+                writeCroppedFullArray(coeffFile, grid.iv[axis]);
+            }
+        }
+
+        // fields.bin: `frameCount` frames back-to-back, each frame six cropped arrays back-to-back
+        // (Ex,Ey,Ez,Hx,Hy,Hz, matching meta.txt's own "fieldOrder" line) -- one real timestep
+        // between each frame (engine.run(1), not runWithProbeSampling's batched form), so frame N
+        // is the field state immediately after global timestep N+1.
+        {
+            std::ofstream fieldsFile(outputDir / "fields.bin", std::ios::binary);
+            const std::array<CopperEngine::Field, 6> fields = {
+                CopperEngine::Field::Ex, CopperEngine::Field::Ey, CopperEngine::Field::Ez,
+                CopperEngine::Field::Hx, CopperEngine::Field::Hy, CopperEngine::Field::Hz,
+            };
+            for (std::uint32_t step = 0; step < frameCount; ++step) {
+                engine.run(1);
+                for (const CopperEngine::Field field : fields) {
+                    for (std::uint32_t z = cropZ0; z <= cropZ1; ++z) {
+                        for (std::uint32_t y = cropY0; y <= cropY1; ++y) {
+                            for (std::uint32_t x = cropX0; x <= cropX1; ++x) {
+                                const float v = engine.readFieldCell(field, x, y, z);
+                                fieldsFile.write(reinterpret_cast<const char*>(&v), sizeof(float));
+                            }
+                        }
+                    }
+                }
+                if (step % 10 == 0 || step + 1 == frameCount) {
+                    std::fprintf(stdout, "Copper dumpEarlyFrames: step %u/%u\n", step + 1, frameCount);
+                }
+            }
+        }
+
+        std::fprintf(stdout, "Copper dumpEarlyFrames: wrote %u frame(s) to %s\n", frameCount,
+                     outputDir.string().c_str());
+        return {};
+    } catch (const std::exception& error) {
+        return std::string("Copper dumpEarlyFrames failed: ") + error.what();
+    }
+}
+
+std::string dumpDetailedTrace(openEMS& fdtd, ContinuousStructure& /*csx*/, std::uint32_t stepCount,
+                               std::uint32_t boxSide, CopperBoundaryKind boundaryKind, double cpmlAlphaMax,
+                               std::uint32_t pmlDepthCells) {
+    constexpr double kDefaultCpmlLowFrequencyHz = 100e6;
+    if (cpmlAlphaMax < 0.0) {
+        cpmlAlphaMax = 2 * M_PI * kDefaultCpmlLowFrequencyHz * EPS0;
+    }
+    try {
+        auto& copperFdtd = static_cast<CopperOpenEMS&>(fdtd);
+        Operator* op = copperFdtd.GetOperatorForGPU();
+        if (op == nullptr) {
+            return "Copper dumpDetailedTrace: GetOperatorForGPU() returned null -- was SetupFDTD() run first?";
+        }
+
+        const CopperYeeGrid grid = buildYeeGrid(*op);
+        std::vector<CopperPMLShell> upmlShells;
+        std::vector<CopperCPMLShell> cpmlShells;
+        if (boundaryKind == CopperBoundaryKind::CPML) {
+            cpmlShells = buildCPMLShells(*op, cpmlAlphaMax, pmlDepthCells);
+        } else {
+            upmlShells = buildPMLShells(*op);
+        }
+        const CopperExcitation excitation = buildExcitation(*op);
+        CopperEngine engine(grid, upmlShells, excitation, cpmlShells);
+
+        std::uint32_t x0 = grid.dims.nx, x1 = 0, y0 = grid.dims.ny, y1 = 0, z0 = grid.dims.nz, z1 = 0;
+        bool anyExcitationCell = false;
+        auto expand = [&](const CopperExcitationCell& cell) {
+            anyExcitationCell = true;
+            x0 = std::min(x0, cell.x);
+            x1 = std::max(x1, cell.x);
+            y0 = std::min(y0, cell.y);
+            y1 = std::max(y1, cell.y);
+            z0 = std::min(z0, cell.z);
+            z1 = std::max(z1, cell.z);
+        };
+        for (const CopperExcitationCell& cell : excitation.voltageCells) {
+            expand(cell);
+        }
+        for (const CopperExcitationCell& cell : excitation.currentCells) {
+            expand(cell);
+        }
+        if (!anyExcitationCell) {
+            return "Copper dumpDetailedTrace: no excitation cells found to center the box on";
+        }
+
+        auto centerStart = [](std::uint32_t lo, std::uint32_t hi, std::uint32_t n,
+                               std::uint32_t side) -> std::uint32_t {
+            if (side >= n) {
+                return 0;
+            }
+            const std::uint32_t center = (lo + hi) / 2;
+            std::uint32_t start = center >= side / 2 ? center - side / 2 : 0;
+            if (start + side > n) {
+                start = n - side;
+            }
+            return start;
+        };
+        const std::uint32_t boxX0 = centerStart(x0, x1, grid.dims.nx, boxSide);
+        const std::uint32_t boxY0 = centerStart(y0, y1, grid.dims.ny, boxSide);
+        const std::uint32_t boxZ0 = centerStart(z0, z1, grid.dims.nz, boxSide);
+        const std::uint32_t boxX1 = std::min(boxX0 + boxSide, grid.dims.nx) - 1;
+        const std::uint32_t boxY1 = std::min(boxY0 + boxSide, grid.dims.ny) - 1;
+        const std::uint32_t boxZ1 = std::min(boxZ0 + boxSide, grid.dims.nz) - 1;
+
+        std::fprintf(stdout,
+                     "Copper dumpDetailedTrace: grid %ux%ux%u dt=%.9e box=[%u..%u]x[%u..%u]x[%u..%u] (%u cell(s)) "
+                     "steps=%u boundaryKind=%s\n",
+                     grid.dims.nx, grid.dims.ny, grid.dims.nz, grid.timestepSeconds, boxX0, boxX1, boxY0, boxY1,
+                     boxZ0, boxZ1, (boxX1 - boxX0 + 1) * (boxY1 - boxY0 + 1) * (boxZ1 - boxZ0 + 1), stepCount,
+                     boundaryKind == CopperBoundaryKind::CPML ? "CPML" : "UPML");
+
+        // Is the tiny-coefficient anomaly localized to the excited port, or present everywhere in
+        // the domain? Sample vv/vi at points spread across the *whole* grid, not just the crop box
+        // -- domain center, each axis's own midpoint offset, and a corner well away from the port.
+        {
+            const std::uint32_t cx = grid.dims.nx / 2, cy = grid.dims.ny / 2, cz = grid.dims.nz / 2;
+            const struct {
+                const char* label;
+                std::uint32_t x, y, z;
+            } samples[] = {
+                {"domain center", cx, cy, cz},
+                {"center, x/4", grid.dims.nx / 4, cy, cz},
+                {"center, y/4", cx, grid.dims.ny / 4, cz},
+                {"center, z near board mid", cx, cy, grid.dims.nz / 2},
+                {"far corner (low x/y, mid z)", 5, 5, cz},
+                {"far corner (high x/y, mid z)", grid.dims.nx - 6, grid.dims.ny - 6, cz},
+                // Isolating which axis of the excited port (61, ~42, ~25) is responsible: each of
+                // these swaps exactly one of the port's own coordinates in for the domain-center
+                // value, keeping the other two at domain center.
+                {"port's own X, center Y/Z", 61, cy, cz},
+                {"center X, port's own Y, center Z", cx, 42, cz},
+                {"center X/Y, port's own Z", cx, cy, 25},
+                {"port's own X/Y, center Z", 61, 42, cz},
+                {"port's own X/Y/Z (matches the excited cell exactly)", 61, 42, 25},
+            };
+            for (const auto& s : samples) {
+                if (s.x >= grid.dims.nx || s.y >= grid.dims.ny || s.z >= grid.dims.nz) {
+                    continue;
+                }
+                const std::uint32_t sidx = copperGridIndex(grid.dims, s.x, s.y, s.z);
+                std::fprintf(stdout,
+                             "Copper dumpDetailedTrace: GLOBAL SAMPLE [%s] (%u,%u,%u): vv0=%.6e vv1=%.6e vv2=%.6e "
+                             "vi0=%.6e vi1=%.6e vi2=%.6e\n",
+                             s.label, s.x, s.y, s.z, static_cast<double>(grid.vv[0][sidx]),
+                             static_cast<double>(grid.vv[1][sidx]), static_cast<double>(grid.vv[2][sidx]),
+                             static_cast<double>(grid.vi[0][sidx]), static_cast<double>(grid.vi[1][sidx]),
+                             static_cast<double>(grid.vi[2][sidx]));
+            }
+            // Full Z sweep at domain-center X/Y -- isolating exactly which Z indices are affected
+            // (the port's own Z, 25, collapsed vi2 by ~11 orders of magnitude independent of X/Y --
+            // this maps the real transition point(s) along Z, rather than assuming where the
+            // board-vs-PML/margin boundary sits).
+            for (std::uint32_t z = 0; z < grid.dims.nz; ++z) {
+                const std::uint32_t sidx = copperGridIndex(grid.dims, cx, cy, z);
+                std::fprintf(stdout,
+                             "Copper dumpDetailedTrace: Z SWEEP z=%u lineZ=%.6e: vv2=%.6e vi2=%.6e\n", z,
+                             static_cast<double>(grid.lineZ[z]), static_cast<double>(grid.vv[2][sidx]),
+                             static_cast<double>(grid.vi[2][sidx]));
+            }
+        }
+        // Primary AND dual (H-grid) mesh line positions around the box, with a margin -- edge
+        // length/area (and so vv/vi/ii/iv) depend on BOTH, not just the primary line spacing already
+        // checked; a bug specific to dual-mesh placement wouldn't show up in primary spacing alone.
+        auto printLines = [&](const char* label, const std::vector<float>& lines, std::uint32_t lo,
+                               std::uint32_t hi) {
+            const std::uint32_t margin = 2;
+            const std::uint32_t start = lo > margin ? lo - margin : 0;
+            const std::uint32_t end = std::min<std::uint32_t>(hi + margin, static_cast<std::uint32_t>(lines.size()) - 1);
+            std::fprintf(stdout, "Copper dumpDetailedTrace: %s[%u..%u] =", label, start, end);
+            for (std::uint32_t i = start; i <= end; ++i) {
+                std::fprintf(stdout, " %.9e", static_cast<double>(lines[i]));
+            }
+            std::fprintf(stdout, "\n");
+        };
+        printLines("lineX", grid.lineX, boxX0, boxX1);
+        printLines("lineY", grid.lineY, boxY0, boxY1);
+        printLines("lineZ", grid.lineZ, boxZ0, boxZ1);
+        printLines("dualLineX", grid.dualLineX, boxX0, boxX1);
+        printLines("dualLineY", grid.dualLineY, boxY0, boxY1);
+        printLines("dualLineZ", grid.dualLineZ, boxZ0, boxZ1);
+        for (const CopperExcitationCell& c : excitation.voltageCells) {
+            std::fprintf(stdout,
+                         "Copper dumpDetailedTrace: voltage-excited cell (%u,%u,%u) axis=%u amplitude=%.9e "
+                         "delaySteps=%u\n",
+                         c.x, c.y, c.z, c.axis, static_cast<double>(c.amplitude), c.delaySteps);
+        }
+        for (const CopperExcitationCell& c : excitation.currentCells) {
+            std::fprintf(stdout,
+                         "Copper dumpDetailedTrace: current-excited cell (%u,%u,%u) axis=%u amplitude=%.9e "
+                         "delaySteps=%u\n",
+                         c.x, c.y, c.z, c.axis, static_cast<double>(c.amplitude), c.delaySteps);
+        }
+        const std::size_t signalPreview = std::min<std::size_t>(stepCount + 2, excitation.voltageSignal.size());
+        std::fprintf(stdout, "Copper dumpDetailedTrace: voltageSignal[0..%zu] =", signalPreview);
+        for (std::size_t i = 0; i < signalPreview; ++i) {
+            std::fprintf(stdout, " %.9e", static_cast<double>(excitation.voltageSignal[i]));
+        }
+        std::fprintf(stdout, "\n");
+        const std::size_t currentSignalPreview = std::min<std::size_t>(stepCount + 2, excitation.currentSignal.size());
+        std::fprintf(stdout, "Copper dumpDetailedTrace: currentSignal[0..%zu] =", currentSignalPreview);
+        for (std::size_t i = 0; i < currentSignalPreview; ++i) {
+            std::fprintf(stdout, " %.9e", static_cast<double>(excitation.currentSignal[i]));
+        }
+        std::fprintf(stdout, "\n");
+
+        auto excPosFor = [](std::int32_t numTS, std::uint32_t delaySteps, std::int32_t period,
+                             std::uint32_t signalLength) -> std::int32_t {
+            std::int32_t excPos = numTS - static_cast<std::int32_t>(delaySteps);
+            excPos *= (excPos > 0) ? 1 : 0;
+            excPos %= period;
+            excPos *= (excPos < static_cast<std::int32_t>(signalLength)) ? 1 : 0;
+            return excPos;
+        };
+        auto excitationContribution = [&](std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint32_t axis,
+                                           bool isVoltage, std::int32_t numTS, std::int32_t period) -> float {
+            const std::vector<CopperExcitationCell>& cells =
+                isVoltage ? excitation.voltageCells : excitation.currentCells;
+            const std::vector<float>& signal = isVoltage ? excitation.voltageSignal : excitation.currentSignal;
+            for (const CopperExcitationCell& c : cells) {
+                if (c.x == x && c.y == y && c.z == z && c.axis == axis) {
+                    const std::int32_t excPos =
+                        excPosFor(numTS, c.delaySteps, period, static_cast<std::uint32_t>(signal.size()));
+                    return c.amplitude * signal[static_cast<std::size_t>(excPos)];
+                }
+            }
+            return 0.0F;
+        };
+
+        const std::array<const char*, 3> axisName = {"x", "y", "z"};
+
+        for (std::uint32_t step = 0; step < stepCount; ++step) {
+            const auto numTS = static_cast<std::int32_t>(step);
+            const std::int32_t period = excitation.signalPeriodSeconds > 0.0
+                                             ? static_cast<std::int32_t>(excitation.signalPeriodSeconds /
+                                                                          grid.timestepSeconds)
+                                             : numTS + 1;
+
+            std::fprintf(stdout, "\n=== Copper dumpDetailedTrace: step %u (numTS=%d, period=%d) ===\n", step, numTS,
+                         period);
+            for (const CopperExcitationCell& c : excitation.voltageCells) {
+                const std::int32_t excPos =
+                    excPosFor(numTS, c.delaySteps, period, static_cast<std::uint32_t>(excitation.voltageSignal.size()));
+                const float signalValue = excitation.voltageSignal[static_cast<std::size_t>(excPos)];
+                const float value = c.amplitude * signalValue;
+                std::fprintf(stdout,
+                             "  voltage excitation (%u,%u,%u) axis=%s: excPos=%d signal=%.9e amplitude=%.9e "
+                             "contribution=%.9e\n",
+                             c.x, c.y, c.z, axisName[c.axis], excPos, static_cast<double>(signalValue),
+                             static_cast<double>(c.amplitude), static_cast<double>(value));
+            }
+
+            // --- Capture every term needed to predict this step's E and H updates *before* letting
+            // the GPU actually run it, then compare predicted vs actual once it has. H's own curl
+            // term needs the *new* E (computed earlier in the same iteration), so only H's own old
+            // value/coefficients are captured now; its curl is read fresh after engine.run(1).
+            struct ETrace {
+                std::uint32_t x, y, z, axis;
+                float oldE, h0, h1, h2, h3, curlDiff, vv, vi, predictedBeforeExc, excContribution, predictedAfterExc;
+            };
+            struct HPending {
+                std::uint32_t x, y, z, axis;
+                float oldH, ii, iv;
+            };
+            std::vector<ETrace> eTraces;
+            std::vector<HPending> hPending;
+
+            for (std::uint32_t z = boxZ0; z <= boxZ1; ++z) {
+                for (std::uint32_t y = boxY0; y <= boxY1; ++y) {
+                    for (std::uint32_t x = boxX0; x <= boxX1; ++x) {
+                        const std::uint32_t sx = (x != 0) ? 1 : 0;
+                        const std::uint32_t sy = (y != 0) ? 1 : 0;
+                        const std::uint32_t sz = (z != 0) ? 1 : 0;
+                        const std::uint32_t idx = copperGridIndex(grid.dims, x, y, z);
+
+                        for (std::uint32_t axis = 0; axis < 3; ++axis) {
+                            const auto eField = static_cast<CopperEngine::Field>(axis);
+                            const float oldE = engine.readFieldCell(eField, x, y, z);
+                            float h0 = 0, h1 = 0, h2 = 0, h3 = 0;
+                            if (axis == 0) { // Ex: Hz(x,y,z) - Hz(x,y-sy,z) - Hy(x,y,z) + Hy(x,y,z-sz)
+                                h0 = engine.readFieldCell(CopperEngine::Field::Hz, x, y, z);
+                                h1 = engine.readFieldCell(CopperEngine::Field::Hz, x, y - sy, z);
+                                h2 = engine.readFieldCell(CopperEngine::Field::Hy, x, y, z);
+                                h3 = engine.readFieldCell(CopperEngine::Field::Hy, x, y, z - sz);
+                            } else if (axis == 1) { // Ey: Hx(x,y,z) - Hx(x,y,z-sz) - Hz(x,y,z) + Hz(x-sx,y,z)
+                                h0 = engine.readFieldCell(CopperEngine::Field::Hx, x, y, z);
+                                h1 = engine.readFieldCell(CopperEngine::Field::Hx, x, y, z - sz);
+                                h2 = engine.readFieldCell(CopperEngine::Field::Hz, x, y, z);
+                                h3 = engine.readFieldCell(CopperEngine::Field::Hz, x - sx, y, z);
+                            } else { // Ez: Hy(x,y,z) - Hy(x-sx,y,z) - Hx(x,y,z) + Hx(x,y-sy,z)
+                                h0 = engine.readFieldCell(CopperEngine::Field::Hy, x, y, z);
+                                h1 = engine.readFieldCell(CopperEngine::Field::Hy, x - sx, y, z);
+                                h2 = engine.readFieldCell(CopperEngine::Field::Hx, x, y, z);
+                                h3 = engine.readFieldCell(CopperEngine::Field::Hx, x, y - sy, z);
+                            }
+                            const float curlDiff = h0 - h1 - h2 + h3;
+                            const float vv = grid.vv[axis][idx];
+                            const float vi = grid.vi[axis][idx];
+                            const float predictedBeforeExc = vv * oldE + vi * curlDiff;
+                            const float excContribution = excitationContribution(x, y, z, axis, true, numTS, period);
+                            const float predictedAfterExc = predictedBeforeExc + excContribution;
+                            eTraces.push_back({x, y, z, axis, oldE, h0, h1, h2, h3, curlDiff, vv, vi,
+                                                predictedBeforeExc, excContribution, predictedAfterExc});
+
+                            const bool hInBounds =
+                                (x + 1 < grid.dims.nx && y + 1 < grid.dims.ny && z + 1 < grid.dims.nz);
+                            if (hInBounds) {
+                                const auto hField = static_cast<CopperEngine::Field>(axis + 3);
+                                const float oldH = engine.readFieldCell(hField, x, y, z);
+                                hPending.push_back({x, y, z, axis, oldH, grid.ii[axis][idx], grid.iv[axis][idx]});
+                            }
+                        }
+                    }
+                }
+            }
+
+            engine.run(1);
+
+            std::fprintf(stdout, "  -- E terms (old, curl components, coefficients, predicted vs actual) --\n");
+            double maxEDiff = 0.0;
+            for (const ETrace& t : eTraces) {
+                const auto eField = static_cast<CopperEngine::Field>(t.axis);
+                const float actual = engine.readFieldCell(eField, t.x, t.y, t.z);
+                const double diff = std::fabs(static_cast<double>(actual) - static_cast<double>(t.predictedAfterExc));
+                maxEDiff = std::max(maxEDiff, diff);
+                std::fprintf(stdout,
+                             "  E%s(%u,%u,%u): old=%.6e h=[%.6e,%.6e,%.6e,%.6e] curl=%.6e vv=%.6e vi=%.6e "
+                             "predicted(pre-exc)=%.6e exc=%.6e predicted(post-exc)=%.6e actual=%.6e |diff|=%.3e\n",
+                             axisName[t.axis], t.x, t.y, t.z, static_cast<double>(t.oldE), static_cast<double>(t.h0),
+                             static_cast<double>(t.h1), static_cast<double>(t.h2), static_cast<double>(t.h3),
+                             static_cast<double>(t.curlDiff), static_cast<double>(t.vv), static_cast<double>(t.vi),
+                             static_cast<double>(t.predictedBeforeExc), static_cast<double>(t.excContribution),
+                             static_cast<double>(t.predictedAfterExc), static_cast<double>(actual), diff);
+            }
+            std::fprintf(stdout, "  (max |E prediction error| this step: %.6e)\n", maxEDiff);
+
+            std::fprintf(stdout, "  -- H terms (old, curl components from the *new* E, coefficients, predicted vs "
+                                  "actual) --\n");
+            double maxHDiff = 0.0;
+            for (const HPending& p : hPending) {
+                const std::uint32_t x = p.x, y = p.y, z = p.z, axis = p.axis;
+                float e0 = 0, e1 = 0, e2 = 0, e3 = 0;
+                if (axis == 0) { // Hx: Ez(x,y,z) - Ez(x,y+1,z) - Ey(x,y,z) + Ey(x,y,z+1)
+                    e0 = engine.readFieldCell(CopperEngine::Field::Ez, x, y, z);
+                    e1 = engine.readFieldCell(CopperEngine::Field::Ez, x, y + 1, z);
+                    e2 = engine.readFieldCell(CopperEngine::Field::Ey, x, y, z);
+                    e3 = engine.readFieldCell(CopperEngine::Field::Ey, x, y, z + 1);
+                } else if (axis == 1) { // Hy: Ex(x,y,z) - Ex(x,y,z+1) - Ez(x,y,z) + Ez(x+1,y,z)
+                    e0 = engine.readFieldCell(CopperEngine::Field::Ex, x, y, z);
+                    e1 = engine.readFieldCell(CopperEngine::Field::Ex, x, y, z + 1);
+                    e2 = engine.readFieldCell(CopperEngine::Field::Ez, x, y, z);
+                    e3 = engine.readFieldCell(CopperEngine::Field::Ez, x + 1, y, z);
+                } else { // Hz: Ey(x,y,z) - Ey(x+1,y,z) - Ex(x,y,z) + Ex(x,y+1,z)
+                    e0 = engine.readFieldCell(CopperEngine::Field::Ey, x, y, z);
+                    e1 = engine.readFieldCell(CopperEngine::Field::Ey, x + 1, y, z);
+                    e2 = engine.readFieldCell(CopperEngine::Field::Ex, x, y, z);
+                    e3 = engine.readFieldCell(CopperEngine::Field::Ex, x, y + 1, z);
+                }
+                const float curlDiff = e0 - e1 - e2 + e3;
+                const float predictedBeforeExc = p.ii * p.oldH + p.iv * curlDiff;
+                const float excContribution = excitationContribution(x, y, z, axis, false, numTS, period);
+                const float predictedAfterExc = predictedBeforeExc + excContribution;
+                const auto hField = static_cast<CopperEngine::Field>(axis + 3);
+                const float actual = engine.readFieldCell(hField, x, y, z);
+                const double diff = std::fabs(static_cast<double>(actual) - static_cast<double>(predictedAfterExc));
+                maxHDiff = std::max(maxHDiff, diff);
+                std::fprintf(stdout,
+                             "  H%s(%u,%u,%u): old=%.6e e=[%.6e,%.6e,%.6e,%.6e] curl=%.6e ii=%.6e iv=%.6e "
+                             "predicted(pre-exc)=%.6e exc=%.6e predicted(post-exc)=%.6e actual=%.6e |diff|=%.3e\n",
+                             axisName[axis], x, y, z, static_cast<double>(p.oldH), static_cast<double>(e0),
+                             static_cast<double>(e1), static_cast<double>(e2), static_cast<double>(e3),
+                             static_cast<double>(curlDiff), static_cast<double>(p.ii), static_cast<double>(p.iv),
+                             static_cast<double>(predictedBeforeExc), static_cast<double>(excContribution),
+                             static_cast<double>(predictedAfterExc), static_cast<double>(actual), diff);
+            }
+            std::fprintf(stdout, "  (max |H prediction error| this step: %.6e)\n", maxHDiff);
+        }
+
+        return {};
+    } catch (const std::exception& error) {
+        return std::string("Copper dumpDetailedTrace failed: ") + error.what();
+    }
 }
 
 std::string CopperProbeResult::data() const {

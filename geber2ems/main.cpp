@@ -84,8 +84,34 @@ void printUsage() {
                  "  --backend {cpu,gpu}        [s] FDTD engine: openEMS CPU (default) or Copper GPU\n"
                  "  --pml {upml,cpml}          [s] GPU boundary: CPML (default, fixes UPML's late-time\n"
                  "                                 numerical instability on very long runs -- see\n"
-                 "                                 PMLKind's own doc comment) or openEMS's own UPML\n";
+                 "                                 PMLKind's own doc comment) or openEMS's own UPML\n"
+                 "  --dump-early-frames DIR    [s] Diagnostic only, GPU backend: instead of a normal run,\n"
+                 "                                 step the first N timesteps one at a time, writing raw\n"
+                 "                                 field components + coupling coefficients (cropped to a\n"
+                 "                                 box around the excitation) to DIR/port<N>/ -- see\n"
+                 "                                 copper::dumpEarlyFrames()'s own doc comment\n"
+                 "  --dump-frame-count N       [s] Frame count for --dump-early-frames [default: 100]\n"
+                 "  --dump-margin-cells N      [s] Crop margin (cells) for --dump-early-frames [default: 25]\n"
+                 "  --dump-detailed-trace      [s] Diagnostic only, GPU backend: instead of a normal run,\n"
+                 "                                 prints every intermediate update term (curl components,\n"
+                 "                                 coefficients, excitation contribution) for a small box\n"
+                 "                                 around the excitation over --dump-trace-steps timesteps --\n"
+                 "                                 see copper::dumpDetailedTrace()'s own doc comment\n"
+                 "  --dump-trace-steps N       [s] Step count for --dump-detailed-trace [default: 4]\n"
+                 "  --dump-trace-box-side N    [s] Box side (cells) for --dump-detailed-trace [default: 4]\n";
 }
+
+/// CLI-only diagnostic knobs for --dump-early-frames/--dump-detailed-trace -- deliberately not part
+/// of Arguments/RunOptions (config.hpp is shared with the GUI app and libgerber2ems; these are
+/// one-off debugging aids that have no business in either).
+struct DumpOptions {
+    std::optional<std::filesystem::path> dir;
+    bool detailedTrace = false;
+    std::uint32_t traceSteps = 4;
+    std::uint32_t traceBoxSide = 4;
+    std::uint32_t frameCount = 100;
+    std::uint32_t marginCells = 25;
+};
 
 [[noreturn]] void printUsageAndExit(int code) {
     printUsage();
@@ -99,7 +125,7 @@ bool looksLikeFlag(const std::string& s) { return s.size() > 1 && s[0] == '-'; }
     printUsageAndExit(2);
 }
 
-Arguments parseArguments(int argc, char** argv) {
+Arguments parseArguments(int argc, char** argv, DumpOptions& dumpOptions) {
     Arguments args;
     // Left relative: main() resolves these against the config file's own directory once parsing is
     // done (see the PathsConfig setup in main()), so a relative default -- or a relative -i/-o --
@@ -206,6 +232,33 @@ Arguments parseArguments(int argc, char** argv) {
                 std::cerr << "argument --pml: invalid choice: '" << tokens[i] << "'\n";
                 printUsageAndExit(2);
             }
+        } else if (tok == "--dump-early-frames") {
+            if (++i >= tokens.size()) {
+                missingValue(tok);
+            }
+            dumpOptions.dir = std::filesystem::path(tokens[i]);
+        } else if (tok == "--dump-frame-count") {
+            if (++i >= tokens.size()) {
+                missingValue(tok);
+            }
+            dumpOptions.frameCount = static_cast<std::uint32_t>(std::stoul(tokens[i]));
+        } else if (tok == "--dump-margin-cells") {
+            if (++i >= tokens.size()) {
+                missingValue(tok);
+            }
+            dumpOptions.marginCells = static_cast<std::uint32_t>(std::stoul(tokens[i]));
+        } else if (tok == "--dump-detailed-trace") {
+            dumpOptions.detailedTrace = true;
+        } else if (tok == "--dump-trace-steps") {
+            if (++i >= tokens.size()) {
+                missingValue(tok);
+            }
+            dumpOptions.traceSteps = static_cast<std::uint32_t>(std::stoul(tokens[i]));
+        } else if (tok == "--dump-trace-box-side") {
+            if (++i >= tokens.size()) {
+                missingValue(tok);
+            }
+            dumpOptions.traceBoxSide = static_cast<std::uint32_t>(std::stoul(tokens[i]));
         } else {
             std::cerr << "Unknown argument: " << tok << "\n";
             printUsageAndExit(2);
@@ -398,8 +451,8 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     const std::filesystem::path probeDir = std::filesystem::current_path();
     const copper::CopperBoundaryKind boundaryKind =
         pmlKind == PMLKind::CPML ? copper::CopperBoundaryKind::CPML : copper::CopperBoundaryKind::UPML;
-    const copper::CopperFDTDRunResult gpuResult =
-        copper::runFDTDPortOnGPU(sim.fdtdEngine(), sim.csx(), printCopperProgress, boundaryKind);
+    const copper::CopperFDTDRunResult gpuResult = copper::runFDTDPortOnGPU(
+        sim.fdtdEngine(), sim.csx(), printCopperProgress, boundaryKind, -1.0, constants::pmlDepthCells);
     std::filesystem::current_path(cwd);
     if (!gpuResult.success) {
         return std::unexpected(gpuResult.errorMessage);
@@ -419,10 +472,49 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     return {};
 }
 
+/// --dump-early-frames/--dump-detailed-trace's own FDTDPortRunner -- same setupFDTDOperator()/
+/// cwd-restore shape as runGPUPortInProcess() above, but calls copper::dumpEarlyFrames() and/or
+/// copper::dumpDetailedTrace() instead of copper::runFDTDPortOnGPU(): a one-off diagnostic capture,
+/// not a normal run, so there are no probe files to write afterward. dumpEarlyFrames() writes into
+/// `dumpOptions.dir`/port<excitedPortNumber>/ so a multi-port config doesn't clobber one port's dump
+/// with another's; dumpDetailedTrace() just prints to stdout, no directory needed.
+std::expected<void, std::string> dumpGPUPortInProcess(Simulation& sim, std::int32_t excitedPortNumber,
+                                                        PMLKind pmlKind, const DumpOptions& dumpOptions) {
+    const std::filesystem::path cwd = std::filesystem::current_path();
+    if (auto result = sim.setupFDTDOperator(excitedPortNumber); !result) {
+        return std::unexpected(result.error());
+    }
+    const copper::CopperBoundaryKind boundaryKind =
+        pmlKind == PMLKind::CPML ? copper::CopperBoundaryKind::CPML : copper::CopperBoundaryKind::UPML;
+    if (dumpOptions.dir.has_value()) {
+        const std::filesystem::path portDir = *dumpOptions.dir / ("port" + std::to_string(excitedPortNumber));
+        const std::string error =
+            copper::dumpEarlyFrames(sim.fdtdEngine(), sim.csx(), portDir, dumpOptions.frameCount,
+                                     dumpOptions.marginCells, boundaryKind, -1.0, constants::pmlDepthCells);
+        if (!error.empty()) {
+            std::filesystem::current_path(cwd);
+            return std::unexpected(error);
+        }
+    }
+    if (dumpOptions.detailedTrace) {
+        std::fprintf(stdout, "Copper: dumpDetailedTrace for excited port %d\n", excitedPortNumber);
+        const std::string error =
+            copper::dumpDetailedTrace(sim.fdtdEngine(), sim.csx(), dumpOptions.traceSteps, dumpOptions.traceBoxSide,
+                                       boundaryKind, -1.0, constants::pmlDepthCells);
+        if (!error.empty()) {
+            std::filesystem::current_path(cwd);
+            return std::unexpected(error);
+        }
+    }
+    std::filesystem::current_path(cwd);
+    return {};
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
-    Arguments args = parseArguments(argc, argv);
+    DumpOptions dumpOptions;
+    Arguments args = parseArguments(argc, argv, dumpOptions);
 
     // Every relative path in this tool (fab/, ems/, etc., and -i/-o if given as relative paths) is
     // meant to be relative to simulation.json's own location, not to wherever the tool happened to
@@ -491,6 +583,13 @@ int main(int argc, char** argv) {
     options.plotPhase = args.plotPhase();
     options.backend = args.backend();
     options.pmlKind = args.pmlKind();
+    // --dump-early-frames/--dump-detailed-trace only exist on Copper's GPU engine -- silently
+    // forcing the backend here (rather than requiring --backend gpu too) keeps either one-off
+    // diagnostic invocation to a single flag.
+    const bool dumpRequested = dumpOptions.dir.has_value() || dumpOptions.detailedTrace;
+    if (dumpRequested) {
+        options.backend = FDTDBackend::CopperGPU;
+    }
 
     // Each stage's result carries its own EMSConfig forward (see geometry_result.hpp), so `config`
     // itself is only ever consumed once, by whichever of build()/load() below runs first -- every
@@ -526,15 +625,28 @@ int main(int argc, char** argv) {
         // posix_spawning copper_fdtd_worker -- the whole point being live progress reporting through
         // this process's own stdout, not a separate process's.
         const PMLKind pmlKind = options.pmlKind;
-        auto result = options.backend == FDTDBackend::CopperGPU
-                          ? SimulationResult::run(*geometryResult, options,
-                                                   [pmlKind](Simulation& sim, std::int32_t excitedPortNumber) {
-                                                       return runGPUPortInProcess(sim, excitedPortNumber, pmlKind);
-                                                   })
-                          : SimulationResult::run(*geometryResult, options);
+        auto result =
+            options.backend != FDTDBackend::CopperGPU
+                ? SimulationResult::run(*geometryResult, options)
+                : (dumpRequested
+                       ? SimulationResult::run(*geometryResult, options,
+                                                [pmlKind, &dumpOptions](Simulation& sim,
+                                                                        std::int32_t excitedPortNumber) {
+                                                    return dumpGPUPortInProcess(sim, excitedPortNumber, pmlKind,
+                                                                                 dumpOptions);
+                                                })
+                       : SimulationResult::run(*geometryResult, options,
+                                                [pmlKind](Simulation& sim, std::int32_t excitedPortNumber) {
+                                                    return runGPUPortInProcess(sim, excitedPortNumber, pmlKind);
+                                                }));
         if (!result) {
             logError(result.error());
             return EXIT_FAILURE;
+        }
+        if (dumpRequested) {
+            logInfo("Dump diagnostic complete; skipping postprocessing (there are no valid S-parameters from a "
+                     "short diagnostic run)");
+            return EXIT_SUCCESS;
         }
         simulationResult = std::move(*result);
     }

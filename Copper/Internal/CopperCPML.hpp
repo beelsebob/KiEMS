@@ -21,6 +21,22 @@
 // decays to (and stays at) exactly zero outside the graded region, so this is a pure additive
 // correction with no effect anywhere sigma=alpha=0.
 //
+// "grid.vv/vi/ii/iv represent the real host medium" is only true if nothing else has *also* graded
+// them -- which is why, unlike an earlier version of this file, buildCPMLShells() no longer discovers
+// its own shell geometry from an actual Operator_Ext_UPML extension at all. Set_BC_PML() causes
+// openEMS's own Operator::CalcECOperator() to unconditionally call BuildExtension() on every extension
+// it creates (operator.cpp's own CalcECOperator(), regardless of which boundary algorithm the *caller*
+// ultimately wants) -- so if gerber2ems ever called Set_BC_PML() before a CPML run, grid.vv/vi/ii/iv at
+// PML cells would already be UPML's own graded, absorbing values by the time buildYeeGrid() reads them,
+// and this file's additive psi correction would be stacked on top of a medium UPML had already turned
+// absorbing -- two independent, incompatible PML formulations layered on the same cells. Confirmed in
+// practice: a real board's first NaN traced to exactly this (grid.vi at a PML cell reading ~1e-11,
+// eleven orders of magnitude off the ~217 a genuine vacuum cell reads, and reproducible with plain
+// UPML -- no CPML involved at all -- disabled). gerber2ems now uses Set_BC_Type()+MUR (never
+// Set_BC_PML()) for a CPML run specifically so no Operator_Ext_UPML ever gets created, and this file
+// computes its own shell geometry directly from `pmlDepthCells` (the same value gerber2ems would
+// otherwise have passed to Set_BC_PML()) and the Operator's own line counts instead.
+//
 // kappa (CPML's coordinate-*stretching* parameter, unrelated to openEMS's own same-named-but-
 // different "kappa_v"/"kappa_i", which mean ordinary conductivity) is fixed at 1, matching this
 // codebase's existing design decision (see CopperCPML.cpp's own comment) -- only alpha is needed for
@@ -73,6 +89,12 @@ struct CopperCPMLShell {
 /// bit-for-bit, since this is a structurally different formulation -- see this header's own top
 /// comment -- but the psi correction itself becomes purely alpha-independent decay-toward-zero
 /// bookkeeping with no effect on stability either way).
-std::vector<CopperCPMLShell> buildCPMLShells(Operator& op, double alphaMax);
+///
+/// `pmlDepthCells` is the PML shell's own depth, in cells, uniform on all 6 domain faces -- the same
+/// value the caller must *not* have passed to openEMS's own Set_BC_PML() (see this header's own top
+/// comment for why); shell geometry here is computed directly from it and `op`'s own line counts,
+/// with no Operator_Ext_UPML extension involved at all. 0 returns no shells (a caller with no PML on
+/// this run -- e.g. a MUR-only smoketest -- can pass 0 rather than special-casing the call away).
+std::vector<CopperCPMLShell> buildCPMLShells(Operator& op, double alphaMax, std::uint32_t pmlDepthCells);
 
 } // namespace copper

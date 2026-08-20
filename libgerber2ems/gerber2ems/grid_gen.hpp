@@ -47,6 +47,12 @@ public:
     double pmlInnerXMax() const;
     double pmlInnerYMin() const;
     double pmlInnerYMax() const;
+    /// Same idea as pmlInnerXMin/Max, for Z -- the substrate stack's own top/bottom extent (board
+    /// top is always 0), everywhere *inside* the graded PML/margin cells _generateZ() appends
+    /// beyond it at both ends. Unlike X/Y (a GridGeneratorAxis per axis), Z has no separate origin
+    /// offset to re-add -- see _generateZ()'s own doc comment in grid_gen.cpp.
+    double pmlInnerZMin() const;
+    double pmlInnerZMax() const;
 
 private:
     struct Impl;

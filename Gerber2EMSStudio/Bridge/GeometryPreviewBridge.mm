@@ -221,12 +221,14 @@ bool viaIntersectsOutline(double x, double y, double diameter, const std::vector
 @implementation EMSGeometryLayer
 - (instancetype)initWithName:(NSString*)name
                     triangles:(NSArray<EMSGeometryTriangle*>*)triangles
-                    hexColor:(nullable NSString*)hexColor {
+                    hexColor:(nullable NSString*)hexColor
+                            z:(double)z {
     self = [super init];
     if (self) {
         _name = [name copy];
         _triangles = [triangles copy];
         _hexColor = [hexColor copy];
+        _z = z;
     }
     return self;
 }
@@ -273,10 +275,13 @@ bool viaIntersectsOutline(double x, double y, double diameter, const std::vector
                           ports:(NSArray<EMSGeometryPort*>*)ports
                      gridLinesX:(NSArray<NSNumber*>*)gridLinesX
                      gridLinesY:(NSArray<NSNumber*>*)gridLinesY
+                     gridLinesZ:(NSArray<NSNumber*>*)gridLinesZ
                     pmlInnerXMin:(double)pmlInnerXMin
                     pmlInnerXMax:(double)pmlInnerXMax
                     pmlInnerYMin:(double)pmlInnerYMin
                     pmlInnerYMax:(double)pmlInnerYMax
+                    pmlInnerZMin:(double)pmlInnerZMin
+                    pmlInnerZMax:(double)pmlInnerZMax
                            xMin:(double)xMin
                            yMin:(double)yMin
                           width:(double)width
@@ -290,10 +295,13 @@ bool viaIntersectsOutline(double x, double y, double diameter, const std::vector
         _ports = [ports copy];
         _gridLinesX = [gridLinesX copy];
         _gridLinesY = [gridLinesY copy];
+        _gridLinesZ = [gridLinesZ copy];
         _pmlInnerXMin = pmlInnerXMin;
         _pmlInnerXMax = pmlInnerXMax;
         _pmlInnerYMin = pmlInnerYMin;
         _pmlInnerYMax = pmlInnerYMax;
+        _pmlInnerZMin = pmlInnerZMin;
+        _pmlInnerZMax = pmlInnerZMax;
         _xMin = xMin;
         _yMin = yMin;
         _width = width;
@@ -318,6 +326,22 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
     }
 
     const auto metals = scaledConfig.getMetals();
+    // One entry per metal layer, in the same stackup order as `metals`/sliced.layerTriangles --
+    // exactly mirrors gerber2ems::Simulation::addGerbers()/getMetalLayerOffset()'s own walk of the
+    // full interleaved layer list, so a copper layer here ends up at the identical Z the real FDTD
+    // geometry places it at (board top always 0, cumulative substrate thickness subtracted going
+    // down) -- not an even-spacing approximation across the board's own extent.
+    std::vector<double> metalOffsets;
+    {
+        double offset = 0;
+        for (const auto& layer : scaledConfig.layers()) {
+            if (layer.kind() == gerber2ems::LayerKind::Substrate) {
+                offset -= layer.thickness();
+            } else if (layer.kind() == gerber2ems::LayerKind::Metal) {
+                metalOffsets.push_back(offset);
+            }
+        }
+    }
     NSMutableArray<EMSGeometryLayer*>* layers = [NSMutableArray arrayWithCapacity:sliced.layerTriangles.size()];
     for (std::size_t layerIndex = 0; layerIndex < sliced.layerTriangles.size(); ++layerIndex) {
         NSString* layerName = layerIndex < metals.size()
@@ -337,9 +361,11 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
                                                                               b:toCGPoint(triangle.b)
                                                                               c:toCGPoint(triangle.c)]];
         }
+        const double layerZ = layerIndex < metalOffsets.size() ? metalOffsets[layerIndex] : 0;
         [layers addObject:[[EMSGeometryLayer alloc] initWithName:layerName
                                                           triangles:layerTriangles
-                                                          hexColor:hexColor]];
+                                                          hexColor:hexColor
+                                                                  z:layerZ]];
     }
 
     NSMutableArray<NSValue*>* outline = [NSMutableArray arrayWithCapacity:sliced.outline.size()];
@@ -452,6 +478,7 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
     // needs sliced.xMin/yMin added back below.
     NSMutableArray<NSNumber*>* gridLinesX = [NSMutableArray array];
     NSMutableArray<NSNumber*>* gridLinesY = [NSMutableArray array];
+    NSMutableArray<NSNumber*>* gridLinesZ = [NSMutableArray array];
     if (gridLines) {
         gridLinesX = [NSMutableArray arrayWithCapacity:gridLines->x.size()];
         for (const double line : gridLines->x) {
@@ -460,6 +487,10 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
         gridLinesY = [NSMutableArray arrayWithCapacity:gridLines->y.size()];
         for (const double line : gridLines->y) {
             [gridLinesY addObject:@(line)];
+        }
+        gridLinesZ = [NSMutableArray arrayWithCapacity:gridLines->z.size()];
+        for (const double line : gridLines->z) {
+            [gridLinesZ addObject:@(line)];
         }
     }
 
@@ -470,10 +501,13 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
                                                   ports:ports
                                              gridLinesX:gridLinesX
                                              gridLinesY:gridLinesY
+                                             gridLinesZ:gridLinesZ
                                            pmlInnerXMin:gridLines ? gridLines->pmlInnerXMin + sliced.xMin : 0
                                            pmlInnerXMax:gridLines ? gridLines->pmlInnerXMax + sliced.xMin : 0
                                            pmlInnerYMin:gridLines ? gridLines->pmlInnerYMin + sliced.yMin : 0
                                            pmlInnerYMax:gridLines ? gridLines->pmlInnerYMax + sliced.yMin : 0
+                                           pmlInnerZMin:gridLines ? gridLines->pmlInnerZMin : 0
+                                           pmlInnerZMax:gridLines ? gridLines->pmlInnerZMax : 0
                                                    xMin:sliced.xMin
                                                    yMin:sliced.yMin
                                                   width:sliced.width

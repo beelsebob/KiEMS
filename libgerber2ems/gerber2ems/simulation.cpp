@@ -11,6 +11,7 @@
 #include <limits>
 #include <map>
 #include <sstream>
+#include <utility>
 
 #include <spawn.h>
 #include <sys/wait.h>
@@ -235,7 +236,7 @@ ComputedGridLines Simulation::computedGridLines() const {
     }
     return {gridLines(*_grid, "x"),      gridLines(*_grid, "y"),      gridLines(*_grid, "z"),
             _gridGen->pmlInnerXMin(),    _gridGen->pmlInnerXMax(),    _gridGen->pmlInnerYMin(),
-            _gridGen->pmlInnerYMax()};
+            _gridGen->pmlInnerYMax(),    _gridGen->pmlInnerZMin(),    _gridGen->pmlInnerZMax()};
 }
 
 void Simulation::adoptGridLines(const ComputedGridLines& lines) {
@@ -287,6 +288,13 @@ void Simulation::createMaterials() {
     for (std::size_t i = 0; i < substrates.size(); ++i) {
         const double kappa = 2 * M_PI * kLossTangentFrequencyHz * kVacuumPermittivity * substrates[i].epsilon() *
                               substrates[i].lossTangent();
+        // TEMPORARY diagnostic: confirms the epsilon/kappa actually reaching CSPropMaterial for
+        // this board -- see the Field Viewer/dumpEarlyFrames investigation into implausibly tiny
+        // near-port vi/iv coefficients.
+        logInfo("[DIAG] Substrate_" + std::to_string(i) + " \"" + substrates[i].name() +
+                 "\" epsilon=" + std::to_string(substrates[i].epsilon()) +
+                 " lossTangent=" + std::to_string(substrates[i].lossTangent()) +
+                 " kappa=" + std::to_string(kappa) + " thicknessMm=" + std::to_string(substrates[i].thickness()));
         _substrateMaterials.push_back(
             addMaterial(*_csx, "Substrate_" + std::to_string(i), substrates[i].epsilon(), kappa));
     }
@@ -697,7 +705,20 @@ void Simulation::addDumpBoxes() {
 }
 
 void Simulation::setBoundaryConditions(bool pml) {
-    if (pml) {
+    // Copper's own CPML must never see openEMS's own PML boundary condition active: Set_BC_PML()
+    // makes openEMS create an Operator_Ext_UPML extension per face, and Operator::CalcECOperator()
+    // unconditionally calls BuildExtension() on every extension it creates -- regardless of which
+    // algorithm the *caller* (Copper) will actually use -- overwriting grid.vv/vi/ii/iv at every PML
+    // cell with UPML's own graded, absorbing coefficients before Copper ever reads them. CPML's own
+    // additive psi correction assumes those coefficients still represent the real (vacuum) host
+    // medium (see Copper/Internal/CopperCPML.hpp's own top comment) -- stacked on top of UPML's
+    // already-absorbing ones instead, it's two independent, incompatible PML formulations layered on
+    // the same cells. Confirmed in practice: a real board's first NaN traced to exactly this (a PML
+    // cell's own grid.vi reading ~1e-11, eleven orders of magnitude off the ~217 a genuine vacuum
+    // cell reads, and reproducible with plain UPML -- no CPML at all -- disabled).
+    const bool cpmlActive =
+        _options.backend == FDTDBackend::CopperGPU && _options.pmlKind == PMLKind::CPML;
+    if (pml && !cpmlActive) {
         logInfo("Adding perfectly matched layer boundary condition");
         // See constants::pmlDepthCells's own doc comment for why 16, not openEMS's own PML_8
         // default -- and GridGenerator's own outermost-cell regrading, which keeps this many cells
@@ -706,11 +727,22 @@ void Simulation::setBoundaryConditions(bool pml) {
         for (std::int32_t i = 0; i < 6; ++i) {
             _fdtd.Set_BC_PML(i, constants::pmlDepthCells);
         }
+        return;
+    }
+    if (pml) {
+        // cpmlActive: MUR at the true domain edge is fine here -- Copper's own CPML shells (built
+        // directly from constants::pmlDepthCells, not from any openEMS extension -- see
+        // buildCPMLShells()'s own doc comment) provide the real absorption well before a wave ever
+        // reaches this boundary; by design, whatever residual energy MUR itself reflects should be
+        // negligible.
+        logInfo("Adding MUR boundary condition (Copper's own CPML provides the real PML absorption "
+                 "for this run -- openEMS's own PML boundary condition must stay off, see this "
+                 "function's own comment)");
     } else {
         logInfo("Adding MUR boundary condition");
-        for (std::int32_t i = 0; i < 6; ++i) {
-            _fdtd.Set_BC_Type(i, 2); // 2 == MUR, matching ['PEC','PMC','MUR'].index('MUR')
-        }
+    }
+    for (std::int32_t i = 0; i < 6; ++i) {
+        _fdtd.Set_BC_Type(i, 2); // 2 == MUR, matching ['PEC','PMC','MUR'].index('MUR')
     }
 }
 
@@ -738,13 +770,18 @@ std::expected<void, std::string> Simulation::run(std::int32_t excitedPortNumber)
     // job.json carries just enough for a freshly-spawned worker to reconstruct an equivalent
     // Simulation on its own (it shares no memory with this process): where to reload the already-
     // saved geometry from, and which port to excite. Everything else (grid/via/frequency/maxSteps)
-    // the worker re-derives itself from paths.configFile, exactly as this process did.
+    // the worker re-derives itself from paths.configFile, exactly as this process did -- except
+    // simConfig.ports(), which isn't (de)serialized (see PortConfig's own doc comment) and must be
+    // rebuilt fresh via importStackup()+resolveSimulationPorts(), both of which shell out through
+    // kicadQueryHelperPath -- so that path is threaded through here too, rather than each worker
+    // re-deriving it the way main.cpp's own resolveKicadCli()/executableDir() do.
     const std::filesystem::path jobPath = simPath / "job.json";
     nlohmann::json job;
     job["config_path"] = _paths.configFile.string();
     job["simulation_name"] = _simConfig.name();
     job["excited_port"] = excitedPortNumber;
     job["oversampling"] = _options.oversampling;
+    job["kicad_query_helper_path"] = _paths.kicadQueryHelperPath.string();
     {
         std::ofstream jobFile(jobPath);
         if (!jobFile) {
@@ -797,6 +834,134 @@ std::expected<void, std::string> Simulation::setupFDTDOperator(std::int32_t exci
     std::filesystem::current_path(simPath);
 
     _fdtd.SetOverSampling(_options.oversampling);
+
+    // [DIAG] Temporary CSX-inspection instrumentation: walk every property/primitive that claims
+    // the excited port's own center coordinate, to rule in/out an overlapping-primitive-priority
+    // explanation for the vi/vv coefficient collapse seen in the real board's substrate layers.
+    {
+        double excCoord[3] = {0.0, 0.0, 0.0};
+        bool foundExcitation = false;
+        for (std::size_t i = 0; i < _csx->GetQtyProperties() && !foundExcitation; ++i) {
+            auto* excProp = dynamic_cast<CSPropExcitation*>(_csx->GetProperty(i));
+            if (excProp == nullptr) {
+                continue;
+            }
+            for (std::size_t p = 0; p < excProp->GetQtyPrimitives(); ++p) {
+                CSPrimitives* prim = excProp->GetPrimitive(p);
+                double bbox[6];
+                if (prim->GetBoundBox(bbox)) {
+                    excCoord[0] = (bbox[0] + bbox[1]) / 2.0;
+                    excCoord[1] = (bbox[2] + bbox[3]) / 2.0;
+                    excCoord[2] = (bbox[4] + bbox[5]) / 2.0;
+                    foundExcitation = true;
+                    logInfo("[CSX-DIAG] Excitation '" + excProp->GetName() + "' primitive#" +
+                             std::to_string(p) + " bbox=[" + std::to_string(bbox[0]) + ".." +
+                             std::to_string(bbox[1]) + ", " + std::to_string(bbox[2]) + ".." +
+                             std::to_string(bbox[3]) + ", " + std::to_string(bbox[4]) + ".." +
+                             std::to_string(bbox[5]) + "]");
+                    break;
+                }
+            }
+        }
+
+        if (foundExcitation) {
+            logInfo("[CSX-DIAG] Excitation center coord: [" + std::to_string(excCoord[0]) + ", " +
+                     std::to_string(excCoord[1]) + ", " + std::to_string(excCoord[2]) + "]");
+            for (std::size_t i = 0; i < _csx->GetQtyProperties(); ++i) {
+                CSProperties* prop = _csx->GetProperty(i);
+                for (std::size_t p = 0; p < prop->GetQtyPrimitives(); ++p) {
+                    CSPrimitives* prim = prop->GetPrimitive(p);
+                    double bbox[6];
+                    if (!prim->GetBoundBox(bbox)) {
+                        continue;
+                    }
+                    const bool overlaps = excCoord[0] >= bbox[0] && excCoord[0] <= bbox[1] &&
+                                          excCoord[1] >= bbox[2] && excCoord[1] <= bbox[3] &&
+                                          excCoord[2] >= bbox[4] && excCoord[2] <= bbox[5];
+                    if (!overlaps) {
+                        continue;
+                    }
+                    logInfo("[CSX-DIAG]   overlap: property='" + prop->GetName() + "' type=" +
+                             prop->GetTypeXMLString() + " primitive#" + std::to_string(p) +
+                             " priority=" + std::to_string(prim->GetPriority()) + " bbox=[" +
+                             std::to_string(bbox[0]) + ".." + std::to_string(bbox[1]) + ", " +
+                             std::to_string(bbox[2]) + ".." + std::to_string(bbox[3]) + ", " +
+                             std::to_string(bbox[4]) + ".." + std::to_string(bbox[5]) + "]");
+                }
+            }
+
+            CSPrimitives* winningPrim = nullptr;
+            CSProperties* winner =
+                _csx->GetPropertyByCoordPriority(excCoord, CSProperties::ANY, false, &winningPrim);
+            if (winner != nullptr) {
+                logInfo("[CSX-DIAG] Winning property at excitation center: '" + winner->GetName() +
+                         "' type=" + winner->GetTypeXMLString() + " priority=" +
+                         std::to_string(winningPrim != nullptr ? winningPrim->GetPriority() : -999));
+            } else {
+                logInfo("[CSX-DIAG] No property claims the excitation center coordinate!");
+            }
+        } else {
+            logInfo("[CSX-DIAG] No excitation primitive with a bounding box was found.");
+        }
+
+        // [DIAG] The vi/vv collapse observed earlier was NOT localized to the port -- it showed up
+        // at arbitrary X/Y, in 4 of the real board's 5 substrate layers (every one except the thick
+        // 406um middle layer), independent of position. Re-run the same overlap walk at each
+        // layer's own Z midpoint (same X/Y as the excitation, since the original Z-sweep found the
+        // pattern was X/Y-independent) to check whether something other than the expected substrate
+        // material is claiming/winning those coordinates -- e.g. a via, plane, or NPTH void with an
+        // unexpectedly high priority silently overriding the dielectric specifically in the thin
+        // layers. Z midpoints computed by hand from createMaterials()'s own [DIAG] thickness prints
+        // (in sim units, board top at Z=0, thickness order top->bottom: 1090,1000,4060,1000,1090):
+        // L0 [0..-1090] mid -545, L1 [-1090..-2090] mid -1590, L2 [-2090..-6150] mid -4120 (the
+        // normal, unaffected layer), L3 [-6150..-7150] mid -6650, L4 [-7150..-8240] mid -7695.
+        if (foundExcitation) {
+            const std::array<std::pair<const char*, double>, 5> layerMidpoints = {{
+                {"L0 Dielectric1 [ANOMALOUS]", -545.0},
+                {"L1 Dielectric2 [ANOMALOUS]", -1590.0},
+                {"L2 Dielectric3 [NORMAL]", -4120.0},
+                {"L3 Dielectric4 [ANOMALOUS]", -6650.0},
+                {"L4 Dielectric5 [ANOMALOUS]", -7695.0},
+            }};
+            for (const auto& [label, z] : layerMidpoints) {
+                const double sampleCoord[3] = {excCoord[0], excCoord[1], z};
+                logInfo(std::string("[CSX-DIAG] Z-sweep ") + label + " @ [" + std::to_string(sampleCoord[0]) +
+                         ", " + std::to_string(sampleCoord[1]) + ", " + std::to_string(sampleCoord[2]) + "]");
+                for (std::size_t i = 0; i < _csx->GetQtyProperties(); ++i) {
+                    CSProperties* prop = _csx->GetProperty(i);
+                    for (std::size_t p = 0; p < prop->GetQtyPrimitives(); ++p) {
+                        CSPrimitives* prim = prop->GetPrimitive(p);
+                        double bbox[6];
+                        if (!prim->GetBoundBox(bbox)) {
+                            continue;
+                        }
+                        const bool overlaps = sampleCoord[0] >= bbox[0] && sampleCoord[0] <= bbox[1] &&
+                                              sampleCoord[1] >= bbox[2] && sampleCoord[1] <= bbox[3] &&
+                                              sampleCoord[2] >= bbox[4] && sampleCoord[2] <= bbox[5];
+                        if (!overlaps) {
+                            continue;
+                        }
+                        logInfo("[CSX-DIAG]   overlap: property='" + prop->GetName() + "' type=" +
+                                 prop->GetTypeXMLString() + " primitive#" + std::to_string(p) +
+                                 " priority=" + std::to_string(prim->GetPriority()) + " bbox=[" +
+                                 std::to_string(bbox[0]) + ".." + std::to_string(bbox[1]) + ", " +
+                                 std::to_string(bbox[2]) + ".." + std::to_string(bbox[3]) + ", " +
+                                 std::to_string(bbox[4]) + ".." + std::to_string(bbox[5]) + "]");
+                    }
+                }
+                CSPrimitives* winningPrim = nullptr;
+                CSProperties* winner =
+                    _csx->GetPropertyByCoordPriority(sampleCoord, CSProperties::ANY, false, &winningPrim);
+                if (winner != nullptr) {
+                    logInfo("[CSX-DIAG]   Winner: '" + winner->GetName() + "' type=" + winner->GetTypeXMLString() +
+                             " priority=" + std::to_string(winningPrim != nullptr ? winningPrim->GetPriority() : -999));
+                } else {
+                    logInfo("[CSX-DIAG]   No property claims this coordinate!");
+                }
+            }
+        }
+    }
+
     const auto setupStart = std::chrono::steady_clock::now();
     const int rc = _fdtd.SetupFDTD();
     const double setupSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - setupStart).count();

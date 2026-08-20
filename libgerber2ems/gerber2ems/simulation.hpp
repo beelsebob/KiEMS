@@ -58,6 +58,8 @@ struct ComputedGridLines {
     double pmlInnerXMax = 0;
     double pmlInnerYMin = 0;
     double pmlInnerYMax = 0;
+    double pmlInnerZMin = 0;
+    double pmlInnerZMax = 0;
 };
 
 inline void to_json(nlohmann::json& j, const ComputedGridLines& g) {
@@ -67,7 +69,9 @@ inline void to_json(nlohmann::json& j, const ComputedGridLines& g) {
                         {"pmlInnerXMin", g.pmlInnerXMin},
                         {"pmlInnerXMax", g.pmlInnerXMax},
                         {"pmlInnerYMin", g.pmlInnerYMin},
-                        {"pmlInnerYMax", g.pmlInnerYMax}};
+                        {"pmlInnerYMax", g.pmlInnerYMax},
+                        {"pmlInnerZMin", g.pmlInnerZMin},
+                        {"pmlInnerZMax", g.pmlInnerZMax}};
 }
 
 inline void from_json(const nlohmann::json& j, ComputedGridLines& g) {
@@ -78,6 +82,8 @@ inline void from_json(const nlohmann::json& j, ComputedGridLines& g) {
     g.pmlInnerXMax = j.value("pmlInnerXMax", 0.0);
     g.pmlInnerYMin = j.value("pmlInnerYMin", 0.0);
     g.pmlInnerYMax = j.value("pmlInnerYMax", 0.0);
+    g.pmlInnerZMin = j.value("pmlInnerZMin", 0.0);
+    g.pmlInnerZMax = j.value("pmlInnerZMax", 0.0);
 }
 
 /// Interacts with openEMS/CSXCAD to build simulation geometry and run the FDTD simulation.

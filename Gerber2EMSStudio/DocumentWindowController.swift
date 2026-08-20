@@ -247,7 +247,7 @@ final class DocumentWindowController: NSWindowController {
                 simulationResultsVC?.invalidateCache(forSimulationIndex: index)
             }
         }
-        let fieldViewerVC = FieldViewerViewController()
+        let fieldViewerVC = FieldViewerViewController(document: ownerDocument)
         fieldViewerViewController = fieldViewerVC
 
         // Force these views to load (running their buildUI()) before simulationListVC's view is
@@ -424,7 +424,9 @@ final class DocumentWindowController: NSWindowController {
             case .simulationResults(let index):
                 showsSimulationResults = true
                 self.simulationResultsViewController?.showResults(forSimulationIndex: index)
-            case .fieldViewer: showsFieldViewer = true
+            case .fieldViewer(let index):
+                showsFieldViewer = true
+                self.fieldViewerViewController?.showField(forSimulationIndex: index)
             case nil:
                 self.currentSimulationIndex = nil
                 self.propertiesViewController?.setSelectedSimulationIndex(nil)

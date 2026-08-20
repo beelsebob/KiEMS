@@ -3,6 +3,7 @@
 #import <Foundation/Foundation.h>
 
 #import "EMSConfigBridge.h"
+#import "FieldSnapshotBridge.h"
 #import "GeometryPreviewBridge.h"
 #import "SimulationResultsBridge.h"
 
@@ -94,6 +95,11 @@ kicadQueryHelperPath:(NSString *)helperPath
 
 /// A renderable results preview -- nil unless hasStage:EMSPipelineStageResults is true.
 - (nullable EMSResultsPreview *)resultsPreview;
+
+/// A renderable field/energy snapshot from the most recently completed excited port's own GPU run
+/// -- nil unless hasStage:EMSPipelineStageResults is true (see EMSFieldSnapshot's own doc comment;
+/// for a multi-port simulation this is the *last* port run, not a combination of all of them).
+- (nullable EMSFieldSnapshot *)fieldSnapshot;
 
 /// Discards this stage and every stage after it (e.g. after an edit that could change the sliced
 /// geometry or FDTD results) -- the next ensureStage: call recomputes from here on. Cheap,
