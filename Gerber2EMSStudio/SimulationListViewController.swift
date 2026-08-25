@@ -120,6 +120,12 @@ final class SimulationListViewController: NSViewController {
     /// setSimulationResultsProgress's own doc comment.
     private var simulationResultsRowStatus: [Int: SimulationRowStatus] = [:]
 
+    /// Same as geometryRowStatus, for the "Field Viewer" row -- driven by JobScheduler (via
+    /// DocumentWindowController's relay of FieldViewerViewController's own onRunStateChanged/
+    /// onProgressChanged/onRunFinished, mirroring geometryRowStatus's own simple pattern since a
+    /// field-post-processing job has no phase-switching to worry about, unlike simulationResultsRowStatus).
+    private var fieldViewerRowStatus: [Int: SimulationRowStatus] = [:]
+
     /// Fired whenever the selected row changes, including to nil when the list is empty or nothing
     /// is selected.
     var onSelectionChanged: ((SimulationListSelection?) -> Void)?
@@ -355,6 +361,19 @@ final class SimulationListViewController: NSViewController {
         outlineView.reloadItem(resultsNode)
     }
 
+    /// Same as reloadGeometryRow, for the "Field Viewer" row.
+    private func reloadFieldViewerRow(forSimulationIndex index: Int) {
+        guard let simulationNode = simulationNodes.first(where: {
+            if case .simulation(let i) = $0.kind { return i == index }
+            return false
+        }) else { return }
+        guard let fieldViewerNode = simulationNode.children.first(where: {
+            if case .fieldViewer = $0.kind { return true }
+            return false
+        }) else { return }
+        outlineView.reloadItem(fieldViewerNode)
+    }
+
     /// Called by DocumentWindowController (wired to GeometryViewController.onRunStateChanged)
     /// whenever a simulation's geometry-step pipeline run starts or finishes. Only the `busy == true`
     /// transition is handled here (-> `.running(fraction: 0)`); the matching "finished" transition
@@ -407,6 +426,45 @@ final class SimulationListViewController: NSViewController {
     func setSimulationResultsRowCompleted(_ success: Bool, forSimulationIndex index: Int) {
         simulationResultsRowStatus[index] = success ? .completed : .error
         reloadSimulationResultsRow(forSimulationIndex: index)
+    }
+
+    /// Same trio as the Geometry row's own busy/progress/completed methods, for the "Field Viewer"
+    /// row -- see fieldViewerRowStatus's own doc comment.
+    func setFieldViewerRowBusy(_ busy: Bool, forSimulationIndex index: Int) {
+        guard busy else { return }
+        fieldViewerRowStatus[index] = .running(fraction: 0)
+        reloadFieldViewerRow(forSimulationIndex: index)
+    }
+
+    func setFieldViewerProgress(_ fraction: Double, forSimulationIndex index: Int) {
+        guard case .running = fieldViewerRowStatus[index] else { return }
+        fieldViewerRowStatus[index] = .running(fraction: fraction)
+        reloadFieldViewerRow(forSimulationIndex: index)
+    }
+
+    func setFieldViewerRowCompleted(_ success: Bool, forSimulationIndex index: Int) {
+        fieldViewerRowStatus[index] = success ? .completed : .error
+        reloadFieldViewerRow(forSimulationIndex: index)
+    }
+
+    /// Reverts a row from `.running` back to `.notStarted` -- for a job JobScheduler reports as
+    /// cancelled (as opposed to genuinely failed, which goes through setXRowCompleted(false,...)
+    /// instead): the user asked for it to stop, so there's nothing to show as "errored", just
+    /// nothing yet. Removes the dictionary entry entirely rather than writing `.notStarted`
+    /// explicitly -- an absent entry already reads as `.notStarted` everywhere else in this file.
+    func resetGeometryRow(forSimulationIndex index: Int) {
+        geometryRowStatus[index] = nil
+        reloadGeometryRow(forSimulationIndex: index)
+    }
+
+    func resetSimulationResultsRow(forSimulationIndex index: Int) {
+        simulationResultsRowStatus[index] = nil
+        reloadSimulationResultsRow(forSimulationIndex: index)
+    }
+
+    func resetFieldViewerRow(forSimulationIndex index: Int) {
+        fieldViewerRowStatus[index] = nil
+        reloadFieldViewerRow(forSimulationIndex: index)
     }
 
     @objc private func selectionChanged() {
@@ -485,11 +543,9 @@ extension SimulationListViewController: NSOutlineViewDelegate {
             return Self.makeChildCell(in: outlineView, owner: self, title: "Simulation Results",
                                        symbolName: "chart.bar",
                                        status: simulationResultsRowStatus[simulationIndex] ?? .notStarted)
-        case .fieldViewer:
-            // Not a pipeline stage yet -- always shown as "not started" (there's no running/
-            // completed/error state to track until it actually does something).
+        case .fieldViewer(let simulationIndex):
             return Self.makeChildCell(in: outlineView, owner: self, title: "Field Viewer",
-                                       symbolName: "waveform", status: .notStarted)
+                                       symbolName: "waveform", status: fieldViewerRowStatus[simulationIndex] ?? .notStarted)
         }
     }
 

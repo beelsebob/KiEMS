@@ -246,12 +246,6 @@ final class FieldView: MTKView, MTKViewDelegate {
 
         if voxelInstanceCount > 0, let geometry = voxelGeometryBuffer, let colors = voxelColorBuffer,
            let voxelPipelineState {
-            if !hasLoggedVoxelDraw {
-                hasLoggedVoxelDraw = true
-                print("[FieldView] draw: issuing voxel draw, instanceCount=\(voxelInstanceCount) "
-                    + "zLayers=\(voxelZLayerDraws.count) eye=\(eye) target=\(target.x),\(target.y),\(target.z) "
-                    + "distance=\(distance) sceneRadius=\(sceneRadius)")
-            }
             encoder.setDepthStencilState(paintersDepthStencilState)
             encoder.setRenderPipelineState(voxelPipelineState)
             encoder.setVertexBuffer(cubeVertexBuffer, offset: 0, index: 0)
@@ -271,11 +265,6 @@ final class FieldView: MTKView, MTKViewDelegate {
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: Self.unitCubeVertices.count,
                                         instanceCount: layer.instanceCount, baseInstance: layer.instanceStart)
             }
-        } else if !hasLoggedVoxelDraw, voxelInstanceCount > 0 {
-            hasLoggedVoxelDraw = true
-            print("[FieldView] draw: SKIPPING voxel draw despite instanceCount=\(voxelInstanceCount) -- "
-                + "geometryBuffer=\(voxelGeometryBuffer != nil) colorBuffer=\(voxelColorBuffer != nil) "
-                + "pipelineState=\(voxelPipelineState != nil)")
         }
 
         encoder.endEncoding()
@@ -572,9 +561,9 @@ final class FieldView: MTKView, MTKViewDelegate {
     // interpolation the renderer already does between stops for color.
     private static let gradientStops: [(t: Float, color: (Float, Float, Float))] = [
         (0.0, (0x2a / 255, 0x2e / 255, 0xac / 255)),
-        (0.25, (0xb8 / 255, 0x1f / 255, 0x3c / 255)),
-        (0.5, (0xf0 / 255, 0x7f / 255, 0x29 / 255)),
-        (0.75, (0xfa / 255, 0xa9 / 255, 0x14 / 255)),
+        (0.5, (0xb8 / 255, 0x1f / 255, 0x3c / 255)),
+        (0.75, (0xf0 / 255, 0x7f / 255, 0x29 / 255)),
+        (0.875, (0xfa / 255, 0xa9 / 255, 0x14 / 255)),
         (1.0, (0xf2 / 255, 0xce / 255, 0x30 / 255)),
     ]
     private static let gradientAlphaAtZero: Float = 0.01

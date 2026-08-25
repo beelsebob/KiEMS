@@ -53,6 +53,14 @@ typedef NS_ENUM(NSInteger, EMSNetSelectorKind) {
 - (void)excludePinWithFootprint:(NSString *)footprint pin:(NSString *)pin;
 - (void)includePinWithFootprint:(NSString *)footprint pin:(NSString *)pin;
 
+/// A per-pad override for `direction`, checked first when resolving that one pad's own port --
+/// see gerber2ems::PinDirectionOverride's own doc comment for why a single net-wide `direction`
+/// isn't always enough (opposite ends of a routed net often depart their own pads in different
+/// cardinal directions). nil means "no override for this specific pad" -- falls through to
+/// `direction`, then auto-derivation, same as before this existed.
+- (nullable NSNumber *)directionOverrideWithFootprint:(NSString *)footprint pin:(NSString *)pin;
+- (void)setDirectionOverride:(nullable NSNumber *)direction withFootprint:(NSString *)footprint pin:(NSString *)pin;
+
 @end
 
 /// One ExcitationConfig entry -- purely a postprocessing input for the pin it's attached to (see

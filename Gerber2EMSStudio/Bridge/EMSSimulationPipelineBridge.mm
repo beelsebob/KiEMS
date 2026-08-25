@@ -5,6 +5,7 @@
 #import "SimulationResultsBridge+Private.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -68,6 +69,18 @@ NSError* makeError(const std::string& message) {
                             userInfo:@{NSLocalizedDescriptionKey : @(message.c_str())}];
 }
 
+// A distinct error code (rather than matching on makeError()'s own message text) so
+// +isCancellationError: can tell a cancellation apart from a message that merely happens to equal
+// kCancelledMessage for some unrelated reason.
+constexpr NSInteger kCancelledErrorCode = 2;
+constexpr const char* kCancelledMessage = "Cancelled";
+
+NSError* makeCancelledError() {
+    return [NSError errorWithDomain:EMSConfigErrorDomain
+                                code:kCancelledErrorCode
+                            userInfo:@{NSLocalizedDescriptionKey : @(kCancelledMessage)}];
+}
+
 // Evenly-spaced frequency samples between start/stop -- matches libgerber2ems's own (private)
 // linspace() in simulation_result.cpp exactly; not worth sharing across a library boundary for
 // something this small (every other C++/ObjC++ bridge file in this app duplicates its own similarly
@@ -104,8 +117,33 @@ std::vector<double> linspace(double start, double stop, std::int32_t num) {
 std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32_t excitedPortNumber,
                                                        EMSPipelineProgressHandler progressHandler,
                                                        std::size_t totalExcitedPorts, std::size_t& portsCompleted,
-                                                       copper::CopperFieldSnapshot* outFieldSnapshot) {
+                                                       copper::CopperFieldSnapshot* outFieldSnapshot,
+                                                       const std::atomic<bool>& cancelRequested) {
+    // Checked before doing any work for this port at all -- a multi-port simulation's excited
+    // ports run strictly sequentially (see this function's own caller, generateResults()'s
+    // FDTDPortRunner loop), so a cancellation requested while an earlier port was running (or
+    // between ports) stops the *next* port from ever starting, without generateResults() itself
+    // needing to know anything about cancellation.
+    if (cancelRequested.load()) {
+        return std::unexpected(kCancelledMessage);
+    }
     const std::filesystem::path cwd = std::filesystem::current_path();
+    // sim.setupFDTDOperator() (openEMS's own SetupFDTD()/CalcECOperator()) is the one call in this
+    // whole pipeline with genuinely no progress hook of its own -- it's also, per real-world timing,
+    // the single most expensive step of the entire Simulation phase on anything but a tiny board (see
+    // EMSPipelineProgressPhase's own doc comment). Reported here as one single SettingUp-phase
+    // report, before the call, rather than left silent -- without this, the UI's last-known phase
+    // just stays whatever Geometry left it at (fraction 1.0), which is what made this look like
+    // geometry itself was still running. No fraction/estimate of any kind attached -- a caller should
+    // show an indeterminate ("barber pole") indicator for this phase, not a predicted countdown.
+    if (progressHandler) {
+        progressHandler([[EMSPipelineProgress alloc] initWithPhase:EMSPipelineProgressPhaseSettingUp
+                                                            fraction:0.0
+                                                      energyChangeDB:0.0
+                                                targetEnergyChangeDB:0.0
+                                                      absoluteEnergy:0.0
+                                                    duringExcitation:NO]);
+    }
     if (auto result = sim.setupFDTDOperator(excitedPortNumber); !result) {
         return std::unexpected(result.error());
     }
@@ -139,8 +177,11 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     }
     const copper::CopperFDTDRunResult gpuResult = copper::runFDTDPortOnGPU(
         sim.fdtdEngine(), sim.csx(), onCopperProgress, copper::CopperBoundaryKind::CPML, -1.0,
-        gerber2ems::constants::pmlDepthCells);
+        gerber2ems::constants::pmlDepthCells, [&] { return cancelRequested.load(); });
     std::filesystem::current_path(cwd);
+    if (gpuResult.cancelled) {
+        return std::unexpected(kCancelledMessage);
+    }
     if (!gpuResult.success) {
         return std::unexpected(gpuResult.errorMessage);
     }
@@ -183,6 +224,15 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     // runGPUPortInProcess()'s own doc comment for why "last port wins" rather than one per port.
     // Reset together with `_results` (see -invalidateFromStage:).
     std::optional<copper::CopperFieldSnapshot> _lastFieldSnapshot;
+
+    // Set by -requestCancellation (any thread), read by -ensurePrepared:/-ensureStage: (the
+    // background thread actually running them) at each checkpoint -- see -requestCancellation's own
+    // doc comment. Cleared at the top of -ensureStage: for the next run, not at the end of this one
+    // -- avoids a race in the gap between one call finishing and the next one starting. Default-
+    // constructed to false (C++20 std::atomic's default constructor value-initializes) -- no
+    // in-class initializer here, Objective-C's ivar block doesn't support one the way a plain C++
+    // class body would.
+    std::atomic<bool> _cancelRequested;
 }
 
 - (instancetype)initWithSimulationName:(NSString*)simulationName {
@@ -205,12 +255,31 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     }
 }
 
+- (void)requestCancellation {
+    _cancelRequested.store(true);
+}
+
++ (BOOL)isCancellationError:(NSError*)error {
+    return [error.domain isEqualToString:EMSConfigErrorDomain] && error.code == kCancelledErrorCode;
+}
+
 // kicad-cli export/stackup import/port resolution, plus taking a fresh scaled-to-simulation-units
 // snapshot of `config` -- everything every later stage needs but none of them individually
 // recomputes (see EMSConfig::scaledToSimulationUnits()'s own doc comment for why this has to
 // happen after port resolution, not before: resolved ports' width/length get scaled too). Only
 // actually does anything the first time it's called since construction or the last
 // invalidateFromStage: call -- `_paths` doubles as "has this already run" for that reason.
+//
+// Everything from here on operates on a *trimmed* copy of `config` -- document-level fields
+// (stackup/frequency/grid/via/...) untouched, but `simulations()` narrowed down to just this one
+// pipeline's own `_simulationName` entry -- rather than the live, full multi-simulation config.
+// resolveSimulationPorts() loops every simulation in whatever EMSConfig it's given, so against the
+// untrimmed config, opening one simulation's tab used to also re-resolve every *other* simulation's
+// ports (redone again, wastefully, the next time each of those tabs was opened) and could fail this
+// tab over a completely unrelated simulation's bad involved_nets/excitation config. Trimming first
+// means this pipeline only ever does and depends on the one simulation's own work. The scratch
+// package's own simulation.json (saved below) ends up holding just this trimmed copy too -- a
+// genuinely temporary, single-simulation file, distinct from the real project package's own.
 - (BOOL)ensurePrepared:(EMSConfigBridge*)config
              packageDir:(NSString*)packageDir
            kicadCliPath:(NSString*)kicadCliPath
@@ -219,6 +288,10 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     if (_paths.has_value()) {
         return YES;
     }
+    if (_cancelRequested.load()) {
+        if (error) *error = makeCancelledError();
+        return NO;
+    }
 
     EMSConfig& liveConfig = config.cxxConfig;
     if (!liveConfig.kicadPcbPath().has_value()) {
@@ -226,42 +299,46 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
         return NO;
     }
 
+    EMSConfig trimmedConfig = liveConfig;
+    auto trimmedSimIt = std::find_if(trimmedConfig.simulations().begin(), trimmedConfig.simulations().end(),
+                                      [&](const auto& sim) { return sim.name() == _simulationName; });
+    if (trimmedSimIt == trimmedConfig.simulations().end()) {
+        if (error) *error = makeError("Simulation \"" + _simulationName + "\" not found.");
+        return NO;
+    }
+    trimmedConfig.simulations() = {std::move(*trimmedSimIt)};
+
     PathsConfig paths = PathsConfig::forConfigFile(std::filesystem::path(packageDir.UTF8String) / "simulation.json",
                                                     kicadCliPath.UTF8String, helperPath.UTF8String, "");
 
-    if (auto result = gerber2ems::exportKicadPcb(paths, *liveConfig.kicadPcbPath()); !result) {
+    if (auto result = gerber2ems::exportKicadPcb(paths, *trimmedConfig.kicadPcbPath()); !result) {
         if (error) *error = makeError(result.error());
         return NO;
     }
-    if (auto result = gerber2ems::importStackup(paths, liveConfig); !result) {
+    if (auto result = gerber2ems::importStackup(paths, trimmedConfig); !result) {
         if (error) *error = makeError(result.error());
         return NO;
     }
-    if (auto result = gerber2ems::resolveSimulationPorts(liveConfig, paths); !result) {
+    if (auto result = gerber2ems::resolveSimulationPorts(trimmedConfig, paths); !result) {
         if (error) *error = makeError(result.error());
         return NO;
     }
     // packageDir is always a private scratch directory (see Document.pipelineDirectory's own doc
     // comment) that only ever gets fab/ems written into it; simulation.json itself is only ever
-    // saved into the real, user-visible package. Saving the live, already-port-resolved config here
-    // keeps the on-disk package's own simulation.json in sync with it, the same as `geber2ems -a`
-    // would leave behind.
-    if (auto result = liveConfig.save(paths.configFile); !result) {
+    // saved into the real, user-visible package. Saving the trimmed, already-port-resolved
+    // single-simulation config here keeps this pipeline's own scratch simulation.json self-contained
+    // -- e.g. for a worker subprocess later spawned against paths.configFile -- without pulling in
+    // every other simulation the live document happens to also contain.
+    if (auto result = trimmedConfig.save(paths.configFile); !result) {
         if (error) *error = makeError(result.error());
         return NO;
     }
 
-    EMSConfig scaled = liveConfig.scaledToSimulationUnits();
-    auto simIt = std::find_if(scaled.simulations().begin(), scaled.simulations().end(),
-                               [&](const auto& sim) { return sim.name() == _simulationName; });
-    if (simIt == scaled.simulations().end()) {
-        if (error) *error = makeError("Simulation \"" + _simulationName + "\" not found.");
-        return NO;
-    }
-
+    EMSConfig scaled = trimmedConfig.scaledToSimulationUnits();
     _scaledConfig.emplace(std::move(scaled));
-    _simConfig = &*std::find_if(_scaledConfig->simulations().begin(), _scaledConfig->simulations().end(),
-                                 [&](const auto& sim) { return sim.name() == _simulationName; });
+    // trimmedConfig.simulations() (and so scaled.simulations()) always has exactly one entry --
+    // the trim above already found the one named _simulationName, or bailed out if it didn't exist.
+    _simConfig = &_scaledConfig->simulations().front();
     _paths.emplace(std::move(paths));
     _configured.emplace(*_simConfig);
     return YES;
@@ -277,6 +354,9 @@ kicadQueryHelperPath:(NSString*)helperPath
     if ([self hasStage:stage]) {
         return YES;
     }
+    // Cleared here, not at the end of a run -- avoids a race in the gap between one call finishing
+    // and the next one starting (see _cancelRequested's own ivar comment).
+    _cancelRequested.store(false);
     if (![self ensurePrepared:config packageDir:packageDir kicadCliPath:kicadCliPath kicadQueryHelperPath:helperPath
                          error:error]) {
         return NO;
@@ -300,6 +380,10 @@ kicadQueryHelperPath:(NSString*)helperPath
     };
 
     if (!_geometry.has_value()) {
+        if (_cancelRequested.load()) {
+            if (error) *error = makeCancelledError();
+            return NO;
+        }
         reportGeometryProgress(0.0);
         auto geometryResult = gerber2ems::generateGeometry(*_configured, *_scaledConfig, *_paths);
         if (!geometryResult) {
@@ -321,6 +405,10 @@ kicadQueryHelperPath:(NSString*)helperPath
     options.backend = FDTDBackend::CopperGPU;
 
     if (!_grid.has_value()) {
+        if (_cancelRequested.load()) {
+            if (error) *error = makeCancelledError();
+            return NO;
+        }
         // The 0.5 checkpoint lands here (not right after generateGeometry() above), unconditionally,
         // so it's reported whether slicing *just* happened above or was already cached from an
         // earlier ensureStage: call -- either way, grid placement is genuinely the second half of
@@ -374,15 +462,21 @@ kicadQueryHelperPath:(NSString*)helperPath
         // sequentially, never concurrently, so there's no real data race to guard against.
         std::size_t portsCompleted = 0;
         copper::CopperFieldSnapshot capturedFieldSnapshot;
-        auto portRunner = [progressHandler, totalExcitedPorts, &portsCompleted, &capturedFieldSnapshot](
+        auto portRunner = [self, progressHandler, totalExcitedPorts, &portsCompleted, &capturedFieldSnapshot](
                                Simulation& sim, std::int32_t excitedPortNumber) {
             return runGPUPortInProcess(sim, excitedPortNumber, progressHandler, totalExcitedPorts, portsCompleted,
-                                        &capturedFieldSnapshot);
+                                        &capturedFieldSnapshot, self->_cancelRequested);
         };
         auto resultsResult =
             gerber2ems::generateResults(*_grid, *_scaledConfig, options, *_paths, frequencies, portRunner);
         if (!resultsResult) {
-            if (error) *error = makeError(resultsResult.error());
+            // generateResults() only ever sees "cancelled" as a plain error string bubbled up from
+            // portRunner (runGPUPortInProcess) -- it has no concept of cancellation itself -- so it
+            // has to be recognized by matching text here, not passed through as a distinguishable
+            // error the way the checkpoints above construct directly.
+            if (error) {
+                *error = resultsResult.error() == kCancelledMessage ? makeCancelledError() : makeError(resultsResult.error());
+            }
             return NO;
         }
         if (resultsResult->byExcitedPort.empty()) {

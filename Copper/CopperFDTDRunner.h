@@ -120,6 +120,12 @@ struct CopperFieldSnapshot {
 struct CopperFDTDRunResult {
     bool success = false;
     std::string errorMessage; // only meaningful when !success
+    /// True iff this run stopped early because the caller's own `isCancelled` (see
+    /// runFDTDPortOnGPU's own doc comment) returned true, rather than reaching `steps` or the
+    /// energy-decay end criteria. `success` is still false in this case (there's no complete probe
+    /// data), but a caller that distinguishes "genuinely failed" from "the user cancelled it" should
+    /// check this rather than treating every `!success` the same way.
+    bool cancelled = false;
     std::vector<CopperProbeResult> probes;
     CopperFieldSnapshot fieldSnapshot;
 };
@@ -190,10 +196,17 @@ using CopperFDTDProgressCallback = std::function<void(const CopperFDTDProgress&)
 /// shell geometry directly from this value. Defaults to 16, matching gerber2ems::constants::
 /// pmlDepthCells -- a caller linking gerber2ems should pass that constant explicitly rather than rely
 /// on this default staying in sync with it.
+///
+/// `isCancelled`, if given, is checked once per timestep (the same per-step sampler callback the
+/// energy-decay end criteria already uses to stop the loop early -- see CopperFDTDRunner.cpp) --
+/// returning true stops the run within a timestep or two, well under a second even on a long run.
+/// Left as the default (empty) means the run can never be cancelled this way. See
+/// CopperFDTDRunResult::cancelled for how a caller tells this apart from a genuine failure.
 CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
                                       const CopperFDTDProgressCallback& onProgress = {},
                                       CopperBoundaryKind boundaryKind = CopperBoundaryKind::CPML,
-                                      double cpmlAlphaMax = -1.0, std::uint32_t pmlDepthCells = 16);
+                                      double cpmlAlphaMax = -1.0, std::uint32_t pmlDepthCells = 16,
+                                      const std::function<bool()>& isCancelled = {});
 
 /// One-off diagnostic, NOT part of the normal run path: sets up exactly like runFDTDPortOnGPU() (same
 /// grid/coefficient/excitation extraction, same CopperEngine), then instead of running to completion,

@@ -55,7 +55,7 @@ private:
 CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
                                       const CopperFDTDProgressCallback& onProgress,
                                       CopperBoundaryKind boundaryKind, double cpmlAlphaMax,
-                                      std::uint32_t pmlDepthCells) {
+                                      std::uint32_t pmlDepthCells, const std::function<bool()>& isCancelled) {
     CopperFDTDRunResult result;
     // See CopperFDTDRunner.h's own doc comment on cpmlAlphaMax's default -- 100MHz is every real
     // board this codebase has actually simulated so far, not an arbitrary round number.
@@ -188,8 +188,7 @@ CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
         result.fieldSnapshot.lineX.assign(grid.lineX.begin(), grid.lineX.end());
         result.fieldSnapshot.lineY.assign(grid.lineY.begin(), grid.lineY.end());
         result.fieldSnapshot.lineZ.assign(grid.lineZ.begin(), grid.lineZ.end());
-        constexpr std::uint32_t kFieldFrameBudget = 90;
-        const std::uint32_t minCaptureStepSpacing = std::max<std::uint32_t>(1, steps / kFieldFrameBudget);
+        const std::uint32_t minCaptureStepSpacing = 100;
         std::uint32_t lastCaptureStep = 0;
         bool anyFrameCaptured = false;
         auto captureFieldFrame = [&](std::uint32_t globalTimestep) {
@@ -229,6 +228,7 @@ CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
         double maxEnergy = 0.0;
         double energyChange = 1.0; // matches RunFDTD()'s own `double change=1;` initial value
         bool endCriteriaReached = false;
+        bool cancelled = false;
         std::uint32_t stepsActuallyRun = 0;
         // [DIAG] Temporary: pinpoints exactly which timestep/cell/field a real run first goes
         // NaN/Inf at. The normal energy check below only runs every ~4s of wall time, by which point
@@ -365,10 +365,16 @@ CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
             // frame count to roughly kFieldFrameBudget regardless of how long the run itself takes.
             // Always captures the very last step's own state, whatever the spacing landed on.
             if (sinceLastPrint > 4.0 &&
-                (globalTimestep - lastCaptureStep >= minCaptureStepSpacing || globalTimestep == steps)) {
+                (globalTimestep - lastCaptureStep >= minCaptureStepSpacing || globalTimestep == 0 || globalTimestep == steps)) {
                 captureFieldFrame(globalTimestep);
             }
-            return !endCriteriaReached;
+            // Checked every timestep (not gated behind the >4s wall-clock block above, unlike the
+            // energy check) -- cancellation should take effect within a timestep or two, not wait
+            // for the next progress-reporting tick.
+            if (isCancelled && isCancelled()) {
+                cancelled = true;
+            }
+            return !endCriteriaReached && !cancelled;
         });
         if (!anyFrameCaptured) {
             // A run that ends (max steps or early-stop) before ever crossing the >4s cadence above
@@ -394,7 +400,16 @@ CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
             std::fprintf(stdout, "Copper: captured %zu field frame(s)\n", result.fieldSnapshot.frames.size());
         }
 
-        result.success = true;
+        if (cancelled) {
+            // Deliberately !success -- probes/fieldSnapshot above only hold whatever partial data
+            // was gathered before the sampler stopped early, not a complete/usable run. See
+            // CopperFDTDRunResult::cancelled's own doc comment for why a caller should check this
+            // before treating an unsuccessful result as a genuine failure.
+            result.cancelled = true;
+            result.errorMessage = "Cancelled";
+        } else {
+            result.success = true;
+        }
     } catch (const std::exception& error) {
         result.errorMessage = std::string("Copper GPU FDTD run failed: ") + error.what();
     }

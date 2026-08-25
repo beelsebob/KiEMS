@@ -44,7 +44,7 @@ TimeWaveform inverseTransform(const std::vector<double>& frequencies, const std:
 }
 
 TimeWaveform synthesizeMainStimulus(const Frequency& freq, double startTime, double duration, double phaseDegrees,
-                                      double dt, std::size_t sampleCount) {
+                                      double dt, std::size_t sampleCount, double amplitude) {
     TimeWaveform result;
     result.dt = dt;
     result.samples.assign(sampleCount, 0.0);
@@ -62,7 +62,7 @@ TimeWaveform synthesizeMainStimulus(const Frequency& freq, double startTime, dou
             continue;
         }
         const double tau = t - startTime;
-        result.samples[n] =
+        result.samples[n] = amplitude *
             std::cos(2.0 * std::numbers::pi * f0 * (tau - 9.0 / (2.0 * std::numbers::pi * fc)) + phaseRadians) *
             std::exp(-std::pow(2.0 * std::numbers::pi * fc * tau / 3.0 - 3.0, 2));
     }

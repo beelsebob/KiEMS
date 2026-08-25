@@ -112,6 +112,14 @@ final class Document: NSDocument {
         }
     }
 
+    // Cancels/drops this document's own jobs before the standard close teardown -- otherwise a
+    // still-running job would keep referencing (via Job's own weak `document`) a Document that's
+    // about to go away, and its GPU work would keep running for no one to ever see the result of.
+    override func close() {
+        JobScheduler.shared.cancelAll(for: self)
+        super.close()
+    }
+
     deinit {
         if let scratchDirectory {
             try? FileManager.default.removeItem(at: scratchDirectory)

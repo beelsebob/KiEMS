@@ -95,9 +95,17 @@ final class SimulationResultsViewController: NSViewController {
     /// geometry itself already succeeded, regardless of how this run ultimately finishes.
     var onRunFinished: ((Int, EMSPipelineProgressPhase, Bool) -> Void)?
 
+    /// Fired when a simulation's results job was cancelled (via the Jobs window) rather than
+    /// finishing with a real error -- see GeometryViewController.onRunCancelled's identical doc
+    /// comment. Carries the phase reached, same as onRunFinished, so DocumentWindowController resets
+    /// the right row (or both, if cancellation happened mid-.simulation -- geometry itself did
+    /// genuinely finish first, so that row should still flip to "completed", not reset).
+    var onRunCancelled: ((Int, EMSPipelineProgressPhase) -> Void)?
+
     init(document: Document) {
         self.document = document
         super.init(nibName: nil, bundle: nil)
+        JobScheduler.shared.addChangeObserver { [weak self] in self?.syncFromScheduler() }
     }
 
     @available(*, unavailable)
@@ -243,7 +251,7 @@ final class SimulationResultsViewController: NSViewController {
         let name = document.config.simulations[index].name
         let pipeline = document.pipeline(forSimulationNamed: name)
         guard !pipeline.hasStage(.results), errors[index] == nil, !runningIndices.contains(index) else { return }
-        runResultsStep(forSimulationIndex: index, simulationName: name, pipeline: pipeline)
+        JobScheduler.shared.request(document: document, simulationName: name, target: .simulation)
     }
 
     /// Called by DocumentWindowController whenever something that would change this simulation's
@@ -258,8 +266,8 @@ final class SimulationResultsViewController: NSViewController {
     func invalidateCache(forSimulationIndex index: Int) {
         errors[index] = nil
         guard let document, index < document.config.simulations.count else { return }
-        document.pipeline(forSimulationNamed: document.config.simulations[index].name)
-            .invalidate(from: .results)
+        JobScheduler.shared.invalidate(document: document, simulationName: document.config.simulations[index].name,
+                                        fromStage: .results)
     }
 
     /// Manually interpolates energyLevelIndicator's doubleValue over ~0.2s -- see
@@ -295,6 +303,11 @@ final class SimulationResultsViewController: NSViewController {
         guard let currentIndex, let document, currentIndex < document.config.simulations.count else { return }
         let name = document.config.simulations[currentIndex].name
         let pipeline = document.pipeline(forSimulationNamed: name)
+        // Reset to the normal determinate bar by default -- only the .settingUp branch below turns
+        // indeterminate animation back on, so every other branch (including a hidden bar) doesn't
+        // need its own explicit stopAnimation() call.
+        progressBar.stopAnimation(nil)
+        progressBar.isIndeterminate = false
         if let preview = pipeline.resultsPreview() {
             // These default to visible (NSControl's own isHidden default) until a run's own
             // running/error/idle branch below first sets them -- a simulation whose results are
@@ -309,7 +322,11 @@ final class SimulationResultsViewController: NSViewController {
         } else if let error = errors[currentIndex] {
             categoryControl.isHidden = true
             scrollView.isHidden = true
-            statusLabel.stringValue = error
+            // See GeometryViewController's identical use of this -- renders an embedded net name's
+            // own markup (sub/superscript, negation, an escaped "/") correctly instead of showing it
+            // as literal, unformatted tokens.
+            statusLabel.attributedStringValue = NetNameFormatting.attributedString(
+                embeddingNetNamesIn: error, font: statusLabel.font ?? .systemFont(ofSize: NSFont.systemFontSize))
             statusLabel.isHidden = false
             progressBar.isHidden = true
             excitationIcon.isHidden = true
@@ -322,11 +339,22 @@ final class SimulationResultsViewController: NSViewController {
             switch progress?.phase {
             case .simulation:
                 statusLabel.stringValue = "Running simulation…\n\nA full FDTD run can take several minutes."
+            case .settingUp:
+                statusLabel.stringValue = "Setting up Simulation…"
             default:
                 statusLabel.stringValue = "Building geometry…"
             }
             statusLabel.isHidden = false
-            if animated {
+            // .settingUp has no fraction of any kind to show -- openEMS gives no progress hook into
+            // its own setup call at all (see EMSPipelineProgressPhase's own doc comment), and guessing
+            // a duration from mesh size turned out to not be worth the false confidence a countdown
+            // implies. A real, animated indeterminate bar is the honest thing to show instead; every
+            // other phase keeps the normal determinate one (progressBar.isIndeterminate/stopAnimation()
+            // already reset to that default at the top of this method).
+            if progress?.phase == .settingUp {
+                progressBar.isIndeterminate = true
+                progressBar.startAnimation(nil)
+            } else if animated {
                 NSAnimationContext.runAnimationGroup { context in
                     context.duration = 0.2
                     progressBar.animator().doubleValue = progress?.fraction ?? 0
@@ -336,9 +364,15 @@ final class SimulationResultsViewController: NSViewController {
             }
             progressBar.isHidden = false
             excitationIcon.isHidden = !(progress?.phase == .simulation && (progress?.duringExcitation ?? false))
-            timeEstimateLabel.stringValue = timeEstimateText[currentIndex]
-                ?? TimeRemainingFormatter.string(secondsRemaining: nil)
-            timeEstimateLabel.isHidden = false
+            // No text at all during .settingUp -- see the progress bar's own comment just above on why
+            // this phase doesn't try to predict a duration.
+            if progress?.phase == .settingUp {
+                timeEstimateLabel.isHidden = true
+            } else {
+                timeEstimateLabel.stringValue = timeEstimateText[currentIndex]
+                    ?? TimeRemainingFormatter.string(secondsRemaining: nil)
+                timeEstimateLabel.isHidden = false
+            }
             if let progress, progress.phase == .simulation {
                 energyLevelIndicator.maxValue = max(progress.targetEnergyChangeDB, 1)
                 // n/10 divisions, per this level indicator's own design brief.
@@ -363,43 +397,72 @@ final class SimulationResultsViewController: NSViewController {
         }
     }
 
-    private func runResultsStep(forSimulationIndex index: Int, simulationName: String,
-                                 pipeline: EMSSimulationPipelineBridge) {
+    /// Called from JobScheduler.shared's onChange notification -- see
+    /// GeometryViewController.syncFromScheduler()'s identical-in-spirit doc comment. Watches this
+    /// simulation's own .geometryGeneration job while it's still the active prerequisite, then its
+    /// .simulation job once that one starts running -- both report through this same progressReceived
+    /// (a job's own `progress.phase` already distinguishes them, exactly as when a single combined
+    /// ensureStage:.results call used to report both phases itself).
+    private func syncFromScheduler() {
         guard let document else { return }
-        let config = document.config
-        // Always a private scratch directory, migrated into the real package only at save time --
-        // see pipelineDirectory's doc comment. Doesn't require saving first either way.
-        let packageDir = document.pipelineDirectory.path
-        let kicadCliPath = AppPaths.resolveKicadCli()
-        let helperPath = AppPaths.kicadQueryHelperPath
+        for index in 0..<document.config.simulations.count {
+            let name = document.config.simulations[index].name
+            let pipeline = document.pipeline(forSimulationNamed: name)
+            let geometryJob = JobScheduler.shared.job(document: document, simulationName: name, kind: .geometryGeneration)
+            let simulationJob = JobScheduler.shared.job(document: document, simulationName: name, kind: .simulation)
+            let activeJob = simulationJob ?? geometryJob
+            let wasRunning = runningIndices.contains(index)
 
-        runningIndices.insert(index)
-        refreshDisplay()
+            switch activeJob?.status {
+            case .running, .cancelling:
+                if !wasRunning {
+                    runningIndices.insert(index)
+                    refreshDisplay()
+                }
+                if let progress = activeJob?.progress {
+                    progressReceived(progress, forSimulationIndex: index)
+                }
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            do {
-                try pipeline.ensureStage(.results, config: config, packageDir: packageDir,
-                                          kicadCliPath: kicadCliPath, kicadQueryHelperPath: helperPath,
-                                          progress: { progress in
-                                              DispatchQueue.main.async {
-                                                  self?.progressReceived(progress, forSimulationIndex: index)
-                                              }
-                                          })
-                DispatchQueue.main.async {
-                    self?.resultsStepFinished(forSimulationIndex: index, error: nil)
+            case .failed(let message):
+                guard wasRunning else { continue }
+                let reachedPhase = latestProgress[index]?.phase ?? .geometry
+                finishTracking(forSimulationIndex: index)
+                errors[index] = message
+                onRunFinished?(index, reachedPhase, false)
+                if let jobID = activeJob?.id { JobScheduler.shared.dismiss(jobID: jobID) }
+                refreshDisplay()
+
+            case .queued, nil:
+                guard wasRunning else { continue }
+                let reachedPhase = latestProgress[index]?.phase ?? .geometry
+                finishTracking(forSimulationIndex: index)
+                if pipeline.hasStage(.results) {
+                    document.updateChangeCount(.changeDone)
+                    onRunFinished?(index, .simulation, true)
+                } else {
+                    onRunCancelled?(index, reachedPhase)
                 }
-            } catch {
-                DispatchQueue.main.async {
-                    self?.resultsStepFinished(forSimulationIndex: index, error: error)
-                }
+                refreshDisplay()
             }
         }
     }
 
-    /// Common handler for every EMSPipelineProgress report from this VC's own in-flight ensureStage:
-    /// call -- relayed outward via onProgressChanged (for the source-list row) and, if this is the
-    /// currently-shown simulation, applied to this VC's own progress bar/time estimate/level
-    /// indicator too.
+    private func finishTracking(forSimulationIndex index: Int) {
+        runningIndices.remove(index)
+        latestProgress[index] = nil
+        lastReportedPhase[index] = nil
+        phaseStartTime[index] = nil
+        timeEstimateText[index] = nil
+        // Immediate, not animated -- this run's own progress bar/level indicator shouldn't leave a
+        // stale value behind for the next run to animate away from.
+        progressBar.doubleValue = 0
+        setLevelIndicatorValue(0, animated: false)
+    }
+
+    /// Common handler for every EMSPipelineProgress report from this simulation's own
+    /// .geometryGeneration/.simulation jobs -- relayed outward via onProgressChanged (for the
+    /// source-list row) and, if this is the currently-shown simulation, applied to this VC's own
+    /// progress bar/time estimate/level indicator too.
     private func progressReceived(_ progress: EMSPipelineProgress, forSimulationIndex index: Int) {
         latestProgress[index] = progress
         onProgressChanged?(index, progress)
@@ -410,6 +473,8 @@ final class SimulationResultsViewController: NSViewController {
             print("[\(name)] Simulation: \(percent)% (energy ~\(String(format: "%.2e", progress.absoluteEnergy))"
                 + ", \(String(format: "%.1f", progress.energyChangeDB))"
                 + "/\(String(format: "%.1f", progress.targetEnergyChangeDB)) dB)")
+        case .settingUp:
+            print("[\(name)] Setting up simulation…")
         default:
             print("[\(name)] Geometry: \(percent)%")
         }
@@ -431,14 +496,19 @@ final class SimulationResultsViewController: NSViewController {
                 setLevelIndicatorValue(energyLevelIndicator.maxValue, animated: false)
             }
         }
-        let secondsRemaining: Double?
-        if let start = phaseStartTime[index], progress.fraction > 0 {
-            let elapsed = Date().timeIntervalSince(start)
-            secondsRemaining = max(0, elapsed / progress.fraction - elapsed)
-        } else {
-            secondsRemaining = nil
+        // .settingUp has no fraction to extrapolate a remaining time from at all (see
+        // EMSPipelineProgressPhase's own doc comment) -- refreshDisplay() shows a plain indeterminate
+        // bar and no time-estimate text for it instead, so there's nothing useful to compute here.
+        if progress.phase != .settingUp {
+            let secondsRemaining: Double?
+            if let start = phaseStartTime[index], progress.fraction > 0 {
+                let elapsed = Date().timeIntervalSince(start)
+                secondsRemaining = max(0, elapsed / progress.fraction - elapsed)
+            } else {
+                secondsRemaining = nil
+            }
+            timeEstimateText[index] = TimeRemainingFormatter.string(secondsRemaining: secondsRemaining)
         }
-        timeEstimateText[index] = TimeRemainingFormatter.string(secondsRemaining: secondsRemaining)
         if currentIndex == index, runningIndices.contains(index) {
             refreshDisplay(animated: true)
         }
@@ -449,28 +519,6 @@ final class SimulationResultsViewController: NSViewController {
         return document.config.simulations[index].name
     }
 
-    private func resultsStepFinished(forSimulationIndex index: Int, error: Error?) {
-        runningIndices.remove(index)
-        // Read before clearing -- the last phase reported before this run stopped, so
-        // onRunFinished's caller knows which stage the outcome belongs to.
-        let reachedPhase = latestProgress[index]?.phase ?? .geometry
-        latestProgress[index] = nil
-        lastReportedPhase[index] = nil
-        phaseStartTime[index] = nil
-        timeEstimateText[index] = nil
-        // Immediate, not animated -- see GeometryViewController.stepFinished's identical reset for
-        // why: this run's own progress bar/level indicator shouldn't leave a stale value behind for
-        // the next run to animate away from.
-        progressBar.doubleValue = 0
-        setLevelIndicatorValue(0, animated: false)
-        onRunFinished?(index, reachedPhase, error == nil)
-        if let error {
-            errors[index] = error.localizedDescription
-        } else {
-            document?.updateChangeCount(.changeDone)
-        }
-        refreshDisplay()
-    }
 
     // MARK: - Category/chart building
 

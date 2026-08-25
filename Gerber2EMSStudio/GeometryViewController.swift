@@ -18,23 +18,20 @@ final class GeometryViewController: NSViewController {
     private let showGridCheckbox = NSButton(checkboxWithTitle: "Show Grid", target: nil, action: nil)
 
     private var errors: [Int: String] = [:]
+    // Mirrors JobScheduler's own status for this simulation's .geometryGeneration job -- see
+    // syncFromScheduler(). Not the source of truth (JobScheduler.jobs is), just this VC's own cached
+    // view of it for refreshDisplay() to read synchronously.
     private var runningIndices: Set<Int> = []
-    // A separate in-flight set from runningIndices -- see runGridOnlyStep()'s own doc comment for
-    // why toggling the overlay on for a simulation whose geometry is already showing must never hide
-    // that already-good view behind the "Processing…" status label the way runningIndices does.
-    private var gridOnlyRunningIndices: Set<Int> = []
     // Per-simulation "Show Grid" checkbox state -- keyed by index (not a single shared Bool) so
     // switching between simulations remembers each one's own choice, matching errors/runningIndices'
     // own per-index convention. Absent (not false) until the user actually checks it once.
     private var gridOverlayEnabled: [Int: Bool] = [:]
-    // Latest known geometry-phase progress fraction (0...1) per simulation, from this VC's own
-    // in-flight ensureStage: call -- kept so refreshDisplay() (called on re-selection, not just from
-    // the live progress callback) can restore the progress bar to where it actually is.
+    // Latest known geometry-phase progress fraction (0...1) per simulation, from JobScheduler's own
+    // job.progress -- kept so refreshDisplay() (called on re-selection, not just from
+    // syncFromScheduler()) can restore the progress bar to where it actually is.
     private var progressFraction: [Int: Double] = [:]
-    // When runStep()'s own in-flight run for a simulation started -- the basis for the elapsed-time/
-    // fraction extrapolation behind timeEstimateLabel's own text (see progressReceived()). Not
-    // touched by runGridOnlyStep(): that path never shows the progress bar/time estimate at all (see
-    // runGridOnlyStep()'s own doc comment), so there's nothing for it to extrapolate for.
+    // When this simulation's own job was first observed running -- the basis for the elapsed-time/
+    // fraction extrapolation behind timeEstimateLabel's own text (see progressReceived()).
     private var runStartTime: [Int: Date] = [:]
     // Latest known time-remaining text per simulation, mirroring progressFraction's own "so
     // refreshDisplay() can restore state on re-selection" role.
@@ -61,9 +58,17 @@ final class GeometryViewController: NSViewController {
     /// SimulationResultsViewController-triggered run -- see that VC's own onProgressChanged).
     var onProgressChanged: ((Int, EMSPipelineProgress) -> Void)?
 
+    /// Fired when a simulation's geometry job was cancelled (via the Jobs window), as opposed to
+    /// finishing with a real error -- see JobScheduler's own doc comment on why that's a distinct
+    /// outcome from onRunFinished(_:false): the user asked for this, so there's nothing to show as
+    /// an error, just nothing yet. DocumentWindowController wires this to
+    /// SimulationListViewController.resetGeometryRow(forSimulationIndex:).
+    var onRunCancelled: ((Int) -> Void)?
+
     init(document: Document) {
         self.document = document
         super.init(nibName: nil, bundle: nil)
+        JobScheduler.shared.addChangeObserver { [weak self] in self?.syncFromScheduler() }
     }
 
     @available(*, unavailable)
@@ -158,14 +163,11 @@ final class GeometryViewController: NSViewController {
         guard let document, index < document.config.simulations.count else { return }
         let name = document.config.simulations[index].name
         let pipeline = document.pipeline(forSimulationNamed: name)
-        // If this simulation's own "Show Grid" checkbox is already on (from a previous visit, or
-        // because a Results run already computed it -- see EMSSimulationPipelineBridge.h's own doc
-        // comment on stage sharing), go straight for .grid: ensureStage: computes .geometry as an
-        // unavoidable step on the way there anyway, so there's no separate "geometry first, grid
-        // later" request needed here even on a simulation never visited before.
-        let targetStage: EMSPipelineStage = (gridOverlayEnabled[index] ?? false) ? .grid : .geometry
-        guard !pipeline.hasStage(targetStage), errors[index] == nil, !runningIndices.contains(index) else { return }
-        runStep(forSimulationIndex: index, simulationName: name, pipeline: pipeline, stage: targetStage)
+        // .geometryGeneration's own job always computes grid lines too, not just the sliced board
+        // (see JobKind's own doc comment) -- so hasStage(.grid), not .geometry, is the real "is
+        // there nothing left to do" check here.
+        guard !pipeline.hasStage(.grid), errors[index] == nil, !runningIndices.contains(index) else { return }
+        JobScheduler.shared.request(document: document, simulationName: name, target: .geometryGeneration)
     }
 
     /// Called by DocumentWindowController whenever something that would change this simulation's
@@ -180,27 +182,19 @@ final class GeometryViewController: NSViewController {
     func invalidateCache(forSimulationIndex index: Int) {
         errors[index] = nil
         guard let document, index < document.config.simulations.count else { return }
-        document.pipeline(forSimulationNamed: document.config.simulations[index].name)
-            .invalidate(from: .geometry)
+        JobScheduler.shared.invalidate(document: document, simulationName: document.config.simulations[index].name,
+                                        fromStage: .geometry)
     }
 
     /// Toggled from the "Show Grid" checkbox -- see showGridCheckbox's own doc comment for why this
-    /// is per-simulation state, not a single shared flag.
+    /// is per-simulation state, not a single shared flag. No separate fetch needed here any more --
+    /// .geometryGeneration's own job always computes grid lines alongside the sliced board (see
+    /// JobKind's own doc comment), so by the time this checkbox is even visible (only once geometry
+    /// is already showing -- see refreshDisplay()), grid lines are already cached too.
     @objc private func toggleGridOverlay(_ sender: NSButton) {
         guard let currentIndex else { return }
-        let enabled = sender.state == .on
-        gridOverlayEnabled[currentIndex] = enabled
+        gridOverlayEnabled[currentIndex] = sender.state == .on
         refreshDisplay()
-        guard enabled, let document, currentIndex < document.config.simulations.count else { return }
-        let name = document.config.simulations[currentIndex].name
-        let pipeline = document.pipeline(forSimulationNamed: name)
-        // Every other case (still loading, in error, or this simulation not visited yet at all) is
-        // already covered by showGeometry()'s own targetStage logic picking .grid the next time this
-        // simulation is (re-)selected -- a separate fetch is only needed here for the one case that
-        // logic can't reach: geometry is already showing right now, so nothing will re-select it.
-        guard pipeline.hasStage(.geometry), !pipeline.hasStage(.grid), errors[currentIndex] == nil,
-              !gridOnlyRunningIndices.contains(currentIndex) else { return }
-        runGridOnlyStep(forSimulationIndex: currentIndex, simulationName: name, pipeline: pipeline)
     }
 
     private func refreshDisplay() {
@@ -223,14 +217,19 @@ final class GeometryViewController: NSViewController {
             showGridCheckbox.isHidden = false
         } else if let error = errors[currentIndex] {
             geometryView.isHidden = true
-            statusLabel.stringValue = error
+            // .attributedStringValue, not .stringValue -- error is a full sentence libgerber2ems
+            // built with an embedded, possibly markup-carrying net name (e.g. "GND_{1}" or a name
+            // with a literal "/" in it) -- see NetNameFormatting.attributedString(embeddingNetNamesIn:)'s
+            // own doc comment for how it finds and renders just that part correctly.
+            statusLabel.attributedStringValue = NetNameFormatting.attributedString(
+                embeddingNetNamesIn: error, font: statusLabel.font ?? .systemFont(ofSize: NSFont.systemFontSize))
             statusLabel.isHidden = false
             progressBar.isHidden = true
             timeEstimateLabel.isHidden = true
             showGridCheckbox.isHidden = true
         } else if runningIndices.contains(currentIndex) {
             geometryView.isHidden = true
-            statusLabel.stringValue = wantsGrid ? "Processing Geometry and Grid…" : "Processing Geometry…"
+            statusLabel.stringValue = "Processing Geometry…"
             statusLabel.isHidden = false
             progressBar.doubleValue = progressFraction[currentIndex] ?? 0
             progressBar.isHidden = false
@@ -247,53 +246,77 @@ final class GeometryViewController: NSViewController {
         }
     }
 
-    private func runStep(forSimulationIndex index: Int, simulationName: String,
-                          pipeline: EMSSimulationPipelineBridge, stage: EMSPipelineStage) {
+    /// Called from JobScheduler.shared's onChange notification -- reconciles this VC's own per-index
+    /// runningIndices/errors/progress state (which refreshDisplay() actually reads) against the
+    /// scheduler's real, authoritative job list, and fires onRunStateChanged/onProgressChanged/
+    /// onRunFinished/onRunCancelled on the transitions those closures expect exactly once each,
+    /// mirroring what the old direct-dispatch runStep()/stepFinished() pair used to do inline.
+    private func syncFromScheduler() {
         guard let document else { return }
-        let config = document.config
-        // Always a private scratch directory, migrated into the real package only at save time --
-        // see pipelineDirectory's doc comment for why it's never the real package directly. Doesn't
-        // require saving first either way.
-        let packageDir = document.pipelineDirectory.path
-        let kicadCliPath = AppPaths.resolveKicadCli()
-        let helperPath = AppPaths.kicadQueryHelperPath
+        for index in 0..<document.config.simulations.count {
+            let name = document.config.simulations[index].name
+            let pipeline = document.pipeline(forSimulationNamed: name)
+            let job = JobScheduler.shared.job(document: document, simulationName: name, kind: .geometryGeneration)
+            let wasRunning = runningIndices.contains(index)
 
-        runningIndices.insert(index)
-        runStartTime[index] = Date()
-        onRunStateChanged?(index, true)
-        refreshDisplay()
+            switch job?.status {
+            case .running, .cancelling:
+                if !wasRunning {
+                    runningIndices.insert(index)
+                    runStartTime[index] = Date()
+                    onRunStateChanged?(index, true)
+                    refreshDisplay()
+                }
+                if let progress = job?.progress {
+                    progressReceived(progress, forSimulationIndex: index)
+                }
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            do {
-                try pipeline.ensureStage(stage, config: config, packageDir: packageDir,
-                                          kicadCliPath: kicadCliPath, kicadQueryHelperPath: helperPath,
-                                          progress: { progress in
-                                              DispatchQueue.main.async {
-                                                  self?.progressReceived(progress, forSimulationIndex: index)
-                                              }
-                                          })
-                DispatchQueue.main.async {
-                    self?.stepFinished(forSimulationIndex: index, error: nil)
+            case .failed(let message):
+                guard wasRunning else { continue }
+                finishTracking(forSimulationIndex: index)
+                errors[index] = message
+                onRunFinished?(index, false)
+                if let jobID = job?.id { JobScheduler.shared.dismiss(jobID: jobID) }
+                refreshDisplay()
+
+            case .queued, nil:
+                guard wasRunning else { continue }
+                finishTracking(forSimulationIndex: index)
+                if pipeline.hasStage(.grid) {
+                    document.updateChangeCount(.changeDone)
+                    onRunFinished?(index, true)
+                } else {
+                    // Cancelled, not failed -- the checkbox's own "Show Grid" state is left as-is
+                    // (unlike the old quiet grid-only fetch's failure path, there's no already-shown
+                    // geometry to protect here: a cancelled .geometryGeneration job never had one).
+                    onRunCancelled?(index)
                 }
-            } catch {
-                DispatchQueue.main.async {
-                    self?.stepFinished(forSimulationIndex: index, error: error)
-                }
+                refreshDisplay()
             }
         }
     }
 
-    /// Common handler for every EMSPipelineProgress report from either runStep()'s or
-    /// runGridOnlyStep()'s own in-flight ensureStage: call -- relayed outward via onProgressChanged
-    /// (for the source-list row) and, if this is the currently-shown simulation, applied to this
-    /// VC's own progress bar/time estimate too.
+    private func finishTracking(forSimulationIndex index: Int) {
+        runningIndices.remove(index)
+        progressFraction[index] = nil
+        runStartTime[index] = nil
+        timeEstimateText[index] = nil
+        // Immediate, not animated -- the bar's about to be hidden by refreshDisplay() below anyway,
+        // but resetting it here (rather than leaving it sitting at its last live value) means the
+        // *next* run for this same simulation starts from a true 0, not an animated slide down from
+        // wherever this one left off.
+        progressBar.doubleValue = 0
+        onRunStateChanged?(index, false)
+    }
+
+    /// Common handler for every EMSPipelineProgress report from this simulation's own
+    /// .geometryGeneration job -- relayed outward via onProgressChanged (for the source-list row)
+    /// and, if this is the currently-shown simulation, applied to this VC's own progress bar/time
+    /// estimate too.
     private func progressReceived(_ progress: EMSPipelineProgress, forSimulationIndex index: Int) {
         progressFraction[index] = progress.fraction
         onProgressChanged?(index, progress)
-        print("[\(simulationName(forIndex: index))] Geometry: \(Int((progress.fraction * 100).rounded()))%")
-        // Simple linear extrapolation from elapsed time and how far through this run we are --
-        // runGridOnlyStep() never sets runStartTime, so this stays nil (-> "Calculating…") for that
-        // path, which is fine since its progress never reaches this VC's own progress bar anyway.
+        // Simple linear extrapolation from elapsed time and how far through this run we are.
         let secondsRemaining: Double?
         if let start = runStartTime[index], progress.fraction > 0 {
             let elapsed = Date().timeIntervalSince(start)
@@ -310,84 +333,5 @@ final class GeometryViewController: NSViewController {
             }
             timeEstimateLabel.stringValue = estimateText
         }
-    }
-
-    private func simulationName(forIndex index: Int) -> String {
-        guard let document, index < document.config.simulations.count else { return "simulation \(index)" }
-        return document.config.simulations[index].name
-    }
-
-    private func stepFinished(forSimulationIndex index: Int, error: Error?) {
-        runningIndices.remove(index)
-        progressFraction[index] = nil
-        runStartTime[index] = nil
-        timeEstimateText[index] = nil
-        // Immediate, not animated -- the bar's about to be hidden by refreshDisplay() below anyway,
-        // but resetting it here (rather than leaving it sitting at its last live value) means the
-        // *next* run for this same simulation starts from a true 0, not an animated slide down from
-        // wherever this one left off.
-        progressBar.doubleValue = 0
-        onRunStateChanged?(index, false)
-        onRunFinished?(index, error == nil)
-        if let error {
-            errors[index] = error.localizedDescription
-        } else {
-            document?.updateChangeCount(.changeDone)
-        }
-        refreshDisplay()
-    }
-
-    /// A quiet, non-blocking follow-up fetch for when "Show Grid" gets checked *after* this
-    /// simulation's geometry is already showing -- unlike runStep(...)/stepFinished(...), this never
-    /// touches runningIndices/onRunStateChanged or hides the already-good geometryView behind the
-    /// "Processing…" status label; refreshDisplay() just picks up the richer (grid-line-including)
-    /// preview once ensureStage:.grid lands.
-    private func runGridOnlyStep(forSimulationIndex index: Int, simulationName: String,
-                                  pipeline: EMSSimulationPipelineBridge) {
-        guard let document else { return }
-        let config = document.config
-        let packageDir = document.pipelineDirectory.path
-        let kicadCliPath = AppPaths.resolveKicadCli()
-        let helperPath = AppPaths.kicadQueryHelperPath
-
-        gridOnlyRunningIndices.insert(index)
-        // Only the *row* spinner, not this VC's own runningIndices/refreshDisplay() -- see this
-        // method's own doc comment for why the main content view must stay untouched here.
-        onRunStateChanged?(index, true)
-
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            do {
-                try pipeline.ensureStage(.grid, config: config, packageDir: packageDir,
-                                          kicadCliPath: kicadCliPath, kicadQueryHelperPath: helperPath,
-                                          progress: { progress in
-                                              DispatchQueue.main.async {
-                                                  self?.progressReceived(progress, forSimulationIndex: index)
-                                              }
-                                          })
-                DispatchQueue.main.async {
-                    self?.gridOnlyStepFinished(forSimulationIndex: index, error: nil)
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self?.gridOnlyStepFinished(forSimulationIndex: index, error: error)
-                }
-            }
-        }
-    }
-
-    private func gridOnlyStepFinished(forSimulationIndex index: Int, error: Error?) {
-        gridOnlyRunningIndices.remove(index)
-        progressFraction[index] = nil
-        onRunStateChanged?(index, false)
-        if error != nil {
-            // The already-shown geometry stays valid and visible; only the overlay itself failed --
-            // uncheck it rather than hiding good geometry behind an error the user didn't cause by
-            // editing anything themselves, and there's no persistent secondary-error UI surface in
-            // this view to show it in without disrupting the main display.
-            gridOverlayEnabled[index] = false
-        } else {
-            document?.updateChangeCount(.changeDone)
-        }
-        refreshDisplay()
     }
 }

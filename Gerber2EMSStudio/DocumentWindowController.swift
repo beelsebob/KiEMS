@@ -54,7 +54,12 @@ final class DocumentWindowController: NSWindowController {
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
-
+    
+    override func windowDidLoad() {
+        super.windowDidLoad()
+        chooseProject()
+    }
+    
     private func buildUI() {
         guard let contentView = window?.contentView else { return }
 
@@ -367,8 +372,12 @@ final class DocumentWindowController: NSWindowController {
             case .geometry:
                 simulationListVC?.setGeometryRowBusy(true, forSimulationIndex: index)
                 simulationListVC?.setGeometryProgress(progress.fraction, forSimulationIndex: index)
-            case .simulation:
-                // Reaching the FDTD phase at all means geometry itself already succeeded.
+            case .settingUp, .simulation:
+                // Reaching either of these phases at all means geometry itself already succeeded.
+                // .settingUp's own `fraction` is always 0 (openEMS gives no real progress signal for
+                // it -- see EMSPipelineProgressPhase's own doc comment), so the row's own progress
+                // ring just sits at 0% (still correctly showing "busy") for that portion -- the real,
+                // ticking countdown lives in SimulationResultsViewController's own bigger status view.
                 simulationListVC?.setGeometryRowCompleted(true, forSimulationIndex: index)
                 simulationListVC?.setSimulationResultsProgress(progress.fraction, forSimulationIndex: index)
             @unknown default:
@@ -388,12 +397,47 @@ final class DocumentWindowController: NSWindowController {
             switch reachedPhase {
             case .geometry:
                 simulationListVC?.setGeometryRowCompleted(success, forSimulationIndex: index)
-            case .simulation:
+            case .settingUp, .simulation:
                 simulationListVC?.setGeometryRowCompleted(true, forSimulationIndex: index)
                 simulationListVC?.setSimulationResultsRowCompleted(success, forSimulationIndex: index)
             @unknown default:
                 break
             }
+        }
+        // A job cancelled (via the Jobs window) rather than genuinely failed -- revert whichever
+        // row(s) were showing progress back to "not started" instead of the yellow error state
+        // onRunFinished(_:_:false) would otherwise show. See GeometryViewController.onRunCancelled's
+        // own doc comment.
+        geometryVC.onRunCancelled = { [weak simulationListVC] index in
+            simulationListVC?.resetGeometryRow(forSimulationIndex: index)
+        }
+        simulationResultsVC.onRunCancelled = { [weak simulationListVC] index, reachedPhase in
+            switch reachedPhase {
+            case .geometry:
+                simulationListVC?.resetGeometryRow(forSimulationIndex: index)
+            case .settingUp, .simulation:
+                // Geometry genuinely finished before the .settingUp/.simulation-phase job was
+                // cancelled -- leave that row showing "completed", only reset the Simulation Results one.
+                simulationListVC?.setGeometryRowCompleted(true, forSimulationIndex: index)
+                simulationListVC?.resetSimulationResultsRow(forSimulationIndex: index)
+            @unknown default:
+                break
+            }
+        }
+        fieldViewerVC.onRunCancelled = { [weak simulationListVC] index in
+            simulationListVC?.resetFieldViewerRow(forSimulationIndex: index)
+        }
+        // Field Viewer's own row -- a plain busy/progress/completed trio like Geometry's own, no
+        // phase-switching needed (see FieldViewerViewController.syncFromScheduler()'s own doc comment
+        // on why its progress is already phase-agnostic).
+        fieldViewerVC.onRunStateChanged = { [weak simulationListVC] index, isRunning in
+            simulationListVC?.setFieldViewerRowBusy(isRunning, forSimulationIndex: index)
+        }
+        fieldViewerVC.onProgressChanged = { [weak simulationListVC] index, progress in
+            simulationListVC?.setFieldViewerProgress(progress.fraction, forSimulationIndex: index)
+        }
+        fieldViewerVC.onRunFinished = { [weak simulationListVC] index, success in
+            simulationListVC?.setFieldViewerRowCompleted(success, forSimulationIndex: index)
         }
         simulationListVC.onSelectionChanged = { [weak self] selection in
             guard let self else { return }
@@ -583,12 +627,12 @@ final class DocumentWindowController: NSWindowController {
 
     @objc private func chooseProject() {
         let panel = NSOpenPanel()
-        panel.canChooseDirectories = false
+        panel.canChooseDirectories = true
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
-        if let kicadProType = UTType(filenameExtension: "kicad_pro") {
-            panel.allowedContentTypes = [kicadProType]
-        }
+        guard let kicadProjectType = UTType(filenameExtension: "kicad_pro"),
+              let kicadPCBType = UTType(filenameExtension: "kicad_pcb") else { return }
+        panel.allowedContentTypes = [kicadProjectType, kicadPCBType, .folder]
         panel.begin { [weak self] response in
             guard response == .OK, let url = panel.url else { return }
             self?.projectSelected(url)
@@ -596,28 +640,71 @@ final class DocumentWindowController: NSWindowController {
     }
     
     private func projectSelected(_ url: URL) {
-        projectPathField.stringValue = url.lastPathComponent
-
-        let directory = url.deletingLastPathComponent()
-        let siblingPCBs =
+        let ext = url.pathExtension
+        
+        if ext == "kicad_pro" {
+            projectPathField.stringValue = url.path(percentEncoded: false)
+            let directory = url.deletingLastPathComponent()
+            let siblingPCBs =
             (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil))?
                 .filter { $0.pathExtension == "kicad_pcb" } ?? []
-        boardCandidates = siblingPCBs
+            boardCandidates = siblingPCBs
+            
+            boardPopUp.removeAllItems()
+            if siblingPCBs.isEmpty {
+                boardPopUp.addItem(withTitle: "No .kicad_pcb found next to this project")
+                boardPopUp.isEnabled = false
+                statusLabel.stringValue = "No board file found alongside \"\(url.lastPathComponent)\"."
+                return
+            }
+            boardPopUp.addItems(withTitles: siblingPCBs.map { $0.lastPathComponent })
+            boardPopUp.isEnabled = true
+            statusLabel.stringValue = ""
+            
+            // The common case (one board per project) skips the extra click.
+            if siblingPCBs.count == 1 {
+                importBoard(siblingPCBs[0])
+            }
+        } else if ext == "kicad_pcb" {
+            let directory = url.deletingLastPathComponent()
+            let siblingProjects =
+            (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil))?
+                .filter { $0.pathExtension == "kicad_pro" } ?? []
+            let projectName = directory.lastPathComponent
+            let projectUrl = siblingProjects.first(where: { $0.lastPathComponent == projectName }) ?? siblingProjects.first
+            projectPathField.stringValue = projectUrl?.path(percentEncoded: false) ?? ""
 
-        boardPopUp.removeAllItems()
-        if siblingPCBs.isEmpty {
-            boardPopUp.addItem(withTitle: "No .kicad_pcb found next to this project")
-            boardPopUp.isEnabled = false
-            statusLabel.stringValue = "No board file found alongside \"\(url.lastPathComponent)\"."
-            return
-        }
-        boardPopUp.addItems(withTitles: siblingPCBs.map { $0.lastPathComponent })
-        boardPopUp.isEnabled = true
-        statusLabel.stringValue = ""
-
-        // The common case (one board per project) skips the extra click.
-        if siblingPCBs.count == 1 {
-            importBoard(siblingPCBs[0])
+            let siblingPCBs =
+            (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil))?
+                .filter { $0.pathExtension == "kicad_pcb" } ?? []
+            boardCandidates = siblingPCBs
+            
+            boardPopUp.removeAllItems()
+            boardPopUp.addItems(withTitles: siblingPCBs.map { $0.lastPathComponent })
+            boardPopUp.isEnabled = true
+            statusLabel.stringValue = url.lastPathComponent
+            
+            importBoard(url)
+        } else {
+            let directory = url
+            let projects =
+            (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil))?
+                .filter { $0.pathExtension == "kicad_pro" } ?? []
+            let projectName = directory.lastPathComponent
+            let projectUrl = projects.first(where: { $0.lastPathComponent == projectName }) ?? projects.first
+            projectPathField.stringValue = projectUrl?.path(percentEncoded: false) ?? ""
+            
+            let siblingPCBs =
+            (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil))?
+                .filter { $0.pathExtension == "kicad_pcb" } ?? []
+            boardCandidates = siblingPCBs
+            
+            boardPopUp.removeAllItems()
+            boardPopUp.addItems(withTitles: siblingPCBs.map { $0.lastPathComponent })
+            boardPopUp.isEnabled = true
+            statusLabel.stringValue = url.lastPathComponent
+            
+            importBoard(url)
         }
     }
 

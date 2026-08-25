@@ -197,6 +197,15 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
                     excluded.end());
 }
 
+- (nullable NSNumber*)directionOverrideWithFootprint:(NSString*)footprint pin:(NSString*)pin {
+    const auto value = self.cxxNet.pinDirectionOverride(footprint.UTF8String, pin.UTF8String);
+    return value.has_value() ? @(*value) : nil;
+}
+- (void)setDirectionOverride:(nullable NSNumber*)direction withFootprint:(NSString*)footprint pin:(NSString*)pin {
+    self.cxxNet.setPinDirectionOverride(footprint.UTF8String, pin.UTF8String,
+                                         direction != nil ? std::optional<double>(direction.doubleValue) : std::nullopt);
+}
+
 @end
 
 // Not cached, for the same reason as EMSInvolvedNetBridge.

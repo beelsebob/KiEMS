@@ -62,7 +62,7 @@ final class UnitSuffixValueFormatter: Formatter {
         // No plain parse -- try stripping a single case-sensitive SI-prefix character (e.g. the
         // "k" left over after "5kHz" has its "Hz" suffix stripped above) and rescale.
         if let lastChar = trimmed.last, let prefix = SIPrefix.matching(symbol: String(lastChar)) {
-            let withoutPrefix = String(trimmed.dropLast()).trimmingCharacters(in: .whitespaces)
+            let withoutPrefix = String(trimmed.dropLast()).trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: ",'"))
             if let value = Double(withoutPrefix) {
                 obj?.pointee = NSNumber(value: value * prefix.factor)
                 return true

@@ -38,17 +38,20 @@ final class FieldViewerViewController: NSViewController {
     private var currentIndex: Int?
 
     /// Fired whenever a given simulation's Field Viewer step starts/finishes running -- see
-    /// GeometryViewController's identical property for the intended DocumentWindowController relay
-    /// (not currently wired to the source-list row's own spinner -- see SimulationListViewController's
-    /// own doc comment on the Field Viewer row still being a static "Not a pipeline stage yet" --
-    /// kept here anyway for parity/future wiring, matching this codebase's other view controllers).
+    /// GeometryViewController's identical property. Now genuinely wired to the source-list row's own
+    /// spinner (see SimulationListViewController.setFieldViewerRowBusy/etc.) -- JobScheduler tracks
+    /// .fieldPostProcessing as a real job, so the Field Viewer row is no longer the static "Not a
+    /// pipeline stage yet" placeholder it used to be.
     var onRunStateChanged: ((Int, Bool) -> Void)?
     var onRunFinished: ((Int, Bool) -> Void)?
     var onProgressChanged: ((Int, EMSPipelineProgress) -> Void)?
+    /// See GeometryViewController.onRunCancelled's identical doc comment.
+    var onRunCancelled: ((Int) -> Void)?
 
     init(document: Document) {
         self.document = document
         super.init(nibName: nil, bundle: nil)
+        JobScheduler.shared.addChangeObserver { [weak self] in self?.syncFromScheduler() }
     }
 
     @available(*, unavailable)
@@ -176,9 +179,12 @@ final class FieldViewerViewController: NSViewController {
 
         guard let document, index < document.config.simulations.count else { return }
         let name = document.config.simulations[index].name
-        let pipeline = document.pipeline(forSimulationNamed: name)
-        guard !pipeline.hasStage(.results), errors[index] == nil, !runningIndices.contains(index) else { return }
-        runStep(forSimulationIndex: index, simulationName: name, pipeline: pipeline)
+        // request(...) is a cheap no-op if .fieldPostProcessing (and everything it depends on) is
+        // already cached -- no separate hasStage(...) guard needed here the way the other two VCs
+        // use one purely as an optimization; errors[index]/runningIndices still guard against
+        // re-requesting while this simulation is already showing an error or mid-run.
+        guard errors[index] == nil, !runningIndices.contains(index) else { return }
+        JobScheduler.shared.request(document: document, simulationName: name, target: .fieldPostProcessing)
     }
 
     /// Called by DocumentWindowController whenever something that would change this simulation's
@@ -195,6 +201,10 @@ final class FieldViewerViewController: NSViewController {
         guard let currentIndex, let document, currentIndex < document.config.simulations.count else { return }
         let name = document.config.simulations[currentIndex].name
         let pipeline = document.pipeline(forSimulationNamed: name)
+        // Reset to the normal determinate bar by default -- only the .settingUp branch below turns
+        // indeterminate animation back on.
+        progressBar.stopAnimation(nil)
+        progressBar.isIndeterminate = false
 
         if pipeline.hasStage(.results), let snapshot = pipeline.fieldSnapshot() {
             // fieldSnapshot before preview, not the other way round -- preview's own didSet reads
@@ -212,20 +222,39 @@ final class FieldViewerViewController: NSViewController {
             updateTransport(for: snapshot)
         } else if let error = errors[currentIndex] {
             fieldView.isHidden = true
-            statusLabel.stringValue = error
+            // See GeometryViewController's identical use of this -- renders an embedded net name's
+            // own markup (sub/superscript, negation, an escaped "/") correctly instead of showing it
+            // as literal, unformatted tokens.
+            statusLabel.attributedStringValue = NetNameFormatting.attributedString(
+                embeddingNetNamesIn: error, font: statusLabel.font ?? .systemFont(ofSize: NSFont.systemFontSize))
             statusLabel.isHidden = false
             progressBar.isHidden = true
             timeEstimateLabel.isHidden = true
             hideTransport()
         } else if runningIndices.contains(currentIndex) {
             fieldView.isHidden = true
-            statusLabel.stringValue = "Running simulation…\n\nA full FDTD run can take several minutes."
+            let isSettingUp = latestProgress[currentIndex]?.phase == .settingUp
+            statusLabel.stringValue = isSettingUp
+                ? "Setting up Simulation…"
+                : "Running simulation…\n\nA full FDTD run can take several minutes."
             statusLabel.isHidden = false
-            progressBar.doubleValue = latestProgress[currentIndex]?.fraction ?? 0
+            // .settingUp has no fraction of any kind to show (openEMS gives no progress hook into its
+            // own setup call at all -- see EMSPipelineProgressPhase's own doc comment) -- a real,
+            // animated indeterminate bar is the honest thing to show instead of guessing a duration.
+            if isSettingUp {
+                progressBar.isIndeterminate = true
+                progressBar.startAnimation(nil)
+            } else {
+                progressBar.doubleValue = latestProgress[currentIndex]?.fraction ?? 0
+            }
             progressBar.isHidden = false
-            timeEstimateLabel.stringValue = timeEstimateText[currentIndex]
-                ?? TimeRemainingFormatter.string(secondsRemaining: nil)
-            timeEstimateLabel.isHidden = false
+            if isSettingUp {
+                timeEstimateLabel.isHidden = true
+            } else {
+                timeEstimateLabel.stringValue = timeEstimateText[currentIndex]
+                    ?? TimeRemainingFormatter.string(secondsRemaining: nil)
+                timeEstimateLabel.isHidden = false
+            }
             hideTransport()
         } else {
             fieldView.isHidden = true
@@ -340,70 +369,100 @@ final class FieldViewerViewController: NSViewController {
         playPauseButton.image = NSImage(systemSymbolName: name, accessibilityDescription: description)
     }
 
-    private func runStep(forSimulationIndex index: Int, simulationName: String, pipeline: EMSSimulationPipelineBridge) {
+    /// Called from JobScheduler.shared's onChange notification -- see
+    /// GeometryViewController.syncFromScheduler()'s identical-in-spirit doc comment. Watches all
+    /// three of this simulation's own prerequisite jobs (.geometryGeneration -> .simulation ->
+    /// .fieldPostProcessing), not just the last one -- the real, potentially slow FDTD work happens
+    /// in the first two, well before .fieldPostProcessing's own (near-instant) job ever exists, so
+    /// this VC's "is something in progress for me" state has to track whichever of the three is
+    /// currently the active one, the same way SimulationResultsViewController does for its own
+    /// two-job chain. progressReceived(...) here is already phase-agnostic (just fraction/time
+    /// estimate, no per-phase row to choose between), so forwarding progress from any of the three
+    /// through it unchanged is correct as-is.
+    private func syncFromScheduler() {
         guard let document else { return }
-        let config = document.config
-        let packageDir = document.pipelineDirectory.path
-        let kicadCliPath = AppPaths.resolveKicadCli()
-        let helperPath = AppPaths.kicadQueryHelperPath
+        for index in 0..<document.config.simulations.count {
+            let name = document.config.simulations[index].name
+            let pipeline = document.pipeline(forSimulationNamed: name)
+            let geometryJob = JobScheduler.shared.job(document: document, simulationName: name, kind: .geometryGeneration)
+            let simulationJob = JobScheduler.shared.job(document: document, simulationName: name, kind: .simulation)
+            let fieldJob = JobScheduler.shared.job(document: document, simulationName: name, kind: .fieldPostProcessing)
+            let activeJob = fieldJob ?? simulationJob ?? geometryJob
+            let wasRunning = runningIndices.contains(index)
 
-        runningIndices.insert(index)
-        runStartTime[index] = Date()
-        onRunStateChanged?(index, true)
-        refreshDisplay()
+            switch activeJob?.status {
+            case .running, .cancelling:
+                if !wasRunning {
+                    runningIndices.insert(index)
+                    runStartTime[index] = Date()
+                    onRunStateChanged?(index, true)
+                    refreshDisplay()
+                }
+                if let progress = activeJob?.progress {
+                    progressReceived(progress, forSimulationIndex: index)
+                }
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            do {
-                try pipeline.ensureStage(.results, config: config, packageDir: packageDir,
-                                          kicadCliPath: kicadCliPath, kicadQueryHelperPath: helperPath,
-                                          progress: { progress in
-                                              DispatchQueue.main.async {
-                                                  self?.progressReceived(progress, forSimulationIndex: index)
-                                              }
-                                          })
-                DispatchQueue.main.async {
-                    self?.stepFinished(forSimulationIndex: index, error: nil)
+            case .failed(let message):
+                guard wasRunning else { continue }
+                finishTracking(forSimulationIndex: index)
+                errors[index] = message
+                onRunFinished?(index, false)
+                if let jobID = activeJob?.id { JobScheduler.shared.dismiss(jobID: jobID) }
+                refreshDisplay()
+
+            case .queued, nil:
+                guard wasRunning else { continue }
+                finishTracking(forSimulationIndex: index)
+                if pipeline.fieldSnapshot() != nil {
+                    onRunFinished?(index, true)
+                } else {
+                    onRunCancelled?(index)
                 }
-            } catch {
-                DispatchQueue.main.async {
-                    self?.stepFinished(forSimulationIndex: index, error: error)
-                }
+                refreshDisplay()
             }
         }
     }
 
-    private func progressReceived(_ progress: EMSPipelineProgress, forSimulationIndex index: Int) {
-        latestProgress[index] = progress
-        onProgressChanged?(index, progress)
-        let secondsRemaining: Double?
-        if let start = runStartTime[index], progress.fraction > 0 {
-            let elapsed = Date().timeIntervalSince(start)
-            secondsRemaining = max(0, elapsed / progress.fraction - elapsed)
-        } else {
-            secondsRemaining = nil
-        }
-        let estimateText = TimeRemainingFormatter.string(secondsRemaining: secondsRemaining)
-        timeEstimateText[index] = estimateText
-        if currentIndex == index, runningIndices.contains(index) {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.2
-                progressBar.animator().doubleValue = progress.fraction
-            }
-            timeEstimateLabel.stringValue = estimateText
-        }
-    }
-
-    private func stepFinished(forSimulationIndex index: Int, error: Error?) {
+    private func finishTracking(forSimulationIndex index: Int) {
         runningIndices.remove(index)
         latestProgress[index] = nil
         runStartTime[index] = nil
         timeEstimateText[index] = nil
         progressBar.doubleValue = 0
         onRunStateChanged?(index, false)
-        onRunFinished?(index, error == nil)
-        if let error {
-            errors[index] = error.localizedDescription
+    }
+
+    private func progressReceived(_ progress: EMSPipelineProgress, forSimulationIndex index: Int) {
+        latestProgress[index] = progress
+        onProgressChanged?(index, progress)
+        // .settingUp (openEMS's own silent SetupFDTD() call -- see EMSPipelineProgressPhase's own doc
+        // comment) has no fraction of any kind to extrapolate a remaining time from -- refreshDisplay()
+        // shows a plain indeterminate bar and no time-estimate text for it instead of guessing.
+        if progress.phase != .settingUp {
+            let secondsRemaining: Double?
+            if let start = runStartTime[index], progress.fraction > 0 {
+                let elapsed = Date().timeIntervalSince(start)
+                secondsRemaining = max(0, elapsed / progress.fraction - elapsed)
+            } else {
+                secondsRemaining = nil
+            }
+            timeEstimateText[index] = TimeRemainingFormatter.string(secondsRemaining: secondsRemaining)
         }
-        refreshDisplay()
+        if currentIndex == index, runningIndices.contains(index) {
+            if progress.phase == .settingUp {
+                progressBar.isIndeterminate = true
+                progressBar.startAnimation(nil)
+                timeEstimateLabel.isHidden = true
+            } else {
+                progressBar.stopAnimation(nil)
+                progressBar.isIndeterminate = false
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.2
+                    progressBar.animator().doubleValue = progress.fraction
+                }
+                timeEstimateLabel.isHidden = false
+                timeEstimateLabel.stringValue = timeEstimateText[index] ?? TimeRemainingFormatter.string(secondsRemaining: nil)
+            }
+        }
     }
 }

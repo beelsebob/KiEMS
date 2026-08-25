@@ -39,6 +39,58 @@ enum NetNameFormatting {
         return result
     }
 
+    /// Renders `message` (a full English sentence libgerber2ems built, e.g. a pipeline error) mostly
+    /// as plain text, except substrings the message itself double-quotes -- every C++ site that
+    /// interpolates a net name, footprint reference, or layer name into a message wraps it in literal
+    /// `"..."` this way, consistently, so quote-splitting is a reliable way to find embedded
+    /// identifiers in an otherwise-opaque prose string without libgerber2ems having to mark them up
+    /// any more explicitly than it already does. Each quoted substring is run through
+    /// segments(for:font:), so a net name's own sub/superscript/negation markup (e.g. "GND_{1}" or
+    /// "~{RESET}") renders correctly wherever it happens to appear inside a full message, not just in
+    /// the source list. Harmless when a quoted substring isn't actually a net name (a footprint
+    /// reference or layer name, say): segments(for:font:) only treats `_{...}`/`^{...}`/`~{...}`/
+    /// `{slash}` specially, none of which are otherwise meaningful there, so plain quoted text just
+    /// passes through unchanged. An odd number of quote characters (a malformed message) degrades to
+    /// treating everything after the last one as quoted -- never worse than showing it as plain text.
+    ///
+    /// `maxPlainTextLength` caps how many characters of *plain* (unquoted) prose this will show in
+    /// total before cutting the rest with a plain "…" -- deliberately not a cap on the message as a
+    /// whole: AppKit's own line-break/truncation modes operate on a whole line with no concept of a
+    /// protected range, so the only way to guarantee a quoted identifier is never the part an
+    /// ellipsis lands inside of is to do the fitting ourselves, here, before AppKit ever sees the
+    /// final string -- every quoted segment is always included in full, whatever its own length,
+    /// with only the surrounding prose ever counted against the budget. If a message is still too
+    /// long after that (a pathologically long net name, say), that's the caller's own layout to
+    /// handle -- this only ever protects *which part* gets shortened, not a hard total-size promise.
+    static func attributedString(embeddingNetNamesIn message: String, font: NSFont,
+                                  maxPlainTextLength: Int = 220) -> NSAttributedString {
+        let result = NSMutableAttributedString()
+        let quoteAttributes: [NSAttributedString.Key: Any] = [.font: font]
+        var isInsideQuotes = false
+        var plainTextBudgetRemaining = maxPlainTextLength
+        for component in message.split(separator: "\"", omittingEmptySubsequences: false) {
+            defer { isInsideQuotes.toggle() }
+            if isInsideQuotes {
+                // Never counted against the budget, and never itself truncated -- see this method's
+                // own doc comment on why a quoted identifier is always shown whole or not at all.
+                result.append(NSAttributedString(string: "\"", attributes: quoteAttributes))
+                result.append(attributedString(for: String(component), font: font))
+                result.append(NSAttributedString(string: "\"", attributes: quoteAttributes))
+                continue
+            }
+            guard plainTextBudgetRemaining > 0 else { continue }
+            if component.count <= plainTextBudgetRemaining {
+                result.append(NSAttributedString(string: String(component), attributes: quoteAttributes))
+                plainTextBudgetRemaining -= component.count
+            } else {
+                let cutoff = component.index(component.startIndex, offsetBy: plainTextBudgetRemaining)
+                result.append(NSAttributedString(string: component[..<cutoff] + "…", attributes: quoteAttributes))
+                plainTextBudgetRemaining = 0
+            }
+        }
+        return result
+    }
+
     /// `baselineOffset`/`isOverlined` are whatever every enclosing `_{}`/`^{}`/`~{}` section (if any)
     /// already contributed -- a section nested inside another compounds on top of it (e.g. a
     /// subscript nested inside a negated section is both smaller/lowered *and* overlined), rather

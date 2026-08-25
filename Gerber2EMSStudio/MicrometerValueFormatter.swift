@@ -77,7 +77,7 @@ final class MicrometerValueFormatter: Formatter {
 
         // Split off a trailing non-numeric unit suffix, if any (e.g. "5 mil", "0.5in", "12.7\"") --
         // everything after the last digit-or-decimal-point character.
-        if let numberEndIndex = text.lastIndex(where: { $0.isNumber || $0 == "." }) {
+        if let numberEndIndex = text.lastIndex(where: { $0.isNumber || "+-.,'e".contains($0)}) {
             let suffixStart = text.index(after: numberEndIndex)
             let suffix = String(text[suffixStart...])
             if !suffix.isEmpty {

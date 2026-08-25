@@ -177,6 +177,13 @@ final class SourceListViewController: NSViewController {
     private let dBMarginField = NSTextField(string: "")
     private let directionPopUp = NSPopUpButton()
     private let customDirectionField = NSTextField(string: "")
+    // Only meaningful (and only ever shown) for a .pin node -- a per-pad escape hatch on top of
+    // directionPopUp/customDirectionField's own net-wide value, for when opposite ends of a routed
+    // net depart their own pads in different cardinal directions and one net-wide value can't be
+    // right for both. See gerber2ems::PinDirectionOverride's own doc comment.
+    private let pinDirectionOverridePopUp = NSPopUpButton()
+    private let pinDirectionOverrideCustomField = NSTextField(string: "")
+    private var pinDirectionOverrideRow: NSView!
     // Styled like DocumentWindowController's noSelectionLabel ("No Simulation Selected") -- same
     // "big, muted placeholder text" look for the same kind of "nothing to show here yet" state.
     private let detailStatusLabel: NSTextField = {
@@ -236,7 +243,9 @@ final class SourceListViewController: NSViewController {
         displaySuffix: "Hz", acceptedSuffixes: ["hertz", "hz"], autoSelectsSIPrefix: true)
     private let phaseFormatter = PhaseValueFormatter()
     private var excitationFieldsContainer: NSStackView!
-    private var frequencyAmplitudeRows: [NSView] = []
+    /// Hidden for a main excitation -- see populateExcitationFields(from:)'s own comment on why
+    /// frequency (unlike amplitude, see amplitudeField's own row) has no meaning there.
+    private var frequencyOnlyRows: [NSView] = []
 
     private var rootNodes: [SourceListNode] = []
     private var selectedNode: SourceListNode?
@@ -477,6 +486,20 @@ final class SourceListViewController: NSViewController {
         customDirectionField.action = #selector(detailFieldChanged(_:))
         customDirectionField.widthAnchor.constraint(equalToConstant: 80).isActive = true
 
+        // Same DirectionKind cases as directionPopUp (so the index<->case mapping stays the same
+        // helper functions), but with .auto's own title swapped for this control's own meaning here
+        // ("no override for this one pad", not "derive from copper").
+        pinDirectionOverridePopUp.addItems(withTitles: DirectionKind.allCases.map(\.title))
+        pinDirectionOverridePopUp.item(at: DirectionKind.auto.rawValue)?.title = "No Override"
+        pinDirectionOverridePopUp.target = self
+        pinDirectionOverridePopUp.action = #selector(pinDirectionOverrideChanged)
+
+        pinDirectionOverrideCustomField.formatter = Self.directionFormatter
+        pinDirectionOverrideCustomField.alignment = .right
+        pinDirectionOverrideCustomField.target = self
+        pinDirectionOverrideCustomField.action = #selector(pinDirectionOverrideCustomFieldChanged)
+        pinDirectionOverrideCustomField.widthAnchor.constraint(equalToConstant: 80).isActive = true
+
         excitationSeparator.wantsLayer = true
         excitationSeparator.layer?.backgroundColor = NSColor.separatorColor.cgColor
         excitationSeparator.heightAnchor.constraint(equalToConstant: 1).isActive = true
@@ -509,8 +532,15 @@ final class SourceListViewController: NSViewController {
         }
 
         let frequencyRow = labeled("Frequency:", frequencyField)
+        // Shown for both main and non-main excitations -- a main excitation always uses the
+        // simulation's own sweep frequency (see frequencyOnlyRows), but its amplitude is still
+        // independently meaningful: e.g. giving one leg of a differential pair a second main
+        // excitation at amplitude -1.0 (relative to the first leg's implicit 1.0) reconstructs the
+        // pair's differential drive during postprocessing without needing a separate, narrowband
+        // non-main excitation for it. See ExcitationPostprocessor::run()'s use of
+        // excitation.amplitude().value_or(1.0) for main excitations.
         let amplitudeRow = labeled("Relative Amplitude:", amplitudeField)
-        frequencyAmplitudeRows = [frequencyRow, amplitudeRow]
+        frequencyOnlyRows = [frequencyRow]
 
         excitationFieldsContainer = NSStackView(views: [
             checkboxRow(mainExcitationCheckbox, title: "Main Excitation"),
@@ -546,6 +576,11 @@ final class SourceListViewController: NSViewController {
         directionRow.orientation = .horizontal
         directionRow.spacing = 8
         let directionLabeledRow = labeled("Direction:", directionRow)
+
+        let pinDirectionOverrideInnerRow = NSStackView(views: [pinDirectionOverridePopUp, pinDirectionOverrideCustomField])
+        pinDirectionOverrideInnerRow.orientation = .horizontal
+        pinDirectionOverrideInnerRow.spacing = 8
+        pinDirectionOverrideRow = labeled("This Pad's Direction:", pinDirectionOverrideInnerRow, labelWidth: 150)
 
         widthDBAdvancedRow = NSStackView(views: [
             labeled("Width override:", widthField),
@@ -1086,6 +1121,12 @@ final class SourceListViewController: NSViewController {
             let kind = DirectionKind.kind(for: entry.direction?.doubleValue)
             directionPopUp.selectItem(at: kind.rawValue)
             customDirectionField.doubleValue = entry.direction?.doubleValue ?? 0
+            if case .pin(let footprintReference, let pin) = node.kind {
+                let override = entry.directionOverride(withFootprint: footprintReference, pin: pin.number)
+                let overrideKind = DirectionKind.kind(for: override?.doubleValue)
+                pinDirectionOverridePopUp.selectItem(at: overrideKind.rawValue)
+                pinDirectionOverrideCustomField.doubleValue = override?.doubleValue ?? 0
+            }
         } else {
             includedCheckbox.state = .off
             impedanceField.stringValue = ""
@@ -1095,8 +1136,11 @@ final class SourceListViewController: NSViewController {
             dBMarginField.stringValue = ""
             directionPopUp.selectItem(at: DirectionKind.auto.rawValue)
             customDirectionField.stringValue = ""
+            pinDirectionOverridePopUp.selectItem(at: DirectionKind.auto.rawValue)
+            pinDirectionOverrideCustomField.stringValue = ""
         }
         updateCustomDirectionFieldVisibility()
+        updatePinDirectionOverrideCustomFieldVisibility()
         updateValueFieldsVisibility()
 
         // Excitations are per-pin only -- hidden entirely for a net/net-class selection, and
@@ -1126,9 +1170,14 @@ final class SourceListViewController: NSViewController {
         phaseField.doubleValue = excitation.phaseDegrees
         frequencyField.objectValue = excitation.frequency
         amplitudeField.objectValue = excitation.amplitude
-        // frequency()/amplitude() are only meaningful (and only required) for a non-main excitation
-        // -- matches ExcitationConfig::frequency()/amplitude()'s "required iff !isMain()" contract.
-        for row in frequencyAmplitudeRows {
+        // frequency() is only meaningful (and only required) for a non-main excitation -- a main
+        // excitation always drives at the simulation's own sweep frequency, matching
+        // ExcitationConfig::frequency()'s "required iff !isMain()" contract. amplitude() stays
+        // shown either way: for a non-main excitation it's required (the tone burst's own level);
+        // for a main one it's optional and defaults to 1.0 (the FDTD's real per-port drive level)
+        // if left blank -- only worth setting explicitly to give a second main excitation on the
+        // same net (a differential pair's other leg, say) a different relative level or sign.
+        for row in frequencyOnlyRows {
             row.isHidden = excitation.isMain
         }
     }
@@ -1140,14 +1189,16 @@ final class SourceListViewController: NSViewController {
                 row.isHidden = true
             }
             widthDBAdvancedRow.isHidden = true
+            pinDirectionOverrideRow.isHidden = true
             excitedRow.isHidden = true
             excitationSeparatorRow.isHidden = true
             excitationFieldsContainer.isHidden = true
         }
-        // When becoming visible (hidden == false), valueFieldRows'/widthDBAdvancedRow's visibility is
-        // driven separately by updateValueFieldsVisibility() (showDetail calls it once
-        // includedCheckbox's state is known), and excitedRow/excitationSeparatorRow visibility by
-        // showDetail's own pin-and-included check.
+        // When becoming visible (hidden == false), valueFieldRows'/widthDBAdvancedRow's/
+        // pinDirectionOverrideRow's visibility is driven separately by updateValueFieldsVisibility()/
+        // showDetail's own node-kind check (showDetail calls it once includedCheckbox's state is
+        // known), and excitedRow/excitationSeparatorRow visibility by showDetail's own
+        // pin-and-included check.
     }
 
     /// The value fields (Impedance/Length/Reference Plane, plus Width override/dB margin override
@@ -1159,6 +1210,10 @@ final class SourceListViewController: NSViewController {
             row.isHidden = !included
         }
         widthDBAdvancedRow.isHidden = !included || !widthDBAdvancedRowExpanded
+        // Only meaningful for a specific pad, not a whole net/net-class -- see
+        // pinDirectionOverrideRow's own declaration comment.
+        let isPinNode: Bool = { if case .pin = selectedNode?.kind { return true } else { return false } }()
+        pinDirectionOverrideRow.isHidden = !included || !isPinNode
     }
 
     /// customDirectionField only makes sense (and is only shown) once "Custom" is picked -- every
@@ -1166,6 +1221,12 @@ final class SourceListViewController: NSViewController {
     /// names (.north/.south/.east/.west), so a free-text field next to them would just be confusing.
     private func updateCustomDirectionFieldVisibility() {
         customDirectionField.isHidden = DirectionKind(rawValue: directionPopUp.indexOfSelectedItem) != .custom
+    }
+
+    /// Same as updateCustomDirectionFieldVisibility, for pinDirectionOverrideCustomField.
+    private func updatePinDirectionOverrideCustomFieldVisibility() {
+        pinDirectionOverrideCustomField.isHidden =
+            DirectionKind(rawValue: pinDirectionOverridePopUp.indexOfSelectedItem) != .custom
     }
 
     @objc private func directionChanged() {
@@ -1185,6 +1246,42 @@ final class SourceListViewController: NSViewController {
             customDirectionField.doubleValue = entry.direction?.doubleValue ?? customDirectionField.doubleValue
             entry.direction = NSNumber(value: customDirectionField.doubleValue)
         }
+        document?.updateChangeCount(.changeDone)
+        onInvolvedNetsChanged?()
+    }
+
+    /// Same as directionChanged(), but for this one pad's own override -- see
+    /// pinDirectionOverrideRow's own declaration comment. Only reachable for a .pin node (the row
+    /// is hidden otherwise), so footprintReference/pin are always available here.
+    @objc private func pinDirectionOverrideChanged() {
+        guard let node = selectedNode, case .pin(let footprintReference, let pin) = node.kind,
+              let entry = matchingEntry(for: node),
+              let kind = DirectionKind(rawValue: pinDirectionOverridePopUp.indexOfSelectedItem)
+        else { return }
+        updatePinDirectionOverrideCustomFieldVisibility()
+        switch kind {
+        case .auto:
+            entry.setDirectionOverride(nil, withFootprint: footprintReference, pin: pin.number)
+        case .north, .south, .east, .west:
+            entry.setDirectionOverride(kind.fixedDegrees.map { NSNumber(value: $0) }, withFootprint: footprintReference,
+                                        pin: pin.number)
+        case .custom:
+            pinDirectionOverrideCustomField.doubleValue =
+                entry.directionOverride(withFootprint: footprintReference, pin: pin.number)?.doubleValue
+                    ?? pinDirectionOverrideCustomField.doubleValue
+            entry.setDirectionOverride(NSNumber(value: pinDirectionOverrideCustomField.doubleValue),
+                                        withFootprint: footprintReference, pin: pin.number)
+        }
+        document?.updateChangeCount(.changeDone)
+        onInvolvedNetsChanged?()
+    }
+
+    @objc private func pinDirectionOverrideCustomFieldChanged() {
+        guard let node = selectedNode, case .pin(let footprintReference, let pin) = node.kind,
+              let entry = matchingEntry(for: node)
+        else { return }
+        entry.setDirectionOverride(NSNumber(value: pinDirectionOverrideCustomField.doubleValue),
+                                    withFootprint: footprintReference, pin: pin.number)
         document?.updateChangeCount(.changeDone)
         onInvolvedNetsChanged?()
     }
@@ -1367,6 +1464,18 @@ extension SourceListViewController: NSSplitViewDelegate {
                     ofSubviewAt dividerIndex: Int) -> CGFloat {
         // Keeps the detail pane from being squeezed away entirely.
         proposedMaximumPosition - 220
+    }
+
+    /// The actual mechanism keeping leftColumn's width fixed while the window resizes (holding
+    /// priority alone, set on splitView in buildUI, turned out not to be reliable here -- both
+    /// panes still ended up sharing a window-resize delta rather than detailPane absorbing all of
+    /// it). Returning false for leftColumn (subview 0) tells the split view not to touch its size at
+    /// all when *the split view itself* is resized, leaving detailPane (subview 1, the only other
+    /// arranged subview, so implicitly true) to take 100% of the delta -- this only governs
+    /// frame-driven resizing, not the user dragging the divider by hand, which still works exactly
+    /// as before.
+    func splitView(_ splitView: NSSplitView, shouldAdjustSizeOfSubview subview: NSView) -> Bool {
+        subview !== splitView.arrangedSubviews.first
     }
 }
 

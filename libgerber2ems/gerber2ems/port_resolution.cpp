@@ -9,6 +9,7 @@
 #include <numbers>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -28,6 +29,24 @@ using libkicad_query::PadIdentity;
 
 std::string _normalizeLayerName(std::string name) {
     std::replace(name.begin(), name.end(), '.', '_');
+    return name;
+}
+
+// KiCad reserves a bare "/" as its hierarchical-sheet path separator within a net name, so a net
+// actually named with a literal slash in it comes back from libkicad already escaped as "{slash}"
+// (see Gerber2EMSStudio/NetNameFormatting.swift's own doc comment for the fuller picture, including
+// the other markup tokens KiCad net names can carry -- this is deliberately just the one token that
+// renders wrong as plain, unformatted text, which is all a std::string error/log message ever is).
+// Every net name this file interpolates into a human-facing message should be passed through this
+// first -- but never the net name used as an actual libkicad_query lookup KEY, which must stay in
+// KiCad's own escaped form to match correctly.
+std::string _unescapeForDisplay(std::string name) {
+    constexpr std::string_view kEscapedSlash = "{slash}";
+    std::size_t pos = 0;
+    while ((pos = name.find(kEscapedSlash, pos)) != std::string::npos) {
+        name.replace(pos, kEscapedSlash.size(), "/");
+        pos += 1;
+    }
     return name;
 }
 
@@ -139,8 +158,16 @@ constexpr double kMinPositionToleranceSimUnits = 50.0; // 5 microns, at 10 sim-u
 // Real trace-to-pad connections often land near the pad's edge rather than its geometric center
 // (e.g. a large/elongated SMD pad on a connector), so the search radius has to scale with the pad
 // itself -- half its diagonal covers any point on its (possibly rotated) outline -- plus a fixed
-// margin for the small extension KiCad's plotter typically adds at a pad/track junction.
-constexpr double kPadToleranceMarginMm = 0.1;
+// margin for the small extension KiCad's plotter typically adds at a pad/track junction. This
+// margin is a fixed physical distance, not scaled with pad size, because a teardrop/fillet lead-in
+// (the thing this margin exists to search past) is roughly a fixed real-world size regardless of
+// how small the pad itself is -- confirmed against a real, tiny (0.46x0.4mm) capacitor pad whose
+// own curved lead-in didn't straighten out to a cardinal angle until ~0.35mm from the pad center,
+// which the previous, smaller 0.1mm margin didn't reach at all (see _deriveDirection's own
+// candidate search -- it already takes the first candidate, ordered nearest-first, that actually
+// snaps to cardinal, so widening this margin only ever adds *more distant* candidates to consider,
+// never changes which nearer one wins if one already qualified).
+constexpr double kPadToleranceMarginMm = 0.4;
 constexpr double kDirectionToleranceDegrees = 5.0;
 
 double _padSearchToleranceSimUnits(double padWidthMm, double padHeightMm) {
@@ -201,7 +228,7 @@ std::expected<double, std::string> _deriveDirection(_CopperLayerCache& cache, co
               [](const Candidate& a, const Candidate& b) { return a.distance < b.distance; });
 
     if (candidates.empty()) {
-        return std::unexpected("Could not find net \"" + netName +
+        return std::unexpected("Could not find net \"" + _unescapeForDisplay(netName) +
                                 "\"'s own routed copper departing pad for port " + portLabel +
                                 " -- set an explicit \"direction\" override for this involved_nets entry");
     }
@@ -215,7 +242,8 @@ std::expected<double, std::string> _deriveDirection(_CopperLayerCache& cache, co
         }
     }
 
-    return std::unexpected("Net \"" + netName + "\"'s routed copper departs pad for port " + portLabel +
+    return std::unexpected("Net \"" + _unescapeForDisplay(netName) + "\"'s routed copper departs pad for port " +
+                            portLabel +
                             " at a non-cardinal angle -- set an explicit \"direction\" override for this "
                             "involved_nets entry");
 }
@@ -245,7 +273,7 @@ std::expected<void, std::string> _resolvePortRef(const PathsConfig& paths, PortR
     const PadIdentity& resolved = *resolvedResult;
     if (std::find(involvedNets.begin(), involvedNets.end(), resolved.netName) == involvedNets.end()) {
         return std::unexpected("Simulation \"" + simName + "\": " + fieldLabel + " (" + ref.footprint() + "." +
-                                ref.pin() + ", net \"" + resolved.netName +
+                                ref.pin() + ", net \"" + _unescapeForDisplay(resolved.netName) +
                                 "\") is not part of this simulation's involved_nets");
     }
     const std::optional<std::int32_t> portIndex = index.find(resolved.footprintRef, resolved.padNumber);
@@ -289,7 +317,7 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
             for (const std::string& netName : *nets) {
                 const auto [it, inserted] = netOwner.emplace(netName, &entry);
                 if (!inserted) {
-                    return std::unexpected("Simulation \"" + sim.name() + "\": net \"" + netName +
+                    return std::unexpected("Simulation \"" + sim.name() + "\": net \"" + _unescapeForDisplay(netName) +
                                             "\" is claimed by more than one involved_nets entry");
                 }
                 orderedNets.push_back(netName);
@@ -303,12 +331,13 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
         for (const std::string& netName : orderedNets) {
             const InvolvedNetConfig& entry = *netOwner.at(netName);
             auto padsResult = libkicad_query::padsOnNet(
-                paths, netName, "Simulation \"" + sim.name() + "\": enumerating pads on net \"" + netName + "\"");
+                paths, netName,
+                "Simulation \"" + sim.name() + "\": enumerating pads on net \"" + _unescapeForDisplay(netName) + "\"");
             if (!padsResult) return std::unexpected(std::move(padsResult).error());
             const std::vector<PadIdentity>& pads = *padsResult;
 
             if (pads.size() > 32) {
-                logWarning("Simulation \"" + sim.name() + "\": net \"" + netName + "\" resolved to " +
+                logWarning("Simulation \"" + sim.name() + "\": net \"" + _unescapeForDisplay(netName) + "\" resolved to " +
                            std::to_string(pads.size()) +
                            " pads -- confirm this is intended (a broad net_class or a power/ground net will "
                            "place a port, and run an FDTD excitation, on every one of them)");
@@ -321,7 +350,12 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                 if (entry.isPinExcluded(pad.footprintRef, pad.padNumber)) {
                     continue;
                 }
-                const std::string portLabel = pad.footprintRef + " pin " + pad.padNumber + " (" + netName + ")";
+                // netName un-escaped here, not left for each individual message to handle -- portLabel
+                // is also persisted as PortConfig::name() (see port.setName(portLabel) below), reused
+                // later as a plain display label (e.g. Simulation Results' own port/chart labeling),
+                // not just built fresh for one-off error text.
+                const std::string portLabel =
+                    pad.footprintRef + " pin " + pad.padNumber + " (" + _unescapeForDisplay(netName) + ")";
                 const Position positionSim = _padPositionInSimFrame(pad, edgeCutsOrigin);
                 const std::string layerFileName = _normalizeLayerName(pad.copperLayerName);
 
@@ -333,8 +367,16 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                         "supported yet -- v1 requires SMD pads)");
                 }
 
+                // Checked in this order: a per-pad override (this exact footprint+pin) first, then
+                // the net-wide override, then auto-derivation -- see PinDirectionOverride's own doc
+                // comment for why a single net-wide value can be wrong for one end of a routed net
+                // while correct for the other, and per-pad is the escape hatch for that case
+                // specifically, without disturbing whichever end the net-wide value already suits.
                 double direction = 0;
-                if (entry.direction().has_value()) {
+                if (const auto pinOverride = entry.pinDirectionOverride(pad.footprintRef, pad.padNumber);
+                    pinOverride.has_value()) {
+                    direction = *pinOverride;
+                } else if (entry.direction().has_value()) {
                     direction = *entry.direction();
                 } else {
                     auto derived =
@@ -390,7 +432,7 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
             if (std::find(orderedNets.begin(), orderedNets.end(), resolved.netName) == orderedNets.end()) {
                 return std::unexpected("Simulation \"" + sim.name() + "\": excitation targets " +
                                         excitation.footprint() + "." + excitation.pin() + " (net \"" +
-                                        resolved.netName +
+                                        _unescapeForDisplay(resolved.netName) +
                                         "\") but that net is not part of this simulation's involved_nets");
             }
             const std::optional<std::int32_t> index = portIndex.find(resolved.footprintRef, resolved.padNumber);

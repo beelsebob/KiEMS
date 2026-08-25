@@ -3,6 +3,11 @@ import Cocoa
 // No Storyboard/XIB: the whole app (main menu included) is built programmatically, matching this
 // project's preference for plain, inspectable source over Interface Builder files.
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    // Lazily created on first "Jobs…" selection, then kept alive (shown/hidden, never deallocated)
+    // for the app's whole lifetime -- see JobsWindowController's own doc comment for why it's owned
+    // here rather than by any one Document/DocumentWindowController.
+    private var jobsWindowController: JobsWindowController?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = buildMainMenu()
     }
@@ -69,8 +74,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.windowsMenu = windowMenu
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)),
                             keyEquivalent: "m")
+        windowMenu.addItem(NSMenuItem.separator())
+        let jobsItem = NSMenuItem(title: "Jobs", action: #selector(showJobsWindow), keyEquivalent: "j")
+        jobsItem.target = self
+        windowMenu.addItem(jobsItem)
 
         return mainMenu
+    }
+
+    @objc private func showJobsWindow() {
+        let controller = jobsWindowController ?? JobsWindowController()
+        jobsWindowController = controller
+        controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
     }
 
     @objc private func openRecentDocument(_ sender: NSMenuItem) {

@@ -43,8 +43,12 @@ TimeWaveform inverseTransform(const std::vector<double>& frequencies, const std:
 /// windowed to fade out by `startTime+duration` (the pulse's own natural envelope already decays
 /// close to zero well within its natural ~9/(pi*fc)-second length; `duration` only matters if
 /// shorter than that, truncating it early). Samples an n-point, dt-spaced timeline starting at t=0.
+/// `amplitude` scales the whole waveform (default 1.0, the FDTD's own real per-port drive level) --
+/// lets two main excitations on the same net (e.g. a differential pair's two legs) reconstruct as
+/// e.g. +1.0/-1.0 of the same pulse shape when their per-port S-parameter responses are superposed
+/// in ExcitationPostprocessor::run(), without needing a second, narrowband non-main excitation.
 TimeWaveform synthesizeMainStimulus(const Frequency& freq, double startTime, double duration, double phaseDegrees,
-                                      double dt, std::size_t sampleCount);
+                                      double dt, std::size_t sampleCount, double amplitude = 1.0);
 
 /// Synthesizes a "non-main" excitation's stimulus: a Hann-windowed sinusoidal burst at
 /// `frequencyHz` and `phaseDegrees` phase offset, amplitude-scaled (relative to the main

@@ -63,6 +63,16 @@ void from_json(const nlohmann::json& j, ExcludedPin& p) {
     p.pin = _pinToString(j.at("pin"));
 }
 
+void to_json(nlohmann::json& j, const PinDirectionOverride& p) {
+    j = nlohmann::json{{"footprint", p.footprint}, {"pin", p.pin}, {"direction", p.direction}};
+}
+
+void from_json(const nlohmann::json& j, PinDirectionOverride& p) {
+    p.footprint = j.at("footprint").get<std::string>();
+    p.pin = _pinToString(j.at("pin"));
+    p.direction = j.at("direction").get<double>();
+}
+
 void to_json(nlohmann::json& j, const InvolvedNetConfig& p) {
     switch (p._kind) {
         case NetSelectorKind::NetClass:
@@ -92,6 +102,9 @@ void to_json(nlohmann::json& j, const InvolvedNetConfig& p) {
     // that source-list toggling already guarantees stays empty on any other kind.
     if (!p._excludedPins.empty()) {
         j["excluded_pins"] = p._excludedPins;
+    }
+    if (!p._pinDirectionOverrides.empty()) {
+        j["pin_direction_overrides"] = p._pinDirectionOverrides;
     }
 }
 
@@ -143,6 +156,12 @@ void from_json(const nlohmann::json& j, InvolvedNetConfig& p) {
     if (j.contains("excluded_pins")) {
         for (const auto& excluded : j.at("excluded_pins")) {
             p._excludedPins.push_back(excluded.get<ExcludedPin>());
+        }
+    }
+    p._pinDirectionOverrides.clear();
+    if (j.contains("pin_direction_overrides")) {
+        for (const auto& override : j.at("pin_direction_overrides")) {
+            p._pinDirectionOverrides.push_back(override.get<PinDirectionOverride>());
         }
     }
 }

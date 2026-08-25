@@ -76,8 +76,13 @@ void ExcitationPostprocessor::run() {
 
             const TimeWaveform stimulus =
                 excitation.isMain()
-                    ? synthesizeMainStimulus(_frequency, excitation.startTime(),
-                                              excitation.duration(), excitation.phaseDegrees(), _dt, sampleCount)
+                    // amplitude() defaults to 1.0 (the FDTD's own real per-port drive level) when
+                    // unset -- a plain, single main excitation never needs to set it explicitly; it
+                    // only matters once a second main excitation on the same net (e.g. a
+                    // differential pair's other leg) needs a different relative level/sign.
+                    ? synthesizeMainStimulus(_frequency, excitation.startTime(), excitation.duration(),
+                                              excitation.phaseDegrees(), _dt, sampleCount,
+                                              excitation.amplitude().value_or(1.0))
                     : synthesizeToneBurst(*excitation.frequency(), *excitation.amplitude(), excitation.phaseDegrees(),
                                            excitation.startTime(), excitation.duration(), _dt, sampleCount);
 

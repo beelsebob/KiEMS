@@ -210,6 +210,26 @@ struct ExcludedPin {
 void to_json(nlohmann::json& j, const ExcludedPin& p);
 void from_json(const nlohmann::json& j, ExcludedPin& p);
 
+/// One footprint+pin+direction triple -- a per-pad override for the departure direction
+/// port_resolution.cpp would otherwise apply uniformly to every pad on this entry's resolved
+/// net(s) (see InvolvedNetConfig::direction()'s own doc comment for why a single net-wide value is
+/// sometimes wrong: opposite ends of a routed net generally depart their own pads in different,
+/// often opposite, cardinal directions, so no single value can be right for both). Checked before
+/// the net-wide direction() override, which stays the fallback applied to every *other* pad on the
+/// net that doesn't have one of these.
+struct PinDirectionOverride {
+    std::string footprint;
+    std::string pin;
+    double direction = 0;
+
+    bool operator==(const PinDirectionOverride& other) const {
+        return footprint == other.footprint && pin == other.pin;
+    }
+};
+
+void to_json(nlohmann::json& j, const PinDirectionOverride& p);
+void from_json(const nlohmann::json& j, PinDirectionOverride& p);
+
 /// One entry in a SimulationConfig's involved-nets list. Resolves (via port_resolution.cpp and
 /// libkicad) to a set of net names -- a net class expands to every net assigned to it; a
 /// footprint+pin resolves to the net connected to that pin and is thereafter treated exactly like
@@ -241,6 +261,31 @@ public:
     const std::optional<double>& width() const { return _width; }
     const std::optional<double>& dBMargin() const { return _dBMargin; }
     const std::optional<double>& direction() const { return _direction; } // escape hatch, see port_resolution.cpp
+    /// Only meaningful for a Net-kind entry, same as excludedPins() -- see PinDirectionOverride's
+    /// own doc comment for why a single net-wide direction() sometimes isn't enough.
+    const std::vector<PinDirectionOverride>& pinDirectionOverrides() const { return _pinDirectionOverrides; }
+    std::vector<PinDirectionOverride>& pinDirectionOverrides() { return _pinDirectionOverrides; }
+    std::optional<double> pinDirectionOverride(const std::string& footprint, const std::string& pin) const {
+        const auto it = std::find_if(_pinDirectionOverrides.begin(), _pinDirectionOverrides.end(),
+                                      [&](const PinDirectionOverride& o) {
+                                          return o.footprint == footprint && o.pin == pin;
+                                      });
+        return it != _pinDirectionOverrides.end() ? std::optional<double>(it->direction) : std::nullopt;
+    }
+    /// Sets (or, given nullopt, clears) this one pad's own direction override -- never leaves more
+    /// than one entry for the same (footprint, pin) pair.
+    void setPinDirectionOverride(const std::string& footprint, const std::string& pin,
+                                  std::optional<double> direction) {
+        _pinDirectionOverrides.erase(
+            std::remove_if(_pinDirectionOverrides.begin(), _pinDirectionOverrides.end(),
+                            [&](const PinDirectionOverride& o) {
+                                return o.footprint == footprint && o.pin == pin;
+                            }),
+            _pinDirectionOverrides.end());
+        if (direction.has_value()) {
+            _pinDirectionOverrides.push_back({footprint, pin, *direction});
+        }
+    }
 
     // impedance/length/width are intentionally left unscaled here: they're copied verbatim into a
     // resolved PortConfig by port_resolution.cpp, which scales the whole PortConfig exactly once
@@ -275,6 +320,7 @@ private:
     std::optional<double> _width;
     std::optional<double> _dBMargin;
     std::optional<double> _direction;
+    std::vector<PinDirectionOverride> _pinDirectionOverrides;
 };
 
 void to_json(nlohmann::json& j, const InvolvedNetConfig& p);
