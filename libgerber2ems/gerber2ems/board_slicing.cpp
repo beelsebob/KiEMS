@@ -147,13 +147,7 @@ double _distancePointToPolyline(const Clipper2Lib::Point64& pt, const Clipper2Li
 /// gerber_composite.cpp's own triangulate()/_collectRegions does: build a PolyTree and check, at
 /// whatever depth `pt` is found, whether that level is an outer region (odd level) or a hole
 /// (even, non-zero level).
-bool _pointInComposite(const Clipper2Lib::Point64& pt, const Clipper2Lib::Paths64& composited) {
-    if (composited.empty()) {
-        return false;
-    }
-    Clipper2Lib::PolyTree64 tree;
-    Clipper2Lib::BooleanOp(Clipper2Lib::ClipType::Union, Clipper2Lib::FillRule::NonZero, composited, {}, tree);
-
+bool _pointInComposite(const Clipper2Lib::Point64& pt, const Clipper2Lib::PolyTree64& tree) {
     const Clipper2Lib::PolyPath64* node = &tree;
     bool inside = false;
     bool descended = true;
@@ -240,6 +234,7 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
     // exactly that reason -- see the stitching-via placement loop below.
     std::vector<Clipper2Lib::Paths64> signalPerLayer(metals.size());
     std::vector<Clipper2Lib::Paths64> groundPerLayer(metals.size());
+    std::vector<Clipper2Lib::PolyTree64> groundTreePerLayer(metals.size());
 
     Clipper2Lib::Paths64 signalUnionAllLayers;
     for (std::size_t layerIndex = 0; layerIndex < metals.size(); ++layerIndex) {
@@ -256,6 +251,8 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
         signalPerLayer[layerIndex] = compositeOps(gerber, involvedOps, origin.xMin, origin.yMin, tessellationTolerance);
         groundPerLayer[layerIndex] =
             compositeOps(gerber, _opsOnNets(gerber, groundNets), origin.xMin, origin.yMin, tessellationTolerance);
+
+        Clipper2Lib::BooleanOp(Clipper2Lib::ClipType::Union, Clipper2Lib::FillRule::NonZero, groundPerLayer[layerIndex], {}, groundTreePerLayer[layerIndex]);
 
         signalUnionAllLayers = Clipper2Lib::Union(signalUnionAllLayers, signalPerLayer[layerIndex],
                                                     Clipper2Lib::FillRule::NonZero);
@@ -305,8 +302,8 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
             const double midY = (via.y + via.y2) / 2;
             const Clipper2Lib::Point64 pos(static_cast<std::int64_t>(std::llround(midX)),
                                              static_cast<std::int64_t>(std::llround(midY)));
-            const bool isGround = std::any_of(groundPerLayer.begin(), groundPerLayer.end(),
-                                                [&](const Clipper2Lib::Paths64& ground) {
+            const bool isGround = std::any_of(groundTreePerLayer.begin(), groundTreePerLayer.end(),
+                                                [&](const Clipper2Lib::PolyTree64& ground) {
                                                     return _pointInComposite(pos, ground);
                                                 });
             // Circumscribing radius from the midpoint -- half the centerline length plus the pad's
@@ -540,8 +537,8 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
 
                 const double viaX = static_cast<double>(viaPos.x);
                 const double viaY = static_cast<double>(viaPos.y);
-                const bool onAnyGroundLayer = std::any_of(groundPerLayer.begin(), groundPerLayer.end(),
-                                                            [&](const Clipper2Lib::Paths64& ground) {
+                const bool onAnyGroundLayer = std::any_of(groundTreePerLayer.begin(), groundTreePerLayer.end(),
+                                                            [&](const Clipper2Lib::PolyTree64& ground) {
                                                                 return _pointInComposite(viaPos, ground);
                                                             });
                 if (!onAnyGroundLayer) {
