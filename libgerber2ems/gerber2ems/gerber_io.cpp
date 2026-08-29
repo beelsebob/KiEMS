@@ -18,6 +18,8 @@
 
 namespace gerber2ems {
 
+using namespace Cu;
+
 namespace {
 
 // ---- small string helpers (mirroring the bits of Python's str API this parser leans on) ----
@@ -1071,7 +1073,7 @@ std::expected<void, std::string> GerberFile::_parse(const std::filesystem::path&
     return {};
 }
 
-Trace GerberFile::traceForNet(const std::string& net) const {
+Trace GerberFile::traceForNet(const NetName& net) const {
     const auto it = _traces.find(net);
     if (it != _traces.end()) {
         return it->second;
@@ -1201,10 +1203,11 @@ std::expected<void, std::string> GerberFile::_processNormalLine(const std::strin
         const Position sStart = parser.zoneContours.front().start();
         const Position sEnd = parser.zoneContours.back().stop();
         parser.zoneContours.emplace_back(sStart, sEnd, "", 0, PlotMode::Linear);
-        Trace trace = traceForNet(parser.net);
+        Trace trace = traceForNet(NetName(parser.net));
         trace.addSegments(parser.zoneContours);
-        _traces.insert_or_assign(parser.net, trace);
-        _copperOps.push_back(CopperOp{CopperOp::Kind::Zone, parser.zoneAdditive, parser.net, parser.zoneContours});
+        _traces.insert_or_assign(NetName(parser.net), trace);
+        _copperOps.push_back(
+            CopperOp{CopperOp::Kind::Zone, parser.zoneAdditive, NetName(parser.net), parser.zoneContours});
         parser.zoneContours.clear();
         parser.zone = false;
     } else if (split[0] == "G74") {
@@ -1274,15 +1277,15 @@ std::expected<void, std::string> GerberFile::_processDrawingLine(const std::stri
                 logError("Aperture `" + apName + "` used for line: `" + line + "` is not circular aperture!");
                 return {};
             }
-            Trace trace = traceForNet(parser.net);
+            Trace trace = traceForNet(NetName(parser.net));
             Position segStart = parser.pos;
             for (const Position& p : subPoints) {
                 TraceSegment seg(segStart, p, apName, circle->diameter(), PlotMode::Linear);
                 trace.addSegment(seg);
-                _copperOps.push_back(CopperOp{CopperOp::Kind::Stroke, parser.additive, parser.net, seg});
+                _copperOps.push_back(CopperOp{CopperOp::Kind::Stroke, parser.additive, NetName(parser.net), seg});
                 segStart = p;
             }
-            _traces.insert_or_assign(parser.net, trace);
+            _traces.insert_or_assign(NetName(parser.net), trace);
         }
         parser.pos = pos;
     } else if (opi == 2) {
@@ -1296,10 +1299,10 @@ std::expected<void, std::string> GerberFile::_processDrawingLine(const std::stri
         if (it != _apertures.end() && it->second.function() == "ComponentPad") {
             pinRef = parser.refpin;
         }
-        Pad pad(parser.aperture, parser.net, pos, pinRef, parser.additive, parser.mirror, parser.rotation,
+        Pad pad(parser.aperture, NetName(parser.net), pos, pinRef, parser.additive, parser.mirror, parser.rotation,
                 parser.scale);
         _pads.push_back(pad);
-        _copperOps.push_back(CopperOp{CopperOp::Kind::Pad, parser.additive, parser.net, pad});
+        _copperOps.push_back(CopperOp{CopperOp::Kind::Pad, parser.additive, NetName(parser.net), pad});
     }
     return {};
 }

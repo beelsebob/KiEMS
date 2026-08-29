@@ -66,10 +66,20 @@ public:
     /// simulated.
     std::optional<std::vector<std::complex<double>>> getSParam(const std::string& simulationName,
                                                                  std::int32_t outputPort, std::int32_t inputPort) const;
+    /// Raw (undecomposed) voltage/current for a non-absorbing (passive-probe) port -- see
+    /// PortConfig::absorbSignal()'s own doc comment. nullopt for an absorbing port (which never has
+    /// this data -- use getSParam() instead) or an unsimulated pair.
+    std::optional<std::vector<std::complex<double>>> getProbeVoltage(const std::string& simulationName,
+                                                                       std::int32_t probe, std::int32_t excitedPort) const;
+    std::optional<std::vector<std::complex<double>>> getProbeCurrent(const std::string& simulationName,
+                                                                       std::int32_t probe, std::int32_t excitedPort) const;
 
     /// Writes `simulationName`'s Sx<port>.csv files to `outputDir`. No-op if `simulationName` isn't
     /// in config() or had no excited port.
     void sparamToFile(const std::string& simulationName, const std::filesystem::path& outputDir) const;
+    /// Writes `simulationName`'s Probe<index>.csv files to `outputDir` -- the passive-probe
+    /// equivalent of sparamToFile().
+    void probeToFile(const std::string& simulationName, const std::filesystem::path& outputDir) const;
 
 private:
     SimulationResult(GeometryResult geometry, std::vector<double> frequencies,

@@ -59,6 +59,25 @@ final class DocumentWindowController: NSWindowController {
         super.windowDidLoad()
         chooseProject()
     }
+
+    /// Jumps the main UI to the simulation+sub-entry a given job represents -- the Jobs window's
+    /// double-click-to-jump gesture. Resolves the simulation by name against the current config (a
+    /// job's simulationName is captured at request time, so a since-renamed simulation simply isn't
+    /// found and nothing happens) and selects the matching Geometry / Simulation Results / Field
+    /// Viewer entry, which fires the list's onSelectionChanged to actually show it.
+    func selectJob(kind: JobKind, forSimulationNamed simulationName: String) {
+        guard let index = ownerDocument.config.simulations.firstIndex(where: { $0.name == simulationName }) else { return }
+        let selection: SimulationListSelection
+        switch kind {
+        case .geometryGeneration:
+            selection = .geometry(simulationIndex: index)
+        case .simulation:
+            selection = .simulationResults(simulationIndex: index)
+        case .fieldPostProcessing:
+            selection = .fieldViewer(simulationIndex: index)
+        }
+        simulationListViewController?.select(selection)
+    }
     
     private func buildUI() {
         guard let contentView = window?.contentView else { return }
@@ -250,6 +269,18 @@ final class DocumentWindowController: NSWindowController {
             if let index = self?.currentSimulationIndex {
                 geometryVC?.invalidateCache(forSimulationIndex: index)
                 simulationResultsVC?.invalidateCache(forSimulationIndex: index)
+            }
+        }
+        // Selecting a row in the involved-nets summary table jumps the source list below it to that
+        // same net/pin (switching scope first if needed) and, via its own selection notification,
+        // fills in the detail pane on the right the same way manually browsing to it would -- see
+        // InvolvedNetsViewController.SelectionTarget's own doc comment.
+        involvedNetsVC.onSelectionRequested = { [weak sourceListVC] target in
+            switch target {
+            case .net(let name):
+                sourceListVC?.revealNet(named: name)
+            case .footprintPin(let footprintReference, let padNumber):
+                sourceListVC?.revealPin(footprintReference: footprintReference, padNumber: padNumber)
             }
         }
         let fieldViewerVC = FieldViewerViewController(document: ownerDocument)

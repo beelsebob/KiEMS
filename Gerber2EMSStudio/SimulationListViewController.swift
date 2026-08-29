@@ -331,6 +331,30 @@ final class SimulationListViewController: NSViewController {
         }
     }
 
+    /// Selects the given entry -- a simulation's own row or one of its 3 fixed sub-entries -- and
+    /// fires onSelectionChanged, so the main UI actually shows it. Used by the Jobs window's
+    /// double-click-to-jump gesture (DocumentWindowController.selectJob). Expands a sub-entry's
+    /// parent simulation row first so the target row is visible to select.
+    func select(_ selection: SimulationListSelection) {
+        let node: SimulationListNode
+        switch selection {
+        case .simulation:
+            guard let match = simulationNodes.first(where: { $0.kind == selection }) else { return }
+            node = match
+        case .geometry, .simulationResults, .fieldViewer:
+            let index = selection.simulationIndex
+            guard let simNode = simulationNodes.first(where: { $0.kind == .simulation(index: index) }),
+                  let child = simNode.children.first(where: { $0.kind == selection }) else { return }
+            outlineView.expandItem(simNode)
+            node = child
+        }
+        let row = outlineView.row(forItem: node)
+        guard row >= 0 else { return }
+        outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        outlineView.scrollRowToVisible(row)
+        selectionChanged()
+    }
+
     /// Finds and reloads just the "Geometry" sub-row for `index`, after geometryRowStatus[index] has
     /// already been updated -- shared by every geometryRowStatus mutator below so each one stays a
     /// one-line status update. Only reloads the one affected row (unlike includedToggled's full

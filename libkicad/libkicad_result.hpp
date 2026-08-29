@@ -22,8 +22,10 @@ struct PadCounts {
 /// before ever reaching a StackupLayer (see stackupRaw()).
 enum class StackupLayerKind {
     Copper,
-    Core,    // rigid dielectric (FR4 etc.)
-    Prepreg, // bonding-film dielectric between core layers
+    Core,           // rigid dielectric (FR4 etc.)
+    Prepreg,        // bonding-film dielectric between core layers
+    SolderMaskTop,
+    SolderMaskBottom,
 };
 
 /// One layer of a board's physical stackup (BOARD_DESIGN_SETTINGS::GetStackupDescriptor()), in
@@ -103,6 +105,44 @@ struct ThroughHole {
     double padHeightMm = 0;
     double drillWidthMm = 0;
     double drillHeightMm = 0;
+};
+
+/// One mesh triangle of a footprint's real, placed 3D model -- mirrors STEP_COMPONENT_TRIANGLE
+/// (libkicad/step_export/component_triangle.h). Vertex positions are absolute, in millimetres, in
+/// the same board-auxiliary-origin-relative frame every other libkicad position (PadPosition,
+/// ThroughHole, ...) uses when `--use-drill-origin`/m_UseDrillOrigin is set, which
+/// exportComponentModels() always does. Color is straight from the model's own STEP colors
+/// (XCAFDoc_ColorTool, the same source WriteSTEP/WriteGLTF preserve); (1,1,1,1) if the model
+/// carries none, each channel 0-1.
+struct ComponentTriangle {
+    double ax = 0, ay = 0, az = 0;
+    double bx = 0, by = 0, bz = 0;
+    double cx = 0, cy = 0, cz = 0;
+    double r = 0, g = 0, b = 0, a = 0;
+};
+
+/// Result of exporting specific footprints' own real, placed 3D models (via
+/// EXPORTER_STEP/STEP_PCB_MODEL, the same machinery `kicad-cli pcb export stl` itself uses, run
+/// in-process instead of as a second subprocess) -- see exportComponentModels()'s own doc comment.
+/// `messages` is every diagnostic KiCad's own exporter reported while building the requested
+/// components' shapes, one entry per line of REPORTER output -- a component whose linked 3D model
+/// file can't be resolved reports two consecutive entries here, "Could not add 3D model for <ref>."
+/// then "File not found: <path>" (the exact text kicad-cli's own CLI export prints too) -- this is
+/// non-fatal, `exportSucceeded` stays true and `triangles` still has every other requested
+/// component's mesh.
+struct ComponentModelExportResult {
+    bool exportSucceeded = false;
+    std::vector<std::string> messages;
+    std::vector<ComponentTriangle> triangles;
+    /// The board's real top-copper mounting surface Z, in the same millimetre frame `triangles`'
+    /// own vertices are in -- mirrors STEP_PCB_MODEL::GetTopCopperZ()'s own doc comment for exactly
+    /// what this is and why a caller placing these triangles into a *different* Z=0 convention
+    /// (one where every copper layer is treated as infinitesimally thin, with no copper-thickness
+    /// contribution to board Z at all) needs this specific value rather than deriving an equivalent
+    /// offset from stackup thickness alone: `triangles`' own Z minus this value is exactly that
+    /// caller's own "height above the top-copper surface," ready to add onto that convention's own
+    /// Z=0 directly.
+    double topCopperZMm = 0;
 };
 
 namespace detail {
@@ -192,6 +232,16 @@ struct RawThroughHolesResult {
 };
 
 RawThroughHolesResult throughHolesRaw(const std::string& projectPath, const std::string& boardPath);
+
+struct RawComponentModelExportResult {
+    bool ok = false;
+    std::string error;
+    ComponentModelExportResult result;
+};
+
+RawComponentModelExportResult exportComponentModelsRaw(const std::string& projectPath, const std::string& boardPath,
+                                                          const std::string& componentFilter,
+                                                          const std::string& outputStlPath);
 
 } // namespace detail
 } // namespace libkicad

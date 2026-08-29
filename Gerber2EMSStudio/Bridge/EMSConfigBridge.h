@@ -18,6 +18,16 @@ typedef NS_ENUM(NSInteger, EMSNetSelectorKind) {
     EMSNetSelectorKindFootprintPin,
 };
 
+/// One ProbedPin entry -- a plain value snapshot (not index-forwarding like EMSInvolvedNetBridge
+/// itself), since gerber2ems::ProbedPin has no separate identity to look up by index; a fresh array
+/// of these is built from InvolvedNetConfig::probedPins() on every read of
+/// EMSInvolvedNetBridge.probedPins.
+@interface EMSProbedPinBridge : NSObject
+@property (nonatomic, copy, readonly) NSString *footprintReference;
+@property (nonatomic, copy, readonly) NSString *pin;
+@property (nonatomic, readonly) BOOL absorbSignal;
+@end
+
 /// One InvolvedNetConfig entry. Never holds a raw pointer into the parent's C++
 /// vector<InvolvedNetConfig> -- see EMSSimulationBridge's identical note; the same index-forwarding
 /// approach applies here, one level deeper.
@@ -46,12 +56,32 @@ typedef NS_ENUM(NSInteger, EMSNetSelectorKind) {
 /// anything the port_resolution.cpp escape hatch supports.
 @property (nonatomic, nullable) NSNumber *direction;
 
-/// Only meaningful for a .Net-kind entry: whether the given pad is excluded from an otherwise-
-/// involved net (see gerber2ems::InvolvedNetConfig's own doc comment) -- the source list's per-pin
-/// "Included in Simulation" checkbox is really toggling this, not a separate per-pin entry.
+/// Legacy opt-*out* mechanism -- only ever consulted (by gerber2ems's own resolution logic) while
+/// hasExplicitPinSelections is NO; superseded by isPinProbed/setPinProbed below for anything edited
+/// under the current source-list UI. Kept only so a pre-existing simulation.json keeps resolving
+/// exactly as it always did until its pins are first touched under the new UI -- see
+/// gerber2ems::InvolvedNetConfig's own doc comment.
 - (BOOL)isPinExcludedWithFootprint:(NSString *)footprint pin:(NSString *)pin;
 - (void)excludePinWithFootprint:(NSString *)footprint pin:(NSString *)pin;
 - (void)includePinWithFootprint:(NSString *)footprint pin:(NSString *)pin;
+
+/// True once any pin under this net has ever been edited via setPinProbed: below -- switches
+/// pin-selection resolution from the legacy excludedPins()-based mode to strict, explicit opt-in
+/// (see gerber2ems::InvolvedNetConfig's own doc comment). Never goes back to NO.
+@property (nonatomic, readonly) BOOL hasExplicitPinSelections;
+/// Only meaningful once hasExplicitPinSelections is YES.
+- (BOOL)isPinProbedWithFootprint:(NSString *)footprint pin:(NSString *)pin;
+/// Only meaningful if isPinProbedWithFootprint:pin: is YES for the same pin -- defaults to YES.
+- (BOOL)pinAbsorbsSignalWithFootprint:(NSString *)footprint pin:(NSString *)pin;
+/// Sets (probed=YES) or clears (probed=NO) this pin's probed state, and its absorb-signal choice
+/// when probed=YES. Always sets hasExplicitPinSelections to YES, even when clearing -- see that
+/// property's own doc comment.
+- (void)setPinProbed:(BOOL)probed absorbSignal:(BOOL)absorbSignal withFootprint:(NSString *)footprint pin:(NSString *)pin;
+/// Every explicitly probed pin on this net -- only ever non-empty once hasExplicitPinSelections is
+/// YES (a legacy net's implicit "every pad probed by default" isn't enumerated here at all, since
+/// it isn't a bounded list -- see InvolvedNetsViewController, the one place this is read, for why
+/// that distinction matters for a "compact summary" view).
+@property (nonatomic, readonly) NSArray<EMSProbedPinBridge *> *probedPins;
 
 /// A per-pad override for `direction`, checked first when resolving that one pad's own port --
 /// see gerber2ems::PinDirectionOverride's own doc comment for why a single net-wide `direction`

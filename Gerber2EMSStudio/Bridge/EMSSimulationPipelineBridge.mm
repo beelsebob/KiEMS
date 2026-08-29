@@ -220,6 +220,12 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     std::optional<SimulationData<SimulationStage::Results>> _results;
     std::optional<SimulationData<SimulationStage::Postprocessing>> _postprocessing;
 
+    // -geometryPreview's own cache -- buildGeometryPreview() now does real work (a libkicad
+    // component-model export subprocess, plus via mesh generation), so unlike the flyweight it used
+    // to be, it must not be rebuilt on every call. Reset alongside `_geometry`/`_grid` themselves
+    // (see -invalidateFromStage:) since it's derived from exactly those two.
+    EMSGeometryPreview* _geometryPreviewCache;
+
     // The last excited port's own full-grid field snapshot, captured alongside `_results` -- see
     // runGPUPortInProcess()'s own doc comment for why "last port wins" rather than one per port.
     // Reset together with `_results` (see -invalidateFromStage:).
@@ -416,6 +422,10 @@ kicadQueryHelperPath:(NSString*)helperPath
         reportGeometryProgress(0.5);
         auto grid = gerber2ems::generateGrid(*_geometry, *_scaledConfig, options, *_paths);
         _grid.emplace(*_geometry, std::move(grid));
+        // A cached -geometryPreview built while only EMSPipelineStageGeometry had run (gridLines
+        // still empty) would otherwise keep serving that stale, grid-less snapshot forever now that
+        // grid lines actually exist.
+        _geometryPreviewCache = nil;
         // Written to disk too (matching `geber2ems -g`) so a later CLI invocation against this same
         // saved package (e.g. `geber2ems -s`) can pick up straight from here without redoing any of
         // this work itself -- see GeometryResult::load()'s own doc comment. Unlike GeometryResult::
@@ -508,8 +518,13 @@ kicadQueryHelperPath:(NSString*)helperPath
     if (!_geometry.has_value()) {
         return nil;
     }
+    if (_geometryPreviewCache) {
+        return _geometryPreviewCache;
+    }
     const gerber2ems::ComputedGridLines* gridLines = _grid.has_value() ? &_grid->grid().gridLines : nullptr;
-    return buildGeometryPreview(_geometry->geometry().slicedBoard, *_simConfig, *_scaledConfig, *_paths, gridLines);
+    _geometryPreviewCache =
+        buildGeometryPreview(_geometry->geometry().slicedBoard, *_simConfig, *_scaledConfig, *_paths, gridLines);
+    return _geometryPreviewCache;
 }
 
 - (nullable EMSResultsPreview*)resultsPreview {
@@ -549,6 +564,7 @@ kicadQueryHelperPath:(NSString*)helperPath
         _lastFieldSnapshot.reset();
         _grid.reset();
         _geometry.reset();
+        _geometryPreviewCache = nil;
         _configured.reset();
         _paths.reset();
         _simConfig = nullptr;
@@ -560,6 +576,7 @@ kicadQueryHelperPath:(NSString*)helperPath
         _results.reset();
         _lastFieldSnapshot.reset();
         _grid.reset();
+        _geometryPreviewCache = nil;
         break;
     case EMSPipelineStageResults:
         // Geometry (and the grid lines placed on it) stay valid -- only the FDTD run and its own

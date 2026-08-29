@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <limits>
 #include <optional>
 #include <string>
 #include <utility>
@@ -147,6 +148,16 @@ public:
     bool excite() const { return _excite; }
     void setExcite(bool value) { _excite = value; }
 
+    /// Whether this port physically loads/terminates the line it sits on -- true (the historical,
+    /// still-default behavior) means a real metal trace + impedance-matched feed resistor gets
+    /// built (Simulation::addMslPort()); false means only U/I probe boxes get placed
+    /// (Simulation::addPassiveProbe()), a purely passive read point with zero effect on the
+    /// simulated fields. excite() always implies the full absorbing structure regardless of this
+    /// flag's own value -- see port_resolution.cpp's resolution rule, which never lets an excited
+    /// pad end up with absorbSignal()==false.
+    bool absorbSignal() const { return _absorbSignal; }
+    void setAbsorbSignal(bool value) { _absorbSignal = value; }
+
     /// Scales width/length into simulation units (mirrors the `*= UNIT_MULTIPLIER` done in
     /// Config.load).
     void scaleToSimulationUnits(std::int32_t unitMultiplier);
@@ -164,6 +175,72 @@ private:
     std::int32_t _plane = 1;
     double _dBMargin = -15;
     bool _excite = false;
+    bool _absorbSignal = true;
+};
+
+/// Which of a LumpedComponentConfig's R/L/C fields are physically present -- mirrors how
+/// CSPropLumpedElement/Operator_Ext_LumpedRLC themselves distinguish "absent" (NaN) from "present,
+/// value zero" (see operator_ext_lumpedRLC.cpp's own doc comment on this), just narrowed to the
+/// three single-quantity component kinds resolveSimulationPorts() ever auto-discovers.
+enum class LumpedComponentType { Resistor, Inductor, Capacitor };
+
+/// One auto-discovered 2-pin R/L/C component, resolved to real board geometry -- populated
+/// entirely by resolveSimulationPorts() (never (de)serialized, same as PortConfig; see
+/// SimulationConfig::_lumpedComponents' own comment). A component only ever gets one of these if
+/// both its pins sit on a net already involved in this simulation (or its ground net) -- see
+/// port_resolution.cpp's own doc comment on the discovery rule.
+class LumpedComponentConfig {
+public:
+    const std::string& reference() const { return _reference; }
+    void setReference(std::string value) { _reference = std::move(value); }
+
+    LumpedComponentType type() const { return _type; }
+    void setType(LumpedComponentType value) { _type = value; }
+
+    /// NaN means "not physically present" (this component isn't of that kind) -- matches
+    /// CSPropLumpedElement's own NaN-means-absent convention exactly, so these are handed straight
+    /// through to SetResistance()/SetInductance()/SetCapacity() unchanged.
+    double resistance() const { return _resistance; }
+    void setResistance(double value) { _resistance = value; }
+    double inductance() const { return _inductance; }
+    void setInductance(double value) { _inductance = value; }
+    double capacitance() const { return _capacitance; }
+    void setCapacitance(double value) { _capacitance = value; }
+
+    /// Both pads' positions, already in simulation-frame coordinates (like PortConfig::position(),
+    /// these come from board/gerber geometry, not a JSON field, so they're never scaled by
+    /// scaleToSimulationUnits() -- only width() is).
+    const std::pair<double, double>& position1() const { return _position1; }
+    void setPosition1(std::pair<double, double> value) { _position1 = value; }
+    const std::pair<double, double>& position2() const { return _position2; }
+    void setPosition2(std::pair<double, double> value) { _position2 = value; }
+
+    /// Cardinal degrees (0/90/180/270) from position1 towards position2 -- same convention as
+    /// PortConfig::direction().
+    double direction() const { return _direction; }
+    void setDirection(double value) { _direction = value; }
+
+    std::int32_t layer() const { return _layer; }
+    void setLayer(std::int32_t value) { _layer = value; }
+
+    /// Transverse box width, in file units until scaleToSimulationUnits() runs -- matches
+    /// PortConfig::width()'s own default.
+    double width() const { return _width; }
+    void setWidth(double value) { _width = value; }
+
+    void scaleToSimulationUnits(std::int32_t unitMultiplier) { _width *= unitMultiplier; }
+
+private:
+    std::string _reference;
+    LumpedComponentType _type = LumpedComponentType::Resistor;
+    double _resistance = std::numeric_limits<double>::quiet_NaN();
+    double _inductance = std::numeric_limits<double>::quiet_NaN();
+    double _capacitance = std::numeric_limits<double>::quiet_NaN();
+    std::pair<double, double> _position1;
+    std::pair<double, double> _position2;
+    double _direction = 0;
+    std::int32_t _layer = 0;
+    double _width = 200;
 };
 
 /// Identifies a port by the footprint+pin selector it was placed on -- the same, human-writable
@@ -210,6 +287,20 @@ struct ExcludedPin {
 void to_json(nlohmann::json& j, const ExcludedPin& p);
 void from_json(const nlohmann::json& j, ExcludedPin& p);
 
+/// One footprint+pin+absorb triple -- the opt-*in* per-pin selection the source list's "Probe"/
+/// "Absorb Signal" checkboxes drive (see InvolvedNetConfig::probedPins()'s own doc comment for how
+/// this coexists with the older, opt-*out* ExcludedPin list).
+struct ProbedPin {
+    std::string footprint;
+    std::string pin;
+    bool absorbSignal = true;
+
+    bool operator==(const ProbedPin& other) const { return footprint == other.footprint && pin == other.pin; }
+};
+
+void to_json(nlohmann::json& j, const ProbedPin& p);
+void from_json(const nlohmann::json& j, ProbedPin& p);
+
 /// One footprint+pin+direction triple -- a per-pad override for the departure direction
 /// port_resolution.cpp would otherwise apply uniformly to every pad on this entry's resolved
 /// net(s) (see InvolvedNetConfig::direction()'s own doc comment for why a single net-wide value is
@@ -233,12 +324,24 @@ void from_json(const nlohmann::json& j, PinDirectionOverride& p);
 /// One entry in a SimulationConfig's involved-nets list. Resolves (via port_resolution.cpp and
 /// libkicad) to a set of net names -- a net class expands to every net assigned to it; a
 /// footprint+pin resolves to the net connected to that pin and is thereafter treated exactly like
-/// naming that net directly. Involvement itself is a property of the *net*, not any individual pad
-/// on it: every pad on every resolved net gets one auto-placed PortConfig (using this entry's
-/// impedance/length/plane/overrides), *except* pads named in excludedPins() -- the mechanism behind
-/// the source list's per-pin "Included in Simulation" checkbox, which only ever adds/removes one pad
-/// from an already-involved net rather than creating a whole separate per-pin entry (see
-/// SourceListViewController.includedToggled()).
+/// naming that net directly.
+///
+/// Which pads on a resolved net actually get a PortConfig is governed by one of two mutually
+/// exclusive modes, selected by hasExplicitPinSelections():
+///  - Legacy (hasExplicitPinSelections()==false, the state of every entry that predates the
+///    Probe/Absorb Signal/Excite source-list redesign): every pad gets a PortConfig
+///    (absorbSignal()==true), *except* pads named in excludedPins() -- an opt-*out* blacklist.
+///    This is what makes loading an old simulation.json a no-op: an entry nobody has touched under
+///    the new per-pin UI keeps resolving exactly as it always did.
+///  - Explicit (hasExplicitPinSelections()==true, set permanently the first time any pin under
+///    this net is edited via the new UI): only pads named in probedPins() get a PortConfig (with
+///    that entry's own absorbSignal), plus any pad targeted by a SimulationConfig-level
+///    ExcitationConfig (which always gets absorbSignal()==true regardless of its probedPins()
+///    entry, if any -- see port_resolution.cpp's resolution rule). excludedPins() is not consulted
+///    in this mode.
+/// See port_resolution.cpp's resolveSimulationPorts() for the exact rule, and
+/// SourceListViewController's probeToggled()/absorbToggled()/excitedToggled() for how the GUI
+/// drives it.
 class InvolvedNetConfig {
 public:
     NetSelectorKind kind() const { return _kind; }
@@ -246,13 +349,41 @@ public:
     const std::optional<std::string>& net() const { return _net; }
     const std::optional<std::string>& footprint() const { return _footprint; }
     const std::vector<std::string>& pins() const { return _pins; }
-    /// Only meaningful for a Net-kind entry -- pads on the resolved net that don't get a port
-    /// despite the net otherwise being involved. See this class's own doc comment.
+    /// Only meaningful for a Net-kind entry, and only consulted when hasExplicitPinSelections() is
+    /// false -- see this class's own doc comment.
     const std::vector<ExcludedPin>& excludedPins() const { return _excludedPins; }
     std::vector<ExcludedPin>& excludedPins() { return _excludedPins; }
     bool isPinExcluded(const std::string& footprint, const std::string& pin) const {
         return std::find(_excludedPins.begin(), _excludedPins.end(), ExcludedPin{footprint, pin}) !=
                _excludedPins.end();
+    }
+
+    /// True once this entry's pins have ever been edited via the new per-pin Probe/Excite UI --
+    /// see this class's own doc comment for what that switches probedPins()/excludedPins()
+    /// resolution to. Never set back to false.
+    bool hasExplicitPinSelections() const { return _hasExplicitPinSelections; }
+    /// Only meaningful for a Net-kind entry, and only consulted when hasExplicitPinSelections() is
+    /// true -- see this class's own doc comment.
+    const std::vector<ProbedPin>& probedPins() const { return _probedPins; }
+    /// nullopt if `footprint`.`pin` isn't in probedPins() at all.
+    std::optional<bool> probedPinAbsorbs(const std::string& footprint, const std::string& pin) const {
+        const auto it = std::find_if(_probedPins.begin(), _probedPins.end(), [&](const ProbedPin& p) {
+            return p.footprint == footprint && p.pin == pin;
+        });
+        return it != _probedPins.end() ? std::optional<bool>(it->absorbSignal) : std::nullopt;
+    }
+    /// Sets (`absorbSignal` has a value) or clears (nullopt) this one pad's probed state. Always
+    /// sets hasExplicitPinSelections() true, even when clearing -- the act of editing a pin's Probe
+    /// state at all is what commits this net to the new, explicit resolution mode (see this class's
+    /// own doc comment); there's no way back to legacy mode once any pin has been touched.
+    void setPinProbed(const std::string& footprint, const std::string& pin, std::optional<bool> absorbSignal) {
+        _hasExplicitPinSelections = true;
+        _probedPins.erase(std::remove_if(_probedPins.begin(), _probedPins.end(),
+                                          [&](const ProbedPin& p) { return p.footprint == footprint && p.pin == pin; }),
+                           _probedPins.end());
+        if (absorbSignal.has_value()) {
+            _probedPins.push_back({footprint, pin, *absorbSignal});
+        }
     }
 
     double impedance() const { return _impedance; }
@@ -314,6 +445,8 @@ private:
     std::optional<std::string> _footprint;
     std::vector<std::string> _pins;
     std::vector<ExcludedPin> _excludedPins;
+    bool _hasExplicitPinSelections = false;
+    std::vector<ProbedPin> _probedPins;
     double _impedance = 45;
     double _length = 1000;
     std::int32_t _plane = 1;
@@ -467,10 +600,12 @@ void from_json(const nlohmann::json& j, SingleEndedConfig& p);
 enum class LayerKind {
     Substrate,
     Metal,
+    SolderMaskTop,
+    SolderMaskBottom,
 };
 
-/// One layer of a resolved board stackup (see libkicad_query::stackup()) -- copper or substrate,
-/// already scaled to simulation units.
+/// One layer of a resolved board stackup (see libkicad_query::stackup()) -- copper, substrate, or
+/// (top/bottom) solder mask, already scaled to simulation units.
 class LayerConfig {
 public:
     /// `thicknessMm` is scaled to simulation units internally; `epsilon`/`lossTangent` are ignored
@@ -482,9 +617,10 @@ public:
     LayerKind kind() const { return _kind; }
     double thickness() const { return _thickness; }
     const std::string& name() const { return _name; }
-    const std::string& file() const { return _file; }       // only meaningful when kind() == Metal
-    double epsilon() const { return _epsilon; }              // only meaningful when kind() == Substrate
-    double lossTangent() const { return _lossTangent; }      // only meaningful when kind() == Substrate
+    const std::string& file() const { return _file; }  // only meaningful when kind() == Metal
+    // only meaningful when kind() == Substrate/SolderMaskTop/SolderMaskBottom
+    double epsilon() const { return _epsilon; }
+    double lossTangent() const { return _lossTangent; }
 
 private:
     LayerKind _kind;
@@ -672,6 +808,12 @@ public:
     std::vector<PortConfig>& ports() { return _ports; }
     const std::vector<PortConfig>& ports() const { return _ports; }
 
+    /// Auto-discovered 2-pin R/L/C components -- see LumpedComponentConfig's own doc comment.
+    /// Populated by resolveSimulationPorts(), alongside ports(); never (de)serialized (same
+    /// reasoning as _ports itself -- see that member's own comment below).
+    std::vector<LumpedComponentConfig>& lumpedComponents() { return _lumpedComponents; }
+    const std::vector<LumpedComponentConfig>& lumpedComponents() const { return _lumpedComponents; }
+
     /// Every net name resolved from involvedNets() (populated once by resolveSimulationPorts(),
     /// alongside ports()) -- cached here so grid_gen.cpp's mesh-density placement doesn't need to
     /// re-resolve net_class/footprint+pin entries via another libkicad_query round trip. The mesh's
@@ -707,6 +849,7 @@ private:
 
     std::vector<PortConfig> _ports;         // not (de)serialized, populated by resolveSimulationPorts()
     std::vector<std::string> _resolvedNets; // not (de)serialized, populated by resolveSimulationPorts()
+    std::vector<LumpedComponentConfig> _lumpedComponents; // not (de)serialized, populated by resolveSimulationPorts()
 };
 
 void to_json(nlohmann::json& j, const SimulationConfig& p);
@@ -799,6 +942,10 @@ public:
 
     std::vector<LayerConfig> getSubstrates() const;
     std::vector<LayerConfig> getMetals() const;
+    /// The board's solder mask layers, if present in its stackup -- 0, 1 (top or bottom only, rare),
+    /// or 2 (top and bottom, the common case) entries, top-to-bottom order (matching layers()' own
+    /// convention) since that's also SolderMaskTop-before-SolderMaskBottom order.
+    std::vector<LayerConfig> getSolderMasks() const;
 
     /// Ordinal index (0-based, counting from the top) of the Metal-kind layer whose LayerConfig::
     /// file() matches `normalizedFileName` (dots already replaced with underscores, matching how

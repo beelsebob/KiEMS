@@ -18,6 +18,8 @@
 
 namespace gerber2ems {
 
+using namespace Cu;
+
 namespace {
 
 Clipper2Lib::Path64 _positionsToPath64(const std::vector<Position>& points, double originX, double originY) {
@@ -110,7 +112,7 @@ std::expected<Clipper2Lib::Path64, std::string> _realBoardOutline(const std::fil
         return std::unexpected(std::move(edgeCutsResult).error());
     }
     const GerberFile& edgeCuts = *edgeCutsResult;
-    const std::vector<Position> loop = _chainSegmentsIntoLoop(edgeCuts.traceForNet("no-net").segments());
+    const std::vector<Position> loop = _chainSegmentsIntoLoop(edgeCuts.traceForNet(NetName("no-net")).segments());
     if (loop.size() < 3) {
         return std::unexpected("Edge_Cuts outline has fewer than 3 points");
     }
@@ -170,7 +172,13 @@ bool _pointInComposite(const Clipper2Lib::Point64& pt, const Clipper2Lib::Paths6
     return inside;
 }
 
-std::vector<CopperOp> _opsOnNets(const GerberFile& gerber, const std::unordered_set<std::string>& nets) {
+// _opsOnNets() below compares net names straight against Gerber's own copperOps() (already NetName,
+// real-unescaped-slash form -- see gerber_io.cpp), while involvedNets/groundNets come from
+// libkicad_query in KiCad's own escaped form ("{slash}" standing in for a literal "/" in a
+// hierarchical-sheet-path net name, e.g. "/MCU/USB/Upstream/SSRx-"). Wrapping both sides in NetName
+// (rather than manually reversing the escaping here, as this used to) lets NetName's own
+// normalize-before-compare handle that mismatch structurally -- see net_name.hpp's own doc comment.
+std::vector<CopperOp> _opsOnNets(const GerberFile& gerber, const std::unordered_set<NetName, NetNameHash>& nets) {
     std::vector<CopperOp> filtered;
     for (const CopperOp& op : gerber.copperOps()) {
         if (nets.count(op.net) != 0) {
@@ -199,20 +207,20 @@ std::optional<std::filesystem::path> _copperGerberForFileName(const std::filesys
 
 std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const SimulationConfig& sim, const EMSConfig& config,
                                                                   const PathsConfig& paths) {
-    std::unordered_set<std::string> involvedNets;
+    std::unordered_set<NetName, NetNameHash> involvedNets;
     for (const InvolvedNetConfig& entry : sim.involvedNets()) {
         auto nets = libkicad_query::resolveInvolvedNetNames(paths, entry);
         if (!nets) return std::unexpected(std::move(nets).error());
         for (const std::string& net : *nets) {
-            involvedNets.insert(net);
+            involvedNets.insert(NetName(net));
         }
     }
-    std::unordered_set<std::string> groundNets;
+    std::unordered_set<NetName, NetNameHash> groundNets;
     {
         auto nets = libkicad_query::resolveGroundNetNames(paths, sim.groundNet());
         if (!nets) return std::unexpected(std::move(nets).error());
         for (const std::string& net : *nets) {
-            groundNets.insert(net);
+            groundNets.insert(NetName(net));
         }
     }
 
@@ -244,8 +252,8 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
         if (!gerberResult) return std::unexpected(std::move(gerberResult).error());
         const GerberFile& gerber = *gerberResult;
 
-        signalPerLayer[layerIndex] =
-            compositeOps(gerber, _opsOnNets(gerber, involvedNets), origin.xMin, origin.yMin, tessellationTolerance);
+        const std::vector<CopperOp> involvedOps = _opsOnNets(gerber, involvedNets);
+        signalPerLayer[layerIndex] = compositeOps(gerber, involvedOps, origin.xMin, origin.yMin, tessellationTolerance);
         groundPerLayer[layerIndex] =
             compositeOps(gerber, _opsOnNets(gerber, groundNets), origin.xMin, origin.yMin, tessellationTolerance);
 
@@ -284,8 +292,12 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
         bool isGround = false;  // For the viaSpacing check, which only applies among ground-net vias.
     };
     std::vector<ExistingVia> existingVias;
+    // Kept (not just the derived ExistingVia stats below) so the final per-layer copper loop can
+    // also cut each real via's own hole out of the copper -- see viaHolePolygons' own comment.
+    std::vector<ViaHole> realViasForHoleCutting;
     if (auto realVias = getVias(paths, origin.xMin, origin.yMin); realVias) {
         existingVias.reserve(realVias->size());
+        realViasForHoleCutting = *realVias;
         for (const ViaHole& via : *realVias) {
             // Midpoint of the via's own capsule centerline -- exactly (via.x, via.y) for a plain
             // round via (x2==x, y2==y), the center of the pad for an elongated one.
@@ -589,21 +601,110 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
         }
     }
 
+    // Every via's own drilled hole (real board vias and the stitching vias just placed above alike),
+    // as an already-tessellated capsule/stadium polygon loop -- the same InflatePaths-of-the-
+    // centerline technique npthHolePolygons above uses, just at each via's own hole diameter rather
+    // than an NPTHHole's. Cut out of *every* metal layer's own final copper below, matching the
+    // simplifying assumption already in force everywhere else a via is modeled in this codebase (both
+    // the real FDTD geometry -- Simulation::addVia() always extrudes its own via metal/filling boxes
+    // the *entire* substrate stack height, regardless of which layers a via is actually connected to
+    // -- and this same preview's own via markers, which never carried a per-layer connectivity list
+    // either): a via reaches every layer, full stop, no blind/buried distinction anywhere upstream
+    // (ViaHole/StitchingVia carry no such data to derive one from even if this wanted to).
+    //
+    // Harmless for the *real* FDTD geometry despite changing what layerTriangles itself contains:
+    // Simulation::addVia() places its own via metal/filling material at CSXCAD priority 50/51, well
+    // above the copper Gerber's own priority 1 (see simulation.cpp's own comment there) -- CSXCAD
+    // resolves overlapping primitives by highest priority wins, so removing the now-redundant copper
+    // underneath a via's own hole changes nothing about the resolved simulated fields, only what a
+    // *previewer* (with no such priority system, just real depth-tested triangles) sees where a via's
+    // own barrel/annular-ring geometry needs an actual absence of flat copper to sit correctly in 3D.
+    Clipper2Lib::Paths64 viaHolePolygons;
+    for (const ViaHole& via : realViasForHoleCutting) {
+        const Clipper2Lib::Path64 line =
+            _positionsToPath64({Position(via.x, via.y), Position(via.x2, via.y2)}, 0, 0);
+        const Clipper2Lib::Paths64 capsule =
+            Clipper2Lib::InflatePaths({line}, via.diameter / 2.0, Clipper2Lib::JoinType::Round,
+                                        Clipper2Lib::EndType::Round, 2.0, tessellationTolerance);
+        viaHolePolygons.insert(viaHolePolygons.end(), capsule.begin(), capsule.end());
+    }
+    for (const StitchingVia& via : stitchingVias) {
+        const Clipper2Lib::Path64 line = _positionsToPath64({Position(via.x, via.y), Position(via.x, via.y)}, 0, 0);
+        const Clipper2Lib::Paths64 capsule =
+            Clipper2Lib::InflatePaths({line}, via.diameter / 2.0, Clipper2Lib::JoinType::Round,
+                                        Clipper2Lib::EndType::Round, 2.0, tessellationTolerance);
+        viaHolePolygons.insert(viaHolePolygons.end(), capsule.begin(), capsule.end());
+    }
+
     // Final per-layer copper: involved-net composite (already inside the cutout by construction)
-    // union ground-net composite intersected with the cutout, minus any NPTH holes.
+    // union ground-net composite intersected with the cutout. layerTriangles (fed to the real FDTD
+    // geometry) deliberately skips the NPTH/via hole subtraction -- see its own doc comment for why
+    // that's redundant there (both already get correctly overridden by higher-priority CSXCAD
+    // primitives regardless) and measurably expensive (many extra small triangle primitives, each
+    // checked at every quarter-cell query across the whole mesh during real FDTD setup).
+    // previewLayerTriangles is the same copper with those holes cut, computed as a second, separate
+    // triangulation purely for GeometryPreviewBridge's own rendering.
     SlicedBoard result;
     result.layerTriangles.resize(metals.size());
+    result.previewLayerTriangles.resize(metals.size());
     for (std::size_t layerIndex = 0; layerIndex < metals.size(); ++layerIndex) {
         const Clipper2Lib::Paths64 groundInCutout =
             Clipper2Lib::Intersect(groundPerLayer[layerIndex], cutout, Clipper2Lib::FillRule::NonZero);
-        Clipper2Lib::Paths64 finalLayer =
+        const Clipper2Lib::Paths64 finalLayer =
             Clipper2Lib::Union(signalPerLayer[layerIndex], groundInCutout, Clipper2Lib::FillRule::NonZero);
-        if (!npthHolePolygons.empty()) {
-            finalLayer = Clipper2Lib::Difference(finalLayer, npthHolePolygons, Clipper2Lib::FillRule::NonZero);
-        }
         result.layerTriangles[layerIndex] =
             triangulate(finalLayer, tessellationTolerance, "simulation \"" + sim.name() + "\" layer " + std::to_string(layerIndex));
+
+        Clipper2Lib::Paths64 previewLayer = finalLayer;
+        if (!npthHolePolygons.empty()) {
+            previewLayer = Clipper2Lib::Difference(previewLayer, npthHolePolygons, Clipper2Lib::FillRule::NonZero);
+        }
+        if (!viaHolePolygons.empty()) {
+            previewLayer = Clipper2Lib::Difference(previewLayer, viaHolePolygons, Clipper2Lib::FillRule::NonZero);
+        }
+        result.previewLayerTriangles[layerIndex] = triangulate(
+            previewLayer, tessellationTolerance, "simulation \"" + sim.name() + "\" layer " + std::to_string(layerIndex) + " (preview)");
     }
+
+    // Solder mask: F_Mask.gbr/B_Mask.gbr draw the board's own copper-exposure openings, not the
+    // mask's own covering shape -- confirmed by inspecting a real export, these files carry
+    // %TF.FilePolarity,Negative% and their drawn shapes are pad/via-shaped cutouts, not the mask
+    // itself. Produces two representations of the same mask (see SlicedBoard::topMaskTriangles'
+    // own doc comment for why): the raw opening loops (cropped to this simulation's own cutout
+    // region, same as every other per-simulation layer here) for Simulation::addSolderMask() to
+    // punch a small number of cutouts out of one big coverage box; and, only for
+    // GeometryPreviewBridge's benefit, the full triangulated "coverage minus openings" shape,
+    // computed the same Difference()-then-triangulate() way copper-minus-holes is just above.
+    // Gracefully empty (not an error) if the board has no mask gerbers exported, or a mask layer
+    // parses to zero draws (no pads on this side at all, however unlikely).
+    auto maskForFile = [&](const std::string& fileName, std::vector<Triangle>& outTriangles,
+                            std::vector<std::vector<Position>>& outOpeningLoops) {
+        const std::optional<std::filesystem::path> maskPath = _copperGerberForFileName(paths.fabDir, fileName);
+        if (!maskPath.has_value()) {
+            return;
+        }
+        auto maskGerberResult = GerberFile::load(*maskPath, tessellationTolerance);
+        if (!maskGerberResult) {
+            logWarning("Simulation \"" + sim.name() + "\": failed to load solder mask gerber " +
+                       maskPath->string() + ": " + maskGerberResult.error() + " -- solder mask not modeled");
+            return;
+        }
+        const Clipper2Lib::Paths64 openingsWholeBoard = compositeOps(
+            *maskGerberResult, maskGerberResult->copperOps(), origin.xMin, origin.yMin, tessellationTolerance);
+        if (openingsWholeBoard.empty()) {
+            outTriangles = triangulate(cutout, tessellationTolerance, "simulation \"" + sim.name() + "\" solder mask " + fileName);
+            return;
+        }
+        const Clipper2Lib::Paths64 openings =
+            Clipper2Lib::Intersect(openingsWholeBoard, cutout, Clipper2Lib::FillRule::NonZero);
+        for (const Clipper2Lib::Path64& loop : openings) {
+            outOpeningLoops.push_back(_path64ToPositions(loop));
+        }
+        const Clipper2Lib::Paths64 coverage = Clipper2Lib::Difference(cutout, openings, Clipper2Lib::FillRule::NonZero);
+        outTriangles = triangulate(coverage, tessellationTolerance, "simulation \"" + sim.name() + "\" solder mask " + fileName);
+    };
+    maskForFile("F_Mask", result.topMaskTriangles, result.topMaskOpeningLoops);
+    maskForFile("B_Mask", result.bottomMaskTriangles, result.bottomMaskOpeningLoops);
 
     // Kept (as already-tessellated polygon loops, not raw NPTHHoles) so Simulation::addNPTHHoles()
     // can also cut these out of the substrate model -- the copper subtraction above only affects

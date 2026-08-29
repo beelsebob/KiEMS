@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "config.hpp"
+#include "net_name.hpp"
 #include "paths_config.hpp"
 
 namespace gerber2ems::libkicad_query {
@@ -59,6 +60,8 @@ enum class StackupLayerKind {
     Copper,
     Core,
     Prepreg,
+    SolderMaskTop,
+    SolderMaskBottom,
 };
 
 /// One layer of the board's physical stackup, as reported by libkicad_smoketest's `stackup` query
@@ -140,6 +143,45 @@ struct ThroughHole {
 /// netForFootprintPin for `context`.
 std::expected<std::vector<ThroughHole>, std::string> throughHoles(const PathsConfig& paths,
                                                                      const std::string& context);
+
+/// One mesh triangle of a footprint's real, placed 3D model -- mirrors libkicad::ComponentTriangle.
+/// Vertex positions are absolute, in millimetres, in the same board-auxiliary-origin-relative frame
+/// every other libkicad_query position uses. Color is straight from the model's own STEP colors,
+/// each channel 0-1; (1,1,1,1) if the model carries none.
+struct ComponentTriangle {
+    double ax = 0, ay = 0, az = 0;
+    double bx = 0, by = 0, bz = 0;
+    double cx = 0, cy = 0, cz = 0;
+    double r = 0, g = 0, b = 0, a = 0;
+};
+
+/// Result of exportComponentModels() -- mirrors libkicad::ComponentModelExportResult. `messages` is
+/// every diagnostic KiCad's own exporter reported while building the requested components' shapes
+/// (e.g. a component whose linked 3D model file can't be resolved); non-fatal, `exportSucceeded`
+/// stays true and `triangles` still has every other requested component's mesh.
+struct ComponentModelExportResult {
+    bool exportSucceeded = false;
+    std::vector<std::string> messages;
+    std::vector<ComponentTriangle> triangles;
+    /// The board's real top-copper mounting surface Z, in the same millimetre frame `triangles`'
+    /// own vertices are in -- mirrors libkicad::ComponentModelExportResult::topCopperZMm; see its
+    /// own doc comment for exactly what this is and why a caller re-basing these triangles onto a
+    /// different Z=0 convention (e.g. this project's own "every copper layer is infinitesimally
+    /// thin" one) needs this specific value rather than deriving an equivalent offset from stackup
+    /// thickness alone.
+    double topCopperZMm = 0;
+};
+
+/// Returns `componentFilter`'s own footprints' real, placed 3D models (no board body/copper/tracks/
+/// pads) as a flat, real-colored triangle list, via libkicad's in-process EXPORTER_STEP/
+/// STEP_PCB_MODEL wrapper (the same machinery `kicad-cli pcb export stl` itself uses).
+/// `outputStlPath` is still where an incidental STL copy of the same mesh gets written (a debug
+/// artifact, not read by this function itself). `componentFilter` is a comma-separated list of
+/// reference designators (wildcards supported). See netForFootprintPin for `context`.
+std::expected<ComponentModelExportResult, std::string> exportComponentModels(const PathsConfig& paths,
+                                                                                const std::string& componentFilter,
+                                                                                const std::string& outputStlPath,
+                                                                                const std::string& context);
 
 /// Resolves an InvolvedNetConfig entry (net_class / net / footprint+pins) to a list of net names,
 /// per its documented semantics (a footprint+pin entry resolves to that pin's net, deduplicated

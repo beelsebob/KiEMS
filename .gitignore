@@ -3,3 +3,6 @@ build/
 *.profraw
 /.et
 /.ht
+/et
+/ht
+/worker_error.txt

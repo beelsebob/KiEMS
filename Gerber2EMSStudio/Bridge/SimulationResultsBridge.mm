@@ -149,6 +149,32 @@ NSString* responseLabel(const gerber2ems::PortConfig& measuredPort) {
 }
 @end
 
+@implementation EMSResultsProbeCurve
+- (instancetype)initWithExcitedPort:(NSInteger)excitedPort
+                    voltageMagnitude:(NSArray<NSNumber*>*)voltageMagnitude
+                    currentMagnitude:(NSArray<NSNumber*>*)currentMagnitude {
+    self = [super init];
+    if (self) {
+        _excitedPort = excitedPort;
+        _voltageMagnitude = [voltageMagnitude copy];
+        _currentMagnitude = [currentMagnitude copy];
+    }
+    return self;
+}
+@end
+
+@implementation EMSResultsProbe
+- (instancetype)initWithName:(NSString*)name index:(NSInteger)index curves:(NSArray<EMSResultsProbeCurve*>*)curves {
+    self = [super init];
+    if (self) {
+        _name = [name copy];
+        _index = index;
+        _curves = [curves copy];
+    }
+    return self;
+}
+@end
+
 @implementation EMSResultsTrace
 - (instancetype)initWithName:(NSString*)name delayNs:(NSArray<NSNumber*>*)delayNs {
     self = [super init];
@@ -167,7 +193,8 @@ NSString* responseLabel(const gerber2ems::PortConfig& measuredPort) {
                              impedances:(NSArray<EMSResultsImpedance*>*)impedances
                             smithCharts:(NSArray<EMSResultsSmith*>*)smithCharts
                               diffPairs:(NSArray<EMSResultsDiffPair*>*)diffPairs
-                                 traces:(NSArray<EMSResultsTrace*>*)traces {
+                                 traces:(NSArray<EMSResultsTrace*>*)traces
+                                 probes:(NSArray<EMSResultsProbe*>*)probes {
     self = [super init];
     if (self) {
         _frequenciesGHz = [frequenciesGHz copy];
@@ -177,6 +204,7 @@ NSString* responseLabel(const gerber2ems::PortConfig& measuredPort) {
         _smithCharts = [smithCharts copy];
         _diffPairs = [diffPairs copy];
         _traces = [traces copy];
+        _probes = [probes copy];
     }
     return self;
 }
@@ -307,6 +335,35 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
                                                                pDelayNs:pDelay]];
     }
 
+    NSMutableArray<EMSResultsProbe*>* probes = [NSMutableArray array];
+    for (std::int32_t i = 0; i < portCount; ++i) {
+        if (simConfig.ports()[static_cast<std::size_t>(i)].absorbSignal()) {
+            continue;
+        }
+        NSMutableArray<EMSResultsProbeCurve*>* curves = [NSMutableArray array];
+        for (std::int32_t exc = 0; exc < portCount; ++exc) {
+            const auto voltage = postprocessor.getProbeVoltage(i, exc);
+            const auto current = postprocessor.getProbeCurrent(i, exc);
+            if (!voltage.has_value() || !current.has_value()) {
+                continue;
+            }
+            std::vector<double> vMag(voltage->size());
+            std::vector<double> iMag(current->size());
+            for (std::size_t f = 0; f < voltage->size(); ++f) {
+                vMag[f] = std::abs((*voltage)[f]);
+                iMag[f] = std::abs((*current)[f]);
+            }
+            [curves addObject:[[EMSResultsProbeCurve alloc] initWithExcitedPort:exc
+                                                                 voltageMagnitude:toNSArray(vMag)
+                                                                 currentMagnitude:toNSArray(iMag)]];
+        }
+        if (curves.count == 0) {
+            continue;
+        }
+        const auto& port = simConfig.ports()[static_cast<std::size_t>(i)];
+        [probes addObject:[[EMSResultsProbe alloc] initWithName:@(port.name().c_str()) index:i curves:curves]];
+    }
+
     NSMutableArray<EMSResultsTrace*>* traces = [NSMutableArray array];
     for (std::size_t idx = 0; idx < simConfig.traces().size(); ++idx) {
         const auto& trace = simConfig.traces()[idx];
@@ -328,5 +385,6 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
                                                    impedances:impedances
                                                   smithCharts:smithCharts
                                                     diffPairs:diffPairs
-                                                       traces:traces];
+                                                       traces:traces
+                                                       probes:probes];
 }

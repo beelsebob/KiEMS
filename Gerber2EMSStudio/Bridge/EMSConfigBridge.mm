@@ -8,6 +8,7 @@ using gerber2ems::ExcitationConfig;
 using gerber2ems::GroundSelectorKind;
 using gerber2ems::InvolvedNetConfig;
 using gerber2ems::NetSelectorKind;
+using gerber2ems::ProbedPin;
 using gerber2ems::SimulationConfig;
 
 NSErrorDomain const EMSConfigErrorDomain = @"EMSConfigErrorDomain";
@@ -78,6 +79,30 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
 }
 
 } // namespace
+
+@implementation EMSProbedPinBridge {
+    std::string _footprintStorage;
+    std::string _pinStorage;
+}
+
+- (instancetype)initWithProbedPin:(const ProbedPin&)probedPin {
+    if ((self = [super init])) {
+        _footprintStorage = probedPin.footprint;
+        _pinStorage = probedPin.pin;
+        _absorbSignal = probedPin.absorbSignal ? YES : NO;
+    }
+    return self;
+}
+
+- (NSString*)footprintReference {
+    return @(_footprintStorage.c_str());
+}
+
+- (NSString*)pin {
+    return @(_pinStorage.c_str());
+}
+
+@end
 
 // Not cached (unlike EMSSimulationBridge's own wrappers): involved nets are removable, and a
 // removal shifts every later index -- a cache would need to be re-indexed on every removal for no
@@ -195,6 +220,32 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
     excluded.erase(std::remove(excluded.begin(), excluded.end(),
                                  gerber2ems::ExcludedPin{footprint.UTF8String, pin.UTF8String}),
                     excluded.end());
+}
+
+- (BOOL)hasExplicitPinSelections {
+    return self.cxxNet.hasExplicitPinSelections() ? YES : NO;
+}
+- (BOOL)isPinProbedWithFootprint:(NSString*)footprint pin:(NSString*)pin {
+    return self.cxxNet.probedPinAbsorbs(footprint.UTF8String, pin.UTF8String).has_value() ? YES : NO;
+}
+- (BOOL)pinAbsorbsSignalWithFootprint:(NSString*)footprint pin:(NSString*)pin {
+    const auto value = self.cxxNet.probedPinAbsorbs(footprint.UTF8String, pin.UTF8String);
+    return value.value_or(true) ? YES : NO;
+}
+- (void)setPinProbed:(BOOL)probed
+       absorbSignal:(BOOL)absorbSignal
+      withFootprint:(NSString*)footprint
+                pin:(NSString*)pin {
+    self.cxxNet.setPinProbed(footprint.UTF8String, pin.UTF8String,
+                              probed ? std::optional<bool>(absorbSignal ? true : false) : std::nullopt);
+}
+- (NSArray<EMSProbedPinBridge*>*)probedPins {
+    const auto& probed = self.cxxNet.probedPins();
+    NSMutableArray<EMSProbedPinBridge*>* result = [NSMutableArray arrayWithCapacity:probed.size()];
+    for (const auto& p : probed) {
+        [result addObject:[[EMSProbedPinBridge alloc] initWithProbedPin:p]];
+    }
+    return result;
 }
 
 - (nullable NSNumber*)directionOverrideWithFootprint:(NSString*)footprint pin:(NSString*)pin {

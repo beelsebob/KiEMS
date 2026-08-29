@@ -21,6 +21,8 @@ extern char** environ;
 
 namespace gerber2ems {
 
+using namespace Cu;
+
 using namespace gerber2ems::constants;
 
 namespace {
@@ -273,6 +275,12 @@ std::expected<void, std::string> importStackup(const PathsConfig& paths, EMSConf
     for (const auto& layer : *stackupResult) {
         if (layer.kind == libkicad_query::StackupLayerKind::Copper) {
             layers.emplace_back(LayerKind::Metal, layer.name, layer.thicknessMm);
+        } else if (layer.kind == libkicad_query::StackupLayerKind::SolderMaskTop) {
+            layers.emplace_back(LayerKind::SolderMaskTop, layer.name, layer.thicknessMm, layer.epsilonR,
+                                 layer.lossTangent);
+        } else if (layer.kind == libkicad_query::StackupLayerKind::SolderMaskBottom) {
+            layers.emplace_back(LayerKind::SolderMaskBottom, layer.name, layer.thicknessMm, layer.epsilonR,
+                                 layer.lossTangent);
         } else {
             layers.emplace_back(LayerKind::Substrate, layer.name, layer.thicknessMm, layer.epsilonR,
                                  layer.lossTangent);

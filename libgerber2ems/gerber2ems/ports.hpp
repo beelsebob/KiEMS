@@ -1,7 +1,7 @@
 // Port abstractions (MSLPort, LumpedPort) and S-parameter extraction. Ported from the *Python*
 // openEMS package's ports.py/utilities.py -- these classes are NOT part of the compiled
 // libopenEMS/libCSXCAD C++ libraries; they're a convenience layer that builds ports out of raw
-// CSXCAD primitives (metal boxes, probes, excitations) and post-processes the resulting probe
+// CSXCAD primitives (lumped terminations, probes, excitations) and post-processes the resulting probe
 // files. Only the subset gerber2ems actually exercises is ported: the shared Port base, LumpedPort
 // and MSLPort (waveguide/coaxial/stripline/CPW/curve port types are not used by gerber2ems and are
 // omitted).
@@ -74,6 +74,12 @@ public:
 
     const std::vector<std::complex<double>>& ufInc() const { return _ufInc; }
     const std::vector<std::complex<double>>& ufRef() const { return _ufRef; }
+    /// Raw, undecomposed total voltage/current vs. frequency -- what readUiData() alone computes,
+    /// before calcPort()'s impedance-based incident/reflected split. Always populated once
+    /// readUiData()/calcPort() has run; the only data PassiveProbe (a port with no real
+    /// characteristic impedance to decompose against) ever produces.
+    const std::vector<std::complex<double>>& ufTot() const { return _ufTot; }
+    const std::vector<std::complex<double>>& ifTot() const { return _ifTot; }
 
 protected:
     std::string _label(const std::string& tag) const { return _prefix + "port_" + tag + "_" + std::to_string(_number); }
@@ -118,12 +124,39 @@ private:
     std::int32_t _excNy;
 };
 
-/// A microstrip transmission line port.
+/// A purely passive, non-loading probe -- U/I probe boxes only, no metal trace, no feed resistor,
+/// no excitation. Reads a location's own voltage/current without adding any physical structure that
+/// could affect the simulated fields (unlike LumpedPort/MSLPort, which always terminate/absorb the
+/// line they sit on). See PortConfig::absorbSignal()'s own doc comment -- this is what
+/// Simulation::addPassiveProbe() builds for a PortConfig with absorbSignal()==false.
+///
+/// Never excited (excite is always 0) and calcPort() is a deliberate no-op beyond readUiData(): a
+/// passive probe has no characteristic impedance to decompose ufTot/ifTot into incident/reflected
+/// waves against, so ufInc()/ufRef() stay empty -- callers needing this port's data must use
+/// ufTot()/ifTot() instead (see Postprocessor::addProbeData(), which is fed from those, never from
+/// ufInc()/ufRef()).
+class PassiveProbe : public Port {
+public:
+    PassiveProbe(ContinuousStructure& csx, std::int32_t portNr, Point3 start, Point3 stop, const std::string& excDir,
+                 std::int32_t priority = 0, std::string portNamePrefix = "");
+
+    std::expected<void, std::string> calcPort(const std::filesystem::path& simPath, const std::vector<double>& freq,
+                                               std::optional<double> refImpedance = std::nullopt,
+                                               const std::string& signalType = "pulse") override;
+
+private:
+    std::int32_t _excNy;
+};
+
+/// A microstrip transmission line port placed on existing imported trace copper. The start/stop
+/// box defines its excitation, termination and measurement cross-sections; it deliberately does not
+/// manufacture a straight metal strip between them, since a PCB trace may bend or pass close to an
+/// unrelated conductor inside that interval.
 class MSLPort : public Port {
 public:
-    MSLPort(ContinuousStructure& csx, std::int32_t portNr, CSProperties& metalProp, Point3 start, Point3 stop,
-            const std::string& propDir, const std::string& excDir, double excite = 0, double feedR = 50,
-            std::int32_t priority = 0, std::string portNamePrefix = "", double delay = 0);
+    MSLPort(ContinuousStructure& csx, std::int32_t portNr, Point3 start, Point3 stop, const std::string& propDir,
+            const std::string& excDir, double excite = 0, double feedR = 50, std::int32_t priority = 0,
+            std::string portNamePrefix = "", double delay = 0);
 
     std::expected<void, std::string> readUiData(const std::filesystem::path& simPath, const std::vector<double>& freq,
                                                  const std::string& signalType = "pulse") override;

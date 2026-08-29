@@ -12,8 +12,9 @@ import simd
 /// dots; rejected stitching-via candidate positions as black crosses (see
 /// EMSGeometryPreview.failedViaAttempts); the simulation's own cutout outline stroked on top.
 ///
-/// Camera: an orbit camera (mouse-drag rotate, scroll/magnify zoom -- same interaction as
-/// FieldView, sharing its camera math via Board3DMath.swift) but *orthographic*, not perspective,
+/// Camera: an orbit camera (mouse-drag rotate, right-drag pan, scroll/magnify zoom -- rotate/zoom
+/// match FieldView's own interaction, sharing its camera math via Board3DMath.swift; pan is
+/// GeometryView-only, FieldView has no pan) but *orthographic*, not perspective,
 /// defaulting to a classic isometric angle -- an orthographic camera has no perspective
 /// foreshortening, so rotating to look straight down any one axis renders exactly as flat/2D as
 /// the old top-down-only view this replaces, while every other angle still reads as genuinely 3D.
@@ -32,6 +33,7 @@ import simd
 final class GeometryView: MTKView, MTKViewDelegate {
     var preview: EMSGeometryPreview? {
         didSet {
+            selectedGridLayerIndex = nil
             rebuildBoardBuffers()
             rebuildGridBuffers()
             hasFitCamera = false
@@ -47,7 +49,10 @@ final class GeometryView: MTKView, MTKViewDelegate {
     /// since the grid buffers were already built from the same `preview` this toggles visibility
     /// for.
     var showGrid: Bool = false {
-        didSet { needsDisplay = true }
+        didSet {
+            rebuildLegend()
+            needsDisplay = true
+        }
     }
 
     override var acceptsFirstResponder: Bool { true }
@@ -56,16 +61,40 @@ final class GeometryView: MTKView, MTKViewDelegate {
     private var opaquePipelineState: MTLRenderPipelineState!
     /// Real depth test *and* write -- unlike FieldView's own translucent overlay/voxel passes
     /// (which can't use a real depth test at all, see paintersDepthStencilState's own doc comment
-    /// there), every draw in this view is fully opaque, so a standard depth-tested pipeline handles
-    /// occlusion correctly regardless of submission order -- no per-frame back-to-front layer
-    /// sorting needed here the way FieldView's own board-reference render still requires.
+    /// there), every *opaque* draw in this view is fully opaque, so a standard depth-tested
+    /// pipeline handles occlusion correctly regardless of submission order -- no per-frame
+    /// back-to-front layer sorting needed here the way FieldView's own board-reference render still
+    /// requires. The exceptions are the always-visible grid overlay and solder mask (see their
+    /// dedicated states below).
     private var depthStencilState: MTLDepthStencilState!
+    /// Grid lines are a diagnostic overlay, not board geometry: they should remain visible through
+    /// the board instead of being clipped by whichever surface happens to be in front of their
+    /// crosshatch plane. They neither test nor write depth.
+    private var gridDepthStencilState: MTLDepthStencilState!
+    /// Solder mask alone renders translucent (50% opacity, so the copper/silkscreen underneath
+    /// stays visible -- matching FieldView's own board-reference treatment), unlike every other
+    /// opaque draw in this view -- same "field_overlay_vertex/fragment" shader pair and blend
+    /// descriptor FieldView's own overlayPipelineState already uses, just reused here for one more
+    /// draw call rather than this view's whole scene.
+    private var translucentPipelineState: MTLRenderPipelineState!
+    /// Real depth *test* (so the mask is correctly hidden by opaque geometry in front of it, e.g.
+    /// viewed from the board's own far side) but no depth *write* -- standard for a translucent
+    /// draw, though with only one translucent layer per side here it's mostly a safety default
+    /// matching FieldView's own paintersDepthStencilState reasoning rather than something this
+    /// view's own single mask draw strictly depends on yet.
+    private var translucentDepthStencilState: MTLDepthStencilState!
 
     // MARK: - Board geometry (layers + vias + ports, one combined opaque triangle buffer)
 
     private var boardPositionBuffer: MTLBuffer?
     private var boardColorBuffer: MTLBuffer?
     private var boardVertexCount = 0
+
+    // MARK: - Solder mask (translucent, drawn in its own pass after every opaque draw above)
+
+    private var maskPositionBuffer: MTLBuffer?
+    private var maskColorBuffer: MTLBuffer?
+    private var maskVertexCount = 0
 
     private var outlinePositionBuffer: MTLBuffer?
     private var outlineColorBuffer: MTLBuffer?
@@ -87,19 +116,33 @@ final class GeometryView: MTKView, MTKViewDelegate {
     private var gridPlaneExcludingX = LineBuffer() // Y/Z crosshatch -- drawn when X is most camera-aligned.
     private var gridPlaneExcludingY = LineBuffer() // X/Z crosshatch -- drawn when Y is most camera-aligned.
     private var gridPlaneExcludingZ = LineBuffer() // X/Y crosshatch -- drawn when Z is most camera-aligned (the old view's only case).
+    private var selectedGridLayerIndex: Int?
+    private var selectedGridLayerBuffer = LineBuffer()
 
-    // MARK: - Orbit camera (shares its math with FieldView -- see Board3DMath.swift)
+    // MARK: - Orbit camera
 
     private static let isometricElevation: Float = atan(1 / Float(2).squareRoot())
+    /// Drag state is still plain azimuth/elevation (not a quaternion accumulated incrementally
+    /// drag-over-drag) -- an earlier version composed each drag directly onto a stored quaternion
+    /// (yaw around world Z, pitch around the camera's own current right axis), which in principle
+    /// avoids gimbal lock the same way this does, but felt visibly wrong in practice (left/right
+    /// drag behaved like it was rolling around the view direction rather than yawing around world
+    /// up -- never fully root-caused). Keeping azimuth/elevation as the actual state sidesteps
+    /// whatever that was: the drag math below is untouched from the original Euler-angle camera,
+    /// just without its elevation clamp. What *does* change is how the camera's basis vectors are
+    /// derived -- currentOrientation() builds a fresh quaternion from the angles every frame (see
+    /// its own doc comment for why that, unlike reconstructing eye/right/up from raw sin/cos and a
+    /// fixed world-up cross product, never degenerates at the poles) -- so azimuth/elevation can
+    /// range freely with no clamp, while the actual rotation composition that seemed to be the
+    /// problem never happens.
     private var azimuth: Float = -.pi / 4
     private var elevation: Float = GeometryView.isometricElevation
     private var distance: Float = 1
     private var target = Position3(0, 0, 0)
     private var sceneRadius: Float = 1
     private var hasFitCamera = false
-    private static let minElevation: Float = -.pi / 2 * 0.98
-    private static let maxElevation: Float = .pi / 2 * 0.98
     private var lastDragPoint: CGPoint?
+    private var lastPanDragPoint: CGPoint?
 
     private let legendStack = NSStackView()
 
@@ -131,11 +174,22 @@ final class GeometryView: MTKView, MTKViewDelegate {
 
         if let device {
             commandQueue = device.makeCommandQueue()
-            opaquePipelineState = Self.makePipelineState(device: device, pixelFormat: colorPixelFormat)
+            opaquePipelineState = Self.makePipelineState(device: device, pixelFormat: colorPixelFormat, translucent: false)
             let depthDescriptor = MTLDepthStencilDescriptor()
             depthDescriptor.depthCompareFunction = .less
             depthDescriptor.isDepthWriteEnabled = true
             depthStencilState = device.makeDepthStencilState(descriptor: depthDescriptor)
+
+            let gridDepthDescriptor = MTLDepthStencilDescriptor()
+            gridDepthDescriptor.depthCompareFunction = .always
+            gridDepthDescriptor.isDepthWriteEnabled = false
+            gridDepthStencilState = device.makeDepthStencilState(descriptor: gridDepthDescriptor)
+
+            translucentPipelineState = Self.makePipelineState(device: device, pixelFormat: colorPixelFormat, translucent: true)
+            let translucentDepthDescriptor = MTLDepthStencilDescriptor()
+            translucentDepthDescriptor.depthCompareFunction = .less
+            translucentDepthDescriptor.isDepthWriteEnabled = false
+            translucentDepthStencilState = device.makeDepthStencilState(descriptor: translucentDepthDescriptor)
         }
 
         setupLegend()
@@ -144,9 +198,12 @@ final class GeometryView: MTKView, MTKViewDelegate {
     /// Reuses FieldShaders.metal's own `field_overlay_vertex`/`field_overlay_fragment` -- the same
     /// "positions + colors + one view-projection uniform" shader pair FieldView's own board
     /// reference render uses (see this view's own top comment: requirement 1 is to reuse that same
-    /// 3D board-drawing code, not reimplement it) -- just with blending off, since every draw here
-    /// is opaque rather than FieldView's fixed-alpha translucent reference plane.
-    private static func makePipelineState(device: MTLDevice, pixelFormat: MTLPixelFormat) -> MTLRenderPipelineState? {
+    /// 3D board-drawing code, not reimplement it). `translucent` reuses the exact same standard
+    /// "over" alpha-blend descriptor FieldView's own makePipelineState() sets up for its overlay --
+    /// every draw in this view is opaque *except* solder mask (see translucentPipelineState's own
+    /// doc comment), which needs its own separately-blended pipeline state.
+    private static func makePipelineState(device: MTLDevice, pixelFormat: MTLPixelFormat,
+                                           translucent: Bool) -> MTLRenderPipelineState? {
         guard let library = device.makeDefaultLibrary(),
               let vertexFunction = library.makeFunction(name: "field_overlay_vertex"),
               let fragmentFunction = library.makeFunction(name: "field_overlay_fragment") else {
@@ -158,6 +215,15 @@ final class GeometryView: MTKView, MTKViewDelegate {
         descriptor.colorAttachments[0].pixelFormat = pixelFormat
         descriptor.depthAttachmentPixelFormat = .depth32Float
         descriptor.rasterSampleCount = sampleCount
+        if translucent {
+            descriptor.colorAttachments[0].isBlendingEnabled = true
+            descriptor.colorAttachments[0].rgbBlendOperation = .add
+            descriptor.colorAttachments[0].alphaBlendOperation = .add
+            descriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+            descriptor.colorAttachments[0].sourceAlphaBlendFactor = .sourceAlpha
+            descriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            descriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        }
         return try? device.makeRenderPipelineState(descriptor: descriptor)
     }
 
@@ -166,7 +232,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
     func draw(in view: MTKView) {
-        guard let commandQueue, let opaquePipelineState, let depthStencilState,
+        guard let commandQueue, let opaquePipelineState, let depthStencilState, let gridDepthStencilState,
               let drawable = currentDrawable, let descriptor = currentRenderPassDescriptor else { return }
         resetCameraIfNeeded()
 
@@ -177,16 +243,16 @@ final class GeometryView: MTKView, MTKViewDelegate {
               let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else { return }
 
         var uniforms = FieldUniformsGPU(viewProjection: currentProjectionMatrix() * lookAt(
-            eye: currentEyePosition(), center: SIMD3(target.x, target.y, target.z), up: SIMD3(0, 0, 1)))
+            eye: currentEyePosition(), center: SIMD3(target.x, target.y, target.z),
+            up: -currentOrientation().act(SIMD3<Float>(1, 0, 0))))
 
         encoder.setRenderPipelineState(opaquePipelineState)
         encoder.setDepthStencilState(depthStencilState)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<FieldUniformsGPU>.stride, index: 2)
 
-        // Real depth test/write throughout (see depthStencilState's own doc comment) -- draw order
-        // below doesn't affect the final image's correctness, only which surfaces are even eligible
-        // to occlude which others; board geometry is drawn first purely so it establishes the main
-        // occlusion surface before the thinner reference elements.
+        // Real depth test/write for opaque board geometry (see depthStencilState's own doc comment)
+        // -- draw order below doesn't affect its correctness. The diagnostic grid switches to its
+        // own depth-free overlay state immediately before it is drawn.
         if boardVertexCount > 0, let positions = boardPositionBuffer, let colors = boardColorBuffer {
             encoder.setVertexBuffer(positions, offset: 0, index: 0)
             encoder.setVertexBuffer(colors, offset: 0, index: 1)
@@ -208,10 +274,23 @@ final class GeometryView: MTKView, MTKViewDelegate {
         if showGrid {
             let activeGrid = gridPlane(excluding: mostAlignedAxis())
             if activeGrid.vertexCount > 1, let positions = activeGrid.positionBuffer, let colors = activeGrid.colorBuffer {
+                encoder.setDepthStencilState(gridDepthStencilState)
                 encoder.setVertexBuffer(positions, offset: 0, index: 0)
                 encoder.setVertexBuffer(colors, offset: 0, index: 1)
                 encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: activeGrid.vertexCount)
             }
+        }
+
+        // Solder mask, translucent, drawn last -- see translucentPipelineState's own doc comment.
+        // Depth-tested against everything opaque drawn above (so it's correctly hidden when viewed
+        // from the board's own far side), just with its own separately-blended pipeline state.
+        if maskVertexCount > 0, let positions = maskPositionBuffer, let colors = maskColorBuffer,
+           let translucentPipelineState, let translucentDepthStencilState {
+            encoder.setRenderPipelineState(translucentPipelineState)
+            encoder.setDepthStencilState(translucentDepthStencilState)
+            encoder.setVertexBuffer(positions, offset: 0, index: 0)
+            encoder.setVertexBuffer(colors, offset: 0, index: 1)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: maskVertexCount)
         }
 
         encoder.endEncoding()
@@ -221,30 +300,65 @@ final class GeometryView: MTKView, MTKViewDelegate {
 
     // MARK: - Camera math
 
-    private func currentEyePosition() -> SIMD3<Float> {
-        SIMD3<Float>(target.x + distance * cos(elevation) * cos(azimuth),
-                     target.y + distance * cos(elevation) * sin(azimuth),
-                     target.z + distance * sin(elevation))
+    /// Builds this frame's camera-orientation quaternion fresh from azimuth/elevation, rather than
+    /// storing/accumulating one across drags (see azimuth's own doc comment for why). Equivalent to
+    /// the old raw-trig eye-position formula (cos(el)cos(az), cos(el)sin(az), sin(el)) when acting
+    /// on local +Z, but *also* gives a well-defined right/up anywhere -- including exactly at the
+    /// poles, where the old cross(forward, worldUp)-based approach degenerated (cross product of
+    /// two parallel vectors is zero) and had to be papered over with an elevation clamp. Order:
+    /// first tilt local +Z down from straight-up by (90-elevation) around Y, then yaw the result
+    /// around Z by azimuth -- chosen so that acting on local +Z reproduces the old formula exactly.
+    ///
+    /// Acting on local +X/+Y does *not* give azimuthal-right/elevation-up directly, though -- this
+    /// construction's own local +Y stays fixed at the *azimuthal* tangent direction regardless of
+    /// elevation (Ry(90-el) leaves the Y axis it rotates around unchanged, so only the later Rz(az)
+    /// yaw ever moves it), while local +X ends up at the *negated* elevation tangent. Confirmed
+    /// numerically (not just by inspection -- this is exactly the kind of thing worth double-
+    /// checking with actual numbers, not re-deriving by hand again) before fixing what was, for one
+    /// commit, a real right/up mixup: dragging left/right visibly rolled the view around the camera's
+    /// own forward axis instead of yawing around world up. See cameraRightAndUp()/draw(in:)'s own
+    /// `up:` argument, which read local +X/+Y directly and hit exactly that bug.
+    private func currentOrientation() -> simd_quatf {
+        simd_quatf(angle: azimuth, axis: SIMD3<Float>(0, 0, 1)) *
+            simd_quatf(angle: .pi / 2 - elevation, axis: SIMD3<Float>(0, 1, 0))
     }
 
-    /// Unit vector from the camera toward `target` -- used only to decide which world axis is most
+    private func currentEyePosition() -> SIMD3<Float> {
+        let eyeOffset = currentOrientation().act(SIMD3<Float>(0, 0, 1))
+        return SIMD3<Float>(target.x, target.y, target.z) + distance * eyeOffset
+    }
+
+    /// Unit vector from `target` toward the camera -- used only to decide which world axis is most
     /// aligned with the current view direction (see mostAlignedAxis()), so grid lines can be drawn
     /// for the other two (see this class's own top comment).
-    private func forwardDirection() -> SIMD3<Float> {
-        SIMD3<Float>(cos(elevation) * cos(azimuth), cos(elevation) * sin(azimuth), sin(elevation))
+    private func eyeOffsetDirection() -> SIMD3<Float> {
+        currentOrientation().act(SIMD3<Float>(0, 0, 1))
     }
 
     private enum Axis3 { case x, y, z }
 
     private func mostAlignedAxis() -> Axis3 {
-        let f = forwardDirection()
+        let f = eyeOffsetDirection()
         let ax = abs(f.x), ay = abs(f.y), az = abs(f.z)
         if ax >= ay, ax >= az { return .x }
         if ay >= az { return .y }
         return .z
     }
 
+    /// The camera's own current right/up basis vectors (screen-space horizontal/vertical, in world
+    /// coordinates), read directly off currentOrientation() -- exactly the same up passed to
+    /// lookAt() in draw(in:), so panning shifts `target` along axes that actually match what's on
+    /// screen. See currentOrientation()'s own doc comment for why right/up come from local +Y and
+    /// *negated* local +X, not the more intuitive-looking local +X/+Y.
+    private func cameraRightAndUp() -> (right: SIMD3<Float>, up: SIMD3<Float>) {
+        let o = currentOrientation()
+        return (o.act(SIMD3<Float>(0, 1, 0)), -o.act(SIMD3<Float>(1, 0, 0)))
+    }
+
     private func gridPlane(excluding axis: Axis3) -> LineBuffer {
+        if selectedGridLayerIndex != nil {
+            return selectedGridLayerBuffer
+        }
         switch axis {
         case .x: return gridPlaneExcludingX
         case .y: return gridPlaneExcludingY
@@ -301,10 +415,10 @@ final class GeometryView: MTKView, MTKViewDelegate {
         return (minX, minX + Float(preview.width), minY, minY + Float(preview.height), minZ, maxZ)
     }
 
-    /// Orbit: drag left/right to rotate azimuth, up/down to tilt elevation (clamped shy of the
-    /// poles to avoid a gimbal flip -- see minElevation/maxElevation). No panning -- the orbit
-    /// target is always the board's own bounding-box center, matching FieldView's own interaction
-    /// model exactly.
+    /// Orbit: drag left/right to rotate azimuth, up/down to tilt elevation -- see azimuth's own doc
+    /// comment for why this is unclamped (no gimbal lock) despite being plain Euler angles. Right-
+    /// drag pans instead (see rightMouseDragged(_:)), shifting the orbit target itself rather than
+    /// orbiting around it.
     override func mouseDown(with event: NSEvent) {
         lastDragPoint = convert(event.locationInWindow, from: nil)
     }
@@ -316,13 +430,40 @@ final class GeometryView: MTKView, MTKViewDelegate {
         let dy = Float(point.y - lastDragPoint.y)
         let sensitivity: Float = 0.01
         azimuth -= dx * sensitivity
-        elevation = min(max(elevation + dy * sensitivity, Self.minElevation), Self.maxElevation)
+        elevation += dy * sensitivity
         self.lastDragPoint = point
         needsDisplay = true
     }
 
     override func mouseUp(with event: NSEvent) {
         lastDragPoint = nil
+    }
+
+    /// Pan: shifts `target` (the orbit center) along the camera's own current right/up axes, scaled
+    /// by the orthographic view's own world-units-per-screen-point ratio so the point under the
+    /// cursor at drag start stays under the cursor throughout the drag (a "grab and drag" feel,
+    /// matching Photoshop's hand tool/Google Maps -- not a fixed, zoom-independent speed).
+    override func rightMouseDown(with event: NSEvent) {
+        lastPanDragPoint = convert(event.locationInWindow, from: nil)
+    }
+
+    override func rightMouseDragged(with event: NSEvent) {
+        guard let lastPanDragPoint else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        let dx = Float(point.x - lastPanDragPoint.x)
+        let dy = Float(point.y - lastPanDragPoint.y)
+        self.lastPanDragPoint = point
+
+        let worldPerPoint = (distance * 0.8) / Float(max(bounds.height, 1))
+        let (right, up) = cameraRightAndUp()
+        target.x -= (right.x * dx + up.x * dy) * worldPerPoint
+        target.y -= (right.y * dx + up.y * dy) * worldPerPoint
+        target.z -= (right.z * dx + up.z * dy) * worldPerPoint
+        needsDisplay = true
+    }
+
+    override func rightMouseUp(with event: NSEvent) {
+        lastPanDragPoint = nil
     }
 
     override func scrollWheel(with event: NSEvent) {
@@ -345,15 +486,6 @@ final class GeometryView: MTKView, MTKViewDelegate {
     // MARK: - Board geometry construction
 
     private static let circleSegments = 20
-    // Solid black, not a bright accent color -- a drilled hole is genuinely empty (no copper, no
-    // substrate, just a void through the board), and KiCad's own PCB editor renders it that way
-    // too. A bright color there reads as "more copper highlighted," not "a hole" -- especially
-    // once the ring/stroke/hole margins are tight, where the whole via just looked like one solid
-    // colored blob with no visible hole at all.
-    private static let viaHoleColor = SIMD4<Float>(0, 0, 0, 1)
-    // Gold, not white -- reads as a plated barrel wall (the stroke's real physical meaning) rather
-    // than a plain highlight outline.
-    private static let viaStrokeColor = SIMD4<Float>(0xEB / 255, 0xB5 / 255, 0x00 / 255, 1)
     private static let portColor = SIMD4<Float>(Float(NSColor.systemBlue.usingColorSpace(.deviceRGB)?.redComponent ?? 0.2),
                                                   Float(NSColor.systemBlue.usingColorSpace(.deviceRGB)?.greenComponent ?? 0.48),
                                                   Float(NSColor.systemBlue.usingColorSpace(.deviceRGB)?.blueComponent ?? 0.98),
@@ -361,6 +493,12 @@ final class GeometryView: MTKView, MTKViewDelegate {
     // A fixed light grey, not the adaptive tertiaryLabelColor the outline used to use -- that
     // reads as near-invisible against the fixed dark canvas below in light-appearance mode.
     private static let outlineColor = SIMD4<Float>(0.7, 0.7, 0.7, 1)
+    // A classic PCB solder-mask green -- distinct from every copper color in kicadDefaultLayerColors
+    // (all coppery/metallic tones) so the mask reads as its own material, not another copper layer.
+    // 50% alpha (drawn via translucentPipelineState, not the opaque one every other color here
+    // uses) so the copper/silkscreen underneath stays visible, matching a real solder mask's own
+    // partial translucency.
+    private static let solderMaskColor = SIMD4<Float>(0.0, 0.35, 0.16, 0.5)
     // A muted cyan -- distinct from the plain grey outline/legend text and every copper color in
     // kicadDefaultLayerColors, so a mesh line stays identifiable crossing any layer's fill.
     private static let gridLineColor = SIMD4<Float>(0.3, 0.75, 0.8, 1)
@@ -393,6 +531,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
             boardVertexCount = 0
             outlineVertexCount = 0
             crossVertexCount = 0
+            maskVertexCount = 0
             return
         }
 
@@ -418,32 +557,66 @@ final class GeometryView: MTKView, MTKViewDelegate {
             }
         }
 
-        // Vias (both real board vias and board-slicing's own synthetic stitching vias -- see
-        // EMSGeometryVia's doc comment, they render identically): three concentric opaque
-        // capsule/stadium shapes, largest to smallest -- an annular ring in the top layer's color, a
-        // gold stroke, then the black hole -- real depth test/write above resolves the stacking
-        // order correctly regardless of draw order, unlike the old flat 2D view's painter's
-        // algorithm, which relied on this exact largest-to-smallest submission order.
-        if let topLayer = preview.layers.first {
-            let ringColor = Self.simdColor(for: topLayer, index: 0, total: preview.layers.count)
-            for via in preview.vias {
-                let outerRadius = CGFloat(via.annularRingDiameter) / 2
-                guard outerRadius > 0 else { continue }
-                let holeRadius = min(CGFloat(via.diameter) / 2, outerRadius)
-                let strokeRadius = holeRadius + (outerRadius - holeRadius) * 0.4
-                Self.appendCapsule(from: via.ringPosition, to: via.ringPosition2, radius: outerRadius, z: markerZ,
-                                     color: ringColor, positions: &positions, colors: &colors)
-                Self.appendCapsule(from: via.ringPosition, to: via.ringPosition2, radius: strokeRadius, z: markerZ,
-                                     color: Self.viaStrokeColor, positions: &positions, colors: &colors)
-                Self.appendCapsule(from: via.position, to: via.position2, radius: holeRadius, z: markerZ,
-                                     color: Self.viaHoleColor, positions: &positions, colors: &colors)
+        // Solder mask, if this board's stackup has one on that side (see EMSGeometryPreview.
+        // topSolderMask/bottomSolderMask's own doc comment) -- built into its own separate buffer,
+        // drawn in draw(in:)'s own translucent pass after everything above, rather than appended
+        // into this opaque positions/colors pair like every other element in this loop.
+        var maskPositions: [Position3] = []
+        var maskColors: [SIMD4<Float>] = []
+        for maskLayer in [preview.topSolderMask, preview.bottomSolderMask].compactMap({ $0 }) {
+            let z = Float(maskLayer.z)
+            for triangle in maskLayer.triangles {
+                maskPositions.append(contentsOf: [Position3(Float(triangle.a.x), Float(triangle.a.y), z),
+                                                   Position3(Float(triangle.b.x), Float(triangle.b.y), z),
+                                                   Position3(Float(triangle.c.x), Float(triangle.c.y), z)])
+                maskColors.append(contentsOf: [Self.solderMaskColor, Self.solderMaskColor, Self.solderMaskColor])
             }
+        }
+        maskVertexCount = maskPositions.count
+        maskPositionBuffer = maskPositions.isEmpty ? nil : device.makeBuffer(
+            bytes: maskPositions, length: MemoryLayout<Position3>.stride * maskPositions.count)
+        maskColorBuffer = maskColors.isEmpty ? nil : device.makeBuffer(
+            bytes: maskColors, length: MemoryLayout<SIMD4<Float>>.stride * maskColors.count)
+
+        // Real 3D via geometry (open barrel tube + per-layer annular rings -- see
+        // EMSGeometryPreview.viaMeshTriangles' own doc comment) -- replaces the old flat, single-Z
+        // concentric-capsule marker this used to draw here: that read fine from the old fixed
+        // top-down 2D view, but from any angle a real 3D camera can now reach, three flat discs
+        // floating at one Z (and copper layers with no hole cut for them to sit in) just look wrong.
+        // Each vertex keeps its own real Z, same as componentMeshTriangles below, not a shared flat
+        // markerZ.
+        for triangle in preview.viaMeshTriangles {
+            positions.append(contentsOf: [
+                Position3(Float(triangle.a.x), Float(triangle.a.y), Float(triangle.a.z)),
+                Position3(Float(triangle.b.x), Float(triangle.b.y), Float(triangle.b.z)),
+                Position3(Float(triangle.c.x), Float(triangle.c.y), Float(triangle.c.z)),
+            ])
+            let color = SIMD4<Float>(Float(triangle.color.x), Float(triangle.color.y), Float(triangle.color.z),
+                                       Float(triangle.color.w))
+            colors.append(contentsOf: [color, color, color])
         }
 
         for port in preview.ports {
             let radius = max(CGFloat(port.width) / 2, 1)
             Self.appendDisc(center: port.position, radius: radius, z: markerZ, color: Self.portColor,
                              positions: &positions, colors: &colors)
+        }
+
+        // Real 3D models of every included footprint (see EMSGeometryComponentTriangle's own doc
+        // comment) -- unlike every other marker here, each vertex keeps its own real Z from the
+        // mesh (a component has genuine 3D shape), not a shared flat markerZ. Color is the model's
+        // own real STEP color (see EMSGeometryComponentTriangle.color's own doc comment), not the
+        // fixed accent color used everywhere else in this view -- STL (which carries no color data)
+        // is no longer what these come from.
+        for triangle in preview.componentMeshTriangles {
+            positions.append(contentsOf: [
+                Position3(Float(triangle.a.x), Float(triangle.a.y), Float(triangle.a.z)),
+                Position3(Float(triangle.b.x), Float(triangle.b.y), Float(triangle.b.z)),
+                Position3(Float(triangle.c.x), Float(triangle.c.y), Float(triangle.c.z)),
+            ])
+            let color = SIMD4<Float>(Float(triangle.color.x), Float(triangle.color.y), Float(triangle.color.z),
+                                       Float(triangle.color.w))
+            colors.append(contentsOf: [color, color, color])
         }
 
         boardVertexCount = positions.count
@@ -516,58 +689,6 @@ final class GeometryView: MTKView, MTKViewDelegate {
         }
     }
 
-    /// A via's cross-section boundary, between capsule/stadium centerline endpoints `a`/`b` -- a
-    /// plain circle around `a` when the two coincide (the ordinary round-via case, identical to
-    /// appendDisc's own tessellation), or a stadium shape otherwise (an elongated via). Mirrors
-    /// libgerber2ems's own `_viaPolygon` (simulation.cpp) point-for-point, so this preview draws
-    /// exactly the shape the FDTD geometry actually uses -- see that function's own comment for why
-    /// the boundary is built as two open (non-duplicated-endpoint) semicircle sweeps.
-    private static func capsuleBoundary(from a: CGPoint, to b: CGPoint, radius: CGFloat) -> [CGPoint] {
-        let dx = b.x - a.x
-        let dy = b.y - a.y
-        guard dx != 0 || dy != 0 else {
-            return (0..<circleSegments).map { i in
-                let angle = CGFloat(i) / CGFloat(circleSegments) * 2 * .pi
-                return CGPoint(x: a.x + radius * cos(angle), y: a.y + radius * sin(angle))
-            }
-        }
-        let lineAngle = atan2(dy, dx)
-        let halfSegments = max(1, circleSegments / 2)
-        // halfSegments *points* spanning a pi-radian sweep means halfSegments-1 *steps* -- dividing
-        // by halfSegments instead undershoots the far endpoint by one step's worth of angle, leaving
-        // each semicircle looking like it doesn't quite reach 180 degrees.
-        let angleDenominator = max(1, halfSegments - 1)
-        var points: [CGPoint] = []
-        points.reserveCapacity(halfSegments * 2)
-        for i in 0..<halfSegments {
-            let angle = lineAngle - .pi / 2 + .pi * CGFloat(i) / CGFloat(angleDenominator)
-            points.append(CGPoint(x: b.x + radius * cos(angle), y: b.y + radius * sin(angle)))
-        }
-        for i in 0..<halfSegments {
-            let angle = lineAngle + .pi / 2 + .pi * CGFloat(i) / CGFloat(angleDenominator)
-            points.append(CGPoint(x: a.x + radius * cos(angle), y: a.y + radius * sin(angle)))
-        }
-        return points
-    }
-
-    /// Fan-triangulated from the centerline's own midpoint -- valid for any interior point since a
-    /// capsule (like a circle) is convex, exactly the same reasoning appendDisc's fan from its
-    /// center relies on.
-    private static func appendCapsule(from a: CGPoint, to b: CGPoint, radius: CGFloat, z: Float, color: SIMD4<Float>,
-                                       positions: inout [Position3], colors: inout [SIMD4<Float>]) {
-        guard radius > 0 else { return }
-        let boundary = capsuleBoundary(from: a, to: b, radius: radius)
-        guard boundary.count >= 3 else { return }
-        let centerVertex = Position3(Float((a.x + b.x) / 2), Float((a.y + b.y) / 2), z)
-        for i in 0..<boundary.count {
-            let current = Position3(Float(boundary[i].x), Float(boundary[i].y), z)
-            let next = boundary[(i + 1) % boundary.count]
-            let nextVertex = Position3(Float(next.x), Float(next.y), z)
-            positions.append(contentsOf: [centerVertex, current, nextVertex])
-            colors.append(contentsOf: [color, color, color])
-        }
-    }
-
     // MARK: - Grid line construction
 
     /// Builds all three possible grid crosshatch planes (XY/XZ/YZ), one per possible *excluded*
@@ -581,6 +702,15 @@ final class GeometryView: MTKView, MTKViewDelegate {
             gridPlaneExcludingX = LineBuffer()
             gridPlaneExcludingY = LineBuffer()
             gridPlaneExcludingZ = LineBuffer()
+            return
+        }
+        if let excludingX = preview.gridPlaneExcludingX,
+           let excludingY = preview.gridPlaneExcludingY,
+           let excludingZ = preview.gridPlaneExcludingZ {
+            gridPlaneExcludingX = Self.makeLineBuffer(device: device, plane: excludingX)
+            gridPlaneExcludingY = Self.makeLineBuffer(device: device, plane: excludingY)
+            gridPlaneExcludingZ = Self.makeLineBuffer(device: device, plane: excludingZ)
+            rebuildSelectedGridLayerBuffer()
             return
         }
         let xLines = preview.gridLinesX.map { Float(truncating: $0) }
@@ -613,6 +743,52 @@ final class GeometryView: MTKView, MTKViewDelegate {
         gridPlaneExcludingZ = Self.makeLineBuffer(device: device, positions: xy.positions, colors: xy.colors)
         gridPlaneExcludingY = Self.makeLineBuffer(device: device, positions: xz.positions, colors: xz.colors)
         gridPlaneExcludingX = Self.makeLineBuffer(device: device, positions: yz.positions, colors: yz.colors)
+        rebuildSelectedGridLayerBuffer()
+    }
+
+    private func rebuildSelectedGridLayerBuffer() {
+        guard let device, let preview, let index = selectedGridLayerIndex,
+              preview.gridLayers.indices.contains(index) else {
+            selectedGridLayerBuffer = LineBuffer()
+            return
+        }
+        let layer = preview.gridLayers[index]
+        let xLines = preview.gridLinesX.map { Float(truncating: $0) }
+        let yLines = preview.gridLinesY.map { Float(truncating: $0) }
+        guard !xLines.isEmpty, !yLines.isEmpty else {
+            selectedGridLayerBuffer = LineBuffer()
+            return
+        }
+        let edgeCount = (xLines.count - 1) * yLines.count + xLines.count * (yLines.count - 1)
+        guard layer.edgeColors.count == edgeCount * MemoryLayout<SIMD4<Float>>.stride else {
+            selectedGridLayerBuffer = LineBuffer()
+            return
+        }
+        var edgeColors = Array(repeating: SIMD4<Float>(repeating: 0), count: edgeCount)
+        _ = edgeColors.withUnsafeMutableBytes { destination in
+            layer.edgeColors.copyBytes(to: destination)
+        }
+        var positions: [Position3] = []
+        var colors: [SIMD4<Float>] = []
+        positions.reserveCapacity(edgeCount * 2)
+        colors.reserveCapacity(edgeCount * 2)
+        let z = Float(layer.z)
+        var edge = 0
+        for y in yLines {
+            for x in 0..<(xLines.count - 1) {
+                positions.append(contentsOf: [Position3(xLines[x], y, z), Position3(xLines[x + 1], y, z)])
+                colors.append(contentsOf: [edgeColors[edge], edgeColors[edge]])
+                edge += 1
+            }
+        }
+        for x in xLines {
+            for y in 0..<(yLines.count - 1) {
+                positions.append(contentsOf: [Position3(x, yLines[y], z), Position3(x, yLines[y + 1], z)])
+                colors.append(contentsOf: [edgeColors[edge], edgeColors[edge]])
+                edge += 1
+            }
+        }
+        selectedGridLayerBuffer = Self.makeLineBuffer(device: device, positions: positions, colors: colors)
     }
 
     /// One plane's worth of crosshatch grid lines: every `valuesA` position as one line spanning
@@ -653,6 +829,24 @@ final class GeometryView: MTKView, MTKViewDelegate {
                    vertexCount: positions.count)
     }
 
+    private static func makeLineBuffer(device: MTLDevice, plane: EMSGeometryGridPlane) -> LineBuffer {
+        let positions = plane.positions
+        let colors = plane.colors
+        let vertexCount = Int(plane.vertexCount)
+        guard vertexCount > 0,
+              positions.count == vertexCount * MemoryLayout<Position3>.stride,
+              colors.count == vertexCount * MemoryLayout<SIMD4<Float>>.stride else {
+            return LineBuffer()
+        }
+        let positionBuffer = positions.withUnsafeBytes { bytes in
+            device.makeBuffer(bytes: bytes.baseAddress!, length: bytes.count)
+        }
+        let colorBuffer = colors.withUnsafeBytes { bytes in
+            device.makeBuffer(bytes: bytes.baseAddress!, length: bytes.count)
+        }
+        return LineBuffer(positionBuffer: positionBuffer, colorBuffer: colorBuffer, vertexCount: vertexCount)
+    }
+
     // MARK: - Legend overlay (plain AppKit, composited over the Metal layer)
 
     private func setupLegend() {
@@ -669,11 +863,11 @@ final class GeometryView: MTKView, MTKViewDelegate {
 
     private func rebuildLegend() {
         legendStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        guard let layers = preview?.layers, !layers.isEmpty else { return }
-        for (index, layer) in layers.enumerated() {
+        guard let preview else { return }
+        for (index, layer) in preview.layers.enumerated() {
             let swatch = NSBox()
             swatch.boxType = .custom // No border by default for .custom (unlike the legacy box types borderType controls).
-            swatch.fillColor = Self.color(for: layer, index: index, total: layers.count)
+            swatch.fillColor = Self.color(for: layer, index: index, total: preview.layers.count)
             swatch.translatesAutoresizingMaskIntoConstraints = false
             swatch.widthAnchor.constraint(equalToConstant: 10).isActive = true
             swatch.heightAnchor.constraint(equalToConstant: 10).isActive = true
@@ -690,6 +884,49 @@ final class GeometryView: MTKView, MTKViewDelegate {
             row.spacing = 6
             legendStack.addArrangedSubview(row)
         }
+        if showGrid {
+            if !preview.gridLayers.isEmpty {
+                let title = NSTextField(labelWithString: "Grid layer:")
+                title.font = .systemFont(ofSize: 11)
+                title.textColor = .white
+                let popUp = NSPopUpButton()
+                popUp.appearance = NSAppearance(named: .darkAqua)
+                popUp.addItem(withTitle: "Automatic cross-section")
+                preview.gridLayers.forEach { popUp.addItem(withTitle: $0.name) }
+                popUp.selectItem(at: (selectedGridLayerIndex ?? -1) + 1)
+                popUp.target = self
+                popUp.action = #selector(selectGridLayer(_:))
+                let row = NSStackView(views: [title, popUp])
+                row.orientation = .horizontal
+                row.alignment = .centerY
+                row.spacing = 6
+                legendStack.addArrangedSubview(row)
+            }
+            for material in preview.gridMaterials {
+                let swatch = NSBox()
+                swatch.boxType = .custom
+                swatch.fillColor = NSColor(deviceRed: material.color.x, green: material.color.y,
+                                           blue: material.color.z, alpha: material.color.w)
+                swatch.translatesAutoresizingMaskIntoConstraints = false
+                swatch.widthAnchor.constraint(equalToConstant: 10).isActive = true
+                swatch.heightAnchor.constraint(equalToConstant: 10).isActive = true
+
+                let label = NSTextField(labelWithString: "Grid: \(material.name)")
+                label.font = .systemFont(ofSize: 11)
+                label.textColor = .white
+                let row = NSStackView(views: [swatch, label])
+                row.orientation = .horizontal
+                row.alignment = .centerY
+                row.spacing = 6
+                legendStack.addArrangedSubview(row)
+            }
+        }
+    }
+
+    @objc private func selectGridLayer(_ sender: NSPopUpButton) {
+        selectedGridLayerIndex = sender.indexOfSelectedItem == 0 ? nil : sender.indexOfSelectedItem - 1
+        rebuildSelectedGridLayerBuffer()
+        needsDisplay = true
     }
 
     // MARK: - Layer color resolution

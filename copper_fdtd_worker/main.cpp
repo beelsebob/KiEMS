@@ -23,7 +23,6 @@
 #include "gerber2ems/config.hpp"
 #include "gerber2ems/constants.hpp"
 #include "gerber2ems/importer.hpp"
-#include "gerber2ems/logging.hpp"
 #include "gerber2ems/paths_config.hpp"
 #include "gerber2ems/port_resolution.hpp"
 #include "gerber2ems/simulation.hpp"

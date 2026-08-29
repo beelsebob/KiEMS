@@ -12,9 +12,7 @@ final class GeometryViewController: NSViewController {
     private weak var document: Document?
 
     private let geometryView = GeometryView()
-    private let statusLabel = NSTextField(labelWithString: "")
-    private let progressBar = NSProgressIndicator()
-    private let timeEstimateLabel = NSTextField(labelWithString: "")
+    private let progressStatus = ProgressStatusView()
     private let showGridCheckbox = NSButton(checkboxWithTitle: "Show Grid", target: nil, action: nil)
 
     private var errors: [Int: String] = [:]
@@ -31,7 +29,7 @@ final class GeometryViewController: NSViewController {
     // syncFromScheduler()) can restore the progress bar to where it actually is.
     private var progressFraction: [Int: Double] = [:]
     // When this simulation's own job was first observed running -- the basis for the elapsed-time/
-    // fraction extrapolation behind timeEstimateLabel's own text (see progressReceived()).
+    // fraction extrapolation behind progressStatus's own time-estimate label (see progressReceived()).
     private var runStartTime: [Int: Date] = [:]
     // Latest known time-remaining text per simulation, mirroring progressFraction's own "so
     // refreshDisplay() can restore state on re-selection" role.
@@ -82,30 +80,8 @@ final class GeometryViewController: NSViewController {
         geometryView.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(geometryView)
 
-        statusLabel.font = .systemFont(ofSize: 20, weight: .medium) // Matches SubEntryPlaceholder's notice text.
-        statusLabel.textColor = .tertiaryLabelColor
-        statusLabel.alignment = .center
-        statusLabel.lineBreakMode = .byWordWrapping
-        statusLabel.maximumNumberOfLines = 0
-        // See SimulationResultsViewController's identical statusLabel setup for why this is needed --
-        // without it, this multi-line label's intrinsic width can come back unwrapped-and-huge,
-        // which an Auto-Layout-sized window then grows to accommodate.
-        statusLabel.preferredMaxLayoutWidth = 400
-        statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(statusLabel)
-
-        progressBar.style = .bar
-        progressBar.isIndeterminate = false
-        progressBar.minValue = 0
-        progressBar.maxValue = 1
-        progressBar.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(progressBar)
-
-        timeEstimateLabel.font = .systemFont(ofSize: 11)
-        timeEstimateLabel.textColor = .tertiaryLabelColor
-        timeEstimateLabel.alignment = .center
-        timeEstimateLabel.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(timeEstimateLabel)
+        progressStatus.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(progressStatus)
 
         showGridCheckbox.target = self
         showGridCheckbox.action = #selector(toggleGridOverlay(_:))
@@ -116,35 +92,16 @@ final class GeometryViewController: NSViewController {
         showGridCheckbox.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(showGridCheckbox)
 
-        // Vertically centers the *whole* statusLabel...timeEstimateLabel block (not just statusLabel
-        // itself) in the container -- an invisible NSLayoutGuide spanning the block, rather than
-        // hardcoding a compensating offset for the progress bar/label's own height, so this stays
-        // correct if that content ever changes again. Without it, centering statusLabel alone (as
-        // when it was the only content here) leaves the extra rows below it pushing the whole block's
-        // visual center below the container's true center.
-        let contentGuide = NSLayoutGuide()
-        container.addLayoutGuide(contentGuide)
-
         NSLayoutConstraint.activate([
             geometryView.topAnchor.constraint(equalTo: container.topAnchor),
             geometryView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             geometryView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             geometryView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
 
-            contentGuide.topAnchor.constraint(equalTo: statusLabel.topAnchor),
-            contentGuide.bottomAnchor.constraint(equalTo: timeEstimateLabel.bottomAnchor),
-            contentGuide.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-
-            statusLabel.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            statusLabel.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor, constant: 24),
-            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -24),
-
-            progressBar.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 12),
-            progressBar.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            progressBar.widthAnchor.constraint(equalToConstant: 240),
-
-            timeEstimateLabel.topAnchor.constraint(equalTo: progressBar.bottomAnchor, constant: 6),
-            timeEstimateLabel.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            progressStatus.topAnchor.constraint(equalTo: container.topAnchor),
+            progressStatus.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            progressStatus.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            progressStatus.bottomAnchor.constraint(equalTo: container.bottomAnchor),
 
             showGridCheckbox.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
             showGridCheckbox.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
@@ -168,6 +125,10 @@ final class GeometryViewController: NSViewController {
         // there nothing left to do" check here.
         guard !pipeline.hasStage(.grid), errors[index] == nil, !runningIndices.contains(index) else { return }
         JobScheduler.shared.request(document: document, simulationName: name, target: .geometryGeneration)
+        // request() may have only queued this job behind another simulation's own in-flight run --
+        // refresh again now (not just the pre-request call above) so the freshly-queued state is
+        // shown immediately instead of a blank content area (see ProgressStatusView.State.queued).
+        refreshDisplay()
     }
 
     /// Called by DocumentWindowController whenever something that would change this simulation's
@@ -211,37 +172,30 @@ final class GeometryViewController: NSViewController {
             geometryView.preview = preview
             geometryView.showGrid = wantsGrid
             geometryView.isHidden = false
-            statusLabel.isHidden = true
-            progressBar.isHidden = true
-            timeEstimateLabel.isHidden = true
+            progressStatus.setState(.hidden)
             showGridCheckbox.isHidden = false
         } else if let error = errors[currentIndex] {
             geometryView.isHidden = true
-            // .attributedStringValue, not .stringValue -- error is a full sentence libgerber2ems
-            // built with an embedded, possibly markup-carrying net name (e.g. "GND_{1}" or a name
-            // with a literal "/" in it) -- see NetNameFormatting.attributedString(embeddingNetNamesIn:)'s
-            // own doc comment for how it finds and renders just that part correctly.
-            statusLabel.attributedStringValue = NetNameFormatting.attributedString(
-                embeddingNetNamesIn: error, font: statusLabel.font ?? .systemFont(ofSize: NSFont.systemFontSize))
-            statusLabel.isHidden = false
-            progressBar.isHidden = true
-            timeEstimateLabel.isHidden = true
+            progressStatus.setState(.error(error))
             showGridCheckbox.isHidden = true
         } else if runningIndices.contains(currentIndex) {
             geometryView.isHidden = true
-            statusLabel.stringValue = "Processing Geometry…"
-            statusLabel.isHidden = false
-            progressBar.doubleValue = progressFraction[currentIndex] ?? 0
-            progressBar.isHidden = false
-            timeEstimateLabel.stringValue = timeEstimateText[currentIndex]
-                ?? TimeRemainingFormatter.string(secondsRemaining: nil)
-            timeEstimateLabel.isHidden = false
+            progressStatus.setState(.progress(status: "Processing Geometry…",
+                                              fraction: progressFraction[currentIndex] ?? 0,
+                                              timeEstimateText: timeEstimateText[currentIndex]
+                                                  ?? TimeRemainingFormatter.string(secondsRemaining: nil)))
+            showGridCheckbox.isHidden = true
+        } else if JobScheduler.shared.job(document: document, simulationName: name,
+                                          kind: .geometryGeneration)?.status == .queued {
+            // A job exists for this simulation but the scheduler hasn't started it yet (waiting
+            // behind another simulation's own in-flight run) -- see ProgressStatusView.State.queued's
+            // own doc comment for why this is shown rather than a blank content area.
+            geometryView.isHidden = true
+            progressStatus.setState(.queued("Waiting to start…", currentJob: JobScheduler.shared.jobs.first?.progressStatusInfo))
             showGridCheckbox.isHidden = true
         } else {
             geometryView.isHidden = true
-            statusLabel.isHidden = true
-            progressBar.isHidden = true
-            timeEstimateLabel.isHidden = true
+            progressStatus.setState(.hidden)
             showGridCheckbox.isHidden = true
         }
     }
@@ -294,6 +248,16 @@ final class GeometryViewController: NSViewController {
                 refreshDisplay()
             }
         }
+        // Keeps the "Current Job: ..." sub-section (see ProgressStatusView's own doc comment) live
+        // while this simulation's own job sits queued behind some *other* simulation's in-flight
+        // run -- that other job's own progress ticks don't touch this VC's own runningIndices/
+        // errors state at all, so nothing in the loop above would otherwise ever repaint it. Guarded
+        // on !runningIndices.contains: when this VC's own job IS what's running, refreshDisplay()
+        // there already reflects progressReceived()'s own *animated* update above -- redundantly
+        // calling it again here (non-animated) would just cancel that animation mid-flight.
+        if let currentIndex, !runningIndices.contains(currentIndex), errors[currentIndex] == nil {
+            refreshDisplay()
+        }
     }
 
     private func finishTracking(forSimulationIndex index: Int) {
@@ -301,11 +265,6 @@ final class GeometryViewController: NSViewController {
         progressFraction[index] = nil
         runStartTime[index] = nil
         timeEstimateText[index] = nil
-        // Immediate, not animated -- the bar's about to be hidden by refreshDisplay() below anyway,
-        // but resetting it here (rather than leaving it sitting at its last live value) means the
-        // *next* run for this same simulation starts from a true 0, not an animated slide down from
-        // wherever this one left off.
-        progressBar.doubleValue = 0
         onRunStateChanged?(index, false)
     }
 
@@ -327,11 +286,9 @@ final class GeometryViewController: NSViewController {
         let estimateText = TimeRemainingFormatter.string(secondsRemaining: secondsRemaining)
         timeEstimateText[index] = estimateText
         if currentIndex == index, runningIndices.contains(index) {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.2
-                progressBar.animator().doubleValue = progress.fraction
-            }
-            timeEstimateLabel.stringValue = estimateText
+            progressStatus.setState(.progress(status: "Processing Geometry…",
+                                              fraction: progress.fraction,
+                                              timeEstimateText: estimateText), animated: true)
         }
     }
 }

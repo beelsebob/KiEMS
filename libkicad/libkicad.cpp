@@ -15,6 +15,7 @@
 #include <wx/app.h>
 #include <wx/init.h>
 #include <wx/filename.h>
+#include <wx/tokenzr.h>
 
 #include <pgm_base.h>
 #include <settings/settings_manager.h>
@@ -41,6 +42,11 @@
 #include <api/common/envelope.pb.h>
 #include <api/common/types/base_types.pb.h>
 
+#include <env_vars.h>
+
+#include "step_export/exporter_step.h"
+#include <reporter.h>
+
 #pragma clang diagnostic pop
 
 namespace libkicad::detail {
@@ -64,6 +70,24 @@ bool _ensureWxInitialized() {
     bool wxInitOk = wxInitialize(argc, static_cast<char**>(nullptr));
     if (!wxInitOk) {
         return false;
+    }
+
+    // PATHS::GetStock3dmodelsPath() (used to default KICADn_3DMODEL_DIR, which 3D-model export
+    // needs to resolve a footprint's linked STEP model) derives its answer from the *running
+    // executable's own* bundle location -- fine for a real KiCad.app, wrong for this standalone
+    // binary, which isn't inside any .app bundle. Setting the real value here, before InitPgm(),
+    // makes COMMON_SETTINGS::InitializeEnvironment() see it as already defined externally (via
+    // wxGetEnv) and leave it alone, the same way a real KiCad install's own env would. Mirrors
+    // AppPaths.swift's resolveKicadCli() fallback -- the one other place this codebase already
+    // assumes this install location when nothing else says otherwise.
+    const wxString kFallbackKicadAppPath = wxT("/Applications/KiCad/KiCad.app");
+    const wxString model3dDirVar = ENV_VAR::GetVersionedEnvVarName(wxT("3DMODEL_DIR"));
+    wxString existingModel3dDir;
+    if (!wxGetEnv(model3dDirVar, &existingModel3dDir) || existingModel3dDir.IsEmpty()) {
+        const wxString candidate = kFallbackKicadAppPath + wxT("/Contents/SharedSupport/3dmodels");
+        if (wxFileName::DirExists(candidate)) {
+            wxSetEnv(model3dDirVar, candidate);
+        }
     }
 
     SetPgm(new MinimalPgm());
@@ -145,6 +169,13 @@ RawFootprintsResult _failFootprints(std::string error) {
 
 RawThroughHolesResult _failThroughHoles(std::string error) {
     RawThroughHolesResult result;
+    result.ok = false;
+    result.error = std::move(error);
+    return result;
+}
+
+RawComponentModelExportResult _failComponentModelExport(std::string error) {
+    RawComponentModelExportResult result;
     result.ok = false;
     result.error = std::move(error);
     return result;
@@ -460,9 +491,22 @@ RawStackupResult stackupRaw(const std::string& projectPath, const std::string& b
             layer.thicknessMm = pcbIUScale.IUTomm(item->GetThickness());
             layer.epsilonR = item->GetEpsilonR();
             layer.lossTangent = item->GetLossTangent();
+        } else if (item->GetType() == BS_ITEM_TYPE_SOLDERMASK) {
+            // Only one BS_ITEM_TYPE_SOLDERMASK enum value exists -- top vs. bottom is distinguished
+            // by which copper layer this item's own GetBrdLayerId() sits alongside, exactly like the
+            // BS_ITEM_TYPE_COPPER branch above. GetEpsilonR()/GetLossTangent()/GetThickness() are
+            // all valid for solder mask items (confirmed against KiCad's own board_stackup.cpp, not
+            // just documentation) and already default to sensible real-world values (ε_r=3.3,
+            // thickness=0.01mm, loss tangent=0.0) even for a board whose stackup was never opened in
+            // KiCad's own stackup editor, so no extra fallback is needed here.
+            layer.kind = item->GetBrdLayerId() == F_Mask ? StackupLayerKind::SolderMaskTop
+                                                            : StackupLayerKind::SolderMaskBottom;
+            layer.name = board->GetLayerName(item->GetBrdLayerId()).ToStdString();
+            layer.thicknessMm = pcbIUScale.IUTomm(item->GetThickness());
+            layer.epsilonR = item->GetEpsilonR();
+            layer.lossTangent = item->GetLossTangent();
         } else {
-            // Solder mask/paste/silkscreen -- not part of the layer stack a field simulation cares
-            // about.
+            // Paste/silkscreen -- not part of the layer stack a field simulation cares about.
             continue;
         }
         result.layers.push_back(std::move(layer));
@@ -628,6 +672,63 @@ RawThroughHolesResult throughHolesRaw(const std::string& projectPath, const std:
             hole.drillHeightMm = pcbIUScale.IUTomm(pad->GetDrillSizeY());
             result.holes.push_back(std::move(hole));
         }
+    }
+
+    return result;
+}
+
+RawComponentModelExportResult exportComponentModelsRaw(const std::string& projectPath, const std::string& boardPath,
+                                                          const std::string& componentFilter,
+                                                          const std::string& outputStlPath) {
+    std::string error;
+    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    if (!loaded) {
+        return _failComponentModelExport(std::move(error));
+    }
+    BOARD* board = loaded->board;
+
+    EXPORTER_STEP_PARAMS params;
+    params.m_Format = EXPORTER_STEP_PARAMS::FORMAT::STL;
+    params.m_ComponentFilter = wxString::FromUTF8(componentFilter);
+    params.m_BoardOnly = false;
+    params.m_ExportBoardBody = false;
+    params.m_ExportComponents = true;
+    params.m_UseDrillOrigin = true;
+    params.m_Overwrite = true;
+
+    WX_STRING_REPORTER reporter;
+    EXPORTER_STEP exporter(board, params, &reporter);
+    // Not set by the constructor -- see EXPORTER_STEP's own header and KiCad's own CLI reference
+    // usage (pcbnew_jobs_handler.cpp), which sets this the same way after construction. Export()
+    // still needs *a* real output path even though the STL it writes here is no longer read back by
+    // any caller (GetComponentTriangles() below returns the same mesh directly, plus real color --
+    // see its own doc comment) -- Export() is what actually builds the shapes into m_pcbModel in
+    // the first place, regardless of which format it's asked to write; the STL file itself is kept
+    // purely as an incidental, harmless-to-ignore debug artifact.
+    exporter.m_outputFile = wxString::FromUTF8(outputStlPath);
+    const bool exportOk = exporter.Export();
+
+    RawComponentModelExportResult result;
+    result.ok = true; // the query itself succeeded even if the exporter reported per-component issues
+    result.result.exportSucceeded = exportOk;
+
+    wxStringTokenizer tokenizer(reporter.GetMessages(), wxT("\n"));
+    while (tokenizer.HasMoreTokens()) {
+        wxString line = tokenizer.GetNextToken();
+        if (!line.IsEmpty()) {
+            result.result.messages.push_back(line.ToStdString());
+        }
+    }
+
+    if (exportOk) {
+        std::vector<STEP_COMPONENT_TRIANGLE> rawTriangles;
+        exporter.GetComponentTriangles(rawTriangles);
+        result.result.triangles.reserve(rawTriangles.size());
+        for (const STEP_COMPONENT_TRIANGLE& t : rawTriangles) {
+            result.result.triangles.push_back(ComponentTriangle{
+                    t.ax, t.ay, t.az, t.bx, t.by, t.bz, t.cx, t.cy, t.cz, t.r, t.g, t.b, t.a});
+        }
+        result.result.topCopperZMm = exporter.GetTopCopperZ();
     }
 
     return result;

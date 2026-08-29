@@ -29,14 +29,111 @@ enum NetNameFormatting {
     /// segments just render as plain text: nothing else here knows how to draw an overline. Only
     /// NetNameCellView, which draws segments itself, actually renders the overline.
     static func attributedString(for name: String, font: NSFont) -> NSAttributedString {
+        attributedString(from: segments(for: name, font: font))
+    }
+
+    /// Shared by attributedString(for:font:) and the width measurement in size(for:) -- `color`
+    /// omitted means "whatever the view drawing this will layer on separately" (attributedString(
+    /// for:font:)'s callers all set their own color via other means; the drawing/measuring paths
+    /// below always pass one explicitly since NSAttributedString has no notion of "unset color").
+    private static func attributedString(from segments: [Segment], color: NSColor? = nil) -> NSMutableAttributedString {
         let result = NSMutableAttributedString()
-        for segment in segments(for: name, font: font) {
-            result.append(NSAttributedString(string: segment.text, attributes: [
+        for segment in segments {
+            var attributes: [NSAttributedString.Key: Any] = [
                 .font: segment.font,
                 .baselineOffset: segment.baselineOffset,
-            ]))
+            ]
+            if let color {
+                attributes[.foregroundColor] = color
+            }
+            result.append(NSAttributedString(string: segment.text, attributes: attributes))
         }
         return result
+    }
+
+    /// The on-screen box draw(_:in:color:) needs to fit `segments` -- width is the full run's
+    /// attributed-string width (built the same way draw(_:in:color:) builds it to actually render),
+    /// height is whichever segment's font is tallest (see draw(_:in:color:)'s own comment on why
+    /// that's the right measure to vertically center a mixed-font run against). Callers doing Auto
+    /// Layout (see NetNameView) use this as their intrinsicContentSize.
+    static func size(for segments: [Segment]) -> CGSize {
+        guard !segments.isEmpty else { return .zero }
+        let lineHeight = segments.map { $0.font.ascender - $0.font.descender }.max() ?? 0
+        return CGSize(width: attributedString(from: segments).size().width, height: lineHeight)
+    }
+
+    /// Draws `segments` into `bounds` of a flipped view, vertically centered, including the
+    /// manually-drawn overline bars `isOverlined` segments need (see NetNameCellView's own doc
+    /// comment on why: sub/superscript is a real NSAttributedString attribute, but there's no
+    /// built-in "overline" one to lean on). Shared by every view that renders a formatted net name
+    /// -- NetNameCellView (table cells) and NetNameView (plain labels) -- so this one piece of
+    /// AppKit-doesn't-have-overline drawing logic lives in exactly one place.
+    static func draw(_ segments: [Segment], in bounds: CGRect, color: NSColor) {
+        guard !segments.isEmpty else { return }
+        let fullString = attributedString(from: segments, color: color)
+
+        // draw(at:) positions the WHOLE string's bounding box at the given point -- that box's height
+        // is set by whichever segment's font is tallest (almost always the base, non-sub/superscript
+        // one), so vertical centering has to be measured against that, not any single segment.
+        let lineHeight = segments.map { $0.font.ascender - $0.font.descender }.max() ?? 0
+        let originY = (bounds.height - lineHeight) / 2
+        fullString.draw(at: NSPoint(x: bounds.minX, y: originY))
+
+        // Where the baseline actually sits: the tallest font's ascender below the box's top edge.
+        let tallestFont = segments.max {
+            ($0.font.ascender - $0.font.descender) < ($1.font.ascender - $1.font.descender)
+        }?.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        let baselineY = originY + tallestFont.ascender
+
+        // NSAttributedString has no API to ask "where did this substring land when drawn as part of
+        // the larger string" -- measuring the width of each successive prefix gives the same answer
+        // here, since each segment already carries its own font/attributes (a hard font-change
+        // boundary, so there's no cross-segment kerning to throw the measurement off).
+        //
+        // A run of consecutive overlined segments (e.g. a negated section with a subscript in it,
+        // "~{A_{B}}") gets ONE bar spanning the whole run, not one per segment -- otherwise a
+        // subscript/superscript inside a negated section would get its own bar at a different height,
+        // reading as a break in the line instead of one continuous overline. That bar sits at
+        // whichever segment in the run needs the most clearance (the smallest -- i.e. topmost, since
+        // this view is flipped -- glyphTopY among them), so it clears every segment's glyphs, sub or
+        // super included.
+        color.setStroke()
+        var prefixLength = 0
+        var startX: CGFloat = bounds.minX
+        var runStartX: CGFloat?
+        var runTopY: CGFloat = 0
+
+        func flushRun(endingAt endX: CGFloat) {
+            guard let runStartX else { return }
+            let path = NSBezierPath()
+            path.lineWidth = 1
+            path.move(to: NSPoint(x: runStartX, y: runTopY))
+            path.line(to: NSPoint(x: endX, y: runTopY))
+            path.stroke()
+        }
+
+        for segment in segments {
+            prefixLength += (segment.text as NSString).length
+            let endX = bounds.minX + fullString.attributedSubstring(
+                from: NSRange(location: 0, length: prefixLength)).size().width
+            if segment.isOverlined {
+                // baselineOffset raises glyphs on screen for positive values, in both flipped and
+                // non-flipped views -- in this flipped view (y grows downward), that's `-offset`.
+                let glyphTopY = baselineY - segment.baselineOffset - segment.font.ascender
+                if let existingRunStartX = runStartX {
+                    runStartX = existingRunStartX
+                    runTopY = min(runTopY, glyphTopY)
+                } else {
+                    runStartX = startX
+                    runTopY = glyphTopY
+                }
+            } else {
+                flushRun(endingAt: startX)
+                runStartX = nil
+            }
+            startX = endX
+        }
+        flushRun(endingAt: startX)
     }
 
     /// Renders `message` (a full English sentence libgerber2ems built, e.g. a pipeline error) mostly

@@ -13,6 +13,8 @@
 
 namespace gerber2ems {
 
+using namespace Cu;
+
 namespace {
 
 // ---- Position <-> Clipper2 Path64 (this module's own conversion; gerber_io.cpp's ApertureMacro
@@ -62,7 +64,7 @@ std::expected<BoundingBox, std::string> edgeCutsBoundingBox(const std::filesyste
         return std::unexpected(std::move(edgeCutsResult).error());
     }
     const GerberFile& edgeCuts = *edgeCutsResult;
-    for (const auto& seg : edgeCuts.traceForNet("no-net").segments()) {
+    for (const auto& seg : edgeCuts.traceForNet(NetName("no-net")).segments()) {
         box.xMin = std::min({seg.start().x(), seg.stop().x(), box.xMin});
         box.yMin = std::min({seg.start().y(), seg.stop().y(), box.yMin});
         box.xMax = std::max({seg.start().x(), seg.stop().x(), box.xMax});

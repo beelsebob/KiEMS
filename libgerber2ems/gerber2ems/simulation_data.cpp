@@ -70,9 +70,10 @@ std::expected<SimulationResults, std::string> generateResults(const SimulationDa
         if (!paramsResult) {
             return std::unexpected(paramsResult.error());
         }
-        auto& [reflected, incident] = *paramsResult;
-        results.byExcitedPort.emplace(excitedPortIndex,
-                                       SimulationPortResults{std::move(reflected), std::move(incident)});
+        auto& [reflected, incident, probeVoltage, probeCurrent] = *paramsResult;
+        results.byExcitedPort.emplace(
+            excitedPortIndex, SimulationPortResults{std::move(reflected), std::move(incident), std::move(probeVoltage),
+                                                      std::move(probeCurrent)});
     }
     return results;
 }
@@ -83,8 +84,14 @@ SimulationPostprocessing generatePostprocessing(const SimulationData<SimulationS
     const auto& ports = data.configuration().ports();
     for (const auto& [excitedPortIndex, portResults] : data.results().byExcitedPort) {
         for (std::size_t measuredPort = 0; measuredPort < ports.size(); ++measuredPort) {
-            postprocessor->addPortData(static_cast<std::int32_t>(measuredPort), excitedPortIndex,
-                                        portResults.incident[measuredPort], portResults.reflected[measuredPort]);
+            const auto index = static_cast<std::int32_t>(measuredPort);
+            if (ports[measuredPort].absorbSignal()) {
+                postprocessor->addPortData(index, excitedPortIndex, portResults.incident[measuredPort],
+                                            portResults.reflected[measuredPort]);
+            } else {
+                postprocessor->addProbeData(index, excitedPortIndex, portResults.probeVoltage.at(index),
+                                             portResults.probeCurrent.at(index));
+            }
         }
     }
     postprocessor->calculateSparams();

@@ -15,6 +15,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "net_name.hpp"
+
 namespace gerber2ems {
 
 /// Plotting mode, matching the gerber file specification (G01, G02, G03).
@@ -74,7 +76,7 @@ private:
 /// Describes a component pad (a flashed aperture in the gerber file).
 class Pad {
 public:
-    Pad(std::string aperture, std::string net, Position pos, std::optional<PadMeta> pinRef = std::nullopt,
+    Pad(std::string aperture, NetName net, Position pos, std::optional<PadMeta> pinRef = std::nullopt,
         bool additive = true, std::string mirror = "N", double rotation = 0, double scale = 1)
         : _aperture(std::move(aperture)),
           _net(std::move(net)),
@@ -86,7 +88,7 @@ public:
           _scale(scale) {}
 
     const std::string& aperture() const { return _aperture; }
-    const std::string& net() const { return _net; }
+    const NetName& net() const { return _net; }
     const Position& pos() const { return _pos; }
     const std::optional<PadMeta>& pinRef() const { return _pinRef; }
     bool additive() const { return _additive; } // If false, this pad erases rather than draws
@@ -96,7 +98,7 @@ public:
 
 private:
     std::string _aperture;
-    std::string _net;
+    NetName _net;
     Position _pos;
     std::optional<PadMeta> _pinRef;
     bool _additive;
@@ -325,7 +327,7 @@ struct CopperOp {
     // GerberFile::pads() for the Stroke/Zone cases -- carried here too, uniformly across all three
     // Kinds, so a consumer can filter copperOps() by net membership without reaching into the
     // payload variant to distinguish how each Kind happens to track it).
-    std::string net;
+    NetName net;
     // Stroke: a single drawn segment (already tessellated if it was an arc -- see _tessellateArc).
     // Pad: a flashed aperture.
     // Zone: a closed loop of segments forming one filled region (G36...G37), already force-closed.
@@ -345,12 +347,12 @@ public:
     /// Parts of the file that are currently not supported/interpreted by the parser.
     const std::string& unparsed() const { return _unparsed; }
     const std::unordered_map<std::string, Aperture>& apertures() const { return _apertures; }
-    const std::unordered_map<std::string, Trace>& traces() const { return _traces; }
+    const std::unordered_map<NetName, Trace, NetNameHash>& traces() const { return _traces; }
     const std::vector<Pad>& pads() const { return _pads; }
     const std::vector<CopperOp>& copperOps() const { return _copperOps; }
 
     /// Returns the trace for `net`, or an empty Trace if none exists (mirrors dict.get(net, Trace([]))).
-    Trace traceForNet(const std::string& net) const;
+    Trace traceForNet(const NetName& net) const;
 
     /// Merges additional (name -> Aperture) entries in, overwriting existing names (mirrors
     /// dict.update()). Used by the grid generator to inject synthetic port apertures.
@@ -371,7 +373,7 @@ private:
 
     std::string _unparsed;
     std::unordered_map<std::string, Aperture> _apertures;
-    std::unordered_map<std::string, Trace> _traces;
+    std::unordered_map<NetName, Trace, NetNameHash> _traces;
     std::vector<Pad> _pads;
     std::unordered_map<std::string, ApertureMacro> _apMacros;
     std::vector<CopperOp> _copperOps;

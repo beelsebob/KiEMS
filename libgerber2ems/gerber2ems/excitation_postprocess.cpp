@@ -10,6 +10,8 @@
 
 namespace gerber2ems {
 
+using namespace Cu;
+
 namespace {
 
 // Port names are "<net>@<footprintRef>.<padNumber>" (port_resolution.cpp) -- net names routinely

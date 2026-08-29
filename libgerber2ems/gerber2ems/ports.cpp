@@ -218,7 +218,46 @@ std::expected<void, std::string> LumpedPort::calcPort(const std::filesystem::pat
     return Port::calcPort(simPath, freq, refImpedance, signalType);
 }
 
-MSLPort::MSLPort(ContinuousStructure& csx, std::int32_t portNr, CSProperties& metalProp, Point3 start, Point3 stop,
+PassiveProbe::PassiveProbe(ContinuousStructure& csx, std::int32_t portNr, Point3 start, Point3 stop,
+                            const std::string& excDir, std::int32_t priority, std::string portNamePrefix)
+    : Port(csx, portNr, start, stop, /*excite=*/0, priority, std::move(portNamePrefix)), _excNy(axisIndex(excDir)) {
+    if (_start[static_cast<std::size_t>(_excNy)] == _stop[static_cast<std::size_t>(_excNy)]) {
+        throw std::runtime_error("PassiveProbe: start and stop may not be identical in probe direction");
+    }
+    const double direction = (_stop[static_cast<std::size_t>(_excNy)] - _start[static_cast<std::size_t>(_excNy)]) < 0
+                                  ? -1.0
+                                  : 1.0;
+
+    // No metal, no resistor, no excitation box -- see this class's own doc comment. Only the U/I
+    // probe boxes, placed exactly like LumpedPort's own (see its constructor above).
+    _uFilenames = {_label("ut")};
+    Point3 uStart = {0.5 * (_start[0] + _stop[0]), 0.5 * (_start[1] + _stop[1]), 0.5 * (_start[2] + _stop[2])};
+    Point3 uStop = uStart;
+    uStart[static_cast<std::size_t>(_excNy)] = _start[static_cast<std::size_t>(_excNy)];
+    uStop[static_cast<std::size_t>(_excNy)] = _stop[static_cast<std::size_t>(_excNy)];
+    CSPropProbeBox* uProbe = addProbe(_csx, _uFilenames[0], 0, -1);
+    addBox(*uProbe, uStart, uStop);
+
+    _iFilenames = {_label("it")};
+    Point3 iStart = _start;
+    Point3 iStop = _stop;
+    const double mid = 0.5 * (_start[static_cast<std::size_t>(_excNy)] + _stop[static_cast<std::size_t>(_excNy)]);
+    iStart[static_cast<std::size_t>(_excNy)] = mid;
+    iStop[static_cast<std::size_t>(_excNy)] = mid;
+    CSPropProbeBox* iProbe = addProbe(_csx, _iFilenames[0], 1, direction, _excNy);
+    addBox(*iProbe, iStart, iStop);
+}
+
+std::expected<void, std::string> PassiveProbe::calcPort(const std::filesystem::path& simPath,
+                                                          const std::vector<double>& freq, std::optional<double>,
+                                                          const std::string& signalType) {
+    // Deliberately does not call Port::calcPort() -- there's no characteristic impedance to
+    // decompose against (see this class's own doc comment). readUiData() alone is enough to
+    // populate ufTot()/ifTot(), which is all a passive probe's data ever consists of.
+    return readUiData(simPath, freq, signalType);
+}
+
+MSLPort::MSLPort(ContinuousStructure& csx, std::int32_t portNr, Point3 start, Point3 stop,
                   const std::string& propDir, const std::string& excDir, double excite, double feedR,
                   std::int32_t priority, std::string portNamePrefix, double delay)
     : Port(csx, portNr, start, stop, excite, priority, std::move(portNamePrefix), delay),
@@ -239,11 +278,6 @@ MSLPort::MSLPort(ContinuousStructure& csx, std::int32_t portNr, CSProperties& me
     const double measplaneShiftInit = 0.5 * std::abs(_start[propNy] - _stop[propNy]);
     const double measplanePos = _start[propNy] + measplaneShiftInit * direction;
     const double feedShift = 0;
-
-    Point3 mslStart = _start;
-    Point3 mslStop = _stop;
-    mslStop[excNy] = mslStart[excNy];
-    addBox(metalProp, mslStart, mslStop, _priority);
 
     CSRectGrid* mesh = _csx.GetGrid();
     const std::vector<double> propLines = gridLines(*mesh, _propNy, true);
@@ -313,7 +347,8 @@ MSLPort::MSLPort(ContinuousStructure& csx, std::int32_t portNr, CSProperties& me
         Point3 rStop = _stop;
         rStop[propNy] = rStart[propNy];
         if (feedR == 0) {
-            addBox(metalProp, rStart, rStop);
+            CSPropMetal* feed = addMetal(_csx, _label("resist"));
+            addBox(*feed, rStart, rStop);
         } else {
             CSPropLumpedElement* lumpedR = addLumpedElement(_csx, _label("resist"), _excNy, true, feedR);
             addBox(*lumpedR, rStart, rStop);

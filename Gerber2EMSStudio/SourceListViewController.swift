@@ -169,7 +169,17 @@ final class SourceListViewController: NSViewController {
     private var didSetInitialSplitPosition = false
     // Titles are added separately as their own NSTextField, not via checkboxWithTitle: -- see
     // checkboxRow(_:title:).
+    // Shown only for a .net/.netClass selection -- see probeCheckbox/absorbCheckbox below for the
+    // per-pin equivalent (a .pin node no longer has an "included" checkbox of its own at all).
     private let includedCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    // Shown only for a .pin selection. Independent of excitedCheckbox (see its own declaration
+    // comment) -- checking either one auto-includes this pin's net, same as includedCheckbox does
+    // for a net/net-class row. absorbCheckbox is only shown (and only meaningful) once probeCheckbox
+    // is checked -- see InvolvedNetConfig::ProbedPin's own doc comment for what the two together
+    // mean physically: Probe+Absorb Signal reproduces today's default port behavior (a real,
+    // matched-impedance termination); Probe alone is a genuinely passive, non-loading read point.
+    private let probeCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    private let absorbCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let impedanceField = NSTextField(string: "")
     private let lengthField = NSTextField(string: "")
     private let planeComboBox = NSComboBox()
@@ -217,6 +227,8 @@ final class SourceListViewController: NSViewController {
     // reserved space in detailStack, so show/hide has to target these actual arranged subviews
     // instead.
     private var includedRow: NSView!
+    private var probeRow: NSView!
+    private var absorbRow: NSView!
     private var excitedRow: NSView!
     private var excitationSeparatorRow: NSView!
     // The Impedance/Length/Reference Plane rows -- hidden as a group whenever includedCheckbox isn't
@@ -226,6 +238,9 @@ final class SourceListViewController: NSViewController {
 
     // Excitation editor -- only ever shown for a pin-level selection (ExcitationConfig is
     // inherently per footprint+pin, not per net/net-class; see gerber2ems::ExcitationConfig).
+    // Independent of probeCheckbox -- available whether or not Probe is checked; checking it always
+    // yields the same full absorbing-port structure Probe+Absorb Signal does, regardless of this
+    // pin's own probe/absorb state (see PortConfig::absorbSignal()'s own doc comment).
     private let excitedCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let mainExcitationCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let startTimeField = NSTextField(string: "")
@@ -456,6 +471,10 @@ final class SourceListViewController: NSViewController {
 
         includedCheckbox.target = self
         includedCheckbox.action = #selector(includedToggled)
+        probeCheckbox.target = self
+        probeCheckbox.action = #selector(probeToggled)
+        absorbCheckbox.target = self
+        absorbCheckbox.action = #selector(absorbToggled)
 
         impedanceField.formatter = impedanceFormatter
         lengthField.formatter = lengthFormatter
@@ -555,7 +574,9 @@ final class SourceListViewController: NSViewController {
         excitationFieldsContainer.spacing = 8
 
         includedRow = checkboxRow(includedCheckbox, title: "Included in Simulation")
-        excitedRow = checkboxRow(excitedCheckbox, title: "Excited in Simulation")
+        probeRow = checkboxRow(probeCheckbox, title: "Probe")
+        absorbRow = checkboxRow(absorbCheckbox, title: "Absorb Signal", labelWidth: 130)
+        excitedRow = checkboxRow(excitedCheckbox, title: "Excite")
         excitationSeparatorRow = insetRow(excitationSeparator)
 
         let impedanceRow = labeled("Impedance:", impedanceField)
@@ -598,6 +619,8 @@ final class SourceListViewController: NSViewController {
 
         let detailStack = NSStackView(views: [
             includedRow,
+            probeRow,
+            absorbRow,
         ] + valueFieldRows + [
             widthDBAdvancedRow,
             excitationSeparatorRow,
@@ -780,6 +803,103 @@ final class SourceListViewController: NSViewController {
         showDetail(for: selectedNode)
     }
 
+    /// A reveal requested while rootNodes doesn't yet hold the right scope's data -- switchScope(to:
+    /// thenReveal:) stashes it here and refreshBoardData()'s own completion applies it once the new
+    /// scope's nodes have actually loaded (a real subprocess round trip -- see refreshBoardData's own
+    /// doc comment -- so this can't just happen synchronously inline).
+    private enum PendingReveal {
+        case net(String)
+        case pin(footprintReference: String, padNumber: String)
+    }
+    private var pendingReveal: PendingReveal?
+
+    /// Jumps this list to whichever net InvolvedNetsViewController's own summary table row belongs
+    /// to -- switching to Net scope first if this list isn't already showing it, then expanding/
+    /// selecting/scrolling to the matching leaf, the same "reveal" a user manually browsing to it
+    /// would produce. Selecting it fires showDetail(for:) the normal way (via
+    /// outlineViewSelectionDidChange), so the detail pane on the right fills in on its own.
+    func revealNet(named netName: String) {
+        switchScope(to: .net, thenReveal: .net(netName))
+    }
+
+    /// Same idea as revealNet(named:), for a specific footprint+pin -- switches to Footprint/Pin
+    /// scope first if needed. `padNumber` is matched exactly against SourceListNode.Kind.pin's own
+    /// pin.number -- safe because both this and InvolvedNetsViewController's own pin identities come
+    /// from the same KicadBoardBridge.footprints() query (see dedupedPins' own doc comment for why a
+    /// duplicate-pad-number collapse never hides a number that was genuinely present).
+    func revealPin(footprintReference: String, padNumber: String) {
+        switchScope(to: .footprint, thenReveal: .pin(footprintReference: footprintReference, padNumber: padNumber))
+    }
+
+    /// Shared by revealNet(named:)/revealPin(footprintReference:padNumber:) -- applies immediately if
+    /// `newScope` is already showing (rootNodes already has the right data), otherwise switches scope
+    /// (mirroring scopeMenuItemSelected's own reset-then-refetch sequence) and lets refreshBoardData()
+    /// apply the reveal once its background fetch completes.
+    private func switchScope(to newScope: Scope, thenReveal reveal: PendingReveal) {
+        guard newScope != scope else {
+            applyReveal(reveal)
+            return
+        }
+        scope = newScope
+        scopeTitleLabel.stringValue = Self.scopeTitles[scope.rawValue]
+        rootNodes = []
+        outlineView.reloadData()
+        showDetail(for: nil)
+        pendingReveal = reveal
+        refreshBoardData()
+    }
+
+    /// Falls back to showDetail(for: nil) if the target genuinely isn't in rootNodes (e.g. a stale
+    /// reveal request for a net/pin that's since been removed from the board) -- otherwise the
+    /// detail pane would be left showing whatever it had before this reveal was requested, which
+    /// reads as a stale, wrong-looking selection rather than "there's genuinely nothing to show."
+    private func applyReveal(_ reveal: PendingReveal) {
+        let found: Bool
+        switch reveal {
+        case .net(let name):
+            found = selectNode(in: rootNodes) { node in
+                if case .net(let n) = node.kind { return n == name }
+                return false
+            }
+        case .pin(let footprintReference, let padNumber):
+            found = selectNode(in: rootNodes) { node in
+                if case .pin(let ref, let pin) = node.kind { return ref == footprintReference && pin.number == padNumber }
+                return false
+            }
+        }
+        if !found {
+            showDetail(for: nil)
+        }
+    }
+
+    /// Recursively finds `predicate`'s matching node under `nodes`, expanding every ancestor group
+    /// along the way (so the target's row actually has a valid, visible index to select) and leaving
+    /// it selected and scrolled into view. Collapses back any group it opened that didn't actually
+    /// lead to a match, so a reveal doesn't leave unrelated branches pried open behind it. Returns
+    /// whether a match was found, purely so a caller could chain further logic on failure -- nothing
+    /// currently needs that, but a silent "did nothing" would be a harder failure mode to notice than
+    /// an unused return value.
+    @discardableResult
+    private func selectNode(in nodes: [SourceListNode], matching predicate: (SourceListNode) -> Bool) -> Bool {
+        for node in nodes {
+            if predicate(node) {
+                let row = outlineView.row(forItem: node)
+                if row >= 0 {
+                    outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+                    outlineView.scrollRowToVisible(row)
+                }
+                return true
+            }
+            guard !node.children.isEmpty else { continue }
+            outlineView.expandItem(node)
+            if selectNode(in: node.children, matching: predicate) {
+                return true
+            }
+            outlineView.collapseItem(node)
+        }
+        return false
+    }
+
     /// Called after a KiCad board is linked (see DocumentWindowController).
     func refreshBoardData() {
         guard let document, let kicadPcbPath = document.config.kicadPcbPath else { return }
@@ -863,7 +983,12 @@ final class SourceListViewController: NSViewController {
                 self?.rootNodes = nodes
                 self?.boardDataError = queryError
                 self?.outlineView.reloadData()
-                self?.showDetail(for: nil)
+                if let reveal = self?.pendingReveal {
+                    self?.pendingReveal = nil
+                    self?.applyReveal(reveal)
+                } else {
+                    self?.showDetail(for: nil)
+                }
             }
         }
     }
@@ -1053,34 +1178,38 @@ final class SourceListViewController: NSViewController {
         matchingExcitationIndex(for: node).map { selectedSimulation!.excitations[$0] }
     }
 
-    /// Whether `entry` (already known to match `node`'s net -- see matchingEntry) actually covers
-    /// this specific node. Always true for a net/net-class node (the entry *is* its own inclusion,
-    /// nothing more granular exists); for a `.pin` node, false if this one pin has been explicitly
-    /// excluded from the otherwise-included net (see InvolvedNetConfig's own doc comment on
-    /// excludedPins).
-    private func isNodeActuallyIncluded(_ node: SourceListNode, by entry: EMSInvolvedNetBridge) -> Bool {
-        guard case .pin(let footprintReference, let pin) = node.kind else { return true }
-        return !entry.isPinExcluded(withFootprint: footprintReference, pin: pin.number)
+    /// Whether `footprint`.`pin` on `entry`'s net is effectively probed, and (only meaningful when
+    /// probed) whether it absorbs the signal -- accounting for both of InvolvedNetConfig's
+    /// resolution modes (see its own doc comment): while hasExplicitPinSelections is NO, every pin
+    /// is probed+absorbing by default except those in the legacy excludedPins() list; once YES,
+    /// only pins actually present in probedPins() are probed at all. Mirrors
+    /// port_resolution.cpp's own resolution rule exactly, so what's shown here always matches what
+    /// an actual simulation run would do.
+    private func effectiveProbeState(for entry: EMSInvolvedNetBridge, footprintReference: String, pin: String)
+        -> (probed: Bool, absorbs: Bool) {
+        if entry.hasExplicitPinSelections {
+            let probed = entry.isPinProbed(withFootprint: footprintReference, pin: pin)
+            return (probed, probed ? entry.pinAbsorbsSignal(withFootprint: footprintReference, pin: pin) : true)
+        }
+        return (!entry.isPinExcluded(withFootprint: footprintReference, pin: pin), true)
     }
 
     /// The status icon shown to a row's left in the source list, or nil for none. Only pin/net/
     /// net-class rows (node.isSelectableForInclusion) ever get one -- a footprint or group row has
-    /// no InvolvedNetConfig/ExcitationConfig identity of its own so it can be neither included nor
-    /// excited. Only a `.pin` node can ever match an excitation (matchingExcitationIndex), so a
-    /// net/net-class row can only ever show "included" or nothing. A pin's own "included" status
-    /// defaults to its net's (see matchingEntryIndex) -- so every pin on an included net shows the
-    /// highlighter automatically, with no separate propagation needed here -- *unless* that specific
-    /// pin has been individually excluded (isNodeActuallyIncluded), in which case it shows nothing
-    /// even though the net itself, and every other pin on it, still does.
+    /// no InvolvedNetConfig/ExcitationConfig identity of its own so it can be neither probed,
+    /// excited, nor included. Only a `.pin` node can ever match an excitation
+    /// (matchingExcitationIndex), so a net/net-class row can only ever show "included" or nothing.
     private func icon(for node: SourceListNode) -> String? {
         guard node.isSelectableForInclusion else { return nil }
         if let excitation = matchingExcitation(for: node) {
             return excitation.isMain ? "rectangle.portrait.and.arrow.right.fill" : "rectangle.portrait.and.arrow.right"
         }
-        if let entry = matchingEntry(for: node), isNodeActuallyIncluded(node, by: entry) {
-            return "highlighter"
+        guard let entry = matchingEntry(for: node) else { return nil }
+        if case .pin(let footprintReference, let pin) = node.kind {
+            return effectiveProbeState(for: entry, footprintReference: footprintReference, pin: pin.number).probed
+                ? "highlighter" : nil
         }
-        return nil
+        return "highlighter"
     }
 
     private func showDetail(for node: SourceListNode?) {
@@ -1107,12 +1236,16 @@ final class SourceListViewController: NSViewController {
         setDetailFieldsHidden(false)
         detailStatusLabel.stringValue = ""
 
+        let isPinNode: Bool
+        if case .pin = node.kind { isPinNode = true } else { isPinNode = false }
+        includedRow.isHidden = isPinNode
+        probeRow.isHidden = !isPinNode
+        absorbRow.isHidden = true // set below, once this pin's own probed state is known
+
         if let entry = matchingEntry(for: node) {
-            // The checkbox reflects *this node's* inclusion (which, for an individually-excluded
-            // pin, is off even though the net entry it's reading everything else from still exists)
-            // -- the other fields are net-wide settings, still shown/editable regardless, same as
-            // for any other pin on the same net.
-            includedCheckbox.state = isNodeActuallyIncluded(node, by: entry) ? .on : .off
+            if !isPinNode {
+                includedCheckbox.state = .on
+            }
             impedanceField.doubleValue = entry.impedance
             lengthField.doubleValue = entry.length
             planeComboBox.stringValue = planeDisplayString(for: entry.plane)
@@ -1122,13 +1255,20 @@ final class SourceListViewController: NSViewController {
             directionPopUp.selectItem(at: kind.rawValue)
             customDirectionField.doubleValue = entry.direction?.doubleValue ?? 0
             if case .pin(let footprintReference, let pin) = node.kind {
+                let state = effectiveProbeState(for: entry, footprintReference: footprintReference, pin: pin.number)
+                probeCheckbox.state = state.probed ? .on : .off
+                absorbRow.isHidden = !state.probed
+                absorbCheckbox.state = state.absorbs ? .on : .off
                 let override = entry.directionOverride(withFootprint: footprintReference, pin: pin.number)
                 let overrideKind = DirectionKind.kind(for: override?.doubleValue)
                 pinDirectionOverridePopUp.selectItem(at: overrideKind.rawValue)
                 pinDirectionOverrideCustomField.doubleValue = override?.doubleValue ?? 0
             }
         } else {
-            includedCheckbox.state = .off
+            if !isPinNode {
+                includedCheckbox.state = .off
+            }
+            probeCheckbox.state = .off
             impedanceField.stringValue = ""
             lengthField.stringValue = ""
             planeComboBox.stringValue = ""
@@ -1143,9 +1283,10 @@ final class SourceListViewController: NSViewController {
         updatePinDirectionOverrideCustomFieldVisibility()
         updateValueFieldsVisibility()
 
-        // Excitations are per-pin only -- hidden entirely for a net/net-class selection, and
-        // meaningless for a pin that isn't even included in the simulation yet.
-        guard case .pin = node.kind, includedCheckbox.state == .on else {
+        // Excitations are per-pin only -- hidden entirely for a net/net-class selection. Unlike
+        // Probe, available regardless of whether this pin has any entry/probed state yet at all
+        // (checking it creates the net's entry the same way Probe does -- see excitedToggled()).
+        guard case .pin = node.kind else {
             excitedRow.isHidden = true
             excitationSeparatorRow.isHidden = true
             excitationFieldsContainer.isHidden = true
@@ -1184,6 +1325,8 @@ final class SourceListViewController: NSViewController {
 
     private func setDetailFieldsHidden(_ hidden: Bool) {
         includedRow.isHidden = hidden
+        probeRow.isHidden = hidden
+        absorbRow.isHidden = hidden
         if hidden {
             for row in valueFieldRows {
                 row.isHidden = true
@@ -1202,10 +1345,12 @@ final class SourceListViewController: NSViewController {
     }
 
     /// The value fields (Impedance/Length/Reference Plane, plus Width override/dB margin override
-    /// behind their own disclosure) only mean anything once this net/pin is actually part of the
-    /// simulation -- hidden as a group otherwise, rather than left showing stale or empty values.
+    /// behind their own disclosure) are net-wide settings -- shown whenever this node's net has an
+    /// entry at all, regardless of this specific pin's own Probe/Excite state (unlike the old
+    /// single-checkbox model, where an individually-excluded pin also hid these, even though they
+    /// describe the net, not the pin).
     private func updateValueFieldsVisibility() {
-        let included = includedCheckbox.state == .on
+        let included = selectedNode.flatMap(matchingEntry) != nil
         for row in valueFieldRows {
             row.isHidden = !included
         }
@@ -1317,74 +1462,90 @@ final class SourceListViewController: NSViewController {
         return Int(trimmed)
     }
 
-    @objc private func includedToggled() {
-        guard let node = selectedNode, let sim = selectedSimulation else { return }
-
-        if includedCheckbox.state == .on {
-            // "Included in Simulation" is a property of the net, not the pin (see
-            // matchingEntryIndex's doc comment) -- so checking it for a `.pin` node creates/reuses
-            // that pin's *net*'s entry, never a separate per-pin one. But *this specific pin* not
-            // having a port is exactly what excludedPins is for (see InvolvedNetConfig's own doc
-            // comment): if the net's entry already exists -- some other pin on it was ticked first,
-            // or this exact pin was explicitly excluded earlier -- reuse it and just un-exclude this
-            // pin, leaving every other pin's own inclusion untouched. Only a genuinely new net (no
-            // entry yet at all) gets a fresh one, which starts with nothing excluded -- i.e. every
-            // pin on it included, matching the "first pin ticked on a brand-new net brings the whole
-            // net in" rule.
-            switch node.kind {
-            case .netClass(let name):
-                let entry = sim.addInvolvedNet(with: .netClass)
-                entry.netClass = name
-            case .net(let name):
-                let entry = sim.addInvolvedNet(with: .net)
-                entry.net = name
-            case .pin(let footprintReference, let pin):
-                guard !pin.netName.isEmpty else { break }
-                if let index = matchingEntryIndex(for: node) {
-                    sim.involvedNets[index].includePin(withFootprint: footprintReference, pin: pin.number)
-                } else {
-                    let entry = sim.addInvolvedNet(with: .net)
-                    entry.net = pin.netName
-                }
-            case .footprint, .group:
-                break
-            }
-        } else if case .pin(let footprintReference, let pin) = node.kind {
-            // Unlike net/net-class, unchecking a pin never removes the whole entry -- only this pin
-            // stops being included; the net (and every other pin already on it) stays involved. See
-            // the tick-on branch's own comment.
-            if let index = matchingEntryIndex(for: node) {
-                sim.involvedNets[index].excludePin(withFootprint: footprintReference, pin: pin.number)
-            }
-            // An excitation on a pin that's no longer included is meaningless (see showDetail's own
-            // excitedRow-hiding guard) and would fail port resolution outright -- there's no port
-            // left for it to point at -- so it goes along with the pin rather than being left
-            // dangling.
-            if let excitationIndex = matchingExcitationIndex(for: node) {
-                sim.removeExcitation(at: excitationIndex)
-            }
-        } else if let index = matchingEntryIndex(for: node) {
-            sim.removeInvolvedNet(at: index)
-        }
+    /// Common tail every toggle handler below shares: mark the document dirty, refresh the detail
+    /// pane, and reload the whole outline (not just `node`'s own branch -- toggling a net's own
+    /// inclusion, or a pin's probed state on a not-yet-explicit net, can change what every *other*
+    /// pin on that net resolves to (see icon(for:)/effectiveProbeState), and in Footprint/Pin scope
+    /// those pins can be scattered across entirely different footprint branches). Selection doesn't
+    /// survive reloadData() the way expansion state does, so it's restored explicitly right after.
+    private func refreshAfterToggle(_ node: SourceListNode) {
         document?.updateChangeCount(.changeDone)
         showDetail(for: node)
-        // "Included" toggling a whole net's inclusion (see above) can change what every pin on that
-        // net resolves to (see icon(for:)/matchingEntryIndex) -- and in Footprint/Pin scope, those
-        // pins can be scattered across entirely different footprint branches, not just `node`'s own
-        // children the way Net scope nests them. reloadItem(node, reloadChildren:) only redraws
-        // `node`'s own branch, leaving every other footprint's same-net pin showing its stale icon
-        // until something else happens to reload it. reloadData() redraws every row instead --
-        // heavier, but simplest way to guarantee no stale icon survives. Expansion state survives
-        // this (NSOutlineView tracks it by item identity, and the underlying node objects aren't
-        // rebuilt -- only refreshBoardData() does that), but *selection* doesn't, so it's restored
-        // explicitly right after -- otherwise the row the user just acted on visibly loses its
-        // highlight even though showDetail(for:) above already left the right data on screen.
         outlineView.reloadData()
         let row = outlineView.row(forItem: node)
         if row >= 0 {
             outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         }
         onInvolvedNetsChanged?()
+    }
+
+    /// Only ever reached for a .net/.netClass node now -- a .pin node has no "included" checkbox of
+    /// its own any more (see probeCheckbox/excitedCheckbox instead, both of which auto-include this
+    /// pin's net themselves when needed).
+    @objc private func includedToggled() {
+        guard let node = selectedNode, let sim = selectedSimulation else { return }
+        switch node.kind {
+        case .netClass(let name):
+            if includedCheckbox.state == .on {
+                let entry = sim.addInvolvedNet(with: .netClass)
+                entry.netClass = name
+            } else if let index = matchingEntryIndex(for: node) {
+                sim.removeInvolvedNet(at: index)
+            }
+        case .net(let name):
+            if includedCheckbox.state == .on {
+                let entry = sim.addInvolvedNet(with: .net)
+                entry.net = name
+            } else if let index = matchingEntryIndex(for: node) {
+                sim.removeInvolvedNet(at: index)
+            }
+        case .pin, .footprint, .group:
+            break
+        }
+        refreshAfterToggle(node)
+    }
+
+    /// Creates `node`'s pin's net entry if it doesn't exist yet -- the auto-include behavior shared
+    /// by probeToggled() and excitedToggled() (checking either one brings the net in, same as
+    /// checking includedCheckbox does for a net/net-class row). Returns nil (having left the
+    /// checkbox that called it unchecked) if the pin's net is somehow unknown.
+    private func entryAutoIncluding(_ node: SourceListNode, in sim: EMSSimulationBridge) -> EMSInvolvedNetBridge? {
+        if let existing = matchingEntry(for: node) {
+            return existing
+        }
+        guard case .pin(_, let pin) = node.kind, !pin.netName.isEmpty else { return nil }
+        let entry = sim.addInvolvedNet(with: .net)
+        entry.net = pin.netName
+        return entry
+    }
+
+    @objc private func probeToggled() {
+        guard let node = selectedNode, case .pin(let footprintReference, let pin) = node.kind,
+              let sim = selectedSimulation
+        else { return }
+        if probeCheckbox.state == .on {
+            guard let entry = entryAutoIncluding(node, in: sim) else {
+                probeCheckbox.state = .off
+                return
+            }
+            // Defaults Absorb Signal to on -- "Probe + Absorb Signal should have the behaviour we
+            // have today" is the expected default when a pin is first probed; unchecking it
+            // afterwards is a separate, explicit step (absorbToggled()).
+            absorbCheckbox.state = .on
+            entry.setPinProbed(true, absorbSignal: true, withFootprint: footprintReference, pin: pin.number)
+        } else if let entry = matchingEntry(for: node) {
+            entry.setPinProbed(false, absorbSignal: true, withFootprint: footprintReference, pin: pin.number)
+        }
+        refreshAfterToggle(node)
+    }
+
+    @objc private func absorbToggled() {
+        guard let node = selectedNode, case .pin(let footprintReference, let pin) = node.kind,
+              let entry = matchingEntry(for: node)
+        else { return }
+        entry.setPinProbed(true, absorbSignal: absorbCheckbox.state == .on, withFootprint: footprintReference,
+                            pin: pin.number)
+        refreshAfterToggle(node)
     }
 
     @objc private func detailFieldChanged(_ sender: NSTextField) {
@@ -1414,16 +1575,18 @@ final class SourceListViewController: NSViewController {
         else { return }
 
         if excitedCheckbox.state == .on {
+            // Available whether or not Probe has been checked -- auto-includes this pin's net
+            // itself, exactly like probeToggled() does, since Excite always needs its net to be
+            // part of the simulation regardless of this pin's own probed state.
+            guard entryAutoIncluding(node, in: sim) != nil else {
+                excitedCheckbox.state = .off
+                return
+            }
             _ = sim.addExcitation(forFootprint: footprintReference, pin: pin.number)
         } else if let index = matchingExcitationIndex(for: node) {
             sim.removeExcitation(at: index)
         }
-        document?.updateChangeCount(.changeDone)
-        showDetail(for: node)
-        outlineView.reloadItem(node)
-        // Involved-nets' outline nests exactly the excited pins under their net (see
-        // InvolvedNetsViewController) -- toggling excitation changes what that nesting should be.
-        onInvolvedNetsChanged?()
+        refreshAfterToggle(node)
     }
 
     @objc private func mainExcitationToggled() {

@@ -110,7 +110,7 @@ struct CopperEngine::Impl {
     };
     std::vector<CPMLShellBuffers> cpmlShells;
 
-    // Excitation (Phase 4 -- see CopperExcitation.hpp). Zero counts mean encodeOneIteration simply
+    // Excitation (Phase 4 -- see CopperExcitation.hpp). Zero counts mean encodeIterationPhase simply
     // never dispatches the corresponding kernel -- an unexcited run stays at its E=H=0 (or
     // test-seeded, see writeFieldCell) initial condition, same as Phase 2/3.
     id<MTLComputePipelineState> applyExcitationEPipeline;
@@ -122,11 +122,11 @@ struct CopperEngine::Impl {
     // CopperExcitationParamsGPU is bound via setBytes:length:atIndex:, not an MTLBuffer -- run()
     // encodes every iteration's commands on the CPU *before* any of them actually execute on the
     // GPU (that's what makes the batching work), so a single shared MTLBuffer mutated by CPU-side
-    // memcpy between encodeOneIteration calls would have every dispatch see only the *last*
+    // memcpy between encodeIterationPhase calls would have every dispatch see only the *last*
     // iteration's values once the GPU finally runs (this was a real, confirmed bug in an earlier
     // version of this code -- Phase 4a's smoketest caught it). setBytes: instead copies the given
     // bytes into the command buffer's own storage immediately at encode time, so each dispatch
-    // keeps its own snapshot regardless of what a later encodeOneIteration call does to the local
+    // keeps its own snapshot regardless of what a later encodeIterationPhase call does to the local
     // variable afterwards.
     std::uint32_t voltageCellCount = 0;
     std::uint32_t currentCellCount = 0;
@@ -136,11 +136,12 @@ struct CopperEngine::Impl {
     std::uint32_t currentTimestep = 0; // persists across run()/runWithProbeSampling() calls, mirrors
                                         // Engine::numTS exactly (including *when* it increments)
 
-    // Encodes exactly one E-then-H leapfrog iteration (PML sandwich + excitation included) into
-    // `encoder`, mirroring Engine::IterateTS's own stage order -- shared by run() (batches many
-    // iterations into one command buffer) and runWithProbeSampling() (one iteration per command
-    // buffer, so a caller can read fields back between iterations).
-    void encodeOneIteration(id<MTLComputeCommandEncoder> encoder);
+    enum class IterationPhase { Full, Voltage, Current };
+
+    // Encodes either or both halves of one leapfrog iteration. `Full` preserves run()'s batched
+    // fast path; Voltage/Current are committed separately when a CPU correction must land between
+    // them. currentTimestep advances only after the Current half.
+    void encodeIterationPhase(id<MTLComputeCommandEncoder> encoder, IterationPhase phase);
 };
 
 CopperEngine::CopperEngine(const CopperYeeGrid& grid, const std::vector<CopperPMLShell>& pmlShells,
@@ -277,7 +278,9 @@ CopperEngine::CopperEngine(const CopperYeeGrid& grid, const std::vector<CopperPM
 
 CopperEngine::~CopperEngine() = default;
 
-void CopperEngine::Impl::encodeOneIteration(id<MTLComputeCommandEncoder> encoder) {
+void CopperEngine::Impl::encodeIterationPhase(id<MTLComputeCommandEncoder> encoder, IterationPhase phase) {
+    const bool encodeVoltage = phase != IterationPhase::Current;
+    const bool encodeCurrent = phase != IterationPhase::Voltage;
     const MTLSize eGrid = MTLSizeMake(dims.nx, dims.ny, dims.nz);
     const MTLSize hGrid = MTLSizeMake(dims.nx > 0 ? dims.nx - 1 : 0, dims.ny > 0 ? dims.ny - 1 : 0,
                                        dims.nz > 0 ? dims.nz - 1 : 0);
@@ -400,97 +403,108 @@ void CopperEngine::Impl::encodeOneIteration(id<MTLComputeCommandEncoder> encoder
         [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
     };
 
-    // --- Voltage (E) update: pml_pre_e -> update_e_interior -> pml_post_e -> apply_excitation_e,
-    // mirroring Engine::IterateTS's own DoPreVoltageUpdates/UpdateVoltages/DoPostVoltageUpdates/
-    // Apply2Voltages order. ---
-    dispatchPMLStage(PMLStage::EPre);
+    // --- Voltage (E) update: pml_pre_e -> update_e_interior -> pml_post_e ->
+    // apply_excitation_e, mirroring Engine::IterateTS's own
+    // DoPreVoltageUpdates/UpdateVoltages/DoPostVoltageUpdates/ Apply2Voltages
+    // order. ---
+    if (encodeVoltage) {
+        dispatchPMLStage(PMLStage::EPre);
 
-    [encoder setComputePipelineState:updateEPipeline];
-    [encoder setBuffer:dimsBuffer offset:0 atIndex:CopperBufferIndexDims];
-    [encoder setBuffer:eField[0] offset:0 atIndex:CopperBufferIndexEx];
-    [encoder setBuffer:eField[1] offset:0 atIndex:CopperBufferIndexEy];
-    [encoder setBuffer:eField[2] offset:0 atIndex:CopperBufferIndexEz];
-    [encoder setBuffer:hField[0] offset:0 atIndex:CopperBufferIndexHx];
-    [encoder setBuffer:hField[1] offset:0 atIndex:CopperBufferIndexHy];
-    [encoder setBuffer:hField[2] offset:0 atIndex:CopperBufferIndexHz];
-    [encoder setBuffer:vv[0] offset:0 atIndex:CopperBufferIndexVV0];
-    [encoder setBuffer:vv[1] offset:0 atIndex:CopperBufferIndexVV1];
-    [encoder setBuffer:vv[2] offset:0 atIndex:CopperBufferIndexVV2];
-    [encoder setBuffer:vi[0] offset:0 atIndex:CopperBufferIndexVI0];
-    [encoder setBuffer:vi[1] offset:0 atIndex:CopperBufferIndexVI1];
-    [encoder setBuffer:vi[2] offset:0 atIndex:CopperBufferIndexVI2];
-    [encoder dispatchThreads:eGrid threadsPerThreadgroup:threadsPerThreadgroup];
-
-    // pml_post_e (next, if there's any PML) reads the E buffers this dispatch just wrote -- Metal
-    // doesn't guarantee that ordering/visibility across dispatches within one encoder on its own.
-    [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
-
-    dispatchPMLStage(PMLStage::EPost);
-    dispatchCPMLCorrect(CPMLStage::E);
-
-    if (voltageCellCount > 0) {
-        [encoder setComputePipelineState:applyExcitationEPipeline];
+        [encoder setComputePipelineState:updateEPipeline];
         [encoder setBuffer:dimsBuffer offset:0 atIndex:CopperBufferIndexDims];
         [encoder setBuffer:eField[0] offset:0 atIndex:CopperBufferIndexEx];
         [encoder setBuffer:eField[1] offset:0 atIndex:CopperBufferIndexEy];
         [encoder setBuffer:eField[2] offset:0 atIndex:CopperBufferIndexEz];
-        [encoder setBuffer:voltageCells offset:0 atIndex:CopperBufferIndexExcCells];
-        [encoder setBuffer:voltageSignal offset:0 atIndex:CopperBufferIndexExcSignal];
-        [encoder setBytes:&excitationParams length:sizeof(excitationParams) atIndex:CopperBufferIndexExcParams];
-        const MTLSize excGrid = MTLSizeMake(voltageCellCount, 1, 1);
-        const MTLSize excThreadsPerThreadgroup = MTLSizeMake(std::min<NSUInteger>(tgWidth, voltageCellCount), 1, 1);
-        [encoder dispatchThreads:excGrid threadsPerThreadgroup:excThreadsPerThreadgroup];
-        // update_h_interior (next) reads the E buffer this just wrote into additively.
-        [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
-    }
-
-    // --- Current (H) update: pml_pre_h -> update_h_interior -> pml_post_h -> apply_excitation_h. ---
-    dispatchPMLStage(PMLStage::HPre);
-
-    [encoder setComputePipelineState:updateHPipeline];
-    [encoder setBuffer:dimsBuffer offset:0 atIndex:CopperBufferIndexDims];
-    [encoder setBuffer:eField[0] offset:0 atIndex:CopperBufferIndexEx];
-    [encoder setBuffer:eField[1] offset:0 atIndex:CopperBufferIndexEy];
-    [encoder setBuffer:eField[2] offset:0 atIndex:CopperBufferIndexEz];
-    [encoder setBuffer:hField[0] offset:0 atIndex:CopperBufferIndexHx];
-    [encoder setBuffer:hField[1] offset:0 atIndex:CopperBufferIndexHy];
-    [encoder setBuffer:hField[2] offset:0 atIndex:CopperBufferIndexHz];
-    [encoder setBuffer:ii[0] offset:0 atIndex:CopperBufferIndexII0];
-    [encoder setBuffer:ii[1] offset:0 atIndex:CopperBufferIndexII1];
-    [encoder setBuffer:ii[2] offset:0 atIndex:CopperBufferIndexII2];
-    [encoder setBuffer:iv[0] offset:0 atIndex:CopperBufferIndexIV0];
-    [encoder setBuffer:iv[1] offset:0 atIndex:CopperBufferIndexIV1];
-    [encoder setBuffer:iv[2] offset:0 atIndex:CopperBufferIndexIV2];
-    [encoder dispatchThreads:hGrid threadsPerThreadgroup:threadsPerThreadgroup];
-
-    // pml_post_h (next, if there's any PML) reads the H buffers this dispatch just wrote.
-    [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
-
-    dispatchPMLStage(PMLStage::HPost);
-    dispatchCPMLCorrect(CPMLStage::H);
-
-    if (currentCellCount > 0) {
-        [encoder setComputePipelineState:applyExcitationHPipeline];
-        [encoder setBuffer:dimsBuffer offset:0 atIndex:CopperBufferIndexDims];
         [encoder setBuffer:hField[0] offset:0 atIndex:CopperBufferIndexHx];
         [encoder setBuffer:hField[1] offset:0 atIndex:CopperBufferIndexHy];
         [encoder setBuffer:hField[2] offset:0 atIndex:CopperBufferIndexHz];
-        [encoder setBuffer:currentCells offset:0 atIndex:CopperBufferIndexExcCells];
-        [encoder setBuffer:currentSignal offset:0 atIndex:CopperBufferIndexExcSignal];
-        [encoder setBytes:&excitationParams length:sizeof(excitationParams) atIndex:CopperBufferIndexExcParams];
-        const MTLSize excGrid = MTLSizeMake(currentCellCount, 1, 1);
-        const MTLSize excThreadsPerThreadgroup = MTLSizeMake(std::min<NSUInteger>(tgWidth, currentCellCount), 1, 1);
-        [encoder dispatchThreads:excGrid threadsPerThreadgroup:excThreadsPerThreadgroup];
+        [encoder setBuffer:vv[0] offset:0 atIndex:CopperBufferIndexVV0];
+        [encoder setBuffer:vv[1] offset:0 atIndex:CopperBufferIndexVV1];
+        [encoder setBuffer:vv[2] offset:0 atIndex:CopperBufferIndexVV2];
+        [encoder setBuffer:vi[0] offset:0 atIndex:CopperBufferIndexVI0];
+        [encoder setBuffer:vi[1] offset:0 atIndex:CopperBufferIndexVI1];
+        [encoder setBuffer:vi[2] offset:0 atIndex:CopperBufferIndexVI2];
+        [encoder dispatchThreads:eGrid threadsPerThreadgroup:threadsPerThreadgroup];
+
+        // pml_post_e (next, if there's any PML) reads the E buffers this dispatch
+        // just wrote -- Metal doesn't guarantee that ordering/visibility across
+        // dispatches within one encoder on its own.
+        [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+        dispatchPMLStage(PMLStage::EPost);
+        dispatchCPMLCorrect(CPMLStage::E);
+
+        if (voltageCellCount > 0) {
+            [encoder setComputePipelineState:applyExcitationEPipeline];
+            [encoder setBuffer:dimsBuffer offset:0 atIndex:CopperBufferIndexDims];
+            [encoder setBuffer:eField[0] offset:0 atIndex:CopperBufferIndexEx];
+            [encoder setBuffer:eField[1] offset:0 atIndex:CopperBufferIndexEy];
+            [encoder setBuffer:eField[2] offset:0 atIndex:CopperBufferIndexEz];
+            [encoder setBuffer:voltageCells offset:0 atIndex:CopperBufferIndexExcCells];
+            [encoder setBuffer:voltageSignal offset:0 atIndex:CopperBufferIndexExcSignal];
+            [encoder setBytes:&excitationParams length:sizeof(excitationParams) atIndex:CopperBufferIndexExcParams];
+            const MTLSize excGrid = MTLSizeMake(voltageCellCount, 1, 1);
+            const MTLSize excThreadsPerThreadgroup = MTLSizeMake(std::min<NSUInteger>(tgWidth, voltageCellCount), 1, 1);
+            [encoder dispatchThreads:excGrid threadsPerThreadgroup:excThreadsPerThreadgroup];
+            // update_h_interior (next) reads the E buffer this just wrote into
+            // additively.
+            [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
+        }
     }
 
-    // Next iteration's pml_pre_e/update_e_interior reads whatever this iteration's H update (and any
-    // PML/excitation on top of it) wrote -- covered by whichever of the barriers above ran last (the
-    // PML-post barrier if there was no H excitation, since dispatchPMLStage only barriers when it
-    // actually dispatches something; here there's always at least the interior H barrier already
-    // issued, so the field is visible regardless of which later stages were no-ops).
-    [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
+    // --- Current (H) update: pml_pre_h -> update_h_interior -> pml_post_h ->
+    // apply_excitation_h. ---
+    if (encodeCurrent) {
+        dispatchPMLStage(PMLStage::HPre);
 
-    ++currentTimestep;
+        [encoder setComputePipelineState:updateHPipeline];
+        [encoder setBuffer:dimsBuffer offset:0 atIndex:CopperBufferIndexDims];
+        [encoder setBuffer:eField[0] offset:0 atIndex:CopperBufferIndexEx];
+        [encoder setBuffer:eField[1] offset:0 atIndex:CopperBufferIndexEy];
+        [encoder setBuffer:eField[2] offset:0 atIndex:CopperBufferIndexEz];
+        [encoder setBuffer:hField[0] offset:0 atIndex:CopperBufferIndexHx];
+        [encoder setBuffer:hField[1] offset:0 atIndex:CopperBufferIndexHy];
+        [encoder setBuffer:hField[2] offset:0 atIndex:CopperBufferIndexHz];
+        [encoder setBuffer:ii[0] offset:0 atIndex:CopperBufferIndexII0];
+        [encoder setBuffer:ii[1] offset:0 atIndex:CopperBufferIndexII1];
+        [encoder setBuffer:ii[2] offset:0 atIndex:CopperBufferIndexII2];
+        [encoder setBuffer:iv[0] offset:0 atIndex:CopperBufferIndexIV0];
+        [encoder setBuffer:iv[1] offset:0 atIndex:CopperBufferIndexIV1];
+        [encoder setBuffer:iv[2] offset:0 atIndex:CopperBufferIndexIV2];
+        [encoder dispatchThreads:hGrid threadsPerThreadgroup:threadsPerThreadgroup];
+
+        // pml_post_h (next, if there's any PML) reads the H buffers this dispatch
+        // just wrote.
+        [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+        dispatchPMLStage(PMLStage::HPost);
+        dispatchCPMLCorrect(CPMLStage::H);
+
+        if (currentCellCount > 0) {
+            [encoder setComputePipelineState:applyExcitationHPipeline];
+            [encoder setBuffer:dimsBuffer offset:0 atIndex:CopperBufferIndexDims];
+            [encoder setBuffer:hField[0] offset:0 atIndex:CopperBufferIndexHx];
+            [encoder setBuffer:hField[1] offset:0 atIndex:CopperBufferIndexHy];
+            [encoder setBuffer:hField[2] offset:0 atIndex:CopperBufferIndexHz];
+            [encoder setBuffer:currentCells offset:0 atIndex:CopperBufferIndexExcCells];
+            [encoder setBuffer:currentSignal offset:0 atIndex:CopperBufferIndexExcSignal];
+            [encoder setBytes:&excitationParams length:sizeof(excitationParams) atIndex:CopperBufferIndexExcParams];
+            const MTLSize excGrid = MTLSizeMake(currentCellCount, 1, 1);
+            const MTLSize excThreadsPerThreadgroup = MTLSizeMake(std::min<NSUInteger>(tgWidth, currentCellCount), 1, 1);
+            [encoder dispatchThreads:excGrid threadsPerThreadgroup:excThreadsPerThreadgroup];
+        }
+
+        // Next iteration's pml_pre_e/update_e_interior reads whatever this
+        // iteration's H update (and any PML/excitation on top of it) wrote --
+        // covered by whichever of the barriers above ran last (the PML-post
+        // barrier if there was no H excitation, since dispatchPMLStage only
+        // barriers when it actually dispatches something; here there's always at
+        // least the interior H barrier already issued, so the field is visible
+        // regardless of which later stages were no-ops).
+        [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+        ++currentTimestep;
+    }
 }
 
 void CopperEngine::run(std::uint32_t steps) {
@@ -498,7 +512,7 @@ void CopperEngine::run(std::uint32_t steps) {
     id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
 
     for (std::uint32_t step = 0; step < steps; ++step) {
-        _impl->encodeOneIteration(encoder);
+        _impl->encodeIterationPhase(encoder, CopperEngine::Impl::IterationPhase::Full);
     }
 
     [encoder endEncoding];
@@ -507,24 +521,39 @@ void CopperEngine::run(std::uint32_t steps) {
 
     if (commandBuffer.error != nil) {
         throw std::runtime_error("CopperEngine::run: Metal command buffer failed: " +
-                                  std::string(commandBuffer.error.localizedDescription.UTF8String));
+                                 std::string(commandBuffer.error.localizedDescription.UTF8String));
     }
 }
 
-void CopperEngine::runWithProbeSampling(std::uint32_t steps, const ProbeSampler& sampler) {
+void CopperEngine::runWithProbeSampling(std::uint32_t steps, const ProbeSampler& sampler,
+                                        const MidStepCorrection& midStepCorrection) {
     for (std::uint32_t step = 0; step < steps; ++step) {
-        id<MTLCommandBuffer> commandBuffer = [_impl->queue commandBuffer];
-        id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+        auto runPhase = [&](CopperEngine::Impl::IterationPhase phase, const char* phaseName) {
+            id<MTLCommandBuffer> commandBuffer = [_impl->queue commandBuffer];
+            id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+            _impl->encodeIterationPhase(encoder, phase);
+            [encoder endEncoding];
+            [commandBuffer commit];
+            [commandBuffer waitUntilCompleted];
 
-        _impl->encodeOneIteration(encoder);
+            if (commandBuffer.error != nil) {
+                throw std::runtime_error(
+                    std::string("CopperEngine::runWithProbeSampling ") + phaseName +
+                    " command buffer failed: " + std::string(commandBuffer.error.localizedDescription.UTF8String));
+            }
+        };
 
-        [encoder endEncoding];
-        [commandBuffer commit];
-        [commandBuffer waitUntilCompleted];
-
-        if (commandBuffer.error != nil) {
-            throw std::runtime_error("CopperEngine::runWithProbeSampling: Metal command buffer failed: " +
-                                      std::string(commandBuffer.error.localizedDescription.UTF8String));
+        if (midStepCorrection) {
+            // Waiting here is the GPU->CPU fence for MTLStorageModeShared field
+            // buffers. The CPU correction writes those same shared bytes; committing
+            // the Current phase afterward is the corresponding CPU->GPU ordering
+            // point, so update_h_interior sees the correction in this timestep rather
+            // than one timestep late.
+            runPhase(CopperEngine::Impl::IterationPhase::Voltage, "voltage");
+            midStepCorrection();
+            runPhase(CopperEngine::Impl::IterationPhase::Current, "current");
+        } else {
+            runPhase(CopperEngine::Impl::IterationPhase::Full, "full-iteration");
         }
 
         if (!sampler(_impl->currentTimestep)) {

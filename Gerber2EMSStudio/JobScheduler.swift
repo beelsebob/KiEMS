@@ -22,6 +22,18 @@ enum JobKind: Int, CaseIterable {
         }
     }
 
+    /// A present-tense phrase for "Current Job: ..." style progress displays (see
+    /// ProgressStatusView.State.queued's own doc comment) -- distinct from displayName (a plain noun
+    /// phrase, used for Jobs-window rows) since this is meant to read naturally as "Current Job:
+    /// <this> '<simulation name>'".
+    var progressVerbPhrase: String {
+        switch self {
+        case .geometryGeneration: return "Building geometry for"
+        case .simulation: return "Running simulation"
+        case .fieldPostProcessing: return "Post-processing fields for"
+        }
+    }
+
     /// Every job needed to reach `target`, in execution order -- e.g. .fieldPostProcessing needs
     /// .geometryGeneration and .simulation to have already completed first. Relies on `allCases`
     /// already being in declaration (== chain) order, which it is for a raw-valued enum.
@@ -55,6 +67,23 @@ final class Job {
     let kind: JobKind
     var status: JobStatus = .queued
     var progress: EMSPipelineProgress?
+    /// Set once, the moment this job transitions to .running (see JobScheduler.startNextIfIdle()) --
+    /// the shared basis for estimatedSecondsRemaining below, so *any* observer (not just whichever
+    /// tab VC originally requested this specific job) can show a live time estimate for whatever job
+    /// is currently running -- e.g. ProgressStatusView's own "Current Job: ..." sub-section, shown
+    /// while a *different* simulation's tab is sitting queued behind this one.
+    var startedAt: Date?
+
+    /// Simple linear extrapolation from elapsed time and how far through this job's current phase
+    /// `progress` reports -- the same formula every tab VC already computed independently for its
+    /// own job before this became a shared property; nil whenever there's nothing to extrapolate
+    /// from (not yet started, no progress report yet, or a phase that reports no fraction at all --
+    /// see EMSPipelineProgressPhase's own doc comment on .settingUp).
+    var estimatedSecondsRemaining: Double? {
+        guard let startedAt, let fraction = progress?.fraction, fraction > 0 else { return nil }
+        let elapsed = Date().timeIntervalSince(startedAt)
+        return max(0, elapsed / fraction - elapsed)
+    }
     /// Set by JobScheduler.invalidate(...) when a config edit needs to invalidate a stage this job
     /// is *currently running* against -- applied once the in-flight call actually returns (see
     /// JobScheduler.finishExecution(_:error:)), never before, so the invalidation can never race
@@ -65,6 +94,21 @@ final class Job {
         self.document = document
         self.simulationName = simulationName
         self.kind = kind
+    }
+
+    /// A ready-to-display description of this job, for ProgressStatusView's own "Current Job: ..."
+    /// sub-section (see State.queued's own doc comment) -- shared by every tab VC's own `.queued`
+    /// display instead of each re-deriving the same three fields independently. nil unless this job
+    /// is genuinely `.running` (a `.queued` or `.cancelling` job isn't "the current job" in the
+    /// sense this sub-section means -- .cancelling in particular reads as "stopping", not "in
+    /// progress", and showing its last-known progress there would be misleading).
+    var progressStatusInfo: ProgressStatusView.CurrentJobInfo? {
+        guard status == .running else { return nil }
+        let isSettingUp = progress?.phase == .settingUp
+        return ProgressStatusView.CurrentJobInfo(
+            label: "\(kind.progressVerbPhrase) '\(simulationName)'",
+            fraction: isSettingUp ? nil : progress?.fraction,
+            timeEstimateText: isSettingUp ? nil : TimeRemainingFormatter.string(secondsRemaining: estimatedSecondsRemaining))
     }
 }
 
@@ -125,21 +169,40 @@ final class JobScheduler {
     /// so it becomes the front of the *pending* queue (never preempting whatever's already running).
     /// Any of the chain's jobs already queued for this simulation are reused in place (not duplicated)
     /// and pulled forward together, in their existing relative order; a kind already cached on the
-    /// pipeline is skipped entirely; every other simulation's queued jobs are left in their own prior
-    /// relative order, just pushed further back. Verified against the user's own worked walkthrough
-    /// (a->geometry, then b->results, then c->results, then b->field-viewer) step by step.
+    /// pipeline is skipped entirely; a kind a currently-running job is already doing for this same
+    /// simulation is skipped too (that running job will itself produce the cached result this request
+    /// depends on, so a duplicate queued job for it would be pure waste); and this simulation's own
+    /// queued jobs for kinds *outside* this request's chain are left exactly where they are (a later,
+    /// narrower request -- e.g. clicking "Geometry" after "Field Viewer" for the same simulation --
+    /// must not discard the earlier, broader request's tail). Every other simulation's queued jobs are
+    /// left in their own prior relative order, just pushed further back. Verified against the user's
+    /// own worked walkthrough (a->geometry, then b->results, then c->results, then b->field-viewer)
+    /// and against clicking Geometry/Results/Field Viewer in any order for a single simulation, step
+    /// by step.
     func request(document: Document, simulationName: String, target: JobKind) {
         let pipeline = document.pipeline(forSimulationNamed: simulationName)
         let chain = JobKind.chain(upTo: target)
         let existing = jobs.filter {
             $0.document === document && $0.simulationName == simulationName && $0.status != .running
         }
+        // Kinds a currently-running job is already doing for this simulation -- re-requesting one of
+        // these must not spawn a duplicate queued job (see the doc comment above).
+        let runningKinds = Set(jobs
+            .filter { $0.document === document && $0.simulationName == simulationName && $0.status == .running }
+            .map(\.kind))
+        // Remove only this simulation's queued jobs for kinds this request's own chain covers, so
+        // they can be rebuilt/reordered below -- NOT its queued jobs for out-of-chain kinds (those
+        // belong to an earlier, broader request and must be preserved as-is).
         jobs.removeAll {
             $0.document === document && $0.simulationName == simulationName && $0.status != .running
+                && chain.contains($0.kind)
         }
 
         var newChain: [Job] = []
         for kind in chain {
+            if runningKinds.contains(kind) {
+                continue
+            }
             if let reused = existing.first(where: { $0.kind == kind }) {
                 newChain.append(reused)
             } else if !hasCachedStage(document: document, pipeline: pipeline, simulationName: simulationName, kind: kind) {
@@ -289,6 +352,7 @@ final class JobScheduler {
         guard !isExecuting, let next = jobs.first(where: { $0.status == .queued }) else { return }
         isExecuting = true
         next.status = .running
+        next.startedAt = Date()
         guard let document = next.document else {
             // The document this job belonged to is already gone -- nothing left to run against.
             // Treated as a plain, silent success (removes the job, lets the next one start) rather

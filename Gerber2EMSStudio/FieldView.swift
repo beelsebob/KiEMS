@@ -1,12 +1,14 @@
 import Cocoa
+import CopperUtils
 import MetalKit
 import simd
 
 /// Renders an EMSFieldSnapshot (the field/energy state Copper captured at the end of a completed
 /// GPU FDTD run) as a 3D voxel cloud, plus the same board geometry the Geometry tab shows -- laid
 /// out flat at the board's own top Z, at 50% opacity -- as a spatial reference underneath it. Real
-/// perspective camera with mouse-drag orbit (unlike GeometryView's flat pan/zoom-only 2D view --
-/// see FieldShaders.metal's own top comment for why this needs its own shader pair).
+/// perspective camera (unlike GeometryView's orthographic one -- see FieldShaders.metal's own top
+/// comment for why this needs its own shader pair), with the same mouse-drag orbit/right-drag pan/
+/// scroll-zoom interaction.
 final class FieldView: MTKView, MTKViewDelegate {
     var preview: EMSGeometryPreview? {
         didSet {
@@ -103,10 +105,20 @@ final class FieldView: MTKView, MTKViewDelegate {
 
     // MARK: - Orbit camera
 
-    // Spherical coordinates around `target`, Z treated as "up" (the board lies flat in the XY
-    // plane, Z is its own thin thickness axis -- see EMSFieldSnapshot's own doc comment on the
-    // frame) -- azimuth rotates around the vertical Z axis, elevation tilts above/below the
-    // horizontal plane, matching a familiar "tilt a physical board in your hand" interaction.
+    /// Drag state is plain azimuth/elevation (not a quaternion accumulated incrementally
+    /// drag-over-drag) -- an earlier version composed each drag directly onto a stored quaternion
+    /// (yaw around world Z, pitch around the camera's own current right axis), which in principle
+    /// avoids gimbal lock the same way this does, but felt visibly wrong in practice (left/right
+    /// drag behaved like it was rolling around the view direction rather than yawing around world
+    /// up -- never fully root-caused; see GeometryView's own matching camera for the same fix).
+    /// Keeping azimuth/elevation as the actual state sidesteps whatever that was: the drag math
+    /// below is untouched from the original Euler-angle camera, just without its elevation clamp.
+    /// What *does* change is how the camera's basis vectors are derived -- currentOrientation()
+    /// builds a fresh quaternion from the angles every frame (see its own doc comment for why that
+    /// never degenerates at the poles, unlike reconstructing eye/right/up from raw sin/cos and a
+    /// fixed world-up cross product) -- so azimuth/elevation can range freely with no clamp. Z is
+    /// still treated as "up" (the board lies flat in the XY plane, Z is its own thin thickness axis
+    /// -- see EMSFieldSnapshot's own doc comment on the frame).
     private var azimuth: Float = -.pi / 4
     private var elevation: Float = .pi / 5
     private var distance: Float = 1
@@ -117,10 +129,9 @@ final class FieldView: MTKView, MTKViewDelegate {
     // severe z-fighting.
     private var sceneRadius: Float = 1
     private var hasFitCamera = false
-    private static let minElevation: Float = -.pi / 2 * 0.98
-    private static let maxElevation: Float = .pi / 2 * 0.98
 
     private var lastDragPoint: CGPoint?
+    private var lastPanDragPoint: CGPoint?
 
     convenience init() {
         self.init(frame: .zero, device: MTLCreateSystemDefaultDevice())
@@ -216,7 +227,7 @@ final class FieldView: MTKView, MTKViewDelegate {
 
         let eye = currentEyePosition()
         var uniforms = FieldUniformsGPU(viewProjection: currentProjectionMatrix() * lookAt(
-            eye: eye, center: SIMD3(target.x, target.y, target.z), up: SIMD3(0, 0, 1)))
+            eye: eye, center: SIMD3(target.x, target.y, target.z), up: -currentOrientation().act(SIMD3<Float>(1, 0, 0))))
 
         if overlayVertexCount > 0, let positions = overlayPositionBuffer, let colors = overlayColorBuffer,
            let overlayPipelineState {
@@ -272,13 +283,35 @@ final class FieldView: MTKView, MTKViewDelegate {
         commandBuffer.commit()
     }
 
+    /// Builds this frame's camera-orientation quaternion fresh from azimuth/elevation, rather than
+    /// storing/accumulating one across drags (see azimuth's own doc comment for why). Equivalent to
+    /// the old raw-trig eye-position formula (cos(el)cos(az), cos(el)sin(az), sin(el)) when acting
+    /// on local +Z, but *also* gives a well-defined right/up anywhere -- including exactly at the
+    /// poles, where the old cross(forward, worldUp)-based approach degenerated (cross product of
+    /// two parallel vectors is zero). Order: first tilt local +Z down from straight-up by
+    /// (90-elevation) around Y, then yaw the result around Z by azimuth -- chosen so that acting on
+    /// local +Z reproduces the old formula exactly.
+    private func currentOrientation() -> simd_quatf {
+        simd_quatf(angle: azimuth, axis: SIMD3<Float>(0, 0, 1)) *
+            simd_quatf(angle: .pi / 2 - elevation, axis: SIMD3<Float>(0, 1, 0))
+    }
+
     /// The camera's own world-space position -- shared by draw()'s own view-matrix construction and
     /// its overlay-layer back-to-front sort, so both read the same eye position without duplicating
-    /// the spherical->cartesian math.
+    /// the quaternion->cartesian math.
     private func currentEyePosition() -> SIMD3<Float> {
-        SIMD3<Float>(target.x + distance * cos(elevation) * cos(azimuth),
-                     target.y + distance * cos(elevation) * sin(azimuth),
-                     target.z + distance * sin(elevation))
+        SIMD3<Float>(target.x, target.y, target.z) + distance * currentOrientation().act(SIMD3<Float>(0, 0, 1))
+    }
+
+    /// The camera's own current right/up basis vectors (screen-space horizontal/vertical, in world
+    /// coordinates), read directly off currentOrientation() -- exactly the same up passed to
+    /// lookAt() in draw(in:), so panning shifts `target` along axes that actually match what's on
+    /// screen. See GeometryView's matching currentOrientation() doc comment for why right/up come
+    /// from local +Y and *negated* local +X, not the more intuitive-looking local +X/+Y -- this
+    /// construction is identical, so the same fix applies here.
+    private func cameraRightAndUp() -> (right: SIMD3<Float>, up: SIMD3<Float>) {
+        let o = currentOrientation()
+        return (o.act(SIMD3<Float>(0, 1, 0)), -o.act(SIMD3<Float>(1, 0, 0)))
     }
 
     private func currentProjectionMatrix() -> simd_float4x4 {
@@ -332,8 +365,10 @@ final class FieldView: MTKView, MTKViewDelegate {
         return (minX, minX + Float(preview.width), minY, minY + Float(preview.height), 0, 0)
     }
 
-    /// Orbit: drag left/right to rotate azimuth, up/down to tilt elevation (clamped shy of the
-    /// poles to avoid a gimbal flip -- see minElevation/maxElevation).
+    /// Orbit: drag left/right to rotate azimuth, up/down to tilt elevation -- see azimuth's own doc
+    /// comment for why this is unclamped (no gimbal lock) despite being plain Euler angles. Right-
+    /// drag pans instead (see rightMouseDragged(_:)), shifting the orbit target itself rather than
+    /// orbiting around it.
     override func mouseDown(with event: NSEvent) {
         lastDragPoint = convert(event.locationInWindow, from: nil)
     }
@@ -345,7 +380,7 @@ final class FieldView: MTKView, MTKViewDelegate {
         let dy = Float(point.y - lastDragPoint.y)
         let sensitivity: Float = 0.01
         azimuth -= dx * sensitivity
-        elevation = min(max(elevation + dy * sensitivity, Self.minElevation), Self.maxElevation)
+        elevation += dy * sensitivity
         self.lastDragPoint = point
         needsDisplay = true
     }
@@ -354,9 +389,39 @@ final class FieldView: MTKView, MTKViewDelegate {
         lastDragPoint = nil
     }
 
-    /// Trackpad two-finger scroll and a plain scroll wheel zoom (distance), rather than pan --
-    /// there's no "pan the target" interaction here (see this class's own top comment: the fixed
-    /// orbit target is always the board/voxel cloud's own center).
+    /// Pan: shifts `target` (the orbit center) along the camera's own current right/up axes --
+    /// see rightMouseDragged(_:)'s own doc comment for the perspective-specific world-per-point
+    /// approximation this uses (unlike GeometryView's exact orthographic one).
+    override func rightMouseDown(with event: NSEvent) {
+        lastPanDragPoint = convert(event.locationInWindow, from: nil)
+    }
+
+    override func rightMouseDragged(with event: NSEvent) {
+        guard let lastPanDragPoint else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        let dx = Float(point.x - lastPanDragPoint.x)
+        let dy = Float(point.y - lastPanDragPoint.y)
+        self.lastPanDragPoint = point
+
+        // Perspective camera -- world-units-per-screen-point genuinely depends on depth, unlike
+        // GeometryView's orthographic pan (a single ratio, exact everywhere). Approximated here at
+        // the orbit target's own depth (== `distance`, by definition of an orbit camera), so the
+        // point *at the target* tracks the cursor 1:1; points nearer/farther the camera won't
+        // track exactly, which is inherent to perspective, not a bug -- the same reason dragging a
+        // perspective viewport never gives a perfectly rigid "grab" feel the way an orthographic
+        // one does.
+        let worldPerPoint = 2 * distance * tan(Float.pi / 4 / 2) / Float(max(bounds.height, 1))
+        let (right, up) = cameraRightAndUp()
+        target.x -= (right.x * dx + up.x * dy) * worldPerPoint
+        target.y -= (right.y * dx + up.y * dy) * worldPerPoint
+        target.z -= (right.z * dx + up.z * dy) * worldPerPoint
+        needsDisplay = true
+    }
+
+    override func rightMouseUp(with event: NSEvent) {
+        lastPanDragPoint = nil
+    }
+
     override func scrollWheel(with event: NSEvent) {
         guard fieldSnapshot != nil || preview != nil else { return }
         let factor = Float(1 - event.scrollingDeltaY * 0.01)
@@ -379,8 +444,10 @@ final class FieldView: MTKView, MTKViewDelegate {
 
     private static let overlayAlpha: Float = 0.5
     private static let overlayOutlineColor = SIMD4<Float>(0.7, 0.7, 0.7, overlayAlpha)
-    private static let overlayViaColor = SIMD4<Float>(0xEB / 255, 0xB5 / 255, 0, overlayAlpha)
     private static let overlayPortColor = SIMD4<Float>(0.2, 0.48, 0.98, overlayAlpha)
+    // Same solder-mask green as GeometryView's own fixed solderMaskColor, just at this view's own
+    // translucent overlayAlpha rather than fully opaque.
+    private static let overlaySolderMaskColor = SIMD4<Float>(0.0, 0.35, 0.16, overlayAlpha)
     private static let overlayCircleSegments = 16
 
     private func rebuildOverlayBuffers() {
@@ -434,12 +501,45 @@ final class FieldView: MTKView, MTKViewDelegate {
             }
         }
 
+        // Solder mask, if this board's stackup has one on that side (see EMSGeometryPreview.
+        // topSolderMask/bottomSolderMask's own doc comment) -- folded into the same layerDraws list
+        // as the copper layers just above, so it gets the identical per-frame back-to-front sort
+        // (draw(in:)) and the same translucent overlay treatment, just with a fixed color rather
+        // than one cycled/looked-up per copper layer.
+        for maskLayer in [preview.topSolderMask, preview.bottomSolderMask].compactMap({ $0 }) {
+            let z = Float(maskLayer.z)
+            let start = positions.count
+            for triangle in maskLayer.triangles {
+                positions.append(contentsOf: [Position3(Float(triangle.a.x), Float(triangle.a.y), z),
+                                               Position3(Float(triangle.b.x), Float(triangle.b.y), z),
+                                               Position3(Float(triangle.c.x), Float(triangle.c.y), z)])
+                colors.append(contentsOf: [Self.overlaySolderMaskColor, Self.overlaySolderMaskColor,
+                                            Self.overlaySolderMaskColor])
+            }
+            let count = positions.count - start
+            if count > 0 {
+                layerDraws.append((z: z, start: start, count: count))
+            }
+        }
+
         let markerStart = positions.count
-        for via in preview.vias {
-            let radius = Float(via.annularRingDiameter) / 2
-            guard radius > 0 else { continue }
-            Self.appendDisc(center: via.ringPosition, radius: CGFloat(radius), z: markerZ, color: Self.overlayViaColor,
-                             positions: &positions, colors: &colors)
+        // Real 3D via geometry (open barrel tube + per-layer annular rings -- see
+        // EMSGeometryPreview.viaMeshTriangles' own doc comment), each vertex keeping its own real Z
+        // -- not the shared flat markerZ a single translucent disc used to sit at. Still part of this
+        // same always-drawn-last, no-real-depth-test marker batch as ports/outline below (see this
+        // function's own top comment on why: a real depth-tested via would get inconsistently
+        // occluded by whichever dim voxel/layer triangles happen to be nearer the camera, when the
+        // whole point of a marker here is staying reliably visible) -- only the *shape* drawn there
+        // changed, not which pass draws it.
+        for triangle in preview.viaMeshTriangles {
+            positions.append(contentsOf: [
+                Position3(Float(triangle.a.x), Float(triangle.a.y), Float(triangle.a.z)),
+                Position3(Float(triangle.b.x), Float(triangle.b.y), Float(triangle.b.z)),
+                Position3(Float(triangle.c.x), Float(triangle.c.y), Float(triangle.c.z)),
+            ])
+            let color = SIMD4<Float>(Float(triangle.color.x), Float(triangle.color.y), Float(triangle.color.z),
+                                       Self.overlayAlpha)
+            colors.append(contentsOf: [color, color, color])
         }
         for port in preview.ports {
             let radius = max(Float(port.width) / 2, 1)
@@ -615,7 +715,7 @@ final class FieldView: MTKView, MTKViewDelegate {
     private func rebuildVoxelGeometry() {
         hasLoggedVoxelDraw = false
         guard let device, let snapshot = fieldSnapshot else {
-            print("[FieldView] rebuildVoxelGeometry: bailing, device=\(device != nil) snapshot=\(fieldSnapshot != nil)")
+            Cu.logDebug("[FieldView] rebuildVoxelGeometry: bailing, device=\(device != nil) snapshot=\(fieldSnapshot != nil)")
             voxelInstanceCount = 0
             voxelCachedZRange = nil
             voxelZLayerDraws = []
@@ -637,12 +737,12 @@ final class FieldView: MTKView, MTKViewDelegate {
         // TEMPORARY diagnostic: confirms the mesh dims/line counts actually landing here, and
         // whether the frame count/board-Z values look sane -- see this file's own top comment on why
         // the voxel cloud is reportedly not rendering at all right now.
-        print("[FieldView] rebuildVoxelGeometry: nx=\(nx) ny=\(ny) nz=\(nz) sampleX.count=\(sampleX.count) "
+        Cu.logDebug("[FieldView] rebuildVoxelGeometry: nx=\(nx) ny=\(ny) nz=\(nz) sampleX.count=\(sampleX.count) "
             + "sampleY.count=\(sampleY.count) sampleZ.count=\(sampleZ.count) frames=\(snapshot.frames.count) "
             + "boardZMin=\(snapshot.boardZMin) boardZMax=\(snapshot.boardZMax) "
             + "minEnergy=\(snapshot.minCellEnergy) maxEnergy=\(snapshot.maxCellEnergy)")
         guard nx > 0, ny > 0, nz > 0, sampleX.count == nx, sampleY.count == ny, sampleZ.count == nz else {
-            print("[FieldView] rebuildVoxelGeometry: bailing on dims/sample-count mismatch")
+            Cu.logWarning("[FieldView] rebuildVoxelGeometry: bailing on dims/sample-count mismatch")
             voxelInstanceCount = 0
             voxelCachedZRange = nil
             voxelZLayerDraws = []
@@ -667,10 +767,10 @@ final class FieldView: MTKView, MTKViewDelegate {
         // is at index zEnd+1. The original off-by-one tested the cell's lower boundary instead,
         // which could leave one extra PML/margin cell included just above the board.
         while zEnd > zStart, lineZ[zEnd + 1] > boardZMax { zEnd -= 1 }
-        print("[FieldView] rebuildVoxelGeometry: boardZMin=\(boardZMin) boardZMax=\(boardZMax) zStart=\(zStart) "
+        Cu.logDebug("[FieldView] rebuildVoxelGeometry: boardZMin=\(boardZMin) boardZMax=\(boardZMax) zStart=\(zStart) "
             + "zEnd=\(zEnd) lineZ.first=\(lineZ.first ?? .nan) lineZ.last=\(lineZ.last ?? .nan)")
         guard zStart <= zEnd else {
-            print("[FieldView] rebuildVoxelGeometry: bailing, zStart > zEnd (board Z crop produced an empty range)")
+            Cu.logWarning("[FieldView] rebuildVoxelGeometry: bailing, zStart > zEnd (board Z crop produced an empty range)")
             voxelInstanceCount = 0
             voxelCachedZRange = nil
             voxelZLayerDraws = []
@@ -721,7 +821,7 @@ final class FieldView: MTKView, MTKViewDelegate {
         voxelCachedNy = ny
         voxelCachedZRange = zStart...zEnd
         voxelCachedMaxEnergy = Self.maxEnergy(in: snapshot.frames, nx: nx, ny: ny, zRange: zStart...zEnd)
-        print("[FieldView] rebuildVoxelGeometry: built \(voxelInstanceCount) instances, "
+        Cu.logDebug("[FieldView] rebuildVoxelGeometry: built \(voxelInstanceCount) instances, "
             + "voxelGeometryBuffer=\(voxelGeometryBuffer != nil) onBoardMaxEnergy=\(voxelCachedMaxEnergy) "
             + "(whole-mesh maxEnergy was \(snapshot.maxCellEnergy))")
         // TEMPORARY diagnostic: reports the actual on-board energy distribution for the *last*
@@ -785,7 +885,7 @@ final class FieldView: MTKView, MTKViewDelegate {
         }
         let countsText = thresholds.map { "\($0)dB:\(countsAboveDB[$0] ?? 0)" }.joined(separator: " ")
         let nonzeroCells = totalCells - exactlyZeroCells
-        print("[FieldView] energy distribution (last frame, on-board \(totalCells) cells, "
+        Cu.logDebug("[FieldView] energy distribution (last frame, on-board \(totalCells) cells, "
             + "\(nonzeroCells) nonzero, \(exactlyZeroCells) exactly zero): "
             + "peak=\(maxValue) at (ix=\(maxIx),iy=\(maxIy),iz=\(maxIz)) counts-above-threshold: \(countsText)")
     }
@@ -823,7 +923,7 @@ final class FieldView: MTKView, MTKViewDelegate {
     private func updateVoxelColors(forFrame frameIndex: Int) {
         guard let device, let snapshot = fieldSnapshot, let zRange = voxelCachedZRange,
               frameIndex >= 0, frameIndex < snapshot.frames.count else {
-            print("[FieldView] updateVoxelColors: bailing, device=\(device != nil) snapshot=\(fieldSnapshot != nil) "
+            Cu.logDebug("[FieldView] updateVoxelColors: bailing, device=\(device != nil) snapshot=\(fieldSnapshot != nil) "
                 + "zRange=\(String(describing: voxelCachedZRange)) frameIndex=\(frameIndex) "
                 + "frameCount=\(fieldSnapshot?.frames.count ?? -1)")
             voxelColorBuffer = nil
@@ -838,7 +938,7 @@ final class FieldView: MTKView, MTKViewDelegate {
             Array(buffer.bindMemory(to: Float.self))
         }
         guard cellEnergy.count == nx * ny * nz else {
-            print("[FieldView] updateVoxelColors: bailing, cellEnergy.count=\(cellEnergy.count) "
+            Cu.logWarning("[FieldView] updateVoxelColors: bailing, cellEnergy.count=\(cellEnergy.count) "
                 + "expected=\(nx * ny * nz) (nx=\(nx) ny=\(ny) nz=\(nz))")
             voxelColorBuffer = nil
             return
@@ -881,7 +981,7 @@ final class FieldView: MTKView, MTKViewDelegate {
 
         voxelColorBuffer = colors.isEmpty ? nil : device.makeBuffer(
             bytes: colors, length: MemoryLayout<Color4>.stride * colors.count)
-        print("[FieldView] updateVoxelColors: frame=\(frameIndex) built \(colors.count) colors, "
+        Cu.logDebug("[FieldView] updateVoxelColors: frame=\(frameIndex) built \(colors.count) colors, "
             + "voxelColorBuffer=\(voxelColorBuffer != nil), floorEnergy=\(floorEnergy) maxEnergy=\(maxEnergy)")
     }
 

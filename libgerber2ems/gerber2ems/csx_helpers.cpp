@@ -57,13 +57,16 @@ CSPropProbeBox* addProbe(ContinuousStructure& csx, const std::string& name, std:
 }
 
 CSPropLumpedElement* addLumpedElement(ContinuousStructure& csx, const std::string& name, std::int32_t ny, bool caps,
-                                       double resistance) {
+                                       double resistance, CSPropLumpedElement::LEtype type, double inductance,
+                                       double capacitance) {
     auto* prop = new CSPropLumpedElement(csx.GetParameterSet());
     prop->SetName(name);
     prop->SetDirection(ny);
     prop->SetCaps(caps);
     prop->SetResistance(resistance);
-    prop->SetLEtype(CSPropLumpedElement::PARALLEL);
+    prop->SetInductance(inductance);
+    prop->SetCapacity(capacitance);
+    prop->SetLEtype(type);
     csx.AddProperty(prop);
     return prop;
 }

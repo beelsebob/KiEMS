@@ -56,6 +56,20 @@ public:
     /// CopperFDTDRunner.cpp's use of estimateEnergy() below); `true` to continue.
     using ProbeSampler = std::function<bool(std::uint32_t globalTimestep)>;
 
+    /// Invoked once per iteration, between that iteration's voltage (E) update and its current (H)
+    /// update -- i.e. after apply_excitation_e has landed and is CPU-visible, before pml_pre_h/
+    /// update_h_interior have even been encoded. Mirrors exactly where openEMS's own Engine::IterateTS
+    /// calls Apply2Voltages() (engine.cpp): after UpdateVoltages()/DoPostVoltageUpdates(), before
+    /// DoPreCurrentUpdates()/UpdateCurrents(). A lumped-element lumped-RLC correction (or any other
+    /// per-timestep voltage-domain extension) *must* land here, not after the current update -- the
+    /// current update is the only place voltage differences actually get converted into transported
+    /// current, so a correction applied afterward only ever affects the next iteration's own seed
+    /// voltage and probe readout, never the current that already crossed whatever gap the correction
+    /// was modeling (see CopperLumpedRLC.hpp's own top comment for the concrete case this was added
+    /// for). Called with no arguments -- typically calls writeFieldCell() itself to apply the
+    /// correction; CopperEngine doesn't know anything about which cells need one.
+    using MidStepCorrection = std::function<void()>;
+
     /// Same per-iteration work as run(), but commits and waits on a separate command buffer for each
     /// of the `steps` iterations (rather than batching all of them into one), calling `sampler`
     /// after each -- so a caller can sample probes at every timestep without racing the GPU. Slower
@@ -63,7 +77,14 @@ public:
     /// collection" design for the batched-gather alternative this doesn't implement yet) -- fine for
     /// Phase 4's real-board *correctness* verification; revisit if a production run needs the
     /// throughput.
-    void runWithProbeSampling(std::uint32_t steps, const ProbeSampler& sampler);
+    ///
+    /// `midStepCorrection`, if non-null, splits each iteration into two command buffers (voltage
+    /// update, then the correction, then current update) instead of the usual one -- see
+    /// MidStepCorrection's own doc comment for why the split matters. Omitting it (the default)
+    /// keeps the original single-command-buffer-per-iteration behavior and cost for callers with
+    /// nothing that needs a mid-step hook.
+    void runWithProbeSampling(std::uint32_t steps, const ProbeSampler& sampler,
+                               const MidStepCorrection& midStepCorrection = nullptr);
 
     enum class Field { Ex, Ey, Ez, Hx, Hy, Hz };
 
@@ -97,11 +118,11 @@ public:
     /// output file, matching openEMS's own "fast"/approximate framing of the same estimate.
     double estimateEnergy() const;
 
-    /// Directly overwrites one field component's single cell. Test-only: a real run always starts
-    /// from FDTD's own E=H=0 initial condition and gets its non-zero state from excitation (added in
-    /// a later phase) -- this exists so a debug/verification build can seed an identical initial
-    /// impulse on both Copper's GPU engine and a real CPU openEMS Engine, cell for cell, without
-    /// needing the excitation kernel this phase doesn't have yet.
+    /// Directly overwrites one field component's single cell. Originally test-only (seeding an
+    /// identical initial impulse on both Copper's GPU engine and a real CPU openEMS Engine for
+    /// parity checks, without needing the excitation kernel); now also a real production caller --
+    /// CopperFDTDRunner.cpp's own lumped-RLC pass (see CopperLumpedRLC.hpp) uses this every timestep
+    /// to write back its corrected voltage, the GPU-side equivalent of Engine::SetVolt().
     void writeFieldCell(Field field, std::uint32_t x, std::uint32_t y, std::uint32_t z, float value);
 
     const CopperGridDims& dims() const;

@@ -16,6 +16,7 @@
 #include "Internal/CopperCPML.hpp"
 #include "Internal/CopperEngine.hpp"
 #include "Internal/CopperExcitation.hpp"
+#include "Internal/CopperLumpedRLC.hpp"
 #include "Internal/CopperOpenEMSAccess.hpp"
 #include "Internal/CopperPML.hpp"
 #include "Internal/CopperProbes.hpp"
@@ -88,27 +89,6 @@ CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
             timer.mark("buildYeeGrid (reading Operator's already-computed vv/vi/ii/iv coefficients)");
         }
 
-        // [DIAG] Temporary: compares grid.vv[0]/vi[0] (Ex axis) at a hand-picked corner cell (near
-        // both a low-Y and low-Z PML face simultaneously), two flat-face cells (only one of Y/Z in
-        // PML), and a fully-interior cell -- to check whether the anomalous base coefficient is
-        // specific to edge/corner overlap or present generally wherever UPML's own BuildExtension()
-        // (always run unconditionally inside Operator::CalcECOperator(), regardless of which
-        // boundary kind Copper itself will use) has touched a cell.
-        {
-            auto dumpCell = [&](const char* label, std::uint32_t x, std::uint32_t y, std::uint32_t z) {
-                if (x >= grid.dims.nx || y >= grid.dims.ny || z >= grid.dims.nz) {
-                    return;
-                }
-                const std::uint32_t idx = copperGridIndex(grid.dims, x, y, z);
-                std::fprintf(stdout, "[DIAG-COEFF] %s (%u,%u,%u): vv=%g vi=%g\n", label, x, y, z,
-                             static_cast<double>(grid.vv[0][idx]), static_cast<double>(grid.vi[0][idx]));
-            };
-            dumpCell("corner (low-Y, low-Z)", 45, 16, 1);
-            dumpCell("flat-Z only (mid-Y, low-Z)", 45, grid.dims.ny / 2, 1);
-            dumpCell("flat-Y only (low-Y, mid-Z)", 45, 16, grid.dims.nz / 2);
-            dumpCell("interior (mid-Y, mid-Z)", 45, grid.dims.ny / 2, grid.dims.nz / 2);
-        }
-
         std::vector<CopperPMLShell> upmlShells;
         std::vector<CopperCPMLShell> cpmlShells;
         std::uint64_t pmlCellTotal = 0;
@@ -134,6 +114,23 @@ CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
         const CopperExcitation excitation = buildExcitation(*op);
         if (!onProgress) {
             timer.mark("buildExcitation");
+        }
+        // Auto-discovered lumped RLC components (gerber2ems::Simulation::addLumpedComponents(), see
+        // CopperLumpedRLC.hpp's own top comment) -- discovered once up front like `excitation`, but
+        // corrected every timestep below via a rolling ADE state this run owns directly (mirrors
+        // Engine_Ext_LumpedRLC's own Vdn/Jn ring buffers, since nothing here is a real openEMS
+        // Engine that could own an Engine_Extension itself).
+        const std::vector<CopperLumpedRLCCell> lumpedRLC = discoverLumpedRLC(csx, grid, *op);
+        struct LumpedRLCState {
+            double vdn[3] = {0.0, 0.0, 0.0};
+            double jn[3] = {0.0, 0.0, 0.0};
+        };
+        std::vector<LumpedRLCState> lumpedRLCState(lumpedRLC.size());
+        if (!onProgress) {
+            timer.mark("discoverLumpedRLC");
+            if (!lumpedRLC.empty()) {
+                std::fprintf(stdout, "Copper: %zu lumped RLC cell(s)\n", lumpedRLC.size());
+            }
         }
         CopperEngine engine(grid, upmlShells, excitation, cpmlShells);
         if (!onProgress) {
@@ -230,152 +227,117 @@ CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
         bool endCriteriaReached = false;
         bool cancelled = false;
         std::uint32_t stepsActuallyRun = 0;
-        // [DIAG] Temporary: pinpoints exactly which timestep/cell/field a real run first goes
-        // NaN/Inf at. The normal energy check below only runs every ~4s of wall time, by which point
-        // corruption may already have spread across the whole domain, making "where did it start"
-        // impossible to tell from that alone.
-        bool nanDiagnosed = false;
 
-        engine.runWithProbeSampling(steps, [&](std::uint32_t globalTimestep) -> bool {
-            stepsActuallyRun = globalTimestep;
+        // Lumped RLC correction: a direct, SERIES-only port of
+        // Engine_Ext_LumpedRLC::Apply2VoltagesImpl (engine_ext_lumpedRLC.cpp).
+        // This callback runs after the GPU voltage phase has completed and
+        // before the current phase is encoded, exactly matching
+        // Engine::IterateTS. Omitting the callback entirely when no lumped
+        // cells exist preserves CopperEngine's single-command-buffer fast path
+        // for ordinary boards.
+        CopperEngine::MidStepCorrection applyLumpedRLC;
+        if (!lumpedRLC.empty()) {
+            applyLumpedRLC = [&]() {
+                for (std::size_t i = 0; i < lumpedRLC.size(); ++i) {
+                    const CopperLumpedRLCCell& cell = lumpedRLC[i];
+                    LumpedRLCState& state = lumpedRLCState[i];
+                    state.vdn[2] = state.vdn[1];
+                    state.vdn[1] = state.vdn[0];
+                    state.jn[2] = state.jn[1];
+                    state.jn[1] = state.jn[0];
 
-            if (!nanDiagnosed && globalTimestep % 100 == 0) {
-                struct FieldEntry {
-                    CopperEngine::Field field;
-                    const char* name;
-                    std::uint32_t axis; // 0=x, 1=y, 2=z
-                    bool isH;
-                };
-                static const std::array<FieldEntry, 6> kFields = {{
-                    {CopperEngine::Field::Ex, "Ex", 0, false},
-                    {CopperEngine::Field::Ey, "Ey", 1, false},
-                    {CopperEngine::Field::Ez, "Ez", 2, false},
-                    {CopperEngine::Field::Hx, "Hx", 0, true},
-                    {CopperEngine::Field::Hy, "Hy", 1, true},
-                    {CopperEngine::Field::Hz, "Hz", 2, true},
-                }};
-                for (const FieldEntry& fieldEntry : kFields) {
-                    const std::vector<float> values = engine.readField(fieldEntry.field);
-                    for (std::size_t i = 0; i < values.size(); ++i) {
-                        if (std::isnan(values[i]) || std::isinf(values[i])) {
-                            const std::uint32_t x = static_cast<std::uint32_t>(i % grid.dims.nx);
-                            const std::uint32_t y = static_cast<std::uint32_t>((i / grid.dims.nx) % grid.dims.ny);
-                            const std::uint32_t z = static_cast<std::uint32_t>(i / (grid.dims.nx * grid.dims.ny));
-                            std::fprintf(stdout,
-                                         "[DIAG-NAN] First NaN/Inf at globalTimestep=%u field=%s cell=(%u,%u,%u) "
-                                         "value=%g domain=(%u,%u,%u)\n",
-                                         globalTimestep, fieldEntry.name, x, y, z, static_cast<double>(values[i]),
-                                         grid.dims.nx, grid.dims.ny, grid.dims.nz);
-                            // [DIAG] Base (non-PML-corrected) coefficient at this exact cell/axis --
-                            // CopperCPMLShell's own doc comment assumes vacuum (a real, non-zero,
-                            // non-PEC decaying-medium coefficient) everywhere its additive psi
-                            // correction applies; if this cell is actually PEC (vv/ii == 0) or has
-                            // some other degenerate base coefficient, that assumption is violated.
-                            const std::uint32_t coeffIdx = copperGridIndex(grid.dims, x, y, z);
-                            const float baseVV = fieldEntry.isH ? grid.ii[fieldEntry.axis][coeffIdx]
-                                                                 : grid.vv[fieldEntry.axis][coeffIdx];
-                            const float baseVI = fieldEntry.isH ? grid.iv[fieldEntry.axis][coeffIdx]
-                                                                 : grid.vi[fieldEntry.axis][coeffIdx];
-                            std::fprintf(stdout, "[DIAG-NAN]   base coefficient at this cell: %s=%g %s=%g\n",
-                                         fieldEntry.isH ? "ii" : "vv", static_cast<double>(baseVV),
-                                         fieldEntry.isH ? "iv" : "vi", static_cast<double>(baseVI));
-                            // [DIAG] Grid-line spacing around this cell, on whichever axis this
-                            // field's own coefficient is computed along -- a degenerate (near-zero
-                            // or duplicate) line spacing there would explain a base coefficient this
-                            // far outside the ~217 a healthy vacuum cell reads regardless of size.
-                            auto printLines = [&](const char* axisName, const std::vector<float>& lines,
-                                                   std::uint32_t center) {
-                                std::fprintf(stdout, "[DIAG-NAN]   %s lines around index %u:", axisName, center);
-                                const std::uint32_t lo = center >= 2 ? center - 2 : 0;
-                                const std::uint32_t hi = std::min<std::uint32_t>(
-                                    center + 2, static_cast<std::uint32_t>(lines.size()) - 1);
-                                for (std::uint32_t idx = lo; idx <= hi; ++idx) {
-                                    std::fprintf(stdout, " [%u]=%.9g", idx, static_cast<double>(lines[idx]));
-                                }
-                                std::fprintf(stdout, "\n");
-                            };
-                            printLines("lineX", grid.lineX, x);
-                            printLines("lineY", grid.lineY, y);
-                            printLines("lineZ", grid.lineZ, z);
-                            printLines("dualLineX", grid.dualLineX, x);
-                            printLines("dualLineY", grid.dualLineY, y);
-                            printLines("dualLineZ", grid.dualLineZ, z);
-                            nanDiagnosed = true;
-                            break;
-                        }
-                    }
-                    if (nanDiagnosed) {
-                        break;
+                    const auto field = static_cast<CopperEngine::Field>(cell.axis);
+                    double vdn0 = static_cast<double>(engine.readFieldCell(field, cell.x, cell.y, cell.z));
+                    vdn0 = static_cast<double>(cell.vvd) *
+                           (vdn0 + static_cast<double>(cell.vv2) * state.vdn[2] +
+                            static_cast<double>(cell.vj1) * state.jn[1] + static_cast<double>(cell.vj2) * state.jn[2]);
+                    state.jn[0] = static_cast<double>(cell.ib0) * (vdn0 - state.vdn[2]) -
+                                  static_cast<double>(cell.b1) * static_cast<double>(cell.ib0) * state.jn[1] -
+                                  static_cast<double>(cell.b2) * static_cast<double>(cell.ib0) * state.jn[2];
+                    state.vdn[0] = vdn0;
+                    engine.writeFieldCell(field, cell.x, cell.y, cell.z, static_cast<float>(vdn0));
+                }
+            };
+        }
+
+        engine.runWithProbeSampling(
+            steps,
+            [&](std::uint32_t globalTimestep) -> bool {
+                stepsActuallyRun = globalTimestep;
+
+                for (std::size_t i = 0; i < probes.size(); ++i) {
+                    const CopperProbe& probe = probes[i];
+                    // Voltage probes sample at t=numTS*dT; current probes at
+                    // t=(numTS+0.5)*dT -- see
+                    // Engine_Interface_Base::GetTime(dualTime) and openems.cpp's
+                    // own SetDualTime(true) for ProbeType==1, which this mirrors
+                    // (see CopperProbes.hpp's own doc comments). Weight applied
+                    // here (matching ProcessIntegral::Process's own `m_Results[n] *
+                    // m_weight`) so every stored sample is already final -- see
+                    // CopperProbeResult's own doc comment.
+                    if (probe.type == CopperProbeType::Voltage) {
+                        const double t = static_cast<double>(globalTimestep) * grid.timestepSeconds;
+                        result.probes[i].samples.push_back({t, sampleVoltageProbe(probe, eField) * probe.weight});
+                    } else {
+                        const double t = (static_cast<double>(globalTimestep) + 0.5) * grid.timestepSeconds;
+                        result.probes[i].samples.push_back({t, sampleCurrentProbe(probe, hField) * probe.weight});
                     }
                 }
-            }
 
-            for (std::size_t i = 0; i < probes.size(); ++i) {
-                const CopperProbe& probe = probes[i];
-                // Voltage probes sample at t=numTS*dT; current probes at t=(numTS+0.5)*dT -- see
-                // Engine_Interface_Base::GetTime(dualTime) and openems.cpp's own SetDualTime(true)
-                // for ProbeType==1, which this mirrors (see CopperProbes.hpp's own doc comments).
-                // Weight applied here (matching ProcessIntegral::Process's own
-                // `m_Results[n] * m_weight`) so every stored sample is already final -- see
-                // CopperProbeResult's own doc comment.
-                if (probe.type == CopperProbeType::Voltage) {
-                    const double t = static_cast<double>(globalTimestep) * grid.timestepSeconds;
-                    result.probes[i].samples.push_back({t, sampleVoltageProbe(probe, eField) * probe.weight});
-                } else {
-                    const double t = (static_cast<double>(globalTimestep) + 0.5) * grid.timestepSeconds;
-                    result.probes[i].samples.push_back({t, sampleCurrentProbe(probe, hField) * probe.weight});
-                }
-            }
+                const auto now = std::chrono::steady_clock::now();
+                const double sinceLastPrint = std::chrono::duration<double>(now - lastPrint).count();
+                if (sinceLastPrint > 4.0 || globalTimestep == steps) {
+                    const double elapsed = std::chrono::duration<double>(now - runStart).count();
+                    const double stepRate = sinceLastPrint / static_cast<double>(globalTimestep - lastPrintStep);
 
-            const auto now = std::chrono::steady_clock::now();
-            const double sinceLastPrint = std::chrono::duration<double>(now - lastPrint).count();
-            if (sinceLastPrint > 4.0 || globalTimestep == steps) {
-                const double elapsed = std::chrono::duration<double>(now - runStart).count();
-                const double stepRate = sinceLastPrint / static_cast<double>(globalTimestep - lastPrintStep);
+                    const double currentEnergy = engine.estimateEnergy();
+                    if (currentEnergy > maxEnergy) {
+                        maxEnergy = currentEnergy;
+                    }
+                    if (maxEnergy > 0.0) {
+                        energyChange = currentEnergy / maxEnergy;
+                    }
+                    const double energyChangeDB = std::fabs(10.0 * std::log10(energyChange));
+                    const double targetDB = std::fabs(10.0 * std::log10(endCriteria));
 
-                const double currentEnergy = engine.estimateEnergy();
-                if (currentEnergy > maxEnergy) {
-                    maxEnergy = currentEnergy;
-                }
-                if (maxEnergy > 0.0) {
-                    energyChange = currentEnergy / maxEnergy;
-                }
-                const double energyChangeDB = std::fabs(10.0 * std::log10(energyChange));
-                const double targetDB = std::fabs(10.0 * std::log10(endCriteria));
+                    if (onProgress) {
+                        const bool duringExcitation = globalTimestep < excitation.voltageSignal.size();
+                        onProgress(CopperFDTDProgress{CopperFDTDPhase::FDTDRun, globalTimestep, steps, energyChangeDB,
+                                                      targetDB, currentEnergy, duringExcitation});
+                    } else {
+                        std::fprintf(stdout,
+                                     "Copper: [@ %7.1fs] timestep %u/%u || Speed: "
+                                     "%.4f s/step || Energy: ~%.2e (-%.2fdB)\n",
+                                     elapsed, globalTimestep, steps, stepRate, currentEnergy, energyChangeDB);
+                    }
+                    lastPrint = now;
+                    lastPrintStep = globalTimestep;
 
-                if (onProgress) {
-                    const bool duringExcitation = globalTimestep < excitation.voltageSignal.size();
-                    onProgress(CopperFDTDProgress{CopperFDTDPhase::FDTDRun, globalTimestep, steps, energyChangeDB,
-                                                   targetDB, currentEnergy, duringExcitation});
-                } else {
-                    std::fprintf(
-                        stdout, "Copper: [@ %7.1fs] timestep %u/%u || Speed: %.4f s/step || Energy: ~%.2e (-%.2fdB)\n",
-                        elapsed, globalTimestep, steps, stepRate, currentEnergy, energyChangeDB);
+                    if (energyChange <= endCriteria) {
+                        endCriteriaReached = true;
+                    }
                 }
-                lastPrint = now;
-                lastPrintStep = globalTimestep;
-
-                if (energyChange <= endCriteria) {
-                    endCriteriaReached = true;
+                // Piggybacks on the same >4s wall-clock check above (so a
+                // field-frame capture never adds its own separate timing pass),
+                // but only actually captures once at least minCaptureStepSpacing
+                // steps have passed since the last one -- bounding the total
+                // frame count to roughly kFieldFrameBudget regardless of how long
+                // the run itself takes. Always captures the very last step's own
+                // state, whatever the spacing landed on.
+                if (sinceLastPrint > 4.0 && (globalTimestep - lastCaptureStep >= minCaptureStepSpacing ||
+                                             globalTimestep == 0 || globalTimestep == steps)) {
+                    captureFieldFrame(globalTimestep);
                 }
-            }
-            // Piggybacks on the same >4s wall-clock check above (so a field-frame capture never
-            // adds its own separate timing pass), but only actually captures once at least
-            // minCaptureStepSpacing steps have passed since the last one -- bounding the total
-            // frame count to roughly kFieldFrameBudget regardless of how long the run itself takes.
-            // Always captures the very last step's own state, whatever the spacing landed on.
-            if (sinceLastPrint > 4.0 &&
-                (globalTimestep - lastCaptureStep >= minCaptureStepSpacing || globalTimestep == 0 || globalTimestep == steps)) {
-                captureFieldFrame(globalTimestep);
-            }
-            // Checked every timestep (not gated behind the >4s wall-clock block above, unlike the
-            // energy check) -- cancellation should take effect within a timestep or two, not wait
-            // for the next progress-reporting tick.
-            if (isCancelled && isCancelled()) {
-                cancelled = true;
-            }
-            return !endCriteriaReached && !cancelled;
-        });
+                // Checked every timestep (not gated behind the >4s wall-clock
+                // block above, unlike the energy check) -- cancellation should
+                // take effect within a timestep or two, not wait for the next
+                // progress-reporting tick.
+                if (isCancelled && isCancelled()) {
+                    cancelled = true;
+                }
+                return !endCriteriaReached && !cancelled;
+            },
+            applyLumpedRLC);
         if (!anyFrameCaptured) {
             // A run that ends (max steps or early-stop) before ever crossing the >4s cadence above
             // -- a short/fast simulation -- would otherwise leave the field snapshot with zero
@@ -389,9 +351,9 @@ CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
                              std::fabs(10.0 * std::log10(endCriteria)), stepsActuallyRun);
             } else {
                 std::fprintf(stdout,
-                              "Copper: RunFDTD: Warning: Max. number of timesteps was reached before the "
-                              "end-criteria of -%.2fdB was reached...\n",
-                              std::fabs(10.0 * std::log10(endCriteria)));
+                             "Copper: RunFDTD: Warning: Max. number of timesteps was reached before the "
+                             "end-criteria of -%.2fdB was reached...\n",
+                             std::fabs(10.0 * std::log10(endCriteria)));
             }
         }
 

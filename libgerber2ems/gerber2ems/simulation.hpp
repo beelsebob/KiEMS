@@ -7,6 +7,7 @@
 #include <expected>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -154,8 +155,26 @@ public:
 
     std::expected<void, std::string> addMslPort(PortConfig& portConfig, std::int32_t portNumber, bool excite = false);
     std::expected<void, std::string> addResistivePort(PortConfig& portConfig, bool excite = false);
+    /// Built instead of addMslPort() for a PortConfig with absorbSignal()==false (and excite()==
+    /// false, which port_resolution.cpp guarantees whenever absorbSignal() is false -- see
+    /// PortConfig::absorbSignal()'s own doc comment): a PassiveProbe, U/I probe boxes only, no
+    /// metal/resistor/excitation. Still pushed onto _ports (see addPorts()), so it's reachable
+    /// through every existing per-port accessor.
+    std::expected<void, std::string> addPassiveProbe(PortConfig& portConfig, std::int32_t portNumber);
+    /// Builds one SERIES CSPropLumpedElement box per SimulationConfig::lumpedComponents() entry,
+    /// bridging its two real pad positions -- see that type's own doc comment and
+    /// port_resolution.cpp's discovery rule. Unlike ports, these are never individually excited and
+    /// aren't tracked in _ports (nothing in this library reads their probe data back) -- the CPU
+    /// backend picks them up automatically via Operator_Ext_LumpedRLC once SetupFDTD() runs (see
+    /// openems.cpp's own unconditional `if (CSX has any LUMPED_ELEMENT) AddExtension(...)`); the GPU
+    /// backend's own pass lives in Copper/Internal/CopperLumpedRLC.hpp instead.
+    std::expected<void, std::string> addLumpedComponents();
     void addPlane(double zHeight);
     void addSubstrates();
+    /// Top/bottom solder mask, if this board's stackup has any -- see _slicedBoard.topMaskTriangles/
+    /// bottomMaskTriangles' own doc comment for where the (already hole-free) covering shape comes
+    /// from; this just extrudes it through the real mask thickness and adds the dielectric material.
+    void addSolderMask();
     std::expected<void, std::string> addVias();
     /// (xPos, yPos)-(x2Pos, y2Pos) is the via's own capsule/stadium centerline -- a plain round via
     /// is the degenerate case where the two points coincide (see ViaHole's own doc comment).
@@ -232,10 +251,20 @@ public:
     /// as long as this Simulation (and therefore _fdtd) is alive.
     ContinuousStructure& csx() { return *_csx; }
 
-    /// Returns (reflected, incident) uf phasors per port, vs. `frequencies`.
-    std::expected<std::pair<std::vector<std::vector<std::complex<double>>>, std::vector<std::vector<std::complex<double>>>>,
-                  std::string>
-    getPortParameters(std::int32_t exIndex, const std::vector<double>& frequencies);
+    /// `reflected`/`incident` are uf phasors per port (a same-length, all-NaN placeholder for any
+    /// port with absorbSignal()==false, which never computes a meaningful incident/reflected split
+    /// -- see PortConfig::absorbSignal()'s own doc comment -- kept only to preserve every other
+    /// piece of code's port-index alignment). `probeVoltage`/`probeCurrent` carry that same
+    /// non-absorbing port's real data instead (ufTot()/ifTot()), keyed by port index -- only ever
+    /// populated for ports with absorbSignal()==false.
+    struct PortParameters {
+        std::vector<std::vector<std::complex<double>>> reflected;
+        std::vector<std::vector<std::complex<double>>> incident;
+        std::map<std::int32_t, std::vector<std::complex<double>>> probeVoltage;
+        std::map<std::int32_t, std::vector<std::complex<double>>> probeCurrent;
+    };
+    std::expected<PortParameters, std::string> getPortParameters(std::int32_t exIndex,
+                                                                    const std::vector<double>& frequencies);
 
     void setupPorts(std::int32_t enabledIdx);
     std::expected<void, std::string> addPorts();
@@ -269,6 +298,7 @@ private:
     std::vector<std::unique_ptr<Port>> _ports;
     std::vector<CSProperties*> _gerberMaterials;   // owned by _csx
     std::vector<CSProperties*> _substrateMaterials; // owned by _csx
+    std::vector<CSProperties*> _solderMaskMaterials; // owned by _csx -- see addSolderMask()
     CSPropMetal* _planeMaterial;
     CSPropMetal* _viaMaterial;
     CSPropMaterial* _viaFillingMaterial;

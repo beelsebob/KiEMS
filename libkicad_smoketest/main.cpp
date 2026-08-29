@@ -32,6 +32,10 @@ std::string _stackupLayerKindName(libkicad::StackupLayerKind kind) {
             return "core";
         case libkicad::StackupLayerKind::Prepreg:
             return "prepreg";
+        case libkicad::StackupLayerKind::SolderMaskTop:
+            return "soldermask-top";
+        case libkicad::StackupLayerKind::SolderMaskBottom:
+            return "soldermask-bottom";
     }
     return "unknown";
 }
@@ -192,12 +196,47 @@ int _runQuery(int argc, char** argv) {
         return 0;
     }
 
+    if (command == "export-component-models" && argc == 6) {
+        const std::expected<libkicad::ComponentModelExportResult, std::string> exportResult =
+                libkicad::exportComponentModels(argv[2], argv[3], argv[4], argv[5]);
+        if (!exportResult.has_value()) {
+            std::cerr << exportResult.error() << "\n";
+            return 1;
+        }
+        // Three sections, each explicitly counted rather than just newline-delimited to end of
+        // stream (the plain convention every other query command here uses) -- messages are
+        // free-text diagnostics from KiCad's own exporter (see ComponentModelExportResult's own
+        // doc comment for why these aren't errors) and triangle rows are tab-separated, so an
+        // implicit "read until EOF" boundary between the two sections would be ambiguous the
+        // moment a message happened to contain a tab.
+        // Line 1: exportSucceeded ("1"/"0"). Line 2: topCopperZMm (see ComponentModelExportResult's
+        // own doc comment). Line 3: message count. Next N lines: one message each. Next line:
+        // triangle count. Next M lines: one triangle each, 13 tab-separated fields (ax ay az bx by
+        // bz cx cy cz r g b a) -- see ComponentTriangle's own doc comment.
+        std::cout << (exportResult->exportSucceeded ? "1" : "0") << "\n";
+        std::cout << _formatDouble(exportResult->topCopperZMm) << "\n";
+        std::cout << exportResult->messages.size() << "\n";
+        for (const std::string& message : exportResult->messages) {
+            std::cout << message << "\n";
+        }
+        std::cout << exportResult->triangles.size() << "\n";
+        for (const libkicad::ComponentTriangle& t : exportResult->triangles) {
+            std::cout << _formatDouble(t.ax) << '\t' << _formatDouble(t.ay) << '\t' << _formatDouble(t.az) << '\t'
+                       << _formatDouble(t.bx) << '\t' << _formatDouble(t.by) << '\t' << _formatDouble(t.bz) << '\t'
+                       << _formatDouble(t.cx) << '\t' << _formatDouble(t.cy) << '\t' << _formatDouble(t.cz) << '\t'
+                       << _formatDouble(t.r) << '\t' << _formatDouble(t.g) << '\t' << _formatDouble(t.b) << '\t'
+                       << _formatDouble(t.a) << '\n';
+        }
+        return 0;
+    }
+
     std::cerr << "usage: " << argv[0]
                << " {net-for-pin <project> <board> <footprint> <pin> | nets-in-class <project> <board> "
                   "<net_class> | pads-on-net <project> <board> <net> | resolve-pin <project> <board> "
                   "<footprint> <pin> | stackup <project> <board> | layer-colors <project> <board> | "
                   "net-classes <project> <board> | all-nets <project> <board> | "
-                  "footprints <project> <board> | through-holes <project> <board>}\n";
+                  "footprints <project> <board> | through-holes <project> <board> | "
+                  "export-component-models <project> <board> <component_filter_csv> <output_stl_path>}\n";
     return 2;
 }
 
@@ -311,9 +350,9 @@ int _runSmoketest(int argc, char** argv) {
     return 0;
 }
 
-const std::vector<std::string> kQueryCommands = {"net-for-pin",  "nets-in-class", "pads-on-net",   "resolve-pin",
-                                                  "stackup",      "layer-colors",  "net-classes",   "all-nets",
-                                                  "footprints",   "through-holes"};
+const std::vector<std::string> kQueryCommands = {"net-for-pin",  "nets-in-class", "pads-on-net",  "resolve-pin",
+                                                  "stackup",      "layer-colors",  "net-classes",  "all-nets",
+                                                  "footprints",   "through-holes", "export-component-models"};
 
 } // namespace
 

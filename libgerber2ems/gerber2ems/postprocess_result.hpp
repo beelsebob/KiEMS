@@ -48,6 +48,10 @@ public:
                                                                std::int32_t diffPairIndex) const;
     std::optional<Postprocessor::DiffPairImpedance> getDiffPairImpedance(const std::string& simulationName,
                                                                           std::int32_t diffPairIndex) const;
+    std::optional<std::vector<std::complex<double>>> getProbeVoltage(const std::string& simulationName,
+                                                                       std::int32_t probe, std::int32_t excitedPort) const;
+    std::optional<std::vector<std::complex<double>>> getProbeCurrent(const std::string& simulationName,
+                                                                       std::int32_t probe, std::int32_t excitedPort) const;
 
     // Explicit save/render calls, matching Postprocessor's own signatures -- no-ops if
     // `simulationName` isn't in config().
@@ -63,6 +67,7 @@ public:
     void renderSmith(const std::string& simulationName, bool transparent, const std::filesystem::path& outputDir) const;
     void renderTraceDelays(const std::string& simulationName, bool transparent,
                             const std::filesystem::path& outputDir) const;
+    void renderProbes(const std::string& simulationName, bool transparent, const std::filesystem::path& outputDir) const;
 
     /// Escape hatch for callers that need the underlying Postprocessor directly -- currently just
     /// the CLI's ExcitationPostprocessor construction (see excitation_postprocess.hpp), which isn't

@@ -78,4 +78,21 @@ std::expected<std::vector<FootprintInfo>, std::string> footprints(const std::str
 std::expected<std::vector<ThroughHole>, std::string> throughHoles(const std::string& projectPath,
                                                                      const std::string& boardPath);
 
+/// Returns `componentFilter`'s own footprints' real, placed 3D models (their real position/
+/// rotation/offset on the board, no board body/copper/tracks/pads) as a flat, real-colored triangle
+/// list (ComponentModelExportResult::triangles) -- via KiCad's own EXPORTER_STEP/STEP_PCB_MODEL
+/// classes, the same machinery `kicad-cli pcb export stl` itself uses, run in-process rather than
+/// as a second subprocess. `outputStlPath` is still where an incidental STL copy of the same mesh
+/// gets written (a debug artifact, not read by this function itself -- see exportComponentModelsRaw's
+/// own comment). `componentFilter` is a comma-separated list of reference designators (wildcards
+/// supported, same syntax as kicad-cli's own --component-filter). The returned std::expected's
+/// error channel is only for a hard failure (board didn't load, or the exporter itself reported
+/// failure) -- a requested component whose own linked 3D model can't be resolved is reported
+/// through the success value's own `messages` instead (see ComponentModelExportResult's own doc
+/// comment), not as an error here.
+std::expected<ComponentModelExportResult, std::string> exportComponentModels(const std::string& projectPath,
+                                                                                const std::string& boardPath,
+                                                                                const std::string& componentFilter,
+                                                                                const std::string& outputStlPath);
+
 } // namespace libkicad

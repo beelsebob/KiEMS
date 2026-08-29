@@ -4,15 +4,25 @@
 <dict>
 	<key>SchemeUserState</key>
 	<dict>
+		<key>CSXCAD.xcscheme_^#shared#^_</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>5</integer>
+		</dict>
 		<key>Copper.xcscheme_^#shared#^_</key>
 		<dict>
 			<key>orderHint</key>
 			<integer>6</integer>
 		</dict>
+		<key>CopperUtils.xcscheme_^#shared#^_</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>8</integer>
+		</dict>
 		<key>Copper_smoketest.xcscheme_^#shared#^_</key>
 		<dict>
 			<key>orderHint</key>
-			<integer>9</integer>
+			<integer>12</integer>
 		</dict>
 		<key>Gerber2EMSStudio (Release).xcscheme_^#shared#^_</key>
 		<dict>
@@ -27,12 +37,17 @@
 		<key>GerberCharts.xcscheme_^#shared#^_</key>
 		<dict>
 			<key>orderHint</key>
-			<integer>11</integer>
+			<integer>15</integer>
+		</dict>
+		<key>HDF5.xcscheme_^#shared#^_</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>9</integer>
 		</dict>
 		<key>copper_fdtd_worker.xcscheme_^#shared#^_</key>
 		<dict>
 			<key>orderHint</key>
-			<integer>5</integer>
+			<integer>13</integer>
 		</dict>
 		<key>geber2ems.xcscheme_^#shared#^_</key>
 		<dict>
@@ -42,17 +57,17 @@
 		<key>gerber2ems_fdtd_worker.xcscheme_^#shared#^_</key>
 		<dict>
 			<key>orderHint</key>
-			<integer>8</integer>
+			<integer>10</integer>
 		</dict>
 		<key>libgerber2ems.xcscheme_^#shared#^_</key>
 		<dict>
 			<key>orderHint</key>
-			<integer>7</integer>
+			<integer>11</integer>
 		</dict>
 		<key>libgerber2ems_smoketest.xcscheme_^#shared#^_</key>
 		<dict>
 			<key>orderHint</key>
-			<integer>10</integer>
+			<integer>14</integer>
 		</dict>
 		<key>libkicad.xcscheme_^#shared#^_</key>
 		<dict>
@@ -63,6 +78,11 @@
 		<dict>
 			<key>orderHint</key>
 			<integer>1</integer>
+		</dict>
+		<key>openEMS.xcscheme_^#shared#^_</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>7</integer>
 		</dict>
 	</dict>
 	<key>SuppressBuildableAutocreation</key>

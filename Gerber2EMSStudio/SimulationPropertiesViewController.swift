@@ -33,6 +33,12 @@ final class SimulationPropertiesViewController: NSViewController {
     private let nameField = NSTextField(string: "")
     private let groundKindPopUp = NSPopUpButton()
     private let groundNamePopUp = NSPopUpButton()
+    // groundNamePopUp's own button face renders sub/superscript fine (attributedTitle's
+    // .baselineOffset is a real NSAttributedString attribute AppKit already draws), but not the
+    // `~{...}` overline -- that needs NetNameFormatting's manual drawing (see NetNameCellView),
+    // which a menu item's attributedTitle can't provide. This mirrors the popup's current selection
+    // purely for that case, so a negated ground net (e.g. "~{RESET}") still reads correctly.
+    private let groundNameView = NetNameView()
     private let maxStepsField = NSTextField(string: "")
     private let hullPaddingField = NSTextField(string: "")
     private let viaEdgeDistanceField = NSTextField(string: "")
@@ -140,7 +146,7 @@ final class SimulationPropertiesViewController: NSViewController {
         viaAdvancedDisclosureButton.widthAnchor.constraint(equalToConstant: 16).isActive = true
         viaAdvancedDisclosureButton.heightAnchor.constraint(equalToConstant: 16).isActive = true
 
-        let groundRow = NSStackView(views: [groundKindPopUp, groundNamePopUp])
+        let groundRow = NSStackView(views: [groundKindPopUp, groundNamePopUp, groundNameView])
         groundRow.orientation = .horizontal
         groundRow.spacing = 8
 
@@ -289,6 +295,7 @@ final class SimulationPropertiesViewController: NSViewController {
             viaEdgeDistanceField.stringValue = ""
             viaSpacingField.stringValue = ""
             groundNamePopUp.removeAllItems()
+            groundNameView.configure(name: "", font: groundNamePopUp.font ?? .systemFont(ofSize: NSFont.systemFontSize))
             setPerSimulationFieldsEnabled(false)
             return
         }
@@ -362,6 +369,9 @@ final class SimulationPropertiesViewController: NSViewController {
         }
         if let currentName = sim.groundNetName, let index = names.firstIndex(of: currentName) {
             groundNamePopUp.selectItem(at: index)
+            groundNameView.configure(name: currentName, font: font)
+        } else {
+            groundNameView.configure(name: "", font: font)
         }
     }
 
@@ -499,6 +509,7 @@ final class SimulationPropertiesViewController: NSViewController {
         if let selectedIndex {
             onGeometryParametersChanged?(selectedIndex)
         }
+        groundNameView.configure(name: names[index], font: groundNamePopUp.font ?? .systemFont(ofSize: NSFont.systemFontSize))
     }
 
     @objc private func numberFieldChanged(_ sender: NSTextField) {

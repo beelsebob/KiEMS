@@ -154,6 +154,10 @@ final class JobsWindowController: NSWindowController {
         tableView.dataSource = self
         tableView.selectionHighlightStyle = .none
         tableView.usesAlternatingRowBackgroundColors = true
+        // Double-clicking a job jumps the owning document's main window to that job's
+        // simulation+sub-entry -- see jobDoubleClicked().
+        tableView.target = self
+        tableView.doubleAction = #selector(jobDoubleClicked)
 
         let scroll = NSScrollView()
         scroll.documentView = tableView
@@ -206,6 +210,21 @@ final class JobsWindowController: NSWindowController {
                 JobScheduler.shared.confirmCancel(jobID: jobID)
             }
         }
+    }
+
+    /// Double-clicked a job row -- bring that job's own document window to the front and jump its
+    /// main UI to the simulation+sub-entry this job represents (Geometry / Simulation Results /
+    /// Field Viewer). No-op if the document is already gone (job.document is weak and nil'd on close)
+    /// or has no window controller.
+    @objc private func jobDoubleClicked() {
+        let row = tableView.clickedRow
+        let jobs = JobScheduler.shared.jobs
+        guard row >= 0, row < jobs.count else { return }
+        let job = jobs[row]
+        guard let document = job.document,
+              let windowController = document.windowControllers.first as? DocumentWindowController else { return }
+        windowController.window?.makeKeyAndOrderFront(nil)
+        windowController.selectJob(kind: job.kind, forSimulationNamed: job.simulationName)
     }
 }
 

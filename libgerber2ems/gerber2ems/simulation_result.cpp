@@ -9,6 +9,8 @@
 
 namespace gerber2ems {
 
+using namespace Cu;
+
 namespace {
 
 std::vector<double> linspace(double start, double stop, std::int32_t num) {
@@ -53,12 +55,40 @@ std::optional<std::vector<std::complex<double>>> SimulationResult::getSParam(con
     return post->getSParam(outputPort, inputPort);
 }
 
+std::optional<std::vector<std::complex<double>>> SimulationResult::getProbeVoltage(const std::string& simulationName,
+                                                                                      std::int32_t probe,
+                                                                                      std::int32_t excitedPort) const {
+    const Postprocessor* post = _postprocessorFor(simulationName);
+    if (post == nullptr) {
+        return std::nullopt;
+    }
+    return post->getProbeVoltage(probe, excitedPort);
+}
+
+std::optional<std::vector<std::complex<double>>> SimulationResult::getProbeCurrent(const std::string& simulationName,
+                                                                                      std::int32_t probe,
+                                                                                      std::int32_t excitedPort) const {
+    const Postprocessor* post = _postprocessorFor(simulationName);
+    if (post == nullptr) {
+        return std::nullopt;
+    }
+    return post->getProbeCurrent(probe, excitedPort);
+}
+
 void SimulationResult::sparamToFile(const std::string& simulationName, const std::filesystem::path& outputDir) const {
     const Postprocessor* post = _postprocessorFor(simulationName);
     if (post == nullptr) {
         return;
     }
     post->sparamToFile(outputDir);
+}
+
+void SimulationResult::probeToFile(const std::string& simulationName, const std::filesystem::path& outputDir) const {
+    const Postprocessor* post = _postprocessorFor(simulationName);
+    if (post == nullptr) {
+        return;
+    }
+    post->probeToFile(outputDir);
 }
 
 std::expected<SimulationResult, std::string> SimulationResult::run(const GeometryResult& geometry,
@@ -112,6 +142,7 @@ std::expected<SimulationResult, std::string> SimulationResult::run(const Geometr
 
         const std::shared_ptr<Postprocessor>& post = postprocessingData.postprocessing().postprocessor;
         post->sparamToFile(geometry.paths().simulationDir / simConfig.name());
+        post->probeToFile(geometry.paths().simulationDir / simConfig.name());
         postprocessors.emplace(simConfig.name(), post);
     }
 
@@ -128,6 +159,9 @@ std::expected<SimulationResult, std::string> SimulationResult::load(const Geomet
     for (const auto& simConfig : geometry.config().simulations()) {
         auto post = std::make_shared<Postprocessor>(frequencies, simConfig);
         if (auto result = post->loadSparams(inputDir / simConfig.name()); !result) {
+            return std::unexpected(result.error());
+        }
+        if (auto result = post->loadProbes(inputDir / simConfig.name()); !result) {
             return std::unexpected(result.error());
         }
         postprocessors.emplace(simConfig.name(), std::move(post));

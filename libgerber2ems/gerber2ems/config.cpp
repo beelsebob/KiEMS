@@ -12,6 +12,8 @@
 
 namespace gerber2ems {
 
+using namespace Cu;
+
 namespace {
 
 std::vector<std::string> _splitDot(const std::string& s) {
@@ -63,6 +65,16 @@ void from_json(const nlohmann::json& j, ExcludedPin& p) {
     p.pin = _pinToString(j.at("pin"));
 }
 
+void to_json(nlohmann::json& j, const ProbedPin& p) {
+    j = nlohmann::json{{"footprint", p.footprint}, {"pin", p.pin}, {"absorb_signal", p.absorbSignal}};
+}
+
+void from_json(const nlohmann::json& j, ProbedPin& p) {
+    p.footprint = j.at("footprint").get<std::string>();
+    p.pin = _pinToString(j.at("pin"));
+    p.absorbSignal = j.value("absorb_signal", true);
+}
+
 void to_json(nlohmann::json& j, const PinDirectionOverride& p) {
     j = nlohmann::json{{"footprint", p.footprint}, {"pin", p.pin}, {"direction", p.direction}};
 }
@@ -102,6 +114,13 @@ void to_json(nlohmann::json& j, const InvolvedNetConfig& p) {
     // that source-list toggling already guarantees stays empty on any other kind.
     if (!p._excludedPins.empty()) {
         j["excluded_pins"] = p._excludedPins;
+    }
+    // Written iff this entry has ever been edited under the new per-pin Probe/Excite UI -- even
+    // when p._probedPins is itself empty ("deliberately zero pins probed" is a real, distinct state
+    // from "never touched", and the two must round-trip differently -- see this key's presence-vs-
+    // absence being exactly what from_json below uses to set hasExplicitPinSelections()).
+    if (p._hasExplicitPinSelections) {
+        j["probed_pins"] = p._probedPins;
     }
     if (!p._pinDirectionOverrides.empty()) {
         j["pin_direction_overrides"] = p._pinDirectionOverrides;
@@ -156,6 +175,13 @@ void from_json(const nlohmann::json& j, InvolvedNetConfig& p) {
     if (j.contains("excluded_pins")) {
         for (const auto& excluded : j.at("excluded_pins")) {
             p._excludedPins.push_back(excluded.get<ExcludedPin>());
+        }
+    }
+    p._probedPins.clear();
+    p._hasExplicitPinSelections = j.contains("probed_pins");
+    if (p._hasExplicitPinSelections) {
+        for (const auto& probed : j.at("probed_pins")) {
+            p._probedPins.push_back(probed.get<ProbedPin>());
         }
     }
     p._pinDirectionOverrides.clear();
@@ -314,7 +340,7 @@ LayerConfig::LayerConfig(LayerKind kind, std::string name, double thicknessMm, d
     if (_kind == LayerKind::Metal) {
         _file = _name;
         std::replace(_file.begin(), _file.end(), '.', '_');
-    } else if (_kind == LayerKind::Substrate) {
+    } else {
         _epsilon = epsilon;
         _lossTangent = lossTangent;
     }
@@ -420,6 +446,9 @@ void SimulationConfig::scaleToSimulationUnits(std::int32_t unitMultiplier) {
     for (auto& port : _ports) {
         port.scaleToSimulationUnits(unitMultiplier);
     }
+    for (auto& component : _lumpedComponents) {
+        component.scaleToSimulationUnits(unitMultiplier);
+    }
 }
 
 void to_json(nlohmann::json& j, const SimulationConfig& p) {
@@ -476,6 +505,16 @@ std::vector<LayerConfig> EMSConfig::getMetals() const {
     std::vector<LayerConfig> result;
     for (const auto& layer : _layers) {
         if (layer.kind() == LayerKind::Metal) {
+            result.push_back(layer);
+        }
+    }
+    return result;
+}
+
+std::vector<LayerConfig> EMSConfig::getSolderMasks() const {
+    std::vector<LayerConfig> result;
+    for (const auto& layer : _layers) {
+        if (layer.kind() == LayerKind::SolderMaskTop || layer.kind() == LayerKind::SolderMaskBottom) {
             result.push_back(layer);
         }
     }

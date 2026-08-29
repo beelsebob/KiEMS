@@ -25,7 +25,7 @@
 #include "gerber2ems/excitation_postprocess.hpp"
 #include "gerber2ems/geometry_result.hpp"
 #include "gerber2ems/importer.hpp"
-#include "gerber2ems/logging.hpp"
+#include "logging.hpp"
 #include "gerber2ems/paths_config.hpp"
 #include "gerber2ems/port_resolution.hpp"
 #include "gerber2ems/postprocess_result.hpp"
@@ -43,6 +43,7 @@
 #include "CopperFDTDRunner.h"
 
 using namespace gerber2ems;
+using namespace Cu;
 
 namespace {
 
@@ -359,6 +360,7 @@ void saveAndRenderResults(const PostprocessResult& results, const Arguments& arg
         results.renderDiffPairSParams(simConfig.name(), args.transparent(), outDir);
         results.renderDiffImpedance(simConfig.name(), args.transparent(), outDir);
         results.renderTraceDelays(simConfig.name(), args.transparent(), outDir);
+        results.renderProbes(simConfig.name(), args.transparent(), outDir);
 
         if (!simConfig.excitations().empty()) {
             const Postprocessor* post = results.postprocessorFor(simConfig.name());

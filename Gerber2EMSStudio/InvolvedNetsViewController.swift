@@ -9,6 +9,13 @@ private final class InvolvedNetsNode: NSObject {
         case net(name: String, impedance: Double, plane: Int)
         case excitedPin(footprintReference: String, pin: KicadFootprintPin, isMain: Bool,
                          startTime: Double, duration: Double, phaseDegrees: Double)
+        /// A pin explicitly probed via the source list's Probe checkbox (see
+        /// InvolvedNetConfig::probedPins()) -- never shown for a pin that's *also* excited (the
+        /// excitedPin row above already covers it, and excitation always implies the same full
+        /// absorbing structure regardless of this pin's own absorbSignal choice). Never populated
+        /// for a net still in legacy (non-explicit) resolution mode -- see refresh()'s own comment
+        /// on why that's a deliberately unbounded list this summary doesn't try to enumerate.
+        case probedPin(footprintReference: String, pin: KicadFootprintPin, absorbSignal: Bool)
     }
     let kind: Kind
     var children: [InvolvedNetsNode] = []
@@ -31,8 +38,20 @@ private final class InvolvedNetsNode: NSObject {
 /// has a query for (KicadBoardBridge.footprints(), which carries each pin's net name) rather than
 /// adding a new bridge round trip purely for this.
 final class InvolvedNetsViewController: NSViewController {
+    /// What selecting a row here should reveal in the source list below -- a net (for a top-level
+    /// net row) or a specific footprint+pin (for a nested excited/probed-pin row). Fired via
+    /// onSelectionRequested; DocumentWindowController relays it to SourceListViewController.
+    /// revealNet(named:)/revealPin(footprintReference:padNumber:).
+    enum SelectionTarget {
+        case net(String)
+        case footprintPin(footprintReference: String, padNumber: String)
+    }
+
     private weak var document: Document?
     private var selectedIndex: Int?
+
+    /// Fired whenever the user selects a row in this table -- see SelectionTarget's own doc comment.
+    var onSelectionRequested: ((SelectionTarget) -> Void)?
 
     private let outlineView = NSOutlineView()
     private let scroll = NSScrollView()
@@ -213,6 +232,9 @@ final class InvolvedNetsViewController: NSViewController {
         let pins: [String]
         let impedance: Double
         let plane: Int
+        /// Snapshotted alongside everything else (see this struct's own reasoning) -- only
+        /// non-empty when hasExplicitPinSelections is true, matching probedPins' own doc comment.
+        let probedPins: [(footprint: String, pin: String, absorbSignal: Bool)]
     }
 
     /// Same idea as InvolvedNetSnapshot, for the reasons given there -- EMSExcitationBridge holds
@@ -243,10 +265,11 @@ final class InvolvedNetsViewController: NSViewController {
         // Read out while still on the main thread, with the real bridge chain still alive -- see
         // InvolvedNetSnapshot/ExcitationSnapshot's doc comments.
         let sim = document.config.simulations[selectedIndex]
-        let entries = sim.involvedNets.map {
-            InvolvedNetSnapshot(kind: $0.kind, net: $0.net, netClass: $0.netClass,
-                                 footprintReference: $0.footprintReference, pins: $0.pins,
-                                 impedance: $0.impedance, plane: $0.plane)
+        let entries = sim.involvedNets.map { entry -> InvolvedNetSnapshot in
+            let probed = entry.probedPins.map { (footprint: $0.footprintReference, pin: $0.pin, absorbSignal: $0.absorbSignal) }
+            return InvolvedNetSnapshot(kind: entry.kind, net: entry.net, netClass: entry.netClass,
+                                        footprintReference: entry.footprintReference, pins: entry.pins,
+                                        impedance: entry.impedance, plane: entry.plane, probedPins: probed)
         }
         let excitations = sim.excitations.map {
             ExcitationSnapshot(footprintReference: $0.footprintReference, pin: $0.pin, isMain: $0.isMain,
@@ -318,12 +341,36 @@ final class InvolvedNetsViewController: NSViewController {
                 excitedPinsByNet[netName]?.sort { $0.pinTitle.localizedStandardCompare($1.pinTitle) == .orderedAscending }
             }
 
+            // Explicitly probed pins, same grouping-by-net as excited ones above -- but only ever
+            // sourced from entries with a bounded, explicit probedPins list (see
+            // InvolvedNetSnapshot's own doc comment: a legacy net's implicit "every pad probed"
+            // default is deliberately never enumerated here, since it isn't a bounded list a compact
+            // summary should try to print). A pin that's also excited is skipped -- the excitedPin
+            // row above already covers it, and excitation always implies the same full absorbing
+            // structure regardless of this pin's own absorbSignal choice.
+            let excitedKeys = Set(excitations.map { "\($0.footprintReference)\t\($0.pin)" })
+            var probedPinsByNet: [String: [InvolvedNetsNode]] = [:]
+            for entry in entries {
+                for probed in entry.probedPins {
+                    let key = "\(probed.footprint)\t\(probed.pin)"
+                    guard !excitedKeys.contains(key), let netName = netForPin[key], infoByNet[netName] != nil,
+                          let pinInfo = pinInfoForKey[key]
+                    else { continue }
+                    let node = InvolvedNetsNode(kind: .probedPin(
+                        footprintReference: probed.footprint, pin: pinInfo, absorbSignal: probed.absorbSignal))
+                    probedPinsByNet[netName, default: []].append(node)
+                }
+            }
+            for netName in probedPinsByNet.keys {
+                probedPinsByNet[netName]?.sort { $0.pinTitle.localizedStandardCompare($1.pinTitle) == .orderedAscending }
+            }
+
             let sortedNodes = infoByNet.keys
                 .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
                 .map { netName -> InvolvedNetsNode in
                     let info = infoByNet[netName]!
                     let node = InvolvedNetsNode(kind: .net(name: netName, impedance: info.impedance, plane: info.plane))
-                    node.children = excitedPinsByNet[netName] ?? []
+                    node.children = (excitedPinsByNet[netName] ?? []) + (probedPinsByNet[netName] ?? [])
                     return node
                 }
             DispatchQueue.main.async {
@@ -364,11 +411,33 @@ private extension InvolvedNetsNode {
                 ? "\(footprintReference) pin \(pin.number)"
                 : "\(footprintReference) pin \(pin.number) (\(function))"
             return isMain ? "\(base) (Main Excitation)" : base
+        case .probedPin(let footprintReference, let pin, let absorbSignal):
+            let function = SourceListNode.strippingTrailingNumericSuffix(pin.function)
+            let base = function.isEmpty
+                ? "\(footprintReference) pin \(pin.number)"
+                : "\(footprintReference) pin \(pin.number) (\(function))"
+            return absorbSignal ? "\(base) (Absorb Signal)" : "\(base) (Passive Probe)"
         }
     }
 }
 
 extension InvolvedNetsViewController: NSOutlineViewDataSource, NSOutlineViewDelegate {
+    /// Relays the newly-selected row's own identity out via onSelectionRequested, so the source
+    /// list below can jump to (and fill in its own detail pane for) the matching net or pin -- see
+    /// SelectionTarget's own doc comment.
+    func outlineViewSelectionDidChange(_ notification: Notification) {
+        let row = outlineView.selectedRow
+        guard row >= 0, let node = outlineView.item(atRow: row) as? InvolvedNetsNode else { return }
+        switch node.kind {
+        case .net(let name, _, _):
+            onSelectionRequested?(.net(name))
+        case .excitedPin(let footprintReference, let pin, _, _, _, _):
+            onSelectionRequested?(.footprintPin(footprintReference: footprintReference, padNumber: pin.number))
+        case .probedPin(let footprintReference, let pin, _):
+            onSelectionRequested?(.footprintPin(footprintReference: footprintReference, padNumber: pin.number))
+        }
+    }
+
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
         guard let node = item as? InvolvedNetsNode else { return netNodes.count }
         return node.children.count
@@ -402,6 +471,8 @@ extension InvolvedNetsViewController: NSOutlineViewDataSource, NSOutlineViewDele
                 text = "\(Self.impedanceFormatter.string(from: NSNumber(value: impedance)) ?? "\(impedance)") Ω"
             case .excitedPin(_, _, _, _, let duration, _):
                 text = Self.durationFormatter.string(for: NSNumber(value: duration)) ?? ""
+            case .probedPin:
+                text = ""
             }
             return textCell(outlineView, identifier: Self.primaryValueColumnIdentifier, text: text, alignment: .right)
         case Self.secondaryValueColumnIdentifier:
@@ -411,6 +482,8 @@ extension InvolvedNetsViewController: NSOutlineViewDataSource, NSOutlineViewDele
                 text = planeDisplayString(for: plane)
             case .excitedPin(_, _, _, _, _, let phaseDegrees):
                 text = Self.phaseFormatter.string(for: NSNumber(value: phaseDegrees)) ?? ""
+            case .probedPin:
+                text = ""
             }
             return textCell(outlineView, identifier: Self.secondaryValueColumnIdentifier, text: text, alignment: .right)
         default:

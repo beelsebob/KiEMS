@@ -1,6 +1,7 @@
 #include "port_resolution.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <expected>
@@ -8,12 +9,15 @@
 #include <limits>
 #include <numbers>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include "component_value.hpp"
 #include "config.hpp"
 #include "constants.hpp"
 #include "gerber_io.hpp"
@@ -22,6 +26,8 @@
 #include "paths_config.hpp"
 
 namespace gerber2ems {
+
+using namespace Cu;
 
 namespace {
 
@@ -80,7 +86,7 @@ std::expected<Position, std::string> _edgeCutsOrigin(const std::filesystem::path
         return std::unexpected(std::move(edgeCutsResult).error());
     }
     const GerberFile& edgeCuts = *edgeCutsResult;
-    for (const auto& seg : edgeCuts.traceForNet("no-net").segments()) {
+    for (const auto& seg : edgeCuts.traceForNet(NetName("no-net")).segments()) {
         xMin = std::min({seg.start().x(), seg.stop().x(), xMin});
         yMin = std::min({seg.start().y(), seg.stop().y(), yMin});
     }
@@ -211,7 +217,7 @@ std::expected<double, std::string> _deriveDirection(_CopperLayerCache& cache, co
         Position to;
     };
     std::vector<Candidate> candidates;
-    const Trace trace = gerber->traceForNet(netName);
+    const Trace trace = gerber->traceForNet(NetName(netName));
     for (const TraceSegment& segment : trace.segments()) {
         const Position start(segment.start().x() - edgeCutsOrigin.x(), segment.start().y() - edgeCutsOrigin.y());
         const Position stop(segment.stop().x() - edgeCutsOrigin.x(), segment.stop().y() - edgeCutsOrigin.y());
@@ -261,6 +267,161 @@ struct _PortIndex {
     }
     std::vector<std::pair<std::string, std::string>> entries; // parallel to SimulationConfig::ports()
 };
+
+// Everything before the first digit, uppercased -- e.g. "R1" -> "R", "RN2" -> "RN", "C89" -> "C".
+std::string _letterPrefix(const std::string& reference) {
+    std::string prefix;
+    for (const char c : reference) {
+        if (std::isdigit(static_cast<unsigned char>(c)) != 0) {
+            break;
+        }
+        prefix += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    return prefix;
+}
+
+// Exact match only (not a prefix match) -- "RN"/"RT"/"RV"/"CN"/"CR"/etc. are deliberately excluded,
+// matching Gerber2EMSStudio/ComponentCategory.swift's effective behavior for these three single-
+// letter designators, without porting its whole IEEE-315 category table.
+std::optional<std::pair<LumpedComponentType, char>> _lumpedComponentKind(const std::string& letterPrefix) {
+    if (letterPrefix == "R") {
+        return std::make_pair(LumpedComponentType::Resistor, 'R');
+    }
+    if (letterPrefix == "L") {
+        return std::make_pair(LumpedComponentType::Inductor, 'H');
+    }
+    if (letterPrefix == "C") {
+        return std::make_pair(LumpedComponentType::Capacitor, 'F');
+    }
+    return std::nullopt;
+}
+
+// Auto-discovers every 2-pin R/L/C on the board whose both pins sit on a net already involved in
+// `sim` (or its ground net) and folds each into a LumpedComponentConfig -- see that type's own doc
+// comment. Silently skips anything not R/L/C-with-2-qualifying-pins (the overwhelming majority of
+// components on any real board); logs and skips a component that *is* in scope but couldn't
+// actually be modeled (unparseable value, pins on different/unknown layers, non-axis-aligned pins).
+std::expected<void, std::string> _resolveLumpedComponents(const EMSConfig& config, SimulationConfig& sim,
+                                                            const PathsConfig& paths, const Position& edgeCutsOrigin,
+                                                            const std::vector<std::string>& orderedNets) {
+    sim.lumpedComponents().clear();
+
+    auto groundNetsResult = libkicad_query::resolveGroundNetNames(paths, sim.groundNet());
+    if (!groundNetsResult) {
+        return std::unexpected(std::move(groundNetsResult).error());
+    }
+    std::unordered_set<std::string> membership(orderedNets.begin(), orderedNets.end());
+    membership.insert(groundNetsResult->begin(), groundNetsResult->end());
+
+    auto footprintsResult = libkicad_query::footprints(
+        paths, "Simulation \"" + sim.name() + "\": enumerating footprints for lumped-component discovery");
+    if (!footprintsResult) {
+        return std::unexpected(std::move(footprintsResult).error());
+    }
+
+    for (const auto& footprint : *footprintsResult) {
+        const auto kind = _lumpedComponentKind(_letterPrefix(footprint.reference));
+        if (!kind.has_value()) {
+            continue;
+        }
+        if (footprint.pins.size() != 2) {
+            // Same visibility reasoning as the net-membership skip below -- an R/L/C-prefixed
+            // footprint that isn't exactly 2 pins (a resistor network, a 4-pin common-mode choke,
+            // an unpopulated/DNP third pad some capacitor footprint variants report) would
+            // otherwise silently vanish, indistinguishable from "wrong prefix, never considered."
+            logInfo("Simulation \"" + sim.name() + "\": component " + footprint.reference + " has " +
+                     std::to_string(footprint.pins.size()) + " pin(s), not 2 -- skipping (not a supported R/L/C shape)");
+            continue;
+        }
+        const auto& pin1 = footprint.pins[0];
+        const auto& pin2 = footprint.pins[1];
+        if (pin1.netName.empty() || pin2.netName.empty()) {
+            logInfo("Simulation \"" + sim.name() + "\": component " + footprint.reference +
+                     " has an unconnected pin -- skipping");
+            continue;
+        }
+        if (membership.find(pin1.netName) == membership.end() || membership.find(pin2.netName) == membership.end()) {
+            // logInfo, not logWarning: this is the ordinary, expected outcome for most R/L/C parts
+            // on a real board (only a small minority ever sit between two simulated/ground nets) --
+            // but it's the one skip reason every other branch below already logs an equivalent of
+            // and this one didn't, leaving "found the part but its nets didn't match" completely
+            // silent and indistinguishable from "never considered it at all" (wrong prefix/pin
+            // count). Bounded volume: only ever printed for genuine 2-pin R/L/C footprints, already
+            // a small subset of a real board.
+            logInfo("Simulation \"" + sim.name() + "\": component " + footprint.reference + " (pins on \"" +
+                     _unescapeForDisplay(pin1.netName) + "\" / \"" + _unescapeForDisplay(pin2.netName) +
+                     "\") -- neither/only one net is in this simulation's involved or ground nets, skipping");
+            continue;
+        }
+
+        const auto [type, unitLetter] = *kind;
+        const std::optional<double> parsedValue = parseComponentValue(footprint.value, unitLetter);
+        if (!parsedValue.has_value()) {
+            logWarning("Simulation \"" + sim.name() + "\": component " + footprint.reference +
+                       " is on a simulated net but its value \"" + footprint.value + "\" couldn't be parsed -- skipping");
+            continue;
+        }
+
+        auto pad1Result = libkicad_query::resolvePin(
+            paths, footprint.reference, pin1.number,
+            "Simulation \"" + sim.name() + "\": lumped component " + footprint.reference + " pin " + pin1.number);
+        if (!pad1Result) {
+            return std::unexpected(std::move(pad1Result).error());
+        }
+        auto pad2Result = libkicad_query::resolvePin(
+            paths, footprint.reference, pin2.number,
+            "Simulation \"" + sim.name() + "\": lumped component " + footprint.reference + " pin " + pin2.number);
+        if (!pad2Result) {
+            return std::unexpected(std::move(pad2Result).error());
+        }
+        const PadIdentity& pad1 = *pad1Result;
+        const PadIdentity& pad2 = *pad2Result;
+
+        if (pad1.copperLayerName != pad2.copperLayerName) {
+            logWarning("Simulation \"" + sim.name() + "\": component " + footprint.reference +
+                       " has pins on different copper layers -- skipping (not supported)");
+            continue;
+        }
+        const std::string layerFileName = _normalizeLayerName(pad1.copperLayerName);
+        const std::optional<std::int32_t> layer = config.metalLayerIndexForFileName(layerFileName);
+        if (!layer.has_value()) {
+            logWarning("Simulation \"" + sim.name() + "\": component " + footprint.reference + ": copper layer \"" +
+                       pad1.copperLayerName + "\" not found in stackup -- skipping");
+            continue;
+        }
+
+        const Position pos1 = _padPositionInSimFrame(pad1, edgeCutsOrigin);
+        const Position pos2 = _padPositionInSimFrame(pad2, edgeCutsOrigin);
+        const double angle = std::atan2(pos2.y() - pos1.y(), pos2.x() - pos1.x());
+        const std::optional<double> snapped = _snapToCardinal(angle, kDirectionToleranceDegrees);
+        if (!snapped.has_value()) {
+            logWarning("Simulation \"" + sim.name() + "\": component " + footprint.reference +
+                       "'s two pads aren't axis-aligned -- skipping (not supported)");
+            continue;
+        }
+
+        LumpedComponentConfig component;
+        component.setReference(footprint.reference);
+        component.setType(type);
+        switch (type) {
+        case LumpedComponentType::Resistor:
+            component.setResistance(*parsedValue);
+            break;
+        case LumpedComponentType::Inductor:
+            component.setInductance(*parsedValue);
+            break;
+        case LumpedComponentType::Capacitor:
+            component.setCapacitance(*parsedValue);
+            break;
+        }
+        component.setPosition1({pos1.x(), pos1.y()});
+        component.setPosition2({pos2.x(), pos2.y()});
+        component.setDirection(*snapped);
+        component.setLayer(*layer);
+        sim.lumpedComponents().push_back(std::move(component));
+    }
+    return {};
+}
 
 std::expected<void, std::string> _resolvePortRef(const PathsConfig& paths, PortRef& ref, const _PortIndex& index,
                                                   const std::vector<std::string>& involvedNets,
@@ -328,6 +489,18 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
         }
         sim.resolvedNets() = orderedNets;
 
+        // Every pad targeted by a SimulationConfig-level excitation always gets a PortConfig (with
+        // absorbSignal()==true) regardless of that net's own Probe/Absorb Signal selections -- see
+        // InvolvedNetConfig's own doc comment. footprint()/pin() are plain, unresolved identifiers
+        // here (not yet matched to a specific pad), but that's exactly what pad.footprintRef/
+        // pad.padNumber already are too, so a direct string-pair comparison below is enough --
+        // resolvePin() is only needed later (in the excitations loop) to validate/derive the
+        // driven port's own index, not to answer this membership question.
+        std::set<std::pair<std::string, std::string>> excitationTargets;
+        for (const ExcitationConfig& excitation : sim.excitations()) {
+            excitationTargets.emplace(excitation.footprint(), excitation.pin());
+        }
+
         for (const std::string& netName : orderedNets) {
             const InvolvedNetConfig& entry = *netOwner.at(netName);
             auto padsResult = libkicad_query::padsOnNet(
@@ -344,10 +517,21 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
             }
 
             for (const PadIdentity& pad : pads) {
-                // "Included in Simulation" per pin (see InvolvedNetConfig's own doc comment) --
-                // this pad's net is involved, but this specific pad was explicitly excluded from
-                // it, so it gets no port at all rather than just an unexcited one.
-                if (entry.isPinExcluded(pad.footprintRef, pad.padNumber)) {
+                // Probe/Absorb Signal per pin (see InvolvedNetConfig's own doc comment for the
+                // legacy-vs-explicit resolution modes this implements) -- this pad's net is
+                // involved, but unless this specific pad is probed, excited, or (in legacy mode)
+                // not excluded, it gets nothing at all: no port, no probe.
+                const bool isExcitationTarget =
+                    excitationTargets.find({pad.footprintRef, pad.padNumber}) != excitationTargets.end();
+                std::optional<bool> absorb;
+                if (!entry.hasExplicitPinSelections()) {
+                    if (!entry.isPinExcluded(pad.footprintRef, pad.padNumber)) {
+                        absorb = true;
+                    }
+                } else {
+                    absorb = entry.probedPinAbsorbs(pad.footprintRef, pad.padNumber);
+                }
+                if (!absorb.has_value() && !isExcitationTarget) {
                     continue;
                 }
                 // netName un-escaped here, not left for each individual message to handle -- portLabel
@@ -410,6 +594,11 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                 // time by however many pads happened to be on the involved nets, not by how many
                 // the user actually asked to drive.
                 port.setExcite(false);
+                // isExcitationTarget wins over a false/absent probedPins() entry -- an excited pad
+                // always gets the full absorbing structure (see PortConfig::absorbSignal()'s own
+                // doc comment); the excitations loop below flips excite() itself back on for
+                // whichever port index this pad resolves to.
+                port.setAbsorbSignal(isExcitationTarget || absorb.value_or(true));
                 // width/length deliberately left unscaled here, matching entry.length()/entry.width()'s
                 // own file units -- SimulationConfig::scaleToSimulationUnits() (called once, by
                 // EMSConfig::scaledToSimulationUnits(), at the FDTD-facing boundary) scales every
@@ -477,6 +666,10 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                 return r;
             }
             pair.postInit();
+        }
+
+        if (auto r = _resolveLumpedComponents(config, sim, paths, edgeCutsOrigin, orderedNets); !r) {
+            return r;
         }
     }
     return {};

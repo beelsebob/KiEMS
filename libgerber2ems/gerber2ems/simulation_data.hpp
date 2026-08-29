@@ -64,6 +64,11 @@ inline void from_json(const nlohmann::json& j, SimulationGrid& g) { j.at("gridLi
 struct SimulationPortResults {
     std::vector<std::vector<std::complex<double>>> reflected;
     std::vector<std::vector<std::complex<double>>> incident;
+    /// Raw (undecomposed) voltage/current vs. frequency for ports with absorbSignal()==false --
+    /// see Simulation::PortParameters' own doc comment. Keyed by port index; only ever populated
+    /// for non-absorbing ports.
+    std::map<std::int32_t, std::vector<std::complex<double>>> probeVoltage;
+    std::map<std::int32_t, std::vector<std::complex<double>>> probeCurrent;
 };
 
 /// Every excited port's own FDTD run, for one SimulationConfig -- keyed by excited port index.

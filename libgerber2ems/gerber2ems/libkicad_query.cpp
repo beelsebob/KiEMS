@@ -11,7 +11,6 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include "logging.hpp"
 
 extern char** environ;
 
@@ -155,6 +154,10 @@ StackupLayer _parseStackupLine(const std::string& line) {
         layer.kind = StackupLayerKind::Copper;
     } else if (kind == "core") {
         layer.kind = StackupLayerKind::Core;
+    } else if (kind == "soldermask-top") {
+        layer.kind = StackupLayerKind::SolderMaskTop;
+    } else if (kind == "soldermask-bottom") {
+        layer.kind = StackupLayerKind::SolderMaskBottom;
     } else {
         layer.kind = StackupLayerKind::Prepreg;
     }
@@ -163,6 +166,25 @@ StackupLayer _parseStackupLine(const std::string& line) {
     layer.epsilonR = std::stod(fields.at(3));
     layer.lossTangent = std::stod(fields.at(4));
     return layer;
+}
+
+ComponentTriangle _parseComponentTriangleLine(const std::string& line) {
+    const std::vector<std::string> fields = _splitTabs(line);
+    ComponentTriangle t;
+    t.ax = std::stod(fields.at(0));
+    t.ay = std::stod(fields.at(1));
+    t.az = std::stod(fields.at(2));
+    t.bx = std::stod(fields.at(3));
+    t.by = std::stod(fields.at(4));
+    t.bz = std::stod(fields.at(5));
+    t.cx = std::stod(fields.at(6));
+    t.cy = std::stod(fields.at(7));
+    t.cz = std::stod(fields.at(8));
+    t.r = std::stod(fields.at(9));
+    t.g = std::stod(fields.at(10));
+    t.b = std::stod(fields.at(11));
+    t.a = std::stod(fields.at(12));
+    return t;
 }
 
 } // namespace
@@ -254,6 +276,45 @@ std::expected<std::vector<ThroughHole>, std::string> throughHoles(const PathsCon
         holes.push_back(std::move(hole));
     }
     return holes;
+}
+
+std::expected<ComponentModelExportResult, std::string> exportComponentModels(const PathsConfig& paths,
+                                                                                const std::string& componentFilter,
+                                                                                const std::string& outputStlPath,
+                                                                                const std::string& context) {
+    auto lines = _query(paths, "export-component-models", {componentFilter, outputStlPath}, context);
+    if (!lines) return std::unexpected(std::move(lines).error());
+    // Three explicitly-counted sections, not just newline-delimited to end of stream -- see
+    // libkicad_smoketest/main.cpp's own comment on why an implicit boundary between free-text
+    // messages and tab-separated triangle rows would be ambiguous.
+    if (lines->size() < 3) {
+        return std::unexpected(context + ": malformed response from libkicad_smoketest (missing header)");
+    }
+    std::size_t index = 0;
+    ComponentModelExportResult result;
+    result.exportSucceeded = lines->at(index++) == "1";
+    result.topCopperZMm = std::stod(lines->at(index++));
+
+    const std::size_t messageCount = std::stoul(lines->at(index++));
+    if (index + messageCount > lines->size()) {
+        return std::unexpected(context + ": malformed response from libkicad_smoketest (truncated messages)");
+    }
+    result.messages.assign(lines->begin() + static_cast<std::ptrdiff_t>(index),
+                            lines->begin() + static_cast<std::ptrdiff_t>(index + messageCount));
+    index += messageCount;
+
+    if (index >= lines->size()) {
+        return std::unexpected(context + ": malformed response from libkicad_smoketest (missing triangle count)");
+    }
+    const std::size_t triangleCount = std::stoul(lines->at(index++));
+    if (index + triangleCount > lines->size()) {
+        return std::unexpected(context + ": malformed response from libkicad_smoketest (truncated triangles)");
+    }
+    result.triangles.reserve(triangleCount);
+    for (std::size_t i = 0; i < triangleCount; ++i) {
+        result.triangles.push_back(_parseComponentTriangleLine(lines->at(index + i)));
+    }
+    return result;
 }
 
 std::expected<std::vector<FootprintInfo>, std::string> footprints(const PathsConfig& paths,

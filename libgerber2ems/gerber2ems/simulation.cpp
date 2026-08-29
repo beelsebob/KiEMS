@@ -28,10 +28,27 @@ extern char** environ;
 
 namespace gerber2ems {
 
+using namespace Cu;
+
 namespace {
 
 std::string _point3ToString(const Point3& p) {
     return "[" + std::to_string(p[0]) + ", " + std::to_string(p[1]) + ", " + std::to_string(p[2]) + "]";
+}
+
+// Dielectric loss tangent -> conductivity (kappa = 2*pi*f*eps0*epsilonR*lossTangent), evaluated at a
+// single fixed frequency rather than modeled as properly dispersive -- CSXCAD's CSPropMaterial::
+// SetKappa() takes one frequency-independent conductivity, but loss tangent implies a conductivity
+// that scales with frequency, so any single value is only exact at the frequency it's evaluated at.
+// 2.5 GHz is a placeholder for testing (chosen directly, not derived from this simulation's own
+// frequency sweep) -- TODO: replace with a configurable per-simulation (or per-material) frequency
+// once there's UI for it, rather than this constant. Shared by every dielectric material this
+// Simulation creates (substrates, solder mask) so they're all evaluated at the same placeholder
+// frequency, not just internally consistent with each other by coincidence.
+double _lossTangentToKappa(double epsilon, double lossTangent) {
+    constexpr double kLossTangentFrequencyHz = 2.5e9;
+    constexpr double kVacuumPermittivity = 8.85418781762e-12; // F/m
+    return 2 * M_PI * kLossTangentFrequencyHz * kVacuumPermittivity * epsilon * lossTangent;
 }
 
 // Standard ray-casting point-in-polygon test against a simple closed loop.
@@ -256,6 +273,7 @@ std::expected<void, std::string> Simulation::populateGeometry() {
         addGrid();
     }
     addSubstrates();
+    addSolderMask();
     addNPTHHoles();
     if (_options.exportField.has_value()) {
         addDumpBoxes();
@@ -267,6 +285,9 @@ std::expected<void, std::string> Simulation::populateGeometry() {
     if (auto result = addPorts(); !result) {
         return std::unexpected(result.error());
     }
+    if (auto result = addLumpedComponents(); !result) {
+        return std::unexpected(result.error());
+    }
     return {};
 }
 
@@ -275,26 +296,9 @@ void Simulation::createMaterials() {
     for (std::size_t i = 0; i < metals.size(); ++i) {
         _gerberMaterials.push_back(addMetal(*_csx, "Gerber_" + std::to_string(i)));
     }
-    // Dielectric loss tangent -> conductivity (kappa = 2*pi*f*eps0*epsilonR*lossTangent), evaluated
-    // at a single fixed frequency rather than modeled as properly dispersive -- CSXCAD's
-    // CSPropMaterial::SetKappa() takes one frequency-independent conductivity, but loss tangent
-    // implies a conductivity that scales with frequency, so any single value is only exact at the
-    // frequency it's evaluated at. 2.5 GHz is a placeholder for testing (chosen directly, not
-    // derived from this simulation's own frequency sweep) -- TODO: replace with a configurable
-    // per-simulation (or per-material) frequency once there's UI for it, rather than this constant.
-    constexpr double kLossTangentFrequencyHz = 2.5e9;
-    constexpr double kVacuumPermittivity = 8.85418781762e-12; // F/m
     const auto substrates = _config.getSubstrates();
     for (std::size_t i = 0; i < substrates.size(); ++i) {
-        const double kappa = 2 * M_PI * kLossTangentFrequencyHz * kVacuumPermittivity * substrates[i].epsilon() *
-                              substrates[i].lossTangent();
-        // TEMPORARY diagnostic: confirms the epsilon/kappa actually reaching CSPropMaterial for
-        // this board -- see the Field Viewer/dumpEarlyFrames investigation into implausibly tiny
-        // near-port vi/iv coefficients.
-        logInfo("[DIAG] Substrate_" + std::to_string(i) + " \"" + substrates[i].name() +
-                 "\" epsilon=" + std::to_string(substrates[i].epsilon()) +
-                 " lossTangent=" + std::to_string(substrates[i].lossTangent()) +
-                 " kappa=" + std::to_string(kappa) + " thicknessMm=" + std::to_string(substrates[i].thickness()));
+        const double kappa = _lossTangentToKappa(substrates[i].epsilon(), substrates[i].lossTangent());
         _substrateMaterials.push_back(
             addMaterial(*_csx, "Substrate_" + std::to_string(i), substrates[i].epsilon(), kappa));
     }
@@ -360,7 +364,7 @@ void Simulation::addPortGrid() {
         // (SlicedBoard::xMin/yMin, itself already an absolute coordinate in that same frame) would
         // double-count the offset and place this density pad millions of sim units away from the
         // real port, discarded once compileGrid() clips lines outside the real domain.
-        _gridGen->addPads().emplace_back(ap, "PORT", Position(posX + width / 2, posY));
+        _gridGen->addPads().emplace_back(ap, NetName("PORT"), Position(posX + width / 2, posY));
         _gridGen->addApertures().insert_or_assign(
             ap, Aperture("", std::make_shared<ApertureRect>(width, height)));
     }
@@ -388,7 +392,7 @@ void Simulation::addContours(const std::vector<Triangle>& contours, double zHeig
             xs.push_back(point.x());
             ys.push_back(point.y());
         }
-        addPolygon(*_gerberMaterials[static_cast<std::size_t>(layerIndex)], xs, ys, axisIndex("z"), zHeight, 1);
+        addPolygon(*_gerberMaterials[static_cast<std::size_t>(layerIndex)], xs, ys, axisIndex("z"), zHeight, 10);
     }
 }
 
@@ -438,7 +442,16 @@ std::expected<void, std::string> Simulation::addMslPort(PortConfig& portConfig, 
         portConfig.setDirection(*portConfig.direction() + 360);
     }
 
-    static const std::map<std::int32_t, std::string> dirMap = {{0, "y"}, {90, "x"}, {180, "y"}, {270, "x"}};
+    // direction is the pad's own departure-angle convention (0/180 => horizontal => x, 90/270 =>
+    // vertical => y) -- see LumpedComponentConfig::direction()'s own doc comment, which is explicit
+    // that PortConfig::direction() uses this exact same convention (both are ultimately populated by
+    // the same _deriveDirection()/pinDirectionOverride() logic in port_resolution.cpp). This dirMap
+    // previously read {{0,"y"},{90,"x"},...} -- backwards relative to that documented convention --
+    // which rotated every MSL port's measurement/feed-resistor box 90 degrees away from the real
+    // routed trace it is meant to sample and terminate, breaking clean absorption at that
+    // junction (an excited port at the same misalignment still radiates something, so it read as
+    // "mostly working" there, but a purely-absorbing port has no such slack).
+    static const std::map<std::int32_t, std::string> dirMap = {{0, "x"}, {90, "y"}, {180, "x"}, {270, "y"}};
     const auto dirIt = dirMap.find(static_cast<std::int32_t>(*portConfig.direction()));
     if (dirIt == dirMap.end()) {
         logError("Ports rotation is not a multiple of 90 degrees which is not supported, skipping");
@@ -460,20 +473,31 @@ std::expected<void, std::string> Simulation::addMslPort(PortConfig& portConfig, 
     const double width = portConfig.width();
     const double length = portConfig.length();
 
+    // Transverse (width) axis and propagation (length) axis, matching the dirMap fix above -- at
+    // direction=0 (a trace departing horizontally, +x) this must put `length` along x and `width`
+    // along y, the opposite of the old cos<->width/sin<->length pairing.
+    const double widthDirX = -std::round(std::sin(angle));
+    const double widthDirY = std::round(std::cos(angle));
+    const double propDirX = std::round(std::cos(angle));
+    const double propDirY = std::round(std::sin(angle));
+
     const Point3 start = {
-        std::round(posX - (width / 2) * std::round(std::cos(angle))),
-        std::round(posY - (width / 2) * std::round(std::sin(angle))),
+        std::round(posX - (width / 2) * widthDirX),
+        std::round(posY - (width / 2) * widthDirY),
         std::round(startZ),
     };
     const Point3 stop = {
-        std::round(posX + (width / 2) * std::round(std::cos(angle)) - length * std::round(std::sin(angle))),
-        std::round(posY + (width / 2) * std::round(std::sin(angle)) + length * std::round(std::cos(angle))),
+        std::round(posX + (width / 2) * widthDirX + length * propDirX),
+        std::round(posY + (width / 2) * widthDirY + length * propDirY),
         std::round(stopZ),
     };
 
     logDebug("Adding port at start: " + _point3ToString(start) + " end: " + _point3ToString(stop));
-    CSPropMetal* metal = addMetal(*_csx, "Port_" + std::to_string(portNumber));
-    _ports.push_back(std::make_unique<MSLPort>(*_csx, portNumber, *metal, start, stop, dirIt->second, "z",
+    // The imported Gerber already supplies the trace metal. Adding the axis-aligned port box as
+    // metal too would invent a straight copper strip even when the real route bends inside the port
+    // interval. On TestSim's U10.59 that synthetic strip overlaps a nearby GND pour and creates a
+    // literal PEC short across the intended clearance.
+    _ports.push_back(std::make_unique<MSLPort>(*_csx, portNumber, start, stop, dirIt->second, "z",
                                                 excite ? 1.0 : 0.0, portConfig.impedance(), 100));
     return {};
 }
@@ -524,7 +548,7 @@ std::expected<void, std::string> Simulation::addResistivePort(PortConfig& portCo
 
 void Simulation::addPlane(double zHeight) {
     addBox(*_planeMaterial, {_slicedBoard.xMin, _slicedBoard.yMin, zHeight},
-           {_slicedBoard.xMin + _slicedBoard.width, _slicedBoard.yMin + _slicedBoard.height, zHeight}, 1);
+           {_slicedBoard.xMin + _slicedBoard.width, _slicedBoard.yMin + _slicedBoard.height, zHeight}, 10);
 }
 
 void Simulation::addSubstrates() {
@@ -539,6 +563,88 @@ void Simulation::addSubstrates() {
         logDebug("Added substrate from " + std::to_string(offset) + " to " +
                  std::to_string(offset - substrates[i].thickness()));
         offset -= substrates[i].thickness();
+    }
+}
+
+void Simulation::addSolderMask() {
+    const auto masks = _config.getSolderMasks();
+    if (masks.empty()) {
+        return;
+    }
+    logInfo("Adding solder mask");
+    // Bottom mask sits just past the last copper layer's own Z -- same "sum every substrate's
+    // thickness" computation addNPTHHoles() already does for that same Z (see its own doc comment).
+    double substrateThickness = 0;
+    for (const auto& layer : _config.getSubstrates()) {
+        substrateThickness += layer.thickness();
+    }
+    for (const auto& mask : masks) {
+        const bool isTop = mask.kind() == LayerKind::SolderMaskTop;
+        const std::vector<std::vector<Position>>& openingLoops =
+            isTop ? _slicedBoard.topMaskOpeningLoops : _slicedBoard.bottomMaskOpeningLoops;
+        const std::vector<Triangle>& coverageTriangles =
+            isTop ? _slicedBoard.topMaskTriangles : _slicedBoard.bottomMaskTriangles;
+        if (coverageTriangles.empty()) {
+            // No mask gerber for this side, or it composited to nothing -- see
+            // board_slicing.cpp's own graceful-skip handling.
+            continue;
+        }
+        // Top mask sits above F.Cu (Z=0, extruding toward +Z); bottom mask sits below the last
+        // copper layer (extruding further away from Z=0, i.e. more negative still).
+        const double elevation = isTop ? 0.0 : -substrateThickness - mask.thickness();
+        const double length = mask.thickness();
+        const double kappa = _lossTangentToKappa(mask.epsilon(), mask.lossTangent());
+        CSProperties* material =
+            addMaterial(*_csx, isTop ? "SolderMaskTop" : "SolderMaskBottom", mask.epsilon(), kappa);
+        _solderMaskMaterials.push_back(material);
+        // One primitive for the *whole* coverage area -- this simulation's own real cutout shape
+        // (_slicedBoard.outline, the same polygon addSubstrates() approximates with a plain
+        // bounding box instead), not a bounding-box rectangle: a tighter outer shape means fewer
+        // quarter-cells even have a candidate reason to evaluate this primitive at all outside the
+        // real board area (e.g. past a rounded/notched edge), on top of the primitive-count win
+        // below. Every individual pad/via opening is then punched out via a small number of
+        // higher-priority vacuum cutouts -- exactly addNPTHHoles()'s own established technique, not
+        // the far more expensive "extrude every already-triangulated coverage-minus-holes triangle
+        // as its own CSXCAD primitive" this used to do. That approach was geometrically equivalent
+        // but made openEMS's own per-cell effective-material averaging dramatically slower (confirmed
+        // via its own profiler): every extra small primitive gets checked at every quarter-cell query
+        // across the *entire* mesh, not just near where it actually sits, so primitive count matters
+        // far more than which of these two equivalent shapes is used. Priority 2: above substrate
+        // (negative), so a query exactly at their shared Z=0 boundary resolves to mask rather than
+        // raw substrate; below via priorities (50/51) so a real via barrel still correctly punches
+        // through the modeled mask at its own footprint; and -- critically -- below copper's own
+        // priority (10, not 1: raised specifically for this). Copper is a zero-thickness sheet at
+        // Z=0, exactly the mask's own lower boundary, so the two primitives *do* coincide there
+        // despite occupying disjoint Z ranges everywhere else. CalcPEC_Range() resolves PEC/PMC
+        // edges via the *same* priority-ordered search across MATERIAL and METAL primitives
+        // together (CSXCAD/ContinuousStructure.cpp's primList-based GetPropertyByCoordPriority()),
+        // so if this dielectric mask ever outranked copper at that shared boundary, real copper
+        // traces would stop being resolved as PEC everywhere the mask covers them (i.e. everywhere
+        // except punched pad/via openings) -- exactly what caused the "signal never leaves the pad"
+        // regression this priority was raised to fix.
+        std::vector<double> outlineXs;
+        std::vector<double> outlineYs;
+        outlineXs.reserve(_slicedBoard.outline.size());
+        outlineYs.reserve(_slicedBoard.outline.size());
+        for (const Position& point : _slicedBoard.outline) {
+            outlineXs.push_back(point.x());
+            outlineYs.push_back(point.y());
+        }
+        addLinPoly(*material, outlineXs, outlineYs, axisIndex("z"), elevation, length, 2);
+        for (const std::vector<Position>& loop : openingLoops) {
+            std::vector<double> xs;
+            std::vector<double> ys;
+            xs.reserve(loop.size());
+            ys.reserve(loop.size());
+            for (const Position& point : loop) {
+                xs.push_back(point.x());
+                ys.push_back(point.y());
+            }
+            addLinPoly(*_npthVoidMaterial, xs, ys, axisIndex("z"), elevation, length, 3);
+        }
+        logDebug("Added " + std::string(isTop ? "top" : "bottom") + " solder mask from " +
+                 std::to_string(elevation) + " to " + std::to_string(elevation + length) + " with " +
+                 std::to_string(openingLoops.size()) + " opening(s)");
     }
 }
 
@@ -835,133 +941,6 @@ std::expected<void, std::string> Simulation::setupFDTDOperator(std::int32_t exci
 
     _fdtd.SetOverSampling(_options.oversampling);
 
-    // [DIAG] Temporary CSX-inspection instrumentation: walk every property/primitive that claims
-    // the excited port's own center coordinate, to rule in/out an overlapping-primitive-priority
-    // explanation for the vi/vv coefficient collapse seen in the real board's substrate layers.
-    {
-        double excCoord[3] = {0.0, 0.0, 0.0};
-        bool foundExcitation = false;
-        for (std::size_t i = 0; i < _csx->GetQtyProperties() && !foundExcitation; ++i) {
-            auto* excProp = dynamic_cast<CSPropExcitation*>(_csx->GetProperty(i));
-            if (excProp == nullptr) {
-                continue;
-            }
-            for (std::size_t p = 0; p < excProp->GetQtyPrimitives(); ++p) {
-                CSPrimitives* prim = excProp->GetPrimitive(p);
-                double bbox[6];
-                if (prim->GetBoundBox(bbox)) {
-                    excCoord[0] = (bbox[0] + bbox[1]) / 2.0;
-                    excCoord[1] = (bbox[2] + bbox[3]) / 2.0;
-                    excCoord[2] = (bbox[4] + bbox[5]) / 2.0;
-                    foundExcitation = true;
-                    logInfo("[CSX-DIAG] Excitation '" + excProp->GetName() + "' primitive#" +
-                             std::to_string(p) + " bbox=[" + std::to_string(bbox[0]) + ".." +
-                             std::to_string(bbox[1]) + ", " + std::to_string(bbox[2]) + ".." +
-                             std::to_string(bbox[3]) + ", " + std::to_string(bbox[4]) + ".." +
-                             std::to_string(bbox[5]) + "]");
-                    break;
-                }
-            }
-        }
-
-        if (foundExcitation) {
-            logInfo("[CSX-DIAG] Excitation center coord: [" + std::to_string(excCoord[0]) + ", " +
-                     std::to_string(excCoord[1]) + ", " + std::to_string(excCoord[2]) + "]");
-            for (std::size_t i = 0; i < _csx->GetQtyProperties(); ++i) {
-                CSProperties* prop = _csx->GetProperty(i);
-                for (std::size_t p = 0; p < prop->GetQtyPrimitives(); ++p) {
-                    CSPrimitives* prim = prop->GetPrimitive(p);
-                    double bbox[6];
-                    if (!prim->GetBoundBox(bbox)) {
-                        continue;
-                    }
-                    const bool overlaps = excCoord[0] >= bbox[0] && excCoord[0] <= bbox[1] &&
-                                          excCoord[1] >= bbox[2] && excCoord[1] <= bbox[3] &&
-                                          excCoord[2] >= bbox[4] && excCoord[2] <= bbox[5];
-                    if (!overlaps) {
-                        continue;
-                    }
-                    logInfo("[CSX-DIAG]   overlap: property='" + prop->GetName() + "' type=" +
-                             prop->GetTypeXMLString() + " primitive#" + std::to_string(p) +
-                             " priority=" + std::to_string(prim->GetPriority()) + " bbox=[" +
-                             std::to_string(bbox[0]) + ".." + std::to_string(bbox[1]) + ", " +
-                             std::to_string(bbox[2]) + ".." + std::to_string(bbox[3]) + ", " +
-                             std::to_string(bbox[4]) + ".." + std::to_string(bbox[5]) + "]");
-                }
-            }
-
-            CSPrimitives* winningPrim = nullptr;
-            CSProperties* winner =
-                _csx->GetPropertyByCoordPriority(excCoord, CSProperties::ANY, false, &winningPrim);
-            if (winner != nullptr) {
-                logInfo("[CSX-DIAG] Winning property at excitation center: '" + winner->GetName() +
-                         "' type=" + winner->GetTypeXMLString() + " priority=" +
-                         std::to_string(winningPrim != nullptr ? winningPrim->GetPriority() : -999));
-            } else {
-                logInfo("[CSX-DIAG] No property claims the excitation center coordinate!");
-            }
-        } else {
-            logInfo("[CSX-DIAG] No excitation primitive with a bounding box was found.");
-        }
-
-        // [DIAG] The vi/vv collapse observed earlier was NOT localized to the port -- it showed up
-        // at arbitrary X/Y, in 4 of the real board's 5 substrate layers (every one except the thick
-        // 406um middle layer), independent of position. Re-run the same overlap walk at each
-        // layer's own Z midpoint (same X/Y as the excitation, since the original Z-sweep found the
-        // pattern was X/Y-independent) to check whether something other than the expected substrate
-        // material is claiming/winning those coordinates -- e.g. a via, plane, or NPTH void with an
-        // unexpectedly high priority silently overriding the dielectric specifically in the thin
-        // layers. Z midpoints computed by hand from createMaterials()'s own [DIAG] thickness prints
-        // (in sim units, board top at Z=0, thickness order top->bottom: 1090,1000,4060,1000,1090):
-        // L0 [0..-1090] mid -545, L1 [-1090..-2090] mid -1590, L2 [-2090..-6150] mid -4120 (the
-        // normal, unaffected layer), L3 [-6150..-7150] mid -6650, L4 [-7150..-8240] mid -7695.
-        if (foundExcitation) {
-            const std::array<std::pair<const char*, double>, 5> layerMidpoints = {{
-                {"L0 Dielectric1 [ANOMALOUS]", -545.0},
-                {"L1 Dielectric2 [ANOMALOUS]", -1590.0},
-                {"L2 Dielectric3 [NORMAL]", -4120.0},
-                {"L3 Dielectric4 [ANOMALOUS]", -6650.0},
-                {"L4 Dielectric5 [ANOMALOUS]", -7695.0},
-            }};
-            for (const auto& [label, z] : layerMidpoints) {
-                const double sampleCoord[3] = {excCoord[0], excCoord[1], z};
-                logInfo(std::string("[CSX-DIAG] Z-sweep ") + label + " @ [" + std::to_string(sampleCoord[0]) +
-                         ", " + std::to_string(sampleCoord[1]) + ", " + std::to_string(sampleCoord[2]) + "]");
-                for (std::size_t i = 0; i < _csx->GetQtyProperties(); ++i) {
-                    CSProperties* prop = _csx->GetProperty(i);
-                    for (std::size_t p = 0; p < prop->GetQtyPrimitives(); ++p) {
-                        CSPrimitives* prim = prop->GetPrimitive(p);
-                        double bbox[6];
-                        if (!prim->GetBoundBox(bbox)) {
-                            continue;
-                        }
-                        const bool overlaps = sampleCoord[0] >= bbox[0] && sampleCoord[0] <= bbox[1] &&
-                                              sampleCoord[1] >= bbox[2] && sampleCoord[1] <= bbox[3] &&
-                                              sampleCoord[2] >= bbox[4] && sampleCoord[2] <= bbox[5];
-                        if (!overlaps) {
-                            continue;
-                        }
-                        logInfo("[CSX-DIAG]   overlap: property='" + prop->GetName() + "' type=" +
-                                 prop->GetTypeXMLString() + " primitive#" + std::to_string(p) +
-                                 " priority=" + std::to_string(prim->GetPriority()) + " bbox=[" +
-                                 std::to_string(bbox[0]) + ".." + std::to_string(bbox[1]) + ", " +
-                                 std::to_string(bbox[2]) + ".." + std::to_string(bbox[3]) + ", " +
-                                 std::to_string(bbox[4]) + ".." + std::to_string(bbox[5]) + "]");
-                    }
-                }
-                CSPrimitives* winningPrim = nullptr;
-                CSProperties* winner =
-                    _csx->GetPropertyByCoordPriority(sampleCoord, CSProperties::ANY, false, &winningPrim);
-                if (winner != nullptr) {
-                    logInfo("[CSX-DIAG]   Winner: '" + winner->GetName() + "' type=" + winner->GetTypeXMLString() +
-                             " priority=" + std::to_string(winningPrim != nullptr ? winningPrim->GetPriority() : -999));
-                } else {
-                    logInfo("[CSX-DIAG]   No property claims this coordinate!");
-                }
-            }
-        }
-    }
-
     const auto setupStart = std::chrono::steady_clock::now();
     const int rc = _fdtd.SetupFDTD();
     const double setupSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - setupStart).count();
@@ -984,23 +963,40 @@ std::expected<void, std::string> Simulation::runFDTDInPlace(std::int32_t excited
     return {};
 }
 
-std::expected<std::pair<std::vector<std::vector<std::complex<double>>>, std::vector<std::vector<std::complex<double>>>>,
-              std::string>
-Simulation::getPortParameters(std::int32_t exIndex, const std::vector<double>& frequencies) {
+std::expected<Simulation::PortParameters, std::string> Simulation::getPortParameters(
+    std::int32_t exIndex, const std::vector<double>& frequencies) {
     const std::filesystem::path resultPath = _paths.simulationDir / _simConfig.name() / std::to_string(exIndex);
+    const std::vector<std::complex<double>> naNPlaceholder(frequencies.size(),
+                                                             std::complex<double>(std::numeric_limits<double>::quiet_NaN(),
+                                                                                    std::numeric_limits<double>::quiet_NaN()));
 
-    std::vector<std::vector<std::complex<double>>> incident;
-    std::vector<std::vector<std::complex<double>>> reflected;
+    PortParameters params;
     for (std::size_t index = 0; index < _ports.size(); ++index) {
-        if (auto result = _ports[index]->calcPort(resultPath, frequencies); !result) {
-            return std::unexpected("Port data files do not exist. Did you run simulation step? (" + result.error() +
-                                    ")");
+        const bool absorbs = _simConfig.ports()[index].absorbSignal();
+        if (absorbs) {
+            if (auto result = _ports[index]->calcPort(resultPath, frequencies); !result) {
+                return std::unexpected("Port data files do not exist. Did you run simulation step? (" +
+                                        result.error() + ")");
+            }
+            params.incident.push_back(_ports[index]->ufInc());
+            params.reflected.push_back(_ports[index]->ufRef());
+        } else {
+            // A passive probe has no incident/reflected split (see PortConfig::absorbSignal()'s own
+            // doc comment) -- readUiData() alone is enough for its real data (ufTot()/ifTot()),
+            // pushed separately below; the placeholder here only keeps every other port-index-
+            // aligned vector the right length.
+            if (auto result = _ports[index]->readUiData(resultPath, frequencies); !result) {
+                return std::unexpected("Probe data files do not exist. Did you run simulation step? (" +
+                                        result.error() + ")");
+            }
+            params.incident.push_back(naNPlaceholder);
+            params.reflected.push_back(naNPlaceholder);
+            params.probeVoltage.emplace(static_cast<std::int32_t>(index), _ports[index]->ufTot());
+            params.probeCurrent.emplace(static_cast<std::int32_t>(index), _ports[index]->ifTot());
         }
         logDebug("Found data for port " + std::to_string(index));
-        incident.push_back(_ports[index]->ufInc());
-        reflected.push_back(_ports[index]->ufRef());
     }
-    return std::make_pair(std::move(reflected), std::move(incident));
+    return params;
 }
 
 void Simulation::setupPorts(std::int32_t enabledIdx) {
@@ -1028,12 +1024,136 @@ void Simulation::setupPorts(std::int32_t enabledIdx) {
     }
 }
 
+std::expected<void, std::string> Simulation::addLumpedComponents() {
+    auto& components = _simConfig.lumpedComponents();
+    if (components.empty()) {
+        return {};
+    }
+    logInfo("Adding " + std::to_string(components.size()) + " auto-discovered lumped component(s)");
+
+    // direction is the pad1->pad2 angle in file-frame degrees (0/180 => horizontal => x, 90/270 =>
+    // vertical => y); it must match the box's long axis below, otherwise Operator_Ext_LumpedRLC
+    // snaps the box to zero length along the "current" axis and drops it.
+    static const std::map<std::int32_t, std::string> dirMap = {{0, "x"}, {90, "y"}, {180, "x"}, {270, "y"}};
+
+    for (const auto& component : components) {
+        std::int32_t direction = static_cast<std::int32_t>(component.direction());
+        while (direction < 0) {
+            direction += 360;
+        }
+        const auto dirIt = dirMap.find(direction);
+        if (dirIt == dirMap.end()) {
+            logError("Lumped component " + component.reference() + "'s direction is not a multiple of 90 degrees, skipping");
+            continue;
+        }
+        const std::int32_t axisIndex = dirIt->second == "x" ? 0 : 1;
+
+        const auto zResult = getMetalLayerOffset(component.layer());
+        if (!zResult) {
+            return std::unexpected(zResult.error());
+        }
+        const double z = std::round(*zResult);
+        const double angle = component.direction() / 360.0 * 2 * M_PI;
+        const double width = component.width();
+        const auto [x1, y1] = component.position1();
+        const auto [x2, y2] = component.position2();
+
+        // `width` is transverse to the pad1->pad2/current axis. The old code multiplied it by
+        // (cos(angle), sin(angle)), extending the box beyond each pad *along* that axis while
+        // leaving its transverse extent at zero. After mesh snapping that produced nCells1 ==
+        // nCells2 == 1, so only one Yee edge received the lumped correction even when the real pad
+        // spanned several parallel edges. Use the perpendicular vector, and form normalized bounds
+        // so 180/270-degree components are handled without relying on CSPrimBox to reorder them.
+        const double halfWidthX = std::abs(std::round(std::sin(angle))) * width / 2.0;
+        const double halfWidthY = std::abs(std::round(std::cos(angle))) * width / 2.0;
+        const Point3 start = {
+            std::round(std::min(x1, x2) - halfWidthX),
+            std::round(std::min(y1, y2) - halfWidthY),
+            z,
+        };
+        const Point3 stop = {
+            std::round(std::max(x1, x2) + halfWidthX),
+            std::round(std::max(y1, y2) + halfWidthY),
+            z,
+        };
+
+        double resistance = component.resistance();
+        double inductance = component.inductance();
+        double capacitance = component.capacitance();
+        logDebug("Adding lumped " +
+                 std::string(component.type() == LumpedComponentType::Resistor   ? "resistor"
+                             : component.type() == LumpedComponentType::Inductor ? "inductor"
+                                                                                  : "capacitor") +
+                 " " + component.reference() + " at start: " + _point3ToString(start) +
+                 " end: " + _point3ToString(stop));
+        CSPropLumpedElement* prop = addLumpedElement(*_csx, "Lumped_" + component.reference(), axisIndex,
+                                                       /*caps=*/false, resistance, CSPropLumpedElement::SERIES,
+                                                       inductance, capacitance);
+        addBox(*prop, start, stop, 100);
+    }
+    return {};
+}
+
+std::expected<void, std::string> Simulation::addPassiveProbe(PortConfig& portConfig, std::int32_t portNumber) {
+    logDebug("Adding port number " + std::to_string(_ports.size()));
+    if (!portConfig.position().has_value() || !portConfig.direction().has_value()) {
+        logError("Port has no defined position or rotation, skipping");
+        return {};
+    }
+    static const std::map<std::int32_t, std::string> dirMap = {{0, "y"}, {90, "x"}, {180, "y"}, {270, "x"}};
+    const auto dirIt = dirMap.find(static_cast<std::int32_t>(*portConfig.direction()));
+    if (dirIt == dirMap.end()) {
+        logError("Ports rotation is not a multiple of 90 degrees which is not supported, skipping");
+        return {};
+    }
+
+    // Same vertical (trace layer -> reference plane) span addResistivePort() uses, not
+    // addMslPort()'s horizontal one -- a passive probe reads trace-to-plane voltage and
+    // along-trace current at a single point, the same measurement convention LumpedPort's own U/I
+    // probes already establish, not MSLPort's multi-point characteristic-impedance scheme (which
+    // exists solely to normalize S-parameters, meaningless for a probe that computes none).
+    const auto startZResult = getMetalLayerOffset(portConfig.layer());
+    if (!startZResult) {
+        return std::unexpected(startZResult.error());
+    }
+    const auto stopZResult = getMetalLayerOffset(portConfig.plane());
+    if (!stopZResult) {
+        return std::unexpected(stopZResult.error());
+    }
+    const double startZ = *startZResult;
+    const double stopZ = *stopZResult;
+    const double angle = *portConfig.direction() / 360.0 * 2 * M_PI;
+    const auto [posX, posY] = *portConfig.position();
+    const double width = portConfig.width();
+
+    const Point3 start = {
+        std::round(posX - (width / 2) * std::round(std::cos(angle))),
+        std::round(posY - (width / 2) * std::round(std::sin(angle))),
+        std::round(startZ),
+    };
+    const Point3 stop = {
+        std::round(posX + (width / 2) * std::round(std::cos(angle))),
+        std::round(posY - (width / 2) * std::round(std::sin(angle))),
+        std::round(stopZ),
+    };
+
+    logDebug("Adding passive probe at start: " + _point3ToString(start) + " end: " + _point3ToString(stop));
+    _ports.push_back(std::make_unique<PassiveProbe>(*_csx, portNumber, start, stop, "z", 100));
+    return {};
+}
+
 std::expected<void, std::string> Simulation::addPorts() {
     logInfo("Adding ports");
     _ports.clear();
     auto& ports = _simConfig.ports();
     for (std::size_t index = 0; index < ports.size(); ++index) {
-        if (auto result = addMslPort(ports[index], static_cast<std::int32_t>(index), true); !result) {
+        const auto portNumber = static_cast<std::int32_t>(index);
+        // absorbSignal()==false means no metal/resistor termination at all -- a passive read-only
+        // probe (see PortConfig::absorbSignal()'s own doc comment). port_resolution.cpp guarantees
+        // excite() is never true here when absorbSignal() is false, so this check alone is enough.
+        if (auto result = ports[index].absorbSignal() ? addMslPort(ports[index], portNumber, true)
+                                                        : addPassiveProbe(ports[index], portNumber);
+            !result) {
             return result;
         }
     }

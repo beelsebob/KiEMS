@@ -66,6 +66,25 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, readonly, nullable) NSArray<NSNumber *> *pDelayNs;
 @end
 
+/// One passive probe's voltage or current magnitude vs. frequency, measured while `excitedPort`
+/// was driven -- mirrors EMSResultsSParamCurve's shape, but for a probe with absorbSignal()==false
+/// (see gerber2ems::PortConfig::absorbSignal()'s own doc comment), which has no S-parameter of its
+/// own to show (no characteristic impedance to normalize against), only raw magnitude vs. frequency.
+@interface EMSResultsProbeCurve : NSObject
+@property (nonatomic, readonly) NSInteger excitedPort;
+@property (nonatomic, copy, readonly) NSArray<NSNumber *> *voltageMagnitude;
+@property (nonatomic, copy, readonly) NSArray<NSNumber *> *currentMagnitude;
+@end
+
+/// One passive probe's data across every excited port -- mirrors EMSResultsSParamSet's shape,
+/// grouped by probe instead of by excited port (a probe is never excited itself, so "one set per
+/// excited port" doesn't apply the way it does for EMSResultsSParamSet).
+@interface EMSResultsProbe : NSObject
+@property (nonatomic, copy, readonly) NSString *name;
+@property (nonatomic, readonly) NSInteger index;
+@property (nonatomic, copy, readonly) NSArray<EMSResultsProbeCurve *> *curves;
+@end
+
 /// One single-ended trace's group delay vs. frequency.
 @interface EMSResultsTrace : NSObject
 @property (nonatomic, copy, readonly) NSString *name;
@@ -82,6 +101,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, readonly) NSArray<EMSResultsSmith *> *smithCharts;
 @property (nonatomic, copy, readonly) NSArray<EMSResultsDiffPair *> *diffPairs;
 @property (nonatomic, copy, readonly) NSArray<EMSResultsTrace *> *traces;
+@property (nonatomic, copy, readonly) NSArray<EMSResultsProbe *> *probes;
 @end
 
 NS_ASSUME_NONNULL_END

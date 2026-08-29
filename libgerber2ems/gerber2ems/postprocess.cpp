@@ -16,12 +16,15 @@
 
 namespace gerber2ems {
 
+using namespace Cu;
+
 namespace {
 
 constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 const std::complex<double> kComplexNaN(kNaN, kNaN);
 
 std::string _sparamPath(std::int32_t port) { return "Sx" + std::to_string(port) + ".csv"; }
+std::string _probePath(std::int32_t probe) { return "Probe" + std::to_string(probe) + ".csv"; }
 
 std::vector<double> _unwrap(std::vector<double> phase) {
     for (std::size_t i = 1; i < phase.size(); ++i) {
@@ -104,6 +107,8 @@ Postprocessor::Postprocessor(std::vector<double> frequencies, const SimulationCo
     };
     _incident = make3(kComplexNaN);
     _reflected = make3(kComplexNaN);
+    _probeVoltage = make3(kComplexNaN);
+    _probeCurrent = make3(kComplexNaN);
     _sParams = make3(kComplexNaN);
     _delays = std::vector<std::vector<std::vector<double>>>(
         static_cast<std::size_t>(_count),
@@ -132,6 +137,31 @@ void Postprocessor::addPortData(std::int32_t port, std::int32_t excitedPort,
     }
     existing = incident;
     _reflected[static_cast<std::size_t>(port)][static_cast<std::size_t>(excitedPort)] = reflected;
+}
+
+void Postprocessor::addProbeData(std::int32_t probe, std::int32_t excitedPort,
+                                  const std::vector<std::complex<double>>& voltage,
+                                  const std::vector<std::complex<double>>& current) {
+    _probeVoltage[static_cast<std::size_t>(probe)][static_cast<std::size_t>(excitedPort)] = voltage;
+    _probeCurrent[static_cast<std::size_t>(probe)][static_cast<std::size_t>(excitedPort)] = current;
+}
+
+std::optional<std::vector<std::complex<double>>> Postprocessor::getProbeVoltage(std::int32_t probe,
+                                                                                   std::int32_t excitedPort) const {
+    if (probe >= _count || excitedPort >= _count) {
+        return std::nullopt;
+    }
+    const auto& v = _probeVoltage[static_cast<std::size_t>(probe)][static_cast<std::size_t>(excitedPort)];
+    return isValid(v) ? std::optional(v) : std::nullopt;
+}
+
+std::optional<std::vector<std::complex<double>>> Postprocessor::getProbeCurrent(std::int32_t probe,
+                                                                                   std::int32_t excitedPort) const {
+    if (probe >= _count || excitedPort >= _count) {
+        return std::nullopt;
+    }
+    const auto& i = _probeCurrent[static_cast<std::size_t>(probe)][static_cast<std::size_t>(excitedPort)];
+    return isValid(i) ? std::optional(i) : std::nullopt;
 }
 
 void Postprocessor::calculateSparams() {
@@ -464,6 +494,52 @@ void Postprocessor::renderImpedance(bool transparent, const std::filesystem::pat
     }
 }
 
+void Postprocessor::renderProbes(bool transparent, const std::filesystem::path& outputDir) const {
+    logInfo("Rendering passive probe plots");
+    const std::vector<double> freqGHz = _scaleFreqGHz(_frequencies);
+    for (std::int32_t probe = 0; probe < _count; ++probe) {
+        bool any = false;
+        for (std::int32_t exc = 0; exc < _count; ++exc) {
+            if (isValid(_probeVoltage[static_cast<std::size_t>(probe)][static_cast<std::size_t>(exc)])) {
+                any = true;
+                break;
+            }
+        }
+        if (!any) {
+            continue;
+        }
+
+        auto fig = _newFigure();
+        matplot::axes_handle ax0 = matplot::subplot(2, 1, 0);
+        matplot::hold(ax0, true);
+        matplot::axes_handle ax1 = matplot::subplot(2, 1, 1);
+        matplot::hold(ax1, true);
+        for (std::int32_t exc = 0; exc < _count; ++exc) {
+            const auto& v = _probeVoltage[static_cast<std::size_t>(probe)][static_cast<std::size_t>(exc)];
+            const auto& i = _probeCurrent[static_cast<std::size_t>(probe)][static_cast<std::size_t>(exc)];
+            if (!isValid(v)) {
+                continue;
+            }
+            std::vector<double> vMag(v.size());
+            std::vector<double> iMag(i.size());
+            for (std::size_t f = 0; f < v.size(); ++f) {
+                vMag[f] = std::abs(v[f]);
+                iMag[f] = std::abs(i[f]);
+            }
+            matplot::plot(ax0, freqGHz, vMag)->display_name("exc. port " + std::to_string(exc + 1));
+            matplot::plot(ax1, freqGHz, iMag)->display_name("exc. port " + std::to_string(exc + 1));
+        }
+        ax0->ylabel("$|V_{" + std::to_string(probe + 1) + "}| [V]$");
+        matplot::grid(ax0, true);
+        matplot::legend(ax0);
+        ax1->ylabel("$|I_{" + std::to_string(probe + 1) + "}| [A]$");
+        ax1->xlabel("Frequency [GHz]");
+        matplot::grid(ax1, true);
+
+        _saveFigure(fig, outputDir / ("Probe_x" + std::to_string(probe + 1) + ".png"), transparent);
+    }
+}
+
 void Postprocessor::renderSmith(bool transparent, const std::filesystem::path& outputDir) const {
     logInfo("Rendering smith charts");
     for (std::int32_t port = 0; port < _count; ++port) {
@@ -647,6 +723,42 @@ void Postprocessor::sparamPortToFile(std::int32_t portNumber, const std::filesys
     }
 }
 
+void Postprocessor::probeToFile(const std::filesystem::path& simulationDir) const {
+    for (std::int32_t i = 0; i < _count; ++i) {
+        bool any = false;
+        for (std::int32_t exc = 0; exc < _count; ++exc) {
+            if (isValid(_probeVoltage[static_cast<std::size_t>(i)][static_cast<std::size_t>(exc)])) {
+                any = true;
+                break;
+            }
+        }
+        if (any) {
+            probePortToFile(i, simulationDir);
+        }
+    }
+}
+
+void Postprocessor::probePortToFile(std::int32_t probeNumber, const std::filesystem::path& path) const {
+    const auto p = static_cast<std::size_t>(probeNumber);
+    std::string header = "Frequency [MHz], ";
+    for (std::int32_t i = 0; i < _count; ++i) {
+        header += "re(V-" + std::to_string(i) + "), im(V-" + std::to_string(i) + "), re(I-" + std::to_string(i) +
+                  "), im(I-" + std::to_string(i) + "), ";
+    }
+
+    std::ofstream file(path / _probePath(probeNumber));
+    file << header << "\n";
+    for (std::size_t f = 0; f < _frequencies.size(); ++f) {
+        file << (_frequencies[f] / 1e6);
+        for (std::int32_t i = 0; i < _count; ++i) {
+            const auto ii = static_cast<std::size_t>(i);
+            file << ", " << _probeVoltage[p][ii][f].real() << ", " << _probeVoltage[p][ii][f].imag() << ", "
+                 << _probeCurrent[p][ii][f].real() << ", " << _probeCurrent[p][ii][f].imag();
+        }
+        file << "\n";
+    }
+}
+
 namespace {
 
 std::vector<std::string> _splitCsvLine(const std::string& line) {
@@ -800,6 +912,68 @@ std::expected<void, std::string> Postprocessor::loadSparams(const std::filesyste
                 _sParams[static_cast<std::size_t>(sxx.first)][static_cast<std::size_t>(sxx.second)][r] =
                     std::complex<double>(rows[r][col], rows[r][imIt->second]);
             }
+        }
+    }
+    return {};
+}
+
+std::expected<void, std::string> Postprocessor::loadProbes(const std::filesystem::path& inputDir) {
+    for (std::size_t idx = 0; idx < _simConfig.ports().size(); ++idx) {
+        if (_simConfig.ports()[idx].absorbSignal()) {
+            continue;
+        }
+        const std::filesystem::path fpath = inputDir / _probePath(static_cast<std::int32_t>(idx));
+        if (!std::filesystem::exists(fpath)) {
+            continue; // this probe simply wasn't reached by any excited port's own run
+        }
+
+        std::ifstream csvfile(fpath);
+        std::string headerLine;
+        std::getline(csvfile, headerLine);
+        const std::vector<std::string> header = _splitCsvLine(headerLine);
+
+        static const std::regex viPattern(R"(([vi])-([0-9]+))");
+        std::map<std::pair<char, std::int32_t>, std::size_t> reCol, imCol;
+        for (std::size_t colNum = 0; colNum < header.size(); ++colNum) {
+            const std::string lcell = _lower(_trim(header[colNum]));
+            std::smatch match;
+            if (!std::regex_search(lcell, match, viPattern)) {
+                continue;
+            }
+            const std::pair<char, std::int32_t> key = {match[1].str()[0], std::stoi(match[2].str())};
+            if (lcell.find("re(") != std::string::npos) {
+                reCol[key] = colNum;
+            } else if (lcell.find("im(") != std::string::npos) {
+                imCol[key] = colNum;
+            }
+        }
+
+        std::vector<std::vector<double>> rows;
+        std::string line;
+        while (std::getline(csvfile, line)) {
+            if (_trim(line).empty()) {
+                continue;
+            }
+            const std::vector<std::string> cells = _splitCsvLine(line);
+            std::vector<double> row;
+            row.reserve(cells.size());
+            for (const auto& cell : cells) {
+                row.push_back(std::stod(cell));
+            }
+            rows.push_back(std::move(row));
+        }
+
+        for (const auto& [key, col] : reCol) {
+            const auto imIt = imCol.find(key);
+            if (imIt == imCol.end()) {
+                return std::unexpected("Probe CSV error: no imaginary data matching column " + std::to_string(col));
+            }
+            std::vector<std::complex<double>> series(rows.size());
+            for (std::size_t r = 0; r < rows.size(); ++r) {
+                series[r] = std::complex<double>(rows[r][col], rows[r][imIt->second]);
+            }
+            auto& dest = key.first == 'v' ? _probeVoltage : _probeCurrent;
+            dest[idx][static_cast<std::size_t>(key.second)] = std::move(series);
         }
     }
     return {};

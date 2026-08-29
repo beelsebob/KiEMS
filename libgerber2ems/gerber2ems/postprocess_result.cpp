@@ -45,6 +45,18 @@ std::expected<PostprocessResult, std::string> PostprocessResult::compute(const S
                 }
             }
         }
+        for (std::int32_t probe = 0; probe < portCount; ++probe) {
+            if (simConfig.ports()[static_cast<std::size_t>(probe)].absorbSignal()) {
+                continue;
+            }
+            for (std::int32_t excitedPort = 0; excitedPort < portCount; ++excitedPort) {
+                auto voltage = simulation.getProbeVoltage(simConfig.name(), probe, excitedPort);
+                auto current = simulation.getProbeCurrent(simConfig.name(), probe, excitedPort);
+                if (voltage.has_value() && current.has_value()) {
+                    post->addProbeData(probe, excitedPort, *voltage, *current);
+                }
+            }
+        }
         post->processData();
         postprocessors.emplace(simConfig.name(), std::move(post));
     }
@@ -86,6 +98,27 @@ std::optional<Postprocessor::DiffPairImpedance> PostprocessResult::getDiffPairIm
     const std::string& simulationName, std::int32_t diffPairIndex) const {
     const Postprocessor* post = postprocessorFor(simulationName);
     return post == nullptr ? std::nullopt : post->getDiffPairImpedance(diffPairIndex);
+}
+
+std::optional<std::vector<std::complex<double>>> PostprocessResult::getProbeVoltage(const std::string& simulationName,
+                                                                                       std::int32_t probe,
+                                                                                       std::int32_t excitedPort) const {
+    const Postprocessor* post = postprocessorFor(simulationName);
+    return post == nullptr ? std::nullopt : post->getProbeVoltage(probe, excitedPort);
+}
+
+std::optional<std::vector<std::complex<double>>> PostprocessResult::getProbeCurrent(const std::string& simulationName,
+                                                                                       std::int32_t probe,
+                                                                                       std::int32_t excitedPort) const {
+    const Postprocessor* post = postprocessorFor(simulationName);
+    return post == nullptr ? std::nullopt : post->getProbeCurrent(probe, excitedPort);
+}
+
+void PostprocessResult::renderProbes(const std::string& simulationName, bool transparent,
+                                      const std::filesystem::path& outputDir) const {
+    if (const Postprocessor* post = postprocessorFor(simulationName); post != nullptr) {
+        post->renderProbes(transparent, outputDir);
+    }
 }
 
 void PostprocessResult::saveToFile(const std::string& simulationName, const std::filesystem::path& outputDir) const {

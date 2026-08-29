@@ -11,6 +11,7 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -46,8 +47,16 @@ CSPropExcitation* addExcitation(ContinuousStructure& csx, const std::string& nam
                                  const Point3& excVal, double delay = 0);
 CSPropProbeBox* addProbe(ContinuousStructure& csx, const std::string& name, std::int32_t pType, double weight = 1,
                           std::int32_t normDir = -1);
+/// `type`/`inductance`/`capacitance` default to a plain PARALLEL resistor (this helper's original,
+/// still-used shape -- see ports.cpp's port-resistor call sites) -- pass `SERIES` plus real
+/// inductance/capacitance for an auto-discovered lumped R/L/C component (see
+/// Simulation::addLumpedComponents()). NaN (the CSPropLumpedElement/Operator_Ext_LumpedRLC default
+/// for an unset value) means "not physically present", not "present, value zero" -- see
+/// operator_ext_lumpedRLC.cpp's own doc comment on that distinction.
 CSPropLumpedElement* addLumpedElement(ContinuousStructure& csx, const std::string& name, std::int32_t ny, bool caps,
-                                       double resistance);
+                                       double resistance, CSPropLumpedElement::LEtype type = CSPropLumpedElement::PARALLEL,
+                                       double inductance = std::numeric_limits<double>::quiet_NaN(),
+                                       double capacitance = std::numeric_limits<double>::quiet_NaN());
 CSPropDumpBox* addDump(ContinuousStructure& csx, const std::string& name, const std::array<std::int32_t, 3>& subSampling);
 
 CSPrimBox* addBox(CSProperties& prop, const Point3& start, const Point3& stop, std::int32_t priority = 0);

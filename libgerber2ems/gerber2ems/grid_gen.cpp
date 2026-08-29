@@ -16,6 +16,8 @@
 
 namespace gerber2ems {
 
+using namespace Cu;
+
 namespace {
 
 // ---- scalar root finder (replaces scipy.optimize.fsolve for these single-variable equations) ----
@@ -489,7 +491,7 @@ public:
         }
     }
 
-    void addLinesFromPads(const std::vector<Pad>& pads, const std::vector<std::string>& nets,
+    void addLinesFromPads(const std::vector<Pad>& pads, const std::vector<NetName>& nets,
                            const std::unordered_map<std::string, Aperture>& apertures) {
         for (const auto& pad : pads) {
             if (std::find(nets.begin(), nets.end(), pad.net()) == nets.end()) {
@@ -861,14 +863,22 @@ struct GridGenerator::Impl {
         // resolveSimulationPorts()). The mesh's core-boundary (domain SIZE) is floored directly from
         // the sliced board's own extent below, independent of this list, so the ground net does not
         // need to be included here -- its pour is already covered by that domain-sized core mesh.
-        std::vector<std::string> nets = simConfig.resolvedNets();
+        // Wrapped in NetName rather than manually reversing KiCad's own "{slash}" escaping here (as
+        // this used to) -- resolvedNets() is in KiCad's escaped form, while gbr.traceForNet()/
+        // addLinesFromPads() below compare straight against Gerber-derived data (already NetName,
+        // real-unescaped-slash form -- see gerber_io.cpp); NetName's own normalize-before-compare
+        // handles that mismatch structurally instead. See net_name.hpp's own doc comment.
+        std::vector<NetName> nets;
+        for (const std::string& net : simConfig.resolvedNets()) {
+            nets.emplace_back(net);
+        }
         {
             std::string netsList;
             for (const auto& n : nets) {
                 if (!netsList.empty()) {
                     netsList += ", ";
                 }
-                netsList += n;
+                netsList += n.unescaped();
             }
             logInfo("### Grid Generator: mesh-sizing nets = [" + netsList + "] ###");
         }
@@ -919,7 +929,7 @@ struct GridGenerator::Impl {
             }
             pads.insert(pads.end(), addPads.begin(), addPads.end());
             gbr.addApertures(addApertures);
-            nets.push_back("PORT");
+            nets.push_back(NetName("PORT"));
             x.addLinesFromPads(pads, nets, gbr.apertures());
             y.addLinesFromPads(pads, nets, gbr.apertures());
         }

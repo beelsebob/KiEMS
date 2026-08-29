@@ -1,4 +1,5 @@
 import Cocoa
+import CopperUtils
 import GerberCharts
 
 /// Which group of charts is currently shown -- an NSSegmentedControl lets the user switch between
@@ -9,6 +10,7 @@ private enum ResultsCategory: CaseIterable {
     case smith
     case diffPairs
     case traceDelays
+    case probes
 
     var title: String {
         switch self {
@@ -17,6 +19,7 @@ private enum ResultsCategory: CaseIterable {
         case .smith: return "Smith"
         case .diffPairs: return "Differential Pairs"
         case .traceDelays: return "Trace Delays"
+        case .probes: return "Probes"
         }
     }
 }
@@ -35,13 +38,11 @@ private enum ResultsCategory: CaseIterable {
 final class SimulationResultsViewController: NSViewController {
     private weak var document: Document?
 
-    private let statusLabel = NSTextField(labelWithString: "")
-    private let progressBar = NSProgressIndicator()
-    /// Shown left of progressBar only while EMSPipelineProgress.duringExcitation is true (the
-    /// excitation pulse is still actively being injected, as opposed to the run just observing
-    /// decay afterward) -- see that property's own doc comment.
+    private let progressStatus = ProgressStatusView()
+    /// Shown left of progressStatus's own progress bar only while EMSPipelineProgress.duringExcitation
+    /// is true (the excitation pulse is still actively being injected, as opposed to the run just
+    /// observing decay afterward) -- see that property's own doc comment.
     private let excitationIcon = NSImageView()
-    private let timeEstimateLabel = NSTextField(labelWithString: "")
     /// Shows the energy-decay end-criteria's current value against its own dB target while the FDTD
     /// run is in progress -- see EMSPipelineProgress's own energyChangeDB/targetEnergyChangeDB doc
     /// comment. `n/10` divisions, where n is the target itself (e.g. 60dB -> 6 divisions) -- set
@@ -65,7 +66,8 @@ final class SimulationResultsViewController: NSViewController {
     // rather than relying solely on the live progress callback.
     private var latestProgress: [Int: EMSPipelineProgress] = [:]
     // When the *current phase* of a simulation's in-flight run began -- the basis for the elapsed-
-    // time/fraction extrapolation behind timeEstimateLabel's own text (see progressReceived()). Reset
+    // time/fraction extrapolation behind progressStatus's own time-estimate label (see
+    // progressReceived()). Reset
     // whenever the reported phase changes, not just once at the start of the whole run: `fraction`
     // itself restarts from 0 at the geometry -> simulation boundary (see EMSPipelineProgressPhase's
     // own doc comment), so elapsed time has to restart its extrapolation basis there too, or the
@@ -116,29 +118,8 @@ final class SimulationResultsViewController: NSViewController {
     override func loadView() {
         let container = NSView()
 
-        statusLabel.font = .systemFont(ofSize: 20, weight: .medium) // Matches SubEntryPlaceholder's notice text.
-        statusLabel.textColor = .tertiaryLabelColor
-        statusLabel.alignment = .center
-        statusLabel.lineBreakMode = .byWordWrapping
-        statusLabel.maximumNumberOfLines = 0
-        // Without this, a multi-line NSTextField's intrinsicContentSize is computed before Auto
-        // Layout has resolved its actual available width -- it can't know where to wrap yet, so it
-        // falls back to reporting its full *unwrapped* single-line width as intrinsic. The only
-        // things bounding this label's width are the <=/>= inequalities below, which don't force a
-        // smaller size the way a hard width would -- so with a long enough string (a verbose error
-        // message, or apparently just this text on some runs) the window itself grows to satisfy
-        // that unwrapped intrinsic width. This was the real, container-independent cause behind
-        // "the whole window becomes enormous" -- unrelated to any chart-rendering code.
-        statusLabel.preferredMaxLayoutWidth = 400
-        statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(statusLabel)
-
-        progressBar.style = .bar
-        progressBar.isIndeterminate = false
-        progressBar.minValue = 0
-        progressBar.maxValue = 1
-        progressBar.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(progressBar)
+        progressStatus.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(progressStatus)
 
         excitationIcon.image = NSImage(systemSymbolName: "waveform.path.ecg.rectangle",
                                         accessibilityDescription: "Exciting")
@@ -146,12 +127,6 @@ final class SimulationResultsViewController: NSViewController {
         excitationIcon.isHidden = true
         excitationIcon.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(excitationIcon)
-
-        timeEstimateLabel.font = .systemFont(ofSize: 11)
-        timeEstimateLabel.textColor = .tertiaryLabelColor
-        timeEstimateLabel.alignment = .center
-        timeEstimateLabel.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(timeEstimateLabel)
 
         energyLevelIndicator.levelIndicatorStyle = .discreteCapacity
         energyLevelIndicator.minValue = 0
@@ -193,13 +168,6 @@ final class SimulationResultsViewController: NSViewController {
         scrollView.isHidden = true
         container.addSubview(scrollView)
 
-        // See GeometryViewController's identical contentGuide for why: vertically centers the whole
-        // statusLabel...energyLevelIndicator block, not just statusLabel itself, so the extra rows
-        // added below it don't leave the block's visual center sitting below the container's true
-        // center.
-        let contentGuide = NSLayoutGuide()
-        container.addLayoutGuide(contentGuide)
-
         NSLayoutConstraint.activate([
             categoryControl.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
             categoryControl.centerXAnchor.constraint(equalTo: container.centerXAnchor),
@@ -210,27 +178,17 @@ final class SimulationResultsViewController: NSViewController {
             scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             stack.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
 
-            contentGuide.topAnchor.constraint(equalTo: statusLabel.topAnchor),
-            contentGuide.bottomAnchor.constraint(equalTo: energyLevelIndicator.bottomAnchor),
-            contentGuide.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            progressStatus.topAnchor.constraint(equalTo: container.topAnchor),
+            progressStatus.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            progressStatus.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            progressStatus.bottomAnchor.constraint(equalTo: container.bottomAnchor),
 
-            statusLabel.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            statusLabel.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor, constant: 24),
-            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -24),
-
-            progressBar.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 12),
-            progressBar.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            progressBar.widthAnchor.constraint(equalToConstant: 240),
-
-            excitationIcon.trailingAnchor.constraint(equalTo: progressBar.leadingAnchor, constant: -8),
-            excitationIcon.centerYAnchor.constraint(equalTo: progressBar.centerYAnchor),
+            excitationIcon.trailingAnchor.constraint(equalTo: progressStatus.progressBar.leadingAnchor, constant: -8),
+            excitationIcon.centerYAnchor.constraint(equalTo: progressStatus.progressBar.centerYAnchor),
             excitationIcon.widthAnchor.constraint(equalToConstant: 16),
             excitationIcon.heightAnchor.constraint(equalToConstant: 16),
 
-            timeEstimateLabel.topAnchor.constraint(equalTo: progressBar.bottomAnchor, constant: 6),
-            timeEstimateLabel.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-
-            energyLevelIndicator.topAnchor.constraint(equalTo: timeEstimateLabel.bottomAnchor, constant: 12),
+            energyLevelIndicator.topAnchor.constraint(equalTo: progressStatus.timeEstimateLabel.bottomAnchor, constant: 12),
             energyLevelIndicator.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             energyLevelIndicator.widthAnchor.constraint(equalToConstant: 240),
             energyLevelIndicator.heightAnchor.constraint(equalToConstant: 16),
@@ -252,6 +210,10 @@ final class SimulationResultsViewController: NSViewController {
         let pipeline = document.pipeline(forSimulationNamed: name)
         guard !pipeline.hasStage(.results), errors[index] == nil, !runningIndices.contains(index) else { return }
         JobScheduler.shared.request(document: document, simulationName: name, target: .simulation)
+        // request() may have only queued this job behind another simulation's own in-flight run --
+        // refresh again now (not just the pre-request call above) so the freshly-queued state is
+        // shown immediately instead of a blank content area (see ProgressStatusView.State.queued).
+        refreshDisplay(animated: false)
     }
 
     /// Called by DocumentWindowController whenever something that would change this simulation's
@@ -272,7 +234,7 @@ final class SimulationResultsViewController: NSViewController {
 
     /// Manually interpolates energyLevelIndicator's doubleValue over ~0.2s -- see
     /// levelIndicatorAnimation's own doc comment for why this can't just use `.animator()` the way
-    /// progressBar does. `animated: false` snaps immediately, which also cancels any interpolation
+    /// progressStatus's own progress bar does. `animated: false` snaps immediately, which also cancels any interpolation
     /// already in flight (so a phase-boundary reset can't be fought by a stale animation still
     /// chasing the previous phase's final value).
     private func setLevelIndicatorValue(_ target: Double, animated: Bool) {
@@ -303,76 +265,47 @@ final class SimulationResultsViewController: NSViewController {
         guard let currentIndex, let document, currentIndex < document.config.simulations.count else { return }
         let name = document.config.simulations[currentIndex].name
         let pipeline = document.pipeline(forSimulationNamed: name)
-        // Reset to the normal determinate bar by default -- only the .settingUp branch below turns
-        // indeterminate animation back on, so every other branch (including a hidden bar) doesn't
-        // need its own explicit stopAnimation() call.
-        progressBar.stopAnimation(nil)
-        progressBar.isIndeterminate = false
         if let preview = pipeline.resultsPreview() {
             // These default to visible (NSControl's own isHidden default) until a run's own
             // running/error/idle branch below first sets them -- a simulation whose results are
             // already cached before this VC's very first refreshDisplay() call (e.g. from a
             // previous session) would otherwise skip that and show them at their AppKit defaults,
             // stacked on top of the just-shown charts.
-            progressBar.isHidden = true
             excitationIcon.isHidden = true
-            timeEstimateLabel.isHidden = true
             energyLevelIndicator.isHidden = true
             showCategories(for: preview)
         } else if let error = errors[currentIndex] {
             categoryControl.isHidden = true
             scrollView.isHidden = true
-            // See GeometryViewController's identical use of this -- renders an embedded net name's
-            // own markup (sub/superscript, negation, an escaped "/") correctly instead of showing it
-            // as literal, unformatted tokens.
-            statusLabel.attributedStringValue = NetNameFormatting.attributedString(
-                embeddingNetNamesIn: error, font: statusLabel.font ?? .systemFont(ofSize: NSFont.systemFontSize))
-            statusLabel.isHidden = false
-            progressBar.isHidden = true
+            progressStatus.setState(.error(error))
             excitationIcon.isHidden = true
-            timeEstimateLabel.isHidden = true
             energyLevelIndicator.isHidden = true
         } else if runningIndices.contains(currentIndex) {
             categoryControl.isHidden = true
             scrollView.isHidden = true
             let progress = latestProgress[currentIndex]
+            let isSettingUp = progress?.phase == .settingUp
+            let statusText: String
             switch progress?.phase {
             case .simulation:
-                statusLabel.stringValue = "Running simulation…\n\nA full FDTD run can take several minutes."
+                statusText = "Running simulation…\n\nA full FDTD run can take several minutes."
             case .settingUp:
-                statusLabel.stringValue = "Setting up Simulation…"
+                statusText = "Setting up Simulation…"
             default:
-                statusLabel.stringValue = "Building geometry…"
+                statusText = "Building geometry…"
             }
-            statusLabel.isHidden = false
             // .settingUp has no fraction of any kind to show -- openEMS gives no progress hook into
             // its own setup call at all (see EMSPipelineProgressPhase's own doc comment), and guessing
             // a duration from mesh size turned out to not be worth the false confidence a countdown
-            // implies. A real, animated indeterminate bar is the honest thing to show instead; every
-            // other phase keeps the normal determinate one (progressBar.isIndeterminate/stopAnimation()
-            // already reset to that default at the top of this method).
-            if progress?.phase == .settingUp {
-                progressBar.isIndeterminate = true
-                progressBar.startAnimation(nil)
-            } else if animated {
-                NSAnimationContext.runAnimationGroup { context in
-                    context.duration = 0.2
-                    progressBar.animator().doubleValue = progress?.fraction ?? 0
-                }
-            } else {
-                progressBar.doubleValue = progress?.fraction ?? 0
-            }
-            progressBar.isHidden = false
+            // implies. fraction nil => an animated indeterminate bar; time-estimate text nil => that
+            // row is hidden instead of guessing.
+            progressStatus.setState(.progress(
+                status: statusText,
+                fraction: isSettingUp ? nil : (progress?.fraction ?? 0),
+                timeEstimateText: isSettingUp ? nil
+                    : (timeEstimateText[currentIndex] ?? TimeRemainingFormatter.string(secondsRemaining: nil))),
+                animated: animated)
             excitationIcon.isHidden = !(progress?.phase == .simulation && (progress?.duringExcitation ?? false))
-            // No text at all during .settingUp -- see the progress bar's own comment just above on why
-            // this phase doesn't try to predict a duration.
-            if progress?.phase == .settingUp {
-                timeEstimateLabel.isHidden = true
-            } else {
-                timeEstimateLabel.stringValue = timeEstimateText[currentIndex]
-                    ?? TimeRemainingFormatter.string(secondsRemaining: nil)
-                timeEstimateLabel.isHidden = false
-            }
             if let progress, progress.phase == .simulation {
                 energyLevelIndicator.maxValue = max(progress.targetEnergyChangeDB, 1)
                 // n/10 divisions, per this level indicator's own design brief.
@@ -386,13 +319,22 @@ final class SimulationResultsViewController: NSViewController {
             } else {
                 energyLevelIndicator.isHidden = true
             }
+        } else if (JobScheduler.shared.job(document: document, simulationName: name, kind: .simulation)
+                ?? JobScheduler.shared.job(document: document, simulationName: name,
+                                           kind: .geometryGeneration))?.status == .queued {
+            // A job exists for this simulation but the scheduler hasn't started it yet (waiting
+            // behind another simulation's own in-flight run) -- see ProgressStatusView.State.queued's
+            // own doc comment for why this is shown rather than a blank content area.
+            categoryControl.isHidden = true
+            scrollView.isHidden = true
+            progressStatus.setState(.queued("Waiting to start…", currentJob: JobScheduler.shared.jobs.first?.progressStatusInfo))
+            excitationIcon.isHidden = true
+            energyLevelIndicator.isHidden = true
         } else {
             categoryControl.isHidden = true
             scrollView.isHidden = true
-            statusLabel.isHidden = true
-            progressBar.isHidden = true
+            progressStatus.setState(.hidden)
             excitationIcon.isHidden = true
-            timeEstimateLabel.isHidden = true
             energyLevelIndicator.isHidden = true
         }
     }
@@ -445,6 +387,14 @@ final class SimulationResultsViewController: NSViewController {
                 refreshDisplay()
             }
         }
+        // Keeps the "Current Job: ..." sub-section (see ProgressStatusView's own doc comment) live
+        // while this simulation's own job sits queued behind some *other* simulation's in-flight
+        // run -- see GeometryViewController.syncFromScheduler()'s identical trailing check for why
+        // this is scoped to !runningIndices.contains (avoiding cancelling progressReceived()'s own
+        // animated update above when this VC's own job is the one actually running).
+        if let currentIndex, !runningIndices.contains(currentIndex), errors[currentIndex] == nil {
+            refreshDisplay()
+        }
     }
 
     private func finishTracking(forSimulationIndex index: Int) {
@@ -453,9 +403,8 @@ final class SimulationResultsViewController: NSViewController {
         lastReportedPhase[index] = nil
         phaseStartTime[index] = nil
         timeEstimateText[index] = nil
-        // Immediate, not animated -- this run's own progress bar/level indicator shouldn't leave a
-        // stale value behind for the next run to animate away from.
-        progressBar.doubleValue = 0
+        // Immediate, not animated -- this run's own level indicator shouldn't leave a stale value
+        // behind for the next run to animate away from.
         setLevelIndicatorValue(0, animated: false)
     }
 
@@ -470,31 +419,26 @@ final class SimulationResultsViewController: NSViewController {
         let percent = Int((progress.fraction * 100).rounded())
         switch progress.phase {
         case .simulation:
-            print("[\(name)] Simulation: \(percent)% (energy ~\(String(format: "%.2e", progress.absoluteEnergy))"
+            Cu.logInfo("[\(name)] Simulation: \(percent)% (energy ~\(String(format: "%.2e", progress.absoluteEnergy))"
                 + ", \(String(format: "%.1f", progress.energyChangeDB))"
                 + "/\(String(format: "%.1f", progress.targetEnergyChangeDB)) dB)")
         case .settingUp:
-            print("[\(name)] Setting up simulation…")
+            Cu.logInfo("[\(name)] Setting up simulation…")
         default:
-            print("[\(name)] Geometry: \(percent)%")
+            Cu.logInfo("[\(name)] Geometry: \(percent)%")
         }
         // See phaseStartTime's own doc comment for why this resets on every phase change, not just
-        // once per run.
+        // once per run. A phase change is rendered as a non-animated jump (refreshDisplay below,
+        // animated: !phaseJustChanged) rather than an animated slide -- without that, the very next
+        // update would visibly slide from wherever the *previous* phase left off (e.g. the Geometry
+        // bar sitting at 100%) down to this new phase's own starting point, transiently reading as
+        // some confusing intermediate "half complete" value instead of genuinely restarting from
+        // scratch the moment the new phase begins.
+        var phaseJustChanged = false
         if lastReportedPhase[index] != progress.phase {
+            phaseJustChanged = true
             lastReportedPhase[index] = progress.phase
             phaseStartTime[index] = Date()
-            // Snap immediately, not animated -- without this, the very next (animated) update below
-            // would visibly slide from wherever the *previous* phase left off (e.g. the Geometry bar
-            // sitting at 100%) down to this new phase's own starting point, transiently reading as
-            // some confusing intermediate "half complete" value instead of genuinely restarting from
-            // scratch the moment the new phase begins.
-            if currentIndex == index {
-                progressBar.doubleValue = 0
-                if progress.phase == .simulation {
-                    energyLevelIndicator.maxValue = max(progress.targetEnergyChangeDB, 1)
-                }
-                setLevelIndicatorValue(energyLevelIndicator.maxValue, animated: false)
-            }
         }
         // .settingUp has no fraction to extrapolate a remaining time from at all (see
         // EMSPipelineProgressPhase's own doc comment) -- refreshDisplay() shows a plain indeterminate
@@ -510,7 +454,7 @@ final class SimulationResultsViewController: NSViewController {
             timeEstimateText[index] = TimeRemainingFormatter.string(secondsRemaining: secondsRemaining)
         }
         if currentIndex == index, runningIndices.contains(index) {
-            refreshDisplay(animated: true)
+            refreshDisplay(animated: !phaseJustChanged)
         }
     }
 
@@ -529,19 +473,19 @@ final class SimulationResultsViewController: NSViewController {
         if !preview.smithCharts.isEmpty { categories.append(.smith) }
         if !preview.diffPairs.isEmpty { categories.append(.diffPairs) }
         if !preview.traces.isEmpty { categories.append(.traceDelays) }
+        if !preview.probes.isEmpty { categories.append(.probes) }
         availableCategories = categories
 
         guard !categories.isEmpty else {
             categoryControl.isHidden = true
             scrollView.isHidden = true
-            statusLabel.stringValue = "No results to display."
-            statusLabel.isHidden = false
+            progressStatus.setState(.message("No results to display."))
             return
         }
 
         categoryControl.isHidden = false
         scrollView.isHidden = false
-        statusLabel.isHidden = true
+        progressStatus.setState(.hidden)
 
         categoryControl.segmentCount = categories.count
         for (i, category) in categories.enumerated() {
@@ -670,6 +614,27 @@ final class SimulationResultsViewController: NSViewController {
                 chart.configure(yAxisLabel: "Delay [ns]")
                 chart.setCurves(xValuesGHz: freqGHz, curves: [(label: trace.name, values: trace.delayNs.map(\.doubleValue))])
                 return makeSection(title: trace.name, content: [chart])
+            }
+
+        case .probes:
+            // A passive (non-absorbing) probe -- see gerber2ems::PortConfig::absorbSignal()'s own
+            // doc comment -- has no S-parameter of its own (no characteristic impedance to
+            // normalize against), just raw voltage/current magnitude vs. frequency, one curve per
+            // excited port that reached it.
+            return preview.probes.map { probe in
+                let voltageChart = MultiCurveLineChartView()
+                voltageChart.configure(yAxisLabel: "|V| [V]")
+                voltageChart.setCurves(
+                    xValuesGHz: freqGHz,
+                    curves: probe.curves.map { (label: "exc. port \($0.excitedPort + 1)", values: $0.voltageMagnitude.map(\.doubleValue)) })
+
+                let currentChart = MultiCurveLineChartView()
+                currentChart.configure(yAxisLabel: "|I| [A]")
+                currentChart.setCurves(
+                    xValuesGHz: freqGHz,
+                    curves: probe.curves.map { (label: "exc. port \($0.excitedPort + 1)", values: $0.currentMagnitude.map(\.doubleValue)) })
+
+                return makeSection(title: "Probe: \(probe.name)", content: [voltageChart, currentChart])
             }
         }
     }

@@ -40,10 +40,27 @@ inline void from_json(const nlohmann::json& j, StitchingVia& v) {
 /// nets' and the ground net's own copper survive, clipped to a padded region ("cutout") around the
 /// involved nets' own extent.
 struct SlicedBoard {
-    /// Per metal layer, in the same order as EMSConfig::getMetals(), the final
-    /// triangulated copper for that layer (involved-net copper, plus ground-net copper wherever it
-    /// falls inside the cutout).
+    /// Per metal layer, in the same order as EMSConfig::getMetals(), the final triangulated copper
+    /// for that layer (involved-net copper, plus ground-net copper wherever it falls inside the
+    /// cutout) -- what Simulation::addContours() actually feeds the real FDTD geometry. Deliberately
+    /// does *not* have via/NPTH holes cut out of it (unlike previewLayerTriangles below) -- see that
+    /// field's own doc comment for why cutting them here used to seem harmless but measurably wasn't.
     std::vector<std::vector<Triangle>> layerTriangles;
+    /// The same copper as layerTriangles, but with every via's own drilled hole and every NPTH hole
+    /// additionally cut out -- for GeometryPreviewBridge's rendering only, *not* fed to the real FDTD
+    /// geometry the way layerTriangles is. Cutting these holes is redundant for the real simulation
+    /// (Simulation::addVia()'s own via metal/filling, and addNPTHHoles()'s own vacuum punch, both sit
+    /// at CSXCAD priority well above copper's, so they already correctly override whatever copper is
+    /// underneath regardless of whether it has a hole pre-cut) but *is* needed for a previewer with
+    /// no such priority system, so a via's own open barrel/annular-ring geometry has real empty space
+    /// to sit in rather than visually clipping through solid copper. This used to be the *only*
+    /// version computed, shared by both consumers on the theory that computing it twice wasn't worth
+    /// avoiding -- reverted once CSXCAD's own profiler showed the hole-cutting this implies (many
+    /// small triangles around every via, each its own separate primitive) made real mesh generation
+    /// dramatically slower: every extra small primitive gets checked at every quarter-cell query
+    /// across the *entire* mesh, not just near where it actually sits, so a board with many vias paid
+    /// that cost on every single simulation run for a purely cosmetic previewer need.
+    std::vector<std::vector<Triangle>> previewLayerTriangles;
     /// This simulation's own outline (a single closed polygon loop), in the same coordinate frame
     /// as the rest of the pipeline (relative to the *original* board's Edge_Cuts origin, not
     /// re-origined to its own bounding box -- so xMin/yMin are generally nonzero, unlike the
@@ -69,6 +86,23 @@ struct SlicedBoard {
     /// subtracted from layerTriangles' own copper; kept here too so Simulation::addNPTHHoles() can
     /// cut the same holes out of the substrate model, which layerTriangles alone can't do.
     std::vector<std::vector<Position>> npthHoleLoops;
+    /// The board's own solder mask coverage, in two different shapes for two different consumers:
+    /// topMaskTriangles/bottomMaskTriangles is "coverage minus every opening", already triangulated
+    /// (like layerTriangles), for GeometryPreviewBridge's rendering; topMaskOpeningLoops/
+    /// bottomMaskOpeningLoops is the much smaller set of raw opening polygon loops themselves (one
+    /// loop per exposed pad/via, mirroring npthHoleLoops' own shape exactly), for
+    /// Simulation::addSolderMask() to punch out of a single big coverage box rather than extruding
+    /// hundreds of small triangles as separate CSXCAD primitives -- confirmed via CSXCAD's own
+    /// gprof-style profiler that doing the latter made mesh generation dramatically slower (every
+    /// small extruded-polygon primitive gets checked at every quarter-cell material-averaging query
+    /// across the *entire* mesh, not just near where it actually is, so primitive count matters far
+    /// more than which of these two shapes is geometrically "correct" -- both represent the same
+    /// mask, just via a different number of CSXCAD primitives). Both empty (not an error) if the
+    /// board has no mask gerbers, or no solder mask stackup layer at all.
+    std::vector<Triangle> topMaskTriangles;
+    std::vector<Triangle> bottomMaskTriangles;
+    std::vector<std::vector<Position>> topMaskOpeningLoops;
+    std::vector<std::vector<Position>> bottomMaskOpeningLoops;
 };
 
 /// Serialized/deserialized whole -- see simulation_data.hpp's saveSimulationData()/
@@ -78,7 +112,11 @@ inline void to_json(nlohmann::json& j, const SlicedBoard& b) {
     j = nlohmann::json{{"layerTriangles", b.layerTriangles}, {"outline", b.outline},       {"xMin", b.xMin},
                         {"yMin", b.yMin},                     {"width", b.width},           {"height", b.height},
                         {"stitchingVias", b.stitchingVias},   {"npthHoleLoops", b.npthHoleLoops},
-                        {"failedStitchingViaAttempts", b.failedStitchingViaAttempts}};
+                        {"failedStitchingViaAttempts", b.failedStitchingViaAttempts},
+                        {"topMaskTriangles", b.topMaskTriangles}, {"bottomMaskTriangles", b.bottomMaskTriangles},
+                        {"topMaskOpeningLoops", b.topMaskOpeningLoops},
+                        {"bottomMaskOpeningLoops", b.bottomMaskOpeningLoops},
+                        {"previewLayerTriangles", b.previewLayerTriangles}};
 }
 
 inline void from_json(const nlohmann::json& j, SlicedBoard& b) {
@@ -94,6 +132,28 @@ inline void from_json(const nlohmann::json& j, SlicedBoard& b) {
     // failing to load an otherwise-valid cached geometry stage.
     if (j.contains("failedStitchingViaAttempts")) {
         j.at("failedStitchingViaAttempts").get_to(b.failedStitchingViaAttempts);
+    }
+    if (j.contains("topMaskTriangles")) {
+        j.at("topMaskTriangles").get_to(b.topMaskTriangles);
+    }
+    if (j.contains("bottomMaskTriangles")) {
+        j.at("bottomMaskTriangles").get_to(b.bottomMaskTriangles);
+    }
+    if (j.contains("topMaskOpeningLoops")) {
+        j.at("topMaskOpeningLoops").get_to(b.topMaskOpeningLoops);
+    }
+    if (j.contains("bottomMaskOpeningLoops")) {
+        j.at("bottomMaskOpeningLoops").get_to(b.bottomMaskOpeningLoops);
+    }
+    // Absent in geometry.json written before previewLayerTriangles existed as its own field (back
+    // when layerTriangles itself was shared, hole-cut, by both the simulation and the preview) --
+    // falls back to layerTriangles itself so an old cached geometry stage still renders something
+    // reasonable (copper without via holes visually cut) rather than blank, until the next real
+    // geometry rebuild recomputes this properly.
+    if (j.contains("previewLayerTriangles")) {
+        j.at("previewLayerTriangles").get_to(b.previewLayerTriangles);
+    } else {
+        b.previewLayerTriangles = b.layerTriangles;
     }
 }
 

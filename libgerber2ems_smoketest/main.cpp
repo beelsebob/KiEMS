@@ -10,12 +10,14 @@
 #include <iostream>
 #include <vector>
 
+#include "gerber2ems/component_value.hpp"
 #include "gerber2ems/config.hpp"
 #include "gerber2ems/constants.hpp"
-#include "gerber2ems/logging.hpp"
+#include "logging.hpp"
 #include "gerber2ems/postprocess.hpp"
 
 using namespace gerber2ems;
+using namespace Cu;
 
 namespace {
 
@@ -42,6 +44,8 @@ EMSConfig makeSyntheticConfig() {
     net.setNet("USB_DP");
     net.setImpedance(45);
     net.setLength(1200);
+    net.setPinProbed("U8", "4", true);
+    net.setPinProbed("U8", "5", false);
     sim.involvedNets().push_back(net);
 
     ExcitationConfig excitation;
@@ -120,9 +124,85 @@ bool checkConfigMutateSaveRoundTrip() {
         std::cerr << "FAIL: involved_nets entry didn't round-trip\n";
         ok = false;
     }
+    {
+        const InvolvedNetConfig& net = reparsed.simulations().front().involvedNets().front();
+        if (!net.hasExplicitPinSelections()) {
+            std::cerr << "FAIL: hasExplicitPinSelections() didn't round-trip as true\n";
+            ok = false;
+        }
+        if (net.probedPinAbsorbs("U8", "4") != std::optional<bool>(true)) {
+            std::cerr << "FAIL: probedPinAbsorbs(\"U8\",\"4\") didn't round-trip as probed+absorbing\n";
+            ok = false;
+        }
+        if (net.probedPinAbsorbs("U8", "5") != std::optional<bool>(false)) {
+            std::cerr << "FAIL: probedPinAbsorbs(\"U8\",\"5\") didn't round-trip as probed, non-absorbing\n";
+            ok = false;
+        }
+        if (net.probedPinAbsorbs("U8", "99").has_value()) {
+            std::cerr << "FAIL: probedPinAbsorbs() should be nullopt for a pin never probed\n";
+            ok = false;
+        }
+    }
     if (reparsed.simulations().front().excitations().size() != 1 ||
         !reparsed.simulations().front().excitations().front().isMain()) {
         std::cerr << "FAIL: excitation entry didn't round-trip\n";
+        ok = false;
+    }
+    return ok;
+}
+
+// Exercises InvolvedNetConfig's own legacy-vs-explicit pin-selection resolution mode boundary (see
+// its own doc comment) in isolation -- port_resolution.cpp's actual pad loop needs a real KiCad
+// board (via the libkicad_query subprocess) to exercise end-to-end, out of reach for this
+// smoketest, but the mode-switch behavior itself is plain C++ object state this can verify directly.
+bool checkInvolvedNetPinSelectionResolutionMode() {
+    bool ok = true;
+    InvolvedNetConfig net;
+    net.setKind(NetSelectorKind::Net);
+    net.setNet("TEST_NET");
+
+    // Fresh entry: legacy mode, nothing excluded -- every pad would resolve as probed+absorbing.
+    if (net.hasExplicitPinSelections()) {
+        std::cerr << "FAIL: a freshly-constructed InvolvedNetConfig should start in legacy mode\n";
+        ok = false;
+    }
+    if (net.probedPinAbsorbs("U1", "1").has_value()) {
+        std::cerr << "FAIL: probedPinAbsorbs() should be nullopt while in legacy mode (excludedPins() governs "
+                      "instead)\n";
+        ok = false;
+    }
+    net.excludedPins().push_back(ExcludedPin{"U1", "2"});
+    if (!net.isPinExcluded("U1", "2") || net.isPinExcluded("U1", "1")) {
+        std::cerr << "FAIL: legacy-mode excludedPins() behavior regressed\n";
+        ok = false;
+    }
+
+    // First explicit edit flips the net permanently into strict opt-in mode.
+    net.setPinProbed("U1", "1", true);
+    if (!net.hasExplicitPinSelections()) {
+        std::cerr << "FAIL: setPinProbed() should set hasExplicitPinSelections() true\n";
+        ok = false;
+    }
+    if (net.probedPinAbsorbs("U1", "1") != std::optional<bool>(true)) {
+        std::cerr << "FAIL: probedPinAbsorbs(\"U1\",\"1\") should be true after setPinProbed(..., true)\n";
+        ok = false;
+    }
+    // A pin never explicitly probed no longer falls back to "probed by default" once in explicit
+    // mode, even though it isn't in excludedPins() either -- that's the whole point of the mode
+    // switch (see InvolvedNetConfig's own doc comment).
+    if (net.probedPinAbsorbs("U1", "3").has_value()) {
+        std::cerr << "FAIL: an untouched pin should not be probed once hasExplicitPinSelections() is true\n";
+        ok = false;
+    }
+
+    // Un-probing (nullopt) still counts as an explicit edit, and clears just that one pin.
+    net.setPinProbed("U1", "1", std::nullopt);
+    if (!net.hasExplicitPinSelections()) {
+        std::cerr << "FAIL: hasExplicitPinSelections() should never revert to false\n";
+        ok = false;
+    }
+    if (net.probedPinAbsorbs("U1", "1").has_value()) {
+        std::cerr << "FAIL: probedPinAbsorbs(\"U1\",\"1\") should be nullopt after un-probing it\n";
         ok = false;
     }
     return ok;
@@ -267,11 +347,57 @@ bool checkPostprocessorRawAccessors() {
     return ok;
 }
 
+// KiCad Value-field parsing for auto-discovered lumped R/L/C components -- covers plain SI-suffix
+// values, KiCad's decimal-substitution shorthand ("4k7"), the bare-ohms marker ("0R1"/"1M2"), the
+// alternate micro-sign spelling, and a couple of strings that should be rejected rather than guessed.
+bool checkParseComponentValue() {
+    struct Case {
+        std::string raw;
+        char unitLetter;
+        std::optional<double> expected;
+    };
+    const std::vector<Case> cases = {
+        {"10k", 'R', 10000.0},
+        {"4k7", 'R', 4700.0},
+        {"100nF", 'F', 1e-7},
+        {"4u7", 'F', 4.7e-6},
+        {"0R1", 'R', 0.1},
+        {"1M2", 'R', 1.2e6},
+        {"4.7uF", 'F', 4.7e-6},
+        {"4.7\xC2\xB5H", 'H', 4.7e-6}, // 'µ' UTF-8 spelling
+        {"1M", 'R', 1e6},
+        {"", 'R', std::nullopt},
+        {"LED", 'R', std::nullopt},
+        {"4k7k", 'R', std::nullopt}, // two markers -- ambiguous
+    };
+    bool ok = true;
+    for (const Case& c : cases) {
+        const std::optional<double> got = parseComponentValue(c.raw, c.unitLetter);
+        if (got.has_value() != c.expected.has_value()) {
+            std::cerr << "FAIL: parseComponentValue(\"" << c.raw << "\", '" << c.unitLetter << "') returned "
+                       << (got.has_value() ? "a value" : "nullopt") << ", expected "
+                       << (c.expected.has_value() ? "a value" : "nullopt") << "\n";
+            ok = false;
+            continue;
+        }
+        if (got.has_value() && std::abs(*got - *c.expected) > std::abs(*c.expected) * 1e-9 + 1e-15) {
+            std::cerr << "FAIL: parseComponentValue(\"" << c.raw << "\", '" << c.unitLetter << "') = " << *got
+                       << ", expected " << *c.expected << "\n";
+            ok = false;
+        }
+    }
+    return ok;
+}
+
 bool checkLogging() {
-    // Purely checks that logging.hpp's free functions link and run without crashing.
+    // Checks that the stream-building temporary accepts heterogeneous values and logs once when
+    // its destructor runs at the end of the full expression.
     setLogLevel(LogLevel::Error);
-    logInfo("this should be suppressed at Error level");
-    logError("libgerber2ems_smoketest: logging path exercised");
+    logInfo() << "this should be suppressed at Error level";
+    const int actual = 5;
+    const int expected = 23;
+    logError() << "libgerber2ems_smoketest: x was " << actual << " when it should have been " << expected;
+    CU_ASSERT(actual == 5) << "x was " << actual << " when it should have been 5";
     return true;
 }
 
@@ -282,8 +408,10 @@ int main() {
     ok &= checkConstants();
     ok &= checkConfigParseFailsCleanly();
     ok &= checkConfigMutateSaveRoundTrip();
+    ok &= checkInvolvedNetPinSelectionResolutionMode();
     ok &= checkScaledToSimulationUnitsIsAPureCopy();
     ok &= checkPostprocessorRawAccessors();
+    ok &= checkParseComponentValue();
     ok &= checkLogging();
 
     if (ok) {

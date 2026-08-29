@@ -10,9 +10,7 @@ final class FieldViewerViewController: NSViewController {
     private weak var document: Document?
 
     private let fieldView = FieldView()
-    private let statusLabel = NSTextField(labelWithString: "")
-    private let progressBar = NSProgressIndicator()
-    private let timeEstimateLabel = NSTextField(labelWithString: "")
+    private let progressStatus = ProgressStatusView()
 
     // MARK: - Playback transport (video-player-style controls over fieldSnapshot.frames)
 
@@ -65,30 +63,8 @@ final class FieldViewerViewController: NSViewController {
         fieldView.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(fieldView)
 
-        statusLabel.font = .systemFont(ofSize: 20, weight: .medium)
-        statusLabel.textColor = .tertiaryLabelColor
-        statusLabel.alignment = .center
-        statusLabel.lineBreakMode = .byWordWrapping
-        statusLabel.maximumNumberOfLines = 0
-        statusLabel.preferredMaxLayoutWidth = 400
-        statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(statusLabel)
-
-        progressBar.style = .bar
-        progressBar.isIndeterminate = false
-        progressBar.minValue = 0
-        progressBar.maxValue = 1
-        progressBar.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(progressBar)
-
-        timeEstimateLabel.font = .systemFont(ofSize: 11)
-        timeEstimateLabel.textColor = .tertiaryLabelColor
-        timeEstimateLabel.alignment = .center
-        timeEstimateLabel.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(timeEstimateLabel)
-
-        let contentGuide = NSLayoutGuide()
-        container.addLayoutGuide(contentGuide)
+        progressStatus.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(progressStatus)
 
         NSLayoutConstraint.activate([
             fieldView.topAnchor.constraint(equalTo: container.topAnchor),
@@ -96,20 +72,10 @@ final class FieldViewerViewController: NSViewController {
             fieldView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             fieldView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
 
-            contentGuide.topAnchor.constraint(equalTo: statusLabel.topAnchor),
-            contentGuide.bottomAnchor.constraint(equalTo: timeEstimateLabel.bottomAnchor),
-            contentGuide.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-
-            statusLabel.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            statusLabel.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor, constant: 24),
-            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -24),
-
-            progressBar.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 12),
-            progressBar.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            progressBar.widthAnchor.constraint(equalToConstant: 240),
-
-            timeEstimateLabel.topAnchor.constraint(equalTo: progressBar.bottomAnchor, constant: 6),
-            timeEstimateLabel.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            progressStatus.topAnchor.constraint(equalTo: container.topAnchor),
+            progressStatus.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            progressStatus.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            progressStatus.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
 
         setUpTransport(in: container)
@@ -185,6 +151,10 @@ final class FieldViewerViewController: NSViewController {
         // re-requesting while this simulation is already showing an error or mid-run.
         guard errors[index] == nil, !runningIndices.contains(index) else { return }
         JobScheduler.shared.request(document: document, simulationName: name, target: .fieldPostProcessing)
+        // request() may have only queued this job behind another simulation's own in-flight run --
+        // refresh again now (not just the pre-request call above) so the freshly-queued state is
+        // shown immediately instead of a blank content area (see ProgressStatusView.State.queued).
+        refreshDisplay()
     }
 
     /// Called by DocumentWindowController whenever something that would change this simulation's
@@ -201,10 +171,6 @@ final class FieldViewerViewController: NSViewController {
         guard let currentIndex, let document, currentIndex < document.config.simulations.count else { return }
         let name = document.config.simulations[currentIndex].name
         let pipeline = document.pipeline(forSimulationNamed: name)
-        // Reset to the normal determinate bar by default -- only the .settingUp branch below turns
-        // indeterminate animation back on.
-        progressBar.stopAnimation(nil)
-        progressBar.isIndeterminate = false
 
         if pipeline.hasStage(.results), let snapshot = pipeline.fieldSnapshot() {
             // fieldSnapshot before preview, not the other way round -- preview's own didSet reads
@@ -216,51 +182,40 @@ final class FieldViewerViewController: NSViewController {
             fieldView.fieldSnapshot = snapshot
             fieldView.preview = pipeline.geometryPreview()
             fieldView.isHidden = false
-            statusLabel.isHidden = true
-            progressBar.isHidden = true
-            timeEstimateLabel.isHidden = true
+            progressStatus.setState(.hidden)
             updateTransport(for: snapshot)
         } else if let error = errors[currentIndex] {
             fieldView.isHidden = true
-            // See GeometryViewController's identical use of this -- renders an embedded net name's
-            // own markup (sub/superscript, negation, an escaped "/") correctly instead of showing it
-            // as literal, unformatted tokens.
-            statusLabel.attributedStringValue = NetNameFormatting.attributedString(
-                embeddingNetNamesIn: error, font: statusLabel.font ?? .systemFont(ofSize: NSFont.systemFontSize))
-            statusLabel.isHidden = false
-            progressBar.isHidden = true
-            timeEstimateLabel.isHidden = true
+            progressStatus.setState(.error(error))
             hideTransport()
         } else if runningIndices.contains(currentIndex) {
             fieldView.isHidden = true
-            let isSettingUp = latestProgress[currentIndex]?.phase == .settingUp
-            statusLabel.stringValue = isSettingUp
-                ? "Setting up Simulation…"
-                : "Running simulation…\n\nA full FDTD run can take several minutes."
-            statusLabel.isHidden = false
+            let progress = latestProgress[currentIndex]
             // .settingUp has no fraction of any kind to show (openEMS gives no progress hook into its
-            // own setup call at all -- see EMSPipelineProgressPhase's own doc comment) -- a real,
-            // animated indeterminate bar is the honest thing to show instead of guessing a duration.
-            if isSettingUp {
-                progressBar.isIndeterminate = true
-                progressBar.startAnimation(nil)
-            } else {
-                progressBar.doubleValue = latestProgress[currentIndex]?.fraction ?? 0
-            }
-            progressBar.isHidden = false
-            if isSettingUp {
-                timeEstimateLabel.isHidden = true
-            } else {
-                timeEstimateLabel.stringValue = timeEstimateText[currentIndex]
-                    ?? TimeRemainingFormatter.string(secondsRemaining: nil)
-                timeEstimateLabel.isHidden = false
-            }
+            // own setup call at all -- see EMSPipelineProgressPhase's own doc comment) -- fraction nil
+            // means an animated indeterminate bar, and time-estimate text nil hides that row, instead
+            // of guessing a duration.
+            let isSettingUp = progress?.phase == .settingUp
+            progressStatus.setState(.progress(
+                status: isSettingUp ? "Setting up Simulation…"
+                    : "Running simulation…\n\nA full FDTD run can take several minutes.",
+                fraction: isSettingUp ? nil : (progress?.fraction ?? 0),
+                timeEstimateText: isSettingUp ? nil
+                    : (timeEstimateText[currentIndex] ?? TimeRemainingFormatter.string(secondsRemaining: nil))))
+            hideTransport()
+        } else if (JobScheduler.shared.job(document: document, simulationName: name, kind: .fieldPostProcessing)
+                ?? JobScheduler.shared.job(document: document, simulationName: name, kind: .simulation)
+                ?? JobScheduler.shared.job(document: document, simulationName: name,
+                                           kind: .geometryGeneration))?.status == .queued {
+            // A job exists for this simulation but the scheduler hasn't started it yet (waiting
+            // behind another simulation's own in-flight run) -- see ProgressStatusView.State.queued's
+            // own doc comment for why this is shown rather than a blank content area.
+            fieldView.isHidden = true
+            progressStatus.setState(.queued("Waiting to start…", currentJob: JobScheduler.shared.jobs.first?.progressStatusInfo))
             hideTransport()
         } else {
             fieldView.isHidden = true
-            statusLabel.isHidden = true
-            progressBar.isHidden = true
-            timeEstimateLabel.isHidden = true
+            progressStatus.setState(.hidden)
             hideTransport()
         }
     }
@@ -421,6 +376,14 @@ final class FieldViewerViewController: NSViewController {
                 refreshDisplay()
             }
         }
+        // Keeps the "Current Job: ..." sub-section (see ProgressStatusView's own doc comment) live
+        // while this simulation's own job sits queued behind some *other* simulation's in-flight
+        // run -- see GeometryViewController.syncFromScheduler()'s identical trailing check for why
+        // this is scoped to !runningIndices.contains (avoiding cancelling progressReceived()'s own
+        // animated update above when this VC's own job is the one actually running).
+        if let currentIndex, !runningIndices.contains(currentIndex), errors[currentIndex] == nil {
+            refreshDisplay()
+        }
     }
 
     private func finishTracking(forSimulationIndex index: Int) {
@@ -428,7 +391,6 @@ final class FieldViewerViewController: NSViewController {
         latestProgress[index] = nil
         runStartTime[index] = nil
         timeEstimateText[index] = nil
-        progressBar.doubleValue = 0
         onRunStateChanged?(index, false)
     }
 
@@ -449,20 +411,14 @@ final class FieldViewerViewController: NSViewController {
             timeEstimateText[index] = TimeRemainingFormatter.string(secondsRemaining: secondsRemaining)
         }
         if currentIndex == index, runningIndices.contains(index) {
-            if progress.phase == .settingUp {
-                progressBar.isIndeterminate = true
-                progressBar.startAnimation(nil)
-                timeEstimateLabel.isHidden = true
-            } else {
-                progressBar.stopAnimation(nil)
-                progressBar.isIndeterminate = false
-                NSAnimationContext.runAnimationGroup { context in
-                    context.duration = 0.2
-                    progressBar.animator().doubleValue = progress.fraction
-                }
-                timeEstimateLabel.isHidden = false
-                timeEstimateLabel.stringValue = timeEstimateText[index] ?? TimeRemainingFormatter.string(secondsRemaining: nil)
-            }
+            let isSettingUp = progress.phase == .settingUp
+            progressStatus.setState(.progress(
+                status: isSettingUp ? "Setting up Simulation…"
+                    : "Running simulation…\n\nA full FDTD run can take several minutes.",
+                fraction: isSettingUp ? nil : progress.fraction,
+                timeEstimateText: isSettingUp ? nil
+                    : (timeEstimateText[index] ?? TimeRemainingFormatter.string(secondsRemaining: nil))),
+                animated: true)
         }
     }
 }

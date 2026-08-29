@@ -107,4 +107,16 @@ std::expected<std::vector<ThroughHole>, std::string> throughHoles(const std::str
     return raw.holes;
 }
 
+std::expected<ComponentModelExportResult, std::string> exportComponentModels(const std::string& projectPath,
+                                                                                const std::string& boardPath,
+                                                                                const std::string& componentFilter,
+                                                                                const std::string& outputStlPath) {
+    detail::RawComponentModelExportResult raw =
+        detail::exportComponentModelsRaw(projectPath, boardPath, componentFilter, outputStlPath);
+    if (!raw.ok) {
+        return std::unexpected(std::move(raw.error));
+    }
+    return raw.result;
+}
+
 } // namespace libkicad
