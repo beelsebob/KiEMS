@@ -152,15 +152,26 @@ public:
     void addGrid();
     void addGerbers();
     void addPortGrid();
+    void addLumpedComponentGrid();
 
     std::expected<void, std::string> addMslPort(PortConfig& portConfig, std::int32_t portNumber, bool excite = false);
-    std::expected<void, std::string> addResistivePort(PortConfig& portConfig, bool excite = false);
-    /// Built instead of addMslPort() for a PortConfig with absorbSignal()==false (and excite()==
+    std::expected<void, std::string> addResistivePort(PortConfig& portConfig, std::int32_t portNumber,
+                                                        bool excite = false);
+    /// Built instead of addResistivePort() for a PortConfig with absorbSignal()==false (and excite()==
     /// false, which port_resolution.cpp guarantees whenever absorbSignal() is false -- see
     /// PortConfig::absorbSignal()'s own doc comment): a PassiveProbe, U/I probe boxes only, no
     /// metal/resistor/excitation. Still pushed onto _ports (see addPorts()), so it's reachable
     /// through every existing per-port accessor.
     std::expected<void, std::string> addPassiveProbe(PortConfig& portConfig, std::int32_t portNumber);
+    /// Built instead of addResistivePort()/addPassiveProbe() for a PortConfig with isTraceProbe()==true --
+    /// a non-loading, mid-trace characteristic-impedance measurement point (see
+    /// PortConfig::isTraceProbe()'s own doc comment). Same transverse-width/propagation-axis box
+    /// geometry as addMslPort() (reusing its corrected widthDirX/widthDirY convention -- not
+    /// addPassiveProbe()'s older, pad-anchored one, which would orient the box wrong for a mid-trace
+    /// probe), but built as an MSLPort with excite()==0 and no feed resistor: no synthetic metal, no
+    /// termination, only the U/I/characteristic-impedance measurement cross-sections
+    /// MSLPort::readUiData() already computes into Port::zRef().
+    std::expected<void, std::string> addImpedanceProbe(PortConfig& portConfig, std::int32_t portNumber);
     /// Builds one SERIES CSPropLumpedElement box per SimulationConfig::lumpedComponents() entry,
     /// bridging its two real pad positions -- see that type's own doc comment and
     /// port_resolution.cpp's discovery rule. Unlike ports, these are never individually excited and
@@ -251,17 +262,26 @@ public:
     /// as long as this Simulation (and therefore _fdtd) is alive.
     ContinuousStructure& csx() { return *_csx; }
 
+    /// Exposed for the same reason as fdtdEngine()/csx(): a GPU worker needs this simulation's own
+    /// EMSConfig::frequency() to compute a correctly-scaled CPML alphaMax (see
+    /// copper::cpmlAlphaMaxForFrequency()'s own doc comment) rather than relying on
+    /// runFDTDPortOnGPU()'s generic, frequency-agnostic default.
+    const EMSConfig& config() const { return _config; }
+
     /// `reflected`/`incident` are uf phasors per port (a same-length, all-NaN placeholder for any
     /// port with absorbSignal()==false, which never computes a meaningful incident/reflected split
     /// -- see PortConfig::absorbSignal()'s own doc comment -- kept only to preserve every other
     /// piece of code's port-index alignment). `probeVoltage`/`probeCurrent` carry that same
     /// non-absorbing port's real data instead (ufTot()/ifTot()), keyed by port index -- only ever
-    /// populated for ports with absorbSignal()==false.
+    /// populated for ports with absorbSignal()==false. `probeImpedance` is populated only for a
+    /// trace-impedance probe (PortConfig::isTraceProbe()==true, a strict subset of the non-absorbing
+    /// ports above) with that probe's own measured characteristic impedance (Port::zRef()).
     struct PortParameters {
         std::vector<std::vector<std::complex<double>>> reflected;
         std::vector<std::vector<std::complex<double>>> incident;
         std::map<std::int32_t, std::vector<std::complex<double>>> probeVoltage;
         std::map<std::int32_t, std::vector<std::complex<double>>> probeCurrent;
+        std::map<std::int32_t, std::vector<std::complex<double>>> probeImpedance;
     };
     std::expected<PortParameters, std::string> getPortParameters(std::int32_t exIndex,
                                                                     const std::vector<double>& frequencies);

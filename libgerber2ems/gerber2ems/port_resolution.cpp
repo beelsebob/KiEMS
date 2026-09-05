@@ -101,48 +101,6 @@ Position _padPositionInSimFrame(const PadIdentity& pad, const Position& edgeCuts
     return Position(_mmToSimUnits(pad.xMm) - edgeCutsOrigin.x(), _mmToSimUnits(pad.yMm) - edgeCutsOrigin.y());
 }
 
-// Caches parsed copper GerberFiles across every pad direction lookup in one resolveSimulationPorts()
-// call -- several pads typically share a layer (and even a net), and re-parsing the same file per
-// pad would be wasteful.
-class _CopperLayerCache {
-public:
-    /// Returns nullptr (a success value, not an error) if there's legitimately no copper gerber for
-    /// this layer; only a failure to parse a gerber that *was* found is reported as unexpected.
-    std::expected<const GerberFile*, std::string> forLayerFileName(const std::filesystem::path& fabDir,
-                                                                     const std::string& layerFileName,
-                                                                     double tessellationTolerance) {
-        const auto it = _files.find(layerFileName);
-        if (it != _files.end()) {
-            return it->second.has_value() ? &*it->second : nullptr;
-        }
-
-        const std::string suffix = "-" + layerFileName + ".gbr";
-        std::optional<std::filesystem::path> gerberPath;
-        std::error_code ec;
-        if (std::filesystem::is_directory(fabDir, ec)) {
-            for (const auto& entry : std::filesystem::directory_iterator(fabDir, ec)) {
-                const std::string name = entry.path().filename().string();
-                if (name.size() >= suffix.size() &&
-                    name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
-                    gerberPath = entry.path();
-                    break;
-                }
-            }
-        }
-        if (!gerberPath.has_value()) {
-            return &*_files.emplace(layerFileName, std::nullopt).first->second;
-        }
-        auto gerberResult = GerberFile::load(*gerberPath, tessellationTolerance);
-        if (!gerberResult) {
-            return std::unexpected(std::move(gerberResult).error());
-        }
-        return &*_files.emplace(layerFileName, std::move(*gerberResult)).first->second;
-    }
-
-private:
-    std::unordered_map<std::string, std::optional<GerberFile>> _files;
-};
-
 // Snaps an angle (radians) to the nearest cardinal direction (0/90/180/270 degrees), returning
 // nullopt if it's further than `toleranceDegrees` from all of them.
 std::optional<double> _snapToCardinal(double angleRadians, double toleranceDegrees) {
@@ -168,11 +126,9 @@ constexpr double kMinPositionToleranceSimUnits = 50.0; // 5 microns, at 10 sim-u
 // margin is a fixed physical distance, not scaled with pad size, because a teardrop/fillet lead-in
 // (the thing this margin exists to search past) is roughly a fixed real-world size regardless of
 // how small the pad itself is -- confirmed against a real, tiny (0.46x0.4mm) capacitor pad whose
-// own curved lead-in didn't straighten out to a cardinal angle until ~0.35mm from the pad center,
-// which the previous, smaller 0.1mm margin didn't reach at all (see _deriveDirection's own
-// candidate search -- it already takes the first candidate, ordered nearest-first, that actually
-// snaps to cardinal, so widening this margin only ever adds *more distant* candidates to consider,
-// never changes which nearer one wins if one already qualified).
+// own curved lead-in extended further than the previous, smaller 0.1mm margin reached. Used by
+// _findTraceProbePoints()'s own tooCloseToPad() below, to reject an impedance-probe candidate run
+// that passes too close to a pad rather than a genuinely clear straight section of trace.
 constexpr double kPadToleranceMarginMm = 0.4;
 constexpr double kDirectionToleranceDegrees = 5.0;
 
@@ -181,91 +137,188 @@ double _padSearchToleranceSimUnits(double padWidthMm, double padHeightMm) {
     return std::max(kMinPositionToleranceSimUnits, _mmToSimUnits(halfDiagonalMm + kPadToleranceMarginMm));
 }
 
-// Derives an MSLPort's propagation direction from the departure angle of `netName`'s own routed
-// copper at `padPositionSim` on `layerFileName`, snapped to the nearest cardinal -- NOT from the
-// pad's own footprint rotation, which doesn't necessarily match the direction its routed trace
-// departs in (angled fanouts, connectors, etc.). Returns nullopt (having logged why) if no trace
-// segment endpoint is close enough to the pad, or its angle isn't close enough to cardinal.
-std::expected<double, std::string> _deriveDirection(_CopperLayerCache& cache, const std::filesystem::path& fabDir,
-                                                      const Position& padPositionSim, const Position& edgeCutsOrigin,
-                                                      double padWidthMm, double padHeightMm,
-                                                      const std::string& netName, const std::string& layerFileName,
-                                                      const std::string& portLabel, double tessellationTolerance) {
-    auto gerberResult = cache.forLayerFileName(fabDir, layerFileName, tessellationTolerance);
-    if (!gerberResult) return std::unexpected(std::move(gerberResult).error());
-    const GerberFile* gerber = *gerberResult;
-    if (!gerber) {
-        return std::unexpected("No copper gerber found for layer \"" + layerFileName + "\" (port " + portLabel + ")");
-    }
+/// Upper bound on how many trace-impedance probes InvolvedNetConfig::probeImpedance() places on any
+/// one net -- bounds both simulation port count (each probe is its own FDTD measurement point) and
+/// results-view clutter. A handful of samples along a net's straight runs is enough to see whether
+/// its measured impedance is flat (well-matched line) or spread out (a discontinuity somewhere on
+/// it); more than a few adds little.
+constexpr std::size_t kMaxTraceProbesPerNet = 3;
 
-    const double toleranceSimUnits = _padSearchToleranceSimUnits(padWidthMm, padHeightMm);
+/// One candidate trace-impedance probe location -- the midpoint of a straight, pad-clear run of
+/// `netName`'s own routed copper, wide/oriented/layered to match the real trace there.
+struct _TraceProbeCandidate {
+    Position position;
+    double direction; // PortConfig::direction()'s own convention (0/90/180/270 degrees)
+    double width;     // config/file units (microns), scaled exactly once with the other ports
+    double length;    // heuristic measurement span, also in config/file units
+    std::int32_t layer;
+};
 
-    // A pad often has more than one segment touching it exactly (e.g. a short 45-degree corner
-    // chamfer immediately at the pad, before the trace straightens into its real, cardinal
-    // direction) -- collect every segment with an endpoint within tolerance, ordered by distance,
-    // and take the first whose departure angle actually snaps to cardinal, rather than assuming
-    // the single geometrically-nearest one is representative.
-    //
-    // GerberFile::traceForNet() returns segments in the gerber's own raw, un-re-origined
-    // coordinates (the same convention gerber_composite.cpp's compositeOps() takes an explicit
-    // origin argument to correct for), while padPositionSim has already been re-origined against
-    // edgeCutsOrigin (see _padPositionInSimFrame) -- so every segment endpoint has to be shifted
-    // by the same origin before it's comparable to padPositionSim at all.
-    struct Candidate {
-        double distance;
-        Position from;
-        Position to;
+/// Finds up to kMaxTraceProbesPerNet reasonable spots to place a non-loading impedance probe on
+/// `netName`'s own routed copper -- see Simulation::addImpedanceProbe(). Walks KiCad's semantic
+/// straight-track primitives, chains consecutive same-direction/same-width segments into maximal
+/// straight runs (a bend, via, or aperture change naturally ends a run, since none of those keep
+/// both direction and width identical across the join), discards any run too short to safely fit a
+/// probe or whose midpoint sits too close to one of this net's own pads (a probe right at a
+/// component termination would measure near-field fringing, not the line's characteristic
+/// impedance), and returns the longest surviving runs' midpoints, longest first.
+std::expected<std::vector<_TraceProbeCandidate>, std::string> _findTraceProbePoints(
+    const PathsConfig& paths, const Position& edgeCutsOrigin, const EMSConfig& config,
+    const std::string& netName, const std::vector<PadIdentity>& pads) {
+    struct _Run {
+        Position start;
+        Position end;
+        double direction;
+        double width;
+        std::int32_t layer;
+        double length;
     };
-    std::vector<Candidate> candidates;
-    const Trace trace = gerber->traceForNet(NetName(netName));
-    for (const TraceSegment& segment : trace.segments()) {
-        const Position start(segment.start().x() - edgeCutsOrigin.x(), segment.start().y() - edgeCutsOrigin.y());
-        const Position stop(segment.stop().x() - edgeCutsOrigin.x(), segment.stop().y() - edgeCutsOrigin.y());
-        const double startDist = std::hypot(start.x() - padPositionSim.x(), start.y() - padPositionSim.y());
-        const double stopDist = std::hypot(stop.x() - padPositionSim.x(), stop.y() - padPositionSim.y());
-        if (startDist <= toleranceSimUnits) {
-            candidates.push_back({startDist, start, stop});
-        }
-        if (stopDist <= toleranceSimUnits) {
-            candidates.push_back({stopDist, stop, start});
-        }
-    }
-    std::sort(candidates.begin(), candidates.end(),
-              [](const Candidate& a, const Candidate& b) { return a.distance < b.distance; });
+    struct _Seg {
+        Position start;
+        Position stop;
+        double width;
+        double direction;
+    };
 
-    if (candidates.empty()) {
-        return std::unexpected("Could not find net \"" + _unescapeForDisplay(netName) +
-                                "\"'s own routed copper departing pad for port " + portLabel +
-                                " -- set an explicit \"direction\" override for this involved_nets entry");
-    }
+    auto tracksResult = libkicad_query::tracksOnNet(
+        paths, netName,
+        "Finding impedance-probe locations on net \"" + _unescapeForDisplay(netName) + "\"");
+    if (!tracksResult) return std::unexpected(std::move(tracksResult).error());
 
-    for (const Candidate& candidate : candidates) {
-        // Departure direction: away from the pad, along the segment.
-        const double angle = std::atan2(candidate.to.y() - candidate.from.y(), candidate.to.x() - candidate.from.x());
-        const std::optional<double> snapped = _snapToCardinal(angle, kDirectionToleranceDegrees);
-        if (snapped.has_value()) {
-            return *snapped;
+    // KiCad track primitives carry the routing semantics Gerber loses: true segment endpoints,
+    // designed width and layer. Gerber remains authoritative for the FDTD copper polygons; these
+    // primitives are only the probe-placement guide.
+    std::vector<_Seg> segs;
+    std::vector<std::int32_t> segLayers;
+    for (const libkicad_query::TrackSegment& track : *tracksResult) {
+        Position start(_mmToSimUnits(track.startXMm) - edgeCutsOrigin.x(),
+                       _mmToSimUnits(track.startYMm) - edgeCutsOrigin.y());
+        Position stop(_mmToSimUnits(track.endXMm) - edgeCutsOrigin.x(),
+                      _mmToSimUnits(track.endYMm) - edgeCutsOrigin.y());
+        const std::optional<double> snapped =
+            _snapToCardinal(std::atan2(stop.y() - start.y(), stop.x() - start.x()), kDirectionToleranceDegrees);
+        const std::optional<std::int32_t> layer =
+            config.metalLayerIndexForFileName(_normalizeLayerName(track.copperLayerName));
+        if (!snapped.has_value() || !layer.has_value() || track.widthMm <= 0) {
+            continue;
         }
+        // A straight line's propagation orientation is unsigned for placement. Canonicalizing to
+        // +X/+Y also lets reversed KiCad segments join the same run.
+        const double direction = (*snapped == 90 || *snapped == 270) ? 90.0 : 0.0;
+        if ((direction == 0 && start.x() > stop.x()) || (direction == 90 && start.y() > stop.y())) {
+            std::swap(start, stop);
+        }
+        segs.push_back({start, stop, _mmToSimUnits(track.widthMm), direction});
+        segLayers.push_back(*layer);
     }
 
-    return std::unexpected("Net \"" + _unescapeForDisplay(netName) + "\"'s routed copper departs pad for port " +
-                            portLabel +
-                            " at a non-cardinal angle -- set an explicit \"direction\" override for this "
-                            "involved_nets entry");
+    std::vector<_Run> runs;
+    std::vector<bool> used(segs.size(), false);
+    for (std::size_t i = 0; i < segs.size(); ++i) {
+        if (used[i]) continue;
+        Position runStart = segs[i].start;
+        Position runEnd = segs[i].stop;
+        const double direction = segs[i].direction;
+        const double width = segs[i].width;
+        const std::int32_t layer = segLayers[i];
+        used[i] = true;
+        bool extended = true;
+        while (extended) {
+            extended = false;
+            for (std::size_t j = 0; j < segs.size(); ++j) {
+                if (used[j] || segLayers[j] != layer || segs[j].direction != direction ||
+                    std::abs(segs[j].width - width) > 1e-6) {
+                    continue;
+                }
+                const bool collinear = direction == 0
+                    ? std::abs(segs[j].start.y() - runStart.y()) <= kMinPositionToleranceSimUnits
+                    : std::abs(segs[j].start.x() - runStart.x()) <= kMinPositionToleranceSimUnits;
+                if (!collinear) continue;
+                const double joinsEnd = std::hypot(segs[j].start.x() - runEnd.x(), segs[j].start.y() - runEnd.y());
+                const double joinsStart =
+                    std::hypot(segs[j].stop.x() - runStart.x(), segs[j].stop.y() - runStart.y());
+                if (joinsEnd <= kMinPositionToleranceSimUnits) {
+                    runEnd = segs[j].stop;
+                } else if (joinsStart <= kMinPositionToleranceSimUnits) {
+                    runStart = segs[j].start;
+                } else {
+                    continue;
+                }
+                used[j] = true;
+                extended = true;
+            }
+        }
+        runs.push_back({runStart, runEnd, direction, width, layer,
+                        std::hypot(runEnd.x() - runStart.x(), runEnd.y() - runStart.y())});
+    }
+
+    auto tooCloseToPad = [&](const Position& point) {
+        for (const PadIdentity& pad : pads) {
+            const Position padPos = _padPositionInSimFrame(pad, edgeCutsOrigin);
+            const double tolerance = _padSearchToleranceSimUnits(pad.widthMm, pad.heightMm);
+            if (std::hypot(point.x() - padPos.x(), point.y() - padPos.y()) <= tolerance) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    std::vector<_Run> candidates;
+    for (const _Run& run : runs) {
+        // Enough room for MSLPort's own 3-plane measurement span plus margin from both ends (see
+        // Simulation::addImpedanceProbe()) -- a shorter run either can't fit a probe at all or would
+        // place one too close to whatever's at either end (a pad, a bend, a via).
+        // Four trace widths provides transverse/longitudinal separation around the three voltage
+        // planes while still admitting compact fan-out routes (TestSim's pre-capacitor USB run is
+        // about 0.68 mm long). The probe's own span is chosen below; no user Length field applies.
+        const double minLength = std::max(4.0 * run.width, _mmToSimUnits(0.5));
+        if (run.length < minLength) {
+            continue;
+        }
+        const Position mid((run.start.x() + run.end.x()) / 2.0, (run.start.y() + run.end.y()) / 2.0);
+        if (tooCloseToPad(mid)) {
+            continue;
+        }
+        candidates.push_back(run);
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const _Run& a, const _Run& b) { return a.length > b.length; });
+
+    std::vector<_TraceProbeCandidate> result;
+    for (const _Run& run : candidates) {
+        if (result.size() >= kMaxTraceProbesPerNet) {
+            break;
+        }
+        const Position mid((run.start.x() + run.end.x()) / 2.0, (run.start.y() + run.end.y()) / 2.0);
+        // PortConfig widths are still in microns here; scaledToSimulationUnits() multiplies them
+        // once later. `run.width` is already in simulation units, so undo only that multiplier.
+        const double probeLength = std::min(_mmToSimUnits(1.0), run.length * 0.8);
+        result.push_back({mid, run.direction, run.width / constants::unitMultiplier,
+                          probeLength / constants::unitMultiplier, run.layer});
+    }
+    return result;
 }
 
 /// One (footprintRef, padNumber) -> resolved port index -- built once per simulation while placing
 /// ports, then reused to resolve ExcitationConfig/PortRef targets without re-deriving identity.
 struct _PortIndex {
     std::optional<std::int32_t> find(const std::string& footprintRef, const std::string& padNumber) const {
-        for (std::size_t i = 0; i < entries.size(); ++i) {
-            if (entries[i].first == footprintRef && entries[i].second == padNumber) {
-                return static_cast<std::int32_t>(i);
+        for (const Entry& entry : entries) {
+            if (entry.footprintRef == footprintRef && entry.padNumber == padNumber) {
+                return entry.portIndex;
             }
         }
         return std::nullopt;
     }
-    std::vector<std::pair<std::string, std::string>> entries; // parallel to SimulationConfig::ports()
+
+    struct Entry {
+        std::string footprintRef;
+        std::string padNumber;
+        std::int32_t portIndex = 0;
+    };
+    // Trace-impedance probes also occupy SimulationConfig::ports(), but are intentionally absent
+    // here because they aren't pad-anchored. Therefore this vector is not positionally parallel to
+    // ports(): every entry must retain the real port index it referred to at insertion time.
+    std::vector<Entry> entries;
 };
 
 // Everything before the first digit, uppercased -- e.g. "R1" -> "R", "RN2" -> "RN", "C89" -> "C".
@@ -394,11 +447,6 @@ std::expected<void, std::string> _resolveLumpedComponents(const EMSConfig& confi
         const Position pos2 = _padPositionInSimFrame(pad2, edgeCutsOrigin);
         const double angle = std::atan2(pos2.y() - pos1.y(), pos2.x() - pos1.x());
         const std::optional<double> snapped = _snapToCardinal(angle, kDirectionToleranceDegrees);
-        if (!snapped.has_value()) {
-            logWarning("Simulation \"" + sim.name() + "\": component " + footprint.reference +
-                       "'s two pads aren't axis-aligned -- skipping (not supported)");
-            continue;
-        }
 
         LumpedComponentConfig component;
         component.setReference(footprint.reference);
@@ -416,8 +464,34 @@ std::expected<void, std::string> _resolveLumpedComponents(const EMSConfig& confi
         }
         component.setPosition1({pos1.x(), pos1.y()});
         component.setPosition2({pos2.x(), pos2.y()});
-        component.setDirection(*snapped);
         component.setLayer(*layer);
+
+        if (snapped.has_value()) {
+            component.setDirection(*snapped);
+        } else {
+            // Neither Operator_Ext_LumpedRLC nor CSPropLumpedElement has any concept of a "diagonal"
+            // element -- a lumped component is a modification to one E-field edge's own update
+            // equation along a single Cartesian axis, not a filled 3D region like real copper, which
+            // staircases across a Yee grid automatically just by being a solid volume spanning many
+            // cells. Route an L-shaped bridge through a synthetic corner instead -- each leg
+            // individually cardinal-aligned even though the true pad1->pad2 line isn't (see
+            // LumpedComponentConfig::cornerBridge()'s own doc comment for why this replaced an
+            // earlier, geometry-free "remote pair" mechanism, and why Simulation::addLumpedComponents()
+            // routes it through open airspace above/below the board rather than along its own copper
+            // layer -- a real board very commonly has a ground pour covering most of a layer near any
+            // given component, which would make an on-layer route fail an interference check almost
+            // everywhere; nothing occupies the airspace just off the board, so no such check is needed
+            // here at all, and either of the two possible corners works equally well). Arbitrarily
+            // picks (position2.x, position1.y) as the corner.
+            const Position corner(pos2.x(), pos1.y());
+            component.setCornerBridge(true);
+            component.setBridgeCorner({corner.x(), corner.y()});
+            component.setDirection(pos1.x() < corner.x() ? 0.0 : 180.0);
+            component.setDirection2(corner.y() < pos2.y() ? 90.0 : 270.0);
+            logInfo("Simulation \"" + sim.name() + "\": component " + footprint.reference +
+                     "'s two pads aren't axis-aligned -- bridging via a synthetic corner at (" +
+                     std::to_string(corner.x()) + ", " + std::to_string(corner.y()) + ") through open airspace");
+        }
         sim.lumpedComponents().push_back(std::move(component));
     }
     return {};
@@ -464,7 +538,7 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
         // itself kept growing, excitation/trace/diff-pair resolved indices would silently point at
         // the wrong (stale, duplicate) entries too.
         sim.ports().clear();
-        _CopperLayerCache layerCache;
+        std::erase_if(sim.diffPairs(), [](const DifferentialPairConfig& pair) { return pair.automatic(); });
         _PortIndex portIndex;
 
         // Map from resolved net name -> which InvolvedNetConfig entry claimed it (for error
@@ -472,7 +546,107 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
         std::unordered_map<std::string, const InvolvedNetConfig*> netOwner;
         std::vector<std::string> orderedNets;
 
+        // GeometryOnly-kind entries ("Included in Simulation") never grow resolvedNets()/the hull --
+        // that's still entirely handled by board_slicing.cpp/grid_gen.cpp's own separate treatment,
+        // untouched by this pass -- but a pin explicitly marked absorb-only via setPinAbsorbOnly()
+        // still needs a real resistive termination port, so an otherwise-completely-unmodeled
+        // downstream trace (one running to an IC or resistor outside this simulation's own involved
+        // set) doesn't behave as an open, fully-reflecting stub in the FDTD field. This is
+        // deliberately a *separate*, narrower pass from the main per-pad loop below: it only ever
+        // creates absorb-only (probe()==false) ports, never lets a GeometryOnly entry's pin become
+        // excitation-eligible (excite() stays false, and these ports are never added to portIndex,
+        // matching isTraceProbe() ports' own "not pad-anchored enough to be an excitation/PortRef
+        // target" treatment), and ignores any probedPins() entry left with probe==true (measuring a
+        // net that's never in resolvedNets() has no S-parameter port-number identity to report
+        // against).
         for (const InvolvedNetConfig& entry : sim.involvedNets()) {
+            if (entry.inclusionLevel() != NetInclusionLevel::GeometryOnly || entry.probedPins().empty()) {
+                continue;
+            }
+            auto nets = libkicad_query::resolveInvolvedNetNames(paths, entry);
+            if (!nets) return std::unexpected(std::move(nets).error());
+            for (const std::string& netName : *nets) {
+                auto padsResult = libkicad_query::padsOnNet(
+                    paths, netName,
+                    "Simulation \"" + sim.name() + "\": enumerating pads on net \"" + _unescapeForDisplay(netName) +
+                        "\" (absorb-only)");
+                if (!padsResult) return std::unexpected(std::move(padsResult).error());
+                for (const PadIdentity& pad : *padsResult) {
+                    const std::optional<bool> isProbe = entry.probedPinIsProbe(pad.footprintRef, pad.padNumber);
+                    const std::optional<bool> absorbs = entry.probedPinAbsorbs(pad.footprintRef, pad.padNumber);
+                    if (!isProbe.has_value() || *isProbe || !absorbs.value_or(false)) {
+                        continue;
+                    }
+                    const Position positionSim = _padPositionInSimFrame(pad, edgeCutsOrigin);
+                    const std::string layerFileName = _normalizeLayerName(pad.copperLayerName);
+                    const std::optional<std::int32_t> layer = config.metalLayerIndexForFileName(layerFileName);
+                    const std::string portLabel = pad.footprintRef + " pin " + pad.padNumber + " (" +
+                                                   _unescapeForDisplay(netName) + ", absorb only)";
+                    if (!layer.has_value()) {
+                        return std::unexpected("Port " + portLabel + ": copper layer \"" + pad.copperLayerName +
+                                                "\" not found in stackup (through-hole pads, which span every "
+                                                "copper layer, aren't supported yet -- v1 requires SMD pads)");
+                    }
+                    // Only ever consumed by addResistivePort()/addPassiveProbe() (never
+                    // addImpedanceProbe(), which derives its own direction independently from a
+                    // routed track run, not from any pad) -- and both of those use it purely to
+                    // orient/size a box to the pad's own real footprint, never as a genuine
+                    // current-carrying axis (that's always Z; see either function's own doc
+                    // comment). Falls back to the pad's own real rotation, not a trace-departure
+                    // search: a pad with traces entering from more than one side has no single
+                    // "departure direction" to search for in the first place, but its own physical
+                    // rotation is always well-defined regardless of how many traces connect to it.
+                    double direction = pad.orientationDeg;
+                    if (const auto pinOverride = entry.pinDirectionOverride(pad.footprintRef, pad.padNumber);
+                        pinOverride.has_value()) {
+                        direction = *pinOverride;
+                    } else if (entry.direction().has_value()) {
+                        direction = *entry.direction();
+                    }
+                    PortConfig port;
+                    port.setName(portLabel);
+                    port.setFootprintRef(pad.footprintRef);
+                    port.setPadNumber(pad.padNumber);
+                    port.setNetName(_unescapeForDisplay(netName));
+                    port.setPosition({positionSim.x(), positionSim.y()});
+                    port.setDirection(direction);
+                    port.setLayer(*layer);
+                    port.setPlane(entry.plane());
+                    port.setImpedance(entry.impedance());
+                    if (entry.width().has_value()) {
+                        port.setWidth(*entry.width());
+                    } else {
+                        const double padAngle = pad.orientationDeg * std::numbers::pi / 180.0;
+                        const double transverseAngle = (direction + 90.0) * std::numbers::pi / 180.0;
+                        const double relative = padAngle - transverseAngle;
+                        const double transverseWidthMm = std::abs(std::cos(relative)) * pad.widthMm +
+                                                          std::abs(std::sin(relative)) * pad.heightMm;
+                        port.setWidth(transverseWidthMm * 1000.0);
+                    }
+                    const double padAngle = pad.orientationDeg * std::numbers::pi / 180.0;
+                    const double longitudinalAngle = direction * std::numbers::pi / 180.0;
+                    const double longitudinalRelative = padAngle - longitudinalAngle;
+                    const double longitudinalLengthMm = std::abs(std::cos(longitudinalRelative)) * pad.widthMm +
+                                                        std::abs(std::sin(longitudinalRelative)) * pad.heightMm;
+                    port.setLength(longitudinalLengthMm * 1000.0);
+                    port.setExcite(false);
+                    port.setAbsorbSignal(true);
+                    port.setProbe(false);
+                    sim.ports().push_back(std::move(port));
+                }
+            }
+        }
+
+        for (const InvolvedNetConfig& entry : sim.involvedNets()) {
+            // GeometryOnly-kind entries ("Included in Simulation") deliberately never reach this
+            // loop at all -- their whole point is to exist in the simulated geometry (handled
+            // entirely by board_slicing.cpp/grid_gen.cpp's own separate treatment) without becoming
+            // port/probe/excitation-eligible or entering resolvedNets(). Their pins can still get an
+            // absorb-only termination port, but that's handled entirely by the separate pass just
+            // above -- see its own doc comment. See NetInclusionLevel's own doc comment.
+            if (entry.inclusionLevel() == NetInclusionLevel::GeometryOnly) {
+                continue;
+            }
             auto nets = libkicad_query::resolveInvolvedNetNames(paths, entry);
             if (!nets) return std::unexpected(std::move(nets).error());
             for (const std::string& netName : *nets) {
@@ -524,12 +698,17 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                 const bool isExcitationTarget =
                     excitationTargets.find({pad.footprintRef, pad.padNumber}) != excitationTargets.end();
                 std::optional<bool> absorb;
+                std::optional<bool> isProbe;
                 if (!entry.hasExplicitPinSelections()) {
+                    // Legacy (opt-out) mode predates setPinAbsorbOnly() entirely -- every
+                    // non-excluded pin is a full, reportable probe, same as it always was.
                     if (!entry.isPinExcluded(pad.footprintRef, pad.padNumber)) {
                         absorb = true;
+                        isProbe = true;
                     }
                 } else {
                     absorb = entry.probedPinAbsorbs(pad.footprintRef, pad.padNumber);
+                    isProbe = entry.probedPinIsProbe(pad.footprintRef, pad.padNumber);
                 }
                 if (!absorb.has_value() && !isExcitationTarget) {
                     continue;
@@ -552,28 +731,38 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                 }
 
                 // Checked in this order: a per-pad override (this exact footprint+pin) first, then
-                // the net-wide override, then auto-derivation -- see PinDirectionOverride's own doc
-                // comment for why a single net-wide value can be wrong for one end of a routed net
-                // while correct for the other, and per-pad is the escape hatch for that case
-                // specifically, without disturbing whichever end the net-wide value already suits.
-                double direction = 0;
+                // the net-wide override, then the pad's own real rotation -- see
+                // PinDirectionOverride's own doc comment for why a single net-wide value can be
+                // wrong for one end of a routed net while correct for the other, and per-pad is the
+                // escape hatch for that case specifically, without disturbing whichever end the
+                // net-wide value already suits.
+                //
+                // The fallback is the pad's own physical rotation, not a trace-departure search
+                // (this used to call _deriveDirection(), which picks whichever nearby routed
+                // segment happens to be nearest and cardinal-snapping) -- only ever consumed by
+                // addResistivePort()/addPassiveProbe() below, both of which use it purely to
+                // orient/size a box to the pad's own real footprint (current there is always
+                // vertical, Z; see either function's own doc comment), never as a genuine
+                // current-carrying axis the way addImpedanceProbe()'s own, entirely separate
+                // direction resolution needs. A pad with traces entering from more than one side
+                // has no single "departure direction" to search for in the first place -- its own
+                // rotation is always well-defined regardless of how many traces connect to it, and
+                // for the overwhelmingly common case of one trace per pad, a component's own
+                // placement rotation already tracks its trace's departure closely in normal layout
+                // practice anyway.
+                double direction = pad.orientationDeg;
                 if (const auto pinOverride = entry.pinDirectionOverride(pad.footprintRef, pad.padNumber);
                     pinOverride.has_value()) {
                     direction = *pinOverride;
                 } else if (entry.direction().has_value()) {
                     direction = *entry.direction();
-                } else {
-                    auto derived =
-                        _deriveDirection(layerCache, paths.fabDir, positionSim, edgeCutsOrigin, pad.widthMm,
-                                          pad.heightMm, netName, layerFileName, portLabel, tessellationTolerance);
-                    if (!derived) return std::unexpected(std::move(derived).error());
-                    direction = *derived;
                 }
 
                 PortConfig port;
                 port.setName(portLabel);
                 port.setFootprintRef(pad.footprintRef);
                 port.setPadNumber(pad.padNumber);
+                port.setNetName(_unescapeForDisplay(netName));
                 port.setPosition({positionSim.x(), positionSim.y()});
                 port.setDirection(direction);
                 port.setLayer(*layer);
@@ -582,7 +771,31 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                 port.setLength(entry.length());
                 if (entry.width().has_value()) {
                     port.setWidth(*entry.width());
+                } else {
+                    // A component-facing lumped port sits directly on the pad and spans its real
+                    // transverse copper extent. Project the rotated pad rectangle onto the axis
+                    // perpendicular to the departing trace; this is exact for cardinal rectangular
+                    // pads and a conservative axis-aligned span for rotated ones.
+                    const double padAngle = pad.orientationDeg * std::numbers::pi / 180.0;
+                    const double transverseAngle = (direction + 90.0) * std::numbers::pi / 180.0;
+                    const double relative = padAngle - transverseAngle;
+                    const double transverseWidthMm = std::abs(std::cos(relative)) * pad.widthMm +
+                                                      std::abs(std::sin(relative)) * pad.heightMm;
+                    port.setWidth(transverseWidthMm * 1000.0); // millimetres -> config microns
                 }
+                // A component-facing LumpedPort is a vertical sheet over the pad, so it needs the
+                // pad's real extent along the departing trace as well as its transverse width. A
+                // zero-thickness sheet in this direction only excites anything when a primary Yee
+                // line happens to land on its exact coordinate; normal mesh deduplication can move
+                // that line and leave Operator_Ext_Excitation with no cells at all. `length` used
+                // to describe an MSL measurement span, but component ports no longer use MSLPort;
+                // their correct longitudinal size is now the corresponding projection of the pad.
+                const double padAngle = pad.orientationDeg * std::numbers::pi / 180.0;
+                const double longitudinalAngle = direction * std::numbers::pi / 180.0;
+                const double longitudinalRelative = padAngle - longitudinalAngle;
+                const double longitudinalLengthMm = std::abs(std::cos(longitudinalRelative)) * pad.widthMm +
+                                                    std::abs(std::sin(longitudinalRelative)) * pad.heightMm;
+                port.setLength(longitudinalLengthMm * 1000.0); // millimetres -> config microns
                 if (entry.dBMargin().has_value()) {
                     port.setDBMargin(*entry.dBMargin());
                 }
@@ -599,6 +812,12 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                 // doc comment); the excitations loop below flips excite() itself back on for
                 // whichever port index this pad resolves to.
                 port.setAbsorbSignal(isExcitationTarget || absorb.value_or(true));
+                // Same "excitation wins" precedence as absorbSignal() above -- driving a pad always
+                // makes it worth reporting, regardless of whether it was separately marked
+                // absorb-only (setPinAbsorbOnly()) via probedPins(). Otherwise defaults true, so
+                // every pre-existing probed pin (and every legacy-mode, non-excluded pin) stays
+                // exactly as reportable as it always was -- see PortConfig::probe()'s own doc comment.
+                port.setProbe(isExcitationTarget || isProbe.value_or(true));
                 // width/length deliberately left unscaled here, matching entry.length()/entry.width()'s
                 // own file units -- SimulationConfig::scaleToSimulationUnits() (called once, by
                 // EMSConfig::scaledToSimulationUnits(), at the FDTD-facing boundary) scales every
@@ -606,8 +825,63 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                 // units (see positionSim above), since it comes from board/gerber geometry, not a
                 // JSON field this config's own scaling concerns itself with.
 
-                portIndex.entries.emplace_back(pad.footprintRef, pad.padNumber);
+                const auto actualPortIndex = static_cast<std::int32_t>(sim.ports().size());
+                portIndex.entries.push_back({pad.footprintRef, pad.padNumber, actualPortIndex});
                 sim.ports().push_back(std::move(port));
+            }
+
+            // Net-level, in addition to whatever the per-pad loop above just resolved -- see
+            // InvolvedNetConfig::probeImpedance()'s own doc comment. Meaningless for a
+            // FootprintPin-kind entry (it names a single pad, not a net to search for straight
+            // trace runs on), so that kind is excluded even if somehow set.
+            // A differential-pair simulation needs the same local trace measurements even when
+            // the user did not separately enable the single-ended "Probe impedance" option. The
+            // mixed-mode port impedance answers what the attached component sees at its pad;
+            // these non-loading probes are what populate the Impedance results with the routed
+            // pair's characteristic impedance away from the pads.
+            if (entry.kind() != NetSelectorKind::FootprintPin &&
+                (entry.probeImpedance() || entry.simulateAsDifferentialPair())) {
+                auto candidatesResult = _findTraceProbePoints(paths, edgeCutsOrigin, config, netName, pads);
+                if (!candidatesResult) return std::unexpected(std::move(candidatesResult).error());
+                if (candidatesResult->empty()) {
+                    logWarning("Simulation \"" + sim.name() + "\": net \"" +
+                               _unescapeForDisplay(netName) +
+                               "\" needs impedance probing, but no sufficiently long, straight, "
+                               "pad-clear cardinal track run could be found");
+                }
+                std::size_t probeNumber = 0;
+                for (const _TraceProbeCandidate& candidate : *candidatesResult) {
+                    ++probeNumber;
+                    PortConfig probe;
+                    probe.setName(_unescapeForDisplay(netName) + " impedance probe " + std::to_string(probeNumber));
+                    probe.setNetName(_unescapeForDisplay(netName));
+                    probe.setPosition({candidate.position.x(), candidate.position.y()});
+                    // Diagnostic: exact placement, in both simulation-frame sim-units (matches the
+                    // Geometry Preview's own coordinate space -- see GeometryPreviewBridge.mm) and mm
+                    // (constants::unitMultiplier sim-units per micron), plus the run length it was
+                    // picked from -- lets a real board be checked for what's actually nearby (a
+                    // ground-plane gap, a component, a bend) without guessing from the algorithm
+                    // alone.
+                    logInfo("### Port Resolution: impedance probe \"" + probe.name() + "\" placed at (" +
+                             std::to_string(candidate.position.x()) + ", " + std::to_string(candidate.position.y()) +
+                             ") sim-units = (" + std::to_string(candidate.position.x() / constants::unitMultiplier / 1000.0) +
+                             ", " + std::to_string(candidate.position.y() / constants::unitMultiplier / 1000.0) +
+                             ") mm, layer=" + std::to_string(candidate.layer) + ", direction=" +
+                             std::to_string(candidate.direction) + " deg, probe length=" +
+                             std::to_string(candidate.length) + " um ###");
+                    probe.setDirection(candidate.direction);
+                    probe.setWidth(candidate.width);
+                    probe.setLength(candidate.length);
+                    probe.setLayer(candidate.layer);
+                    probe.setPlane(entry.plane());
+                    probe.setExcite(false);
+                    probe.setAbsorbSignal(false);
+                    probe.setIsTraceProbe(true);
+                    // Not added to portIndex -- a trace probe isn't pad-anchored, so nothing ever
+                    // resolves an ExcitationConfig/PortRef/DifferentialPairConfig to it (see
+                    // PortConfig::isTraceProbe()'s own doc comment).
+                    sim.ports().push_back(std::move(probe));
+                }
             }
         }
 
@@ -629,8 +903,105 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                 return std::unexpected("Simulation \"" + sim.name() + "\": excitation on " + excitation.footprint() +
                                         "." + excitation.pin() + " did not resolve to a placed port");
             }
+            const PortConfig& drivenPort = sim.ports()[static_cast<std::size_t>(*index)];
+            if (drivenPort.footprintRef() != resolved.footprintRef || drivenPort.padNumber() != resolved.padNumber) {
+                return std::unexpected("Simulation \"" + sim.name() +
+                                       "\": internal port-index mismatch while resolving excitation on " +
+                                       excitation.footprint() + "." + excitation.pin());
+            }
             excitation.setDrivenPortIndex(*index);
             sim.ports()[static_cast<std::size_t>(*index)].setExcite(true);
+        }
+
+        // Turn reciprocal, enabled net-pair metadata into the four single-ended port references
+        // the existing mixed-mode postprocessor consumes. The FDTD still sweeps each source port
+        // independently; linear superposition of those two columns is exactly the odd-mode
+        // (+ on P, - on N) stimulus used by SDD. Prefer matching component footprints at both ends
+        // so unrelated pads on multi-drop nets can never be paired accidentally.
+        std::set<std::pair<std::string, std::string>> generatedNetPairs;
+        for (const InvolvedNetConfig& entry : sim.involvedNets()) {
+            if (entry.kind() != NetSelectorKind::Net || !entry.net().has_value() ||
+                !entry.differentialPairPartner().has_value() || !entry.simulateAsDifferentialPair()) {
+                continue;
+            }
+            const std::string firstName = _unescapeForDisplay(*entry.net());
+            const std::string secondName = _unescapeForDisplay(*entry.differentialPairPartner());
+            const auto pairKey = std::minmax(firstName, secondName);
+            if (!generatedNetPairs.emplace(pairKey.first, pairKey.second).second) {
+                continue;
+            }
+            const auto reciprocal = std::find_if(sim.involvedNets().begin(), sim.involvedNets().end(),
+                                                   [&](const InvolvedNetConfig& candidate) {
+                return candidate.kind() == NetSelectorKind::Net && candidate.net().has_value() &&
+                       _unescapeForDisplay(*candidate.net()) == secondName &&
+                       candidate.differentialPairPartner().has_value() &&
+                       _unescapeForDisplay(*candidate.differentialPairPartner()) == firstName &&
+                       candidate.simulateAsDifferentialPair();
+            });
+            if (reciprocal == sim.involvedNets().end()) {
+                logWarning("Simulation \"" + sim.name() + "\": differential pair " + firstName + " / " +
+                           secondName + " is not reciprocal; skipping mixed-mode analysis");
+                continue;
+            }
+
+            const auto isPositiveName = [](const std::string& name) {
+                return name.ends_with("+") || name.ends_with("_P") ||
+                       (name.ends_with("P") && !name.ends_with("_N"));
+            };
+            const std::string pName = isPositiveName(firstName) ? firstName : secondName;
+            const std::string nName = pName == firstName ? secondName : firstName;
+
+            std::optional<std::pair<std::int32_t, std::int32_t>> source;
+            for (std::size_t pi = 0; pi < sim.ports().size() && !source.has_value(); ++pi) {
+                const PortConfig& p = sim.ports()[pi];
+                if (!p.excite() || p.netName() != pName || p.isTraceProbe()) continue;
+                for (std::size_t ni = 0; ni < sim.ports().size(); ++ni) {
+                    const PortConfig& n = sim.ports()[ni];
+                    if (n.excite() && n.netName() == nName && !n.isTraceProbe() &&
+                        n.footprintRef() == p.footprintRef()) {
+                        source = {static_cast<std::int32_t>(pi), static_cast<std::int32_t>(ni)};
+                        break;
+                    }
+                }
+            }
+            if (!source.has_value()) {
+                logWarning("Simulation \"" + sim.name() + "\": differential pair " + pName + " / " + nName +
+                           " has no pair of excited pins on the same component");
+                continue;
+            }
+
+            std::optional<std::pair<std::int32_t, std::int32_t>> destination;
+            for (std::size_t pi = 0; pi < sim.ports().size() && !destination.has_value(); ++pi) {
+                const PortConfig& p = sim.ports()[pi];
+                if (p.excite() || !p.absorbSignal() || p.netName() != pName || p.isTraceProbe()) continue;
+                for (std::size_t ni = 0; ni < sim.ports().size(); ++ni) {
+                    const PortConfig& n = sim.ports()[ni];
+                    if (!n.excite() && n.absorbSignal() && n.netName() == nName && !n.isTraceProbe() &&
+                        n.footprintRef() == p.footprintRef()) {
+                        destination = {static_cast<std::int32_t>(pi), static_cast<std::int32_t>(ni)};
+                        break;
+                    }
+                }
+            }
+            if (!destination.has_value()) {
+                logWarning("Simulation \"" + sim.name() + "\": differential pair " + pName + " / " + nName +
+                           " has no matching pair of absorbing destination pins; skipping mixed-mode analysis");
+                continue;
+            }
+
+            const auto setRef = [&](PortRef& ref, std::int32_t index) {
+                const PortConfig& port = sim.ports()[static_cast<std::size_t>(index)];
+                ref.setFootprint(port.footprintRef());
+                ref.setPin(port.padNumber());
+            };
+            DifferentialPairConfig pair;
+            setRef(pair.startP(), source->first);
+            setRef(pair.startN(), source->second);
+            setRef(pair.stopP(), destination->first);
+            setRef(pair.stopN(), destination->second);
+            pair.setName(pName + " / " + nName);
+            pair.setAutomatic(true);
+            sim.diffPairs().push_back(std::move(pair));
         }
 
         for (SingleEndedConfig& trace : sim.traces()) {

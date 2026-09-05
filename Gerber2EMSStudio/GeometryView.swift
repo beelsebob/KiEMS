@@ -490,6 +490,14 @@ final class GeometryView: MTKView, MTKViewDelegate {
                                                   Float(NSColor.systemBlue.usingColorSpace(.deviceRGB)?.greenComponent ?? 0.48),
                                                   Float(NSColor.systemBlue.usingColorSpace(.deviceRGB)?.blueComponent ?? 0.98),
                                                   1)
+    // A non-loading measurement point -- a pin-level passive probe or a net-level trace-impedance
+    // probe alike (see EMSGeometryPort.absorbSignal's own doc comment) -- has zero effect on the
+    // simulated fields, unlike a real terminating port; distinct from portColor so that difference
+    // is visible at a glance in the preview.
+    private static let probeColor = SIMD4<Float>(Float(NSColor.systemOrange.usingColorSpace(.deviceRGB)?.redComponent ?? 1.0),
+                                                    Float(NSColor.systemOrange.usingColorSpace(.deviceRGB)?.greenComponent ?? 0.58),
+                                                    Float(NSColor.systemOrange.usingColorSpace(.deviceRGB)?.blueComponent ?? 0.0),
+                                                    1)
     // A fixed light grey, not the adaptive tertiaryLabelColor the outline used to use -- that
     // reads as near-invisible against the fixed dark canvas below in light-appearance mode.
     private static let outlineColor = SIMD4<Float>(0.7, 0.7, 0.7, 1)
@@ -598,7 +606,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
 
         for port in preview.ports {
             let radius = max(CGFloat(port.width) / 2, 1)
-            Self.appendDisc(center: port.position, radius: radius, z: markerZ, color: Self.portColor,
+            Self.appendDisc(center: port.position, radius: radius, z: markerZ,
+                             color: port.absorbSignal ? Self.portColor : Self.probeColor,
                              positions: &positions, colors: &colors)
         }
 

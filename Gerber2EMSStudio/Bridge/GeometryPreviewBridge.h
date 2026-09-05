@@ -66,6 +66,10 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) CGPoint position;
 @property (nonatomic, readonly) double width;
 @property (nonatomic, readonly) double length;
+/// NO for any non-loading measurement point (a pin-level passive probe or a net-level trace-
+/// impedance probe alike -- see gerber2ems::PortConfig::absorbSignal()'s own doc comment); YES for
+/// a real, terminating lumped port. GeometryView colors these two cases differently.
+@property (nonatomic, readonly) BOOL absorbSignal;
 @end
 
 /// One filled triangle of a real KiCad footprint 3D model, from libkicad's in-process

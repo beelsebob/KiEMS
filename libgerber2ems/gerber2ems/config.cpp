@@ -67,12 +67,18 @@ void from_json(const nlohmann::json& j, ExcludedPin& p) {
 
 void to_json(nlohmann::json& j, const ProbedPin& p) {
     j = nlohmann::json{{"footprint", p.footprint}, {"pin", p.pin}, {"absorb_signal", p.absorbSignal}};
+    // Written only when false -- an entry created before ProbedPin::probe existed (or one nobody's
+    // set as absorb-only) round-trips with no new key, same sparse convention as geometry_only.
+    if (!p.probe) {
+        j["probe"] = false;
+    }
 }
 
 void from_json(const nlohmann::json& j, ProbedPin& p) {
     p.footprint = j.at("footprint").get<std::string>();
     p.pin = _pinToString(j.at("pin"));
     p.absorbSignal = j.value("absorb_signal", true);
+    p.probe = j.value("probe", true);
 }
 
 void to_json(nlohmann::json& j, const PinDirectionOverride& p) {
@@ -100,6 +106,19 @@ void to_json(nlohmann::json& j, const InvolvedNetConfig& p) {
     j["impedance"] = p._impedance;
     j["length"] = p._length;
     j["plane"] = p._plane;
+    // Written only for the non-default (GeometryOnly) case -- an entry predating this distinction
+    // (or one nobody's touched the new checkbox on) round-trips with no new key at all, keeping an
+    // old-style simulation.json textually unchanged.
+    if (p._inclusionLevel == NetInclusionLevel::GeometryOnly) {
+        j["geometry_only"] = true;
+    }
+    if (p._probeImpedance) {
+        j["probe_impedance"] = p._probeImpedance;
+    }
+    if (p._differentialPairPartner.has_value()) {
+        j["differential_pair_partner"] = *p._differentialPairPartner;
+        j["simulate_as_differential_pair"] = p._simulateAsDifferentialPair;
+    }
     if (p._width.has_value()) {
         j["width"] = *p._width;
     }
@@ -162,6 +181,16 @@ void from_json(const nlohmann::json& j, InvolvedNetConfig& p) {
     p._impedance = j.value("impedance", def._impedance);
     p._length = j.value("length", def._length);
     p._plane = j.value("plane", def._plane);
+    p._inclusionLevel = j.value("geometry_only", false) ? NetInclusionLevel::GeometryOnly
+                                                          : NetInclusionLevel::SimulationNet;
+    p._probeImpedance = j.value("probe_impedance", def._probeImpedance);
+    if (j.contains("differential_pair_partner")) {
+        p._differentialPairPartner = j.at("differential_pair_partner").get<std::string>();
+    } else {
+        p._differentialPairPartner = std::nullopt;
+    }
+    p._simulateAsDifferentialPair =
+        j.value("simulate_as_differential_pair", def._simulateAsDifferentialPair);
     if (j.contains("width")) {
         p._width = j.at("width").get<double>();
     }
@@ -379,6 +408,12 @@ void from_json(const nlohmann::json& j, Via& v) {
     v._viaClearance = j.value("via_clearance", def._viaClearance);
 }
 
+void Margin::applyFrequencyConstraint(double minWavelength) {
+    const double minimumMargin = minWavelength / 4.0;
+    _xy = std::max(_xy, minimumMargin);
+    _z = std::max(_z, minimumMargin);
+}
+
 void Margin::scaleToSimulationUnits(std::int32_t unitMultiplier) {
     _xy *= unitMultiplier;
     _z *= unitMultiplier;
@@ -411,6 +446,7 @@ void Grid::applyFrequencyConstraint(double stopFrequencyHz) {
     _perpendicular = std::min(_perpendicular, _max);
     _diagonal = std::min(_diagonal, _perpendicular);
     _optimal = std::min(_diagonal, _optimal);
+    _margin.applyFrequencyConstraint(minWavelength);
 }
 
 void Grid::scaleToSimulationUnits(std::int32_t unitMultiplier) {
@@ -452,6 +488,9 @@ void SimulationConfig::scaleToSimulationUnits(std::int32_t unitMultiplier) {
 }
 
 void to_json(nlohmann::json& j, const SimulationConfig& p) {
+    std::vector<DifferentialPairConfig> authoredDiffPairs;
+    std::copy_if(p._diffPairs.begin(), p._diffPairs.end(), std::back_inserter(authoredDiffPairs),
+                 [](const DifferentialPairConfig& pair) { return !pair.automatic(); });
     j = nlohmann::json{
         {"name", p._name},
         {"involved_nets", p._involvedNets},
@@ -461,8 +500,11 @@ void to_json(nlohmann::json& j, const SimulationConfig& p) {
         {"via_spacing", p._viaSpacing},
         {"excitations", p._excitations},
         {"traces", p._traces},
-        {"differential_pairs", p._diffPairs},
+        {"differential_pairs", authoredDiffPairs},
     };
+    if (p._eyeBitRate > 0) {
+        j["eye_bit_rate"] = p._eyeBitRate;
+    }
 }
 
 void from_json(const nlohmann::json& j, SimulationConfig& p) {
@@ -476,6 +518,7 @@ void from_json(const nlohmann::json& j, SimulationConfig& p) {
     p._hullPadding = j.value("hull_padding", def._hullPadding);
     p._viaEdgeDistance = j.value("via_edge_distance", def._viaEdgeDistance);
     p._viaSpacing = j.value("via_spacing", def._viaSpacing);
+    p._eyeBitRate = j.value("eye_bit_rate", def._eyeBitRate);
     p._excitations = j.value("excitations", std::vector<ExcitationConfig>{});
     p._traces = j.value("traces", std::vector<SingleEndedConfig>{});
     p._diffPairs = j.value("differential_pairs", std::vector<DifferentialPairConfig>{});

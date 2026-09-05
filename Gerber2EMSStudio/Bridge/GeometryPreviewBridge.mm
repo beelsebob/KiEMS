@@ -343,13 +343,18 @@ ComponentExportOutcome exportComponentTriangles(const PathsConfig& paths, const 
 @end
 
 @implementation EMSGeometryPort
-- (instancetype)initWithName:(NSString*)name position:(CGPoint)position width:(double)width length:(double)length {
+- (instancetype)initWithName:(NSString*)name
+                     position:(CGPoint)position
+                        width:(double)width
+                       length:(double)length
+                 absorbSignal:(BOOL)absorbSignal {
     self = [super init];
     if (self) {
         _name = [name copy];
         _position = position;
         _width = width;
         _length = length;
+        _absorbSignal = absorbSignal;
     }
     return self;
 }
@@ -979,7 +984,8 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
         [ports addObject:[[EMSGeometryPort alloc] initWithName:@(port.name().c_str())
                                                           position:CGPointMake(x, y)
                                                              width:port.width()
-                                                            length:port.length()]];
+                                                            length:port.length()
+                                                      absorbSignal:port.absorbSignal() ? YES : NO]];
     }
 
     // Real 3D models of every footprint this simulation touches -- see EMSGeometryComponentTriangle's

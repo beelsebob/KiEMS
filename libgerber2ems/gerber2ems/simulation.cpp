@@ -22,6 +22,7 @@
 #include "constants.hpp"
 #include "csx_grid_utils.hpp"
 #include "gerber_composite.hpp"
+#include "libkicad_query.hpp"
 #include "logging.hpp"
 
 extern char** environ;
@@ -34,6 +35,20 @@ namespace {
 
 std::string _point3ToString(const Point3& p) {
     return "[" + std::to_string(p[0]) + ", " + std::to_string(p[1]) + ", " + std::to_string(p[2]) + "]";
+}
+
+// Corner-bridge elevation above/below the board for a diagonal 2-pin lumped component (see
+// LumpedComponentConfig::cornerBridge()'s own doc comment) -- shared by
+// Simulation::addLumpedComponentGrid() (which must reserve mesh density here before the grid is
+// generated) and Simulation::addLumpedComponents() (which actually builds the geometry there), so the
+// two can never drift out of sync with each other.
+constexpr double kCornerBridgeElevationSimUnits = 2000.0; // ~0.2mm clearance above/below the board
+double _cornerBridgeZ(double padZ, std::int32_t layer) {
+    // Metal layer 0 is F.Cu, the topmost copper (see Simulation::getMetalLayerOffset()'s own
+    // convention: offset 0 there, more negative for every layer below it) -- elevate away from the
+    // board in whichever direction is actually open air for this component's own side, not through
+    // the substrate stack.
+    return layer == 0 ? padZ + kCornerBridgeElevationSimUnits : padZ - kCornerBridgeElevationSimUnits;
 }
 
 // Dielectric loss tangent -> conductivity (kappa = 2*pi*f*eps0*epsilonR*lossTangent), evaluated at a
@@ -370,12 +385,86 @@ void Simulation::addPortGrid() {
     }
 }
 
+// A diagonal 2-pin component's corner-bridge (see LumpedComponentConfig::cornerBridge()'s own doc
+// comment) is real 3D CSX geometry -- two short vertical pillars plus a small elevated horizontal
+// bridge -- built later, in addLumpedComponents(). But grid generation runs *before* that (see
+// addGrid()'s own call order) and works entirely from pre-computed config/gerber inputs, never from
+// the CSX structure itself, so it has no way to discover that geometry on its own and would otherwise
+// mesh right through it at whatever density the ordinary board-to-margin grading happens to produce
+// there -- potentially far too coarse to resolve a ~0.2mm pillar (confirmed on a real board: the
+// bridge showed the same near-zero transmission as the design it replaced, even though the geometry
+// itself was verified correct, until this was added). Reserves X/Y density at the corner point the
+// same way addPortGrid() already does for a port's own synthetic aperture, and Z density at both the
+// pad's own layer and the bridge's own elevated height.
+void Simulation::addLumpedComponentGrid() {
+    for (const auto& component : _simConfig.lumpedComponents()) {
+        if (!component.cornerBridge()) {
+            continue;
+        }
+        // Not a fatal std::expected error here even though getMetalLayerOffset() can fail in
+        // principle -- component.layer() was already validated as a real configured metal layer back
+        // in port_resolution.cpp's own _resolveLumpedComponents() (via
+        // EMSConfig::metalLayerIndexForFileName()), so a failure here would mean the config changed
+        // out from under this run; addLumpedComponents() itself (which runs later, building the
+        // actual geometry) will hit the exact same lookup and fail loudly there instead. Skipping just
+        // this one component's density hints degrades to "may mesh a bit coarse" rather than losing
+        // grid generation for every other component/port over one that's already about to fail anyway.
+        const auto zResult = getMetalLayerOffset(component.layer());
+        if (!zResult) {
+            logWarning("Simulation: couldn't resolve corner-bridge component " + component.reference() +
+                       "'s own metal layer for grid density -- skipping its density hints: " + zResult.error());
+            continue;
+        }
+        const double padZ = std::round(*zResult);
+        const double bridgeZ = _cornerBridgeZ(padZ, component.layer());
+        _gridGen->additionalZHeights().push_back(padZ);
+        _gridGen->additionalZHeights().push_back(bridgeZ);
+
+        const auto [cornerX, cornerY] = component.bridgeCorner();
+        const std::string ap = "LUMPEDBRIDGE" + std::to_string(_gridGen->addApertures().size() + 1);
+        const double width = component.width();
+        _gridGen->addPads().emplace_back(ap, NetName("LUMPEDBRIDGE"), Position(cornerX, cornerY));
+        _gridGen->addApertures().insert_or_assign(ap, Aperture("", std::make_shared<ApertureRect>(width, width)));
+    }
+}
+
 void Simulation::addGrid() {
     _gridGen = std::make_unique<GridGenerator>(_config, _slicedBoard.xMin, _slicedBoard.yMin, _slicedBoard.width,
-                                                _slicedBoard.height);
+                                                _slicedBoard.height, _slicedBoard.cutoutLoops);
     addPortGrid();
+    addLumpedComponentGrid();
     logInfo("Compiling grid");
-    _gridGen->generate(*_grid, _simConfig, _paths.fabDir);
+    // Best-effort: ground's own copper, and any GeometryOnly-level ("Included in Simulation", as
+    // opposed to full "Simulation Net" -- see NetInclusionLevel's own doc comment) involved-nets
+    // entries, get exactly the same edge-aware density treatment as a fully involved net (see
+    // GridGenerator::generate()'s own doc comment for why -- a wide-open pour stays coarse, dense
+    // via stitching naturally drives itself fine, the same self-modulation already used for signal
+    // nets). A resolution failure here (e.g. a net-class ground selector that doesn't currently
+    // exist on the board) shouldn't fail the whole grid generation over what is, in the end, a
+    // mesh-accuracy enhancement, not a hard requirement -- falls back to this function's own
+    // pre-existing behavior for whichever net that failure was on (covered only by the coarse
+    // whole-board pass).
+    std::vector<std::string> additionalDensityNets;
+    if (auto resolved = libkicad_query::resolveGroundNetNames(_paths, _simConfig.groundNet()); resolved) {
+        additionalDensityNets = std::move(*resolved);
+    } else {
+        logWarning("Could not resolve ground_net for grid density, ground copper will use the coarse "
+                   "background mesh only: " +
+                   resolved.error());
+    }
+    for (const InvolvedNetConfig& entry : _simConfig.involvedNets()) {
+        if (entry.inclusionLevel() != NetInclusionLevel::GeometryOnly) {
+            continue;
+        }
+        if (auto resolved = libkicad_query::resolveInvolvedNetNames(_paths, entry); resolved) {
+            additionalDensityNets.insert(additionalDensityNets.end(), resolved->begin(), resolved->end());
+        } else {
+            logWarning("Could not resolve a geometry-only involved_nets entry for grid density, its own "
+                       "copper will use the coarse background mesh only: " +
+                       resolved.error());
+        }
+    }
+    _gridGen->generate(*_grid, _simConfig, _paths.fabDir, additionalDensityNets);
     printGridStats();
 }
 
@@ -444,8 +533,8 @@ std::expected<void, std::string> Simulation::addMslPort(PortConfig& portConfig, 
 
     // direction is the pad's own departure-angle convention (0/180 => horizontal => x, 90/270 =>
     // vertical => y) -- see LumpedComponentConfig::direction()'s own doc comment, which is explicit
-    // that PortConfig::direction() uses this exact same convention (both are ultimately populated by
-    // the same _deriveDirection()/pinDirectionOverride() logic in port_resolution.cpp). This dirMap
+    // that PortConfig::direction() uses this exact same convention (both are ultimately populated in
+    // port_resolution.cpp, from a per-pad/net override or else the pad's own real rotation). This dirMap
     // previously read {{0,"y"},{90,"x"},...} -- backwards relative to that documented convention --
     // which rotated every MSL port's measurement/feed-resistor box 90 degrees away from the real
     // routed trace it is meant to sample and terminate, breaking clean absorption at that
@@ -502,13 +591,20 @@ std::expected<void, std::string> Simulation::addMslPort(PortConfig& portConfig, 
     return {};
 }
 
-std::expected<void, std::string> Simulation::addResistivePort(PortConfig& portConfig, bool excite) {
+std::expected<void, std::string> Simulation::addImpedanceProbe(PortConfig& portConfig, std::int32_t portNumber) {
     logDebug("Adding port number " + std::to_string(_ports.size()));
     if (!portConfig.position().has_value() || !portConfig.direction().has_value()) {
         logError("Port has no defined position or rotation, skipping");
         return {};
     }
-    static const std::map<std::int32_t, std::string> dirMap = {{0, "y"}, {90, "x"}, {180, "y"}, {270, "x"}};
+    while (*portConfig.direction() < 0) {
+        portConfig.setDirection(*portConfig.direction() + 360);
+    }
+
+    // Same dirMap/width-axis convention as addMslPort() -- see that function's own comment on why
+    // this (not addPassiveProbe()'s older, pad-anchored cos/sin-along-axis convention) is the
+    // correct one for a box whose width must span transversely across the real trace, not along it.
+    static const std::map<std::int32_t, std::string> dirMap = {{0, "x"}, {90, "y"}, {180, "x"}, {270, "y"}};
     const auto dirIt = dirMap.find(static_cast<std::int32_t>(*portConfig.direction()));
     if (dirIt == dirMap.end()) {
         logError("Ports rotation is not a multiple of 90 degrees which is not supported, skipping");
@@ -528,20 +624,86 @@ std::expected<void, std::string> Simulation::addResistivePort(PortConfig& portCo
     const double angle = *portConfig.direction() / 360.0 * 2 * M_PI;
     const auto [posX, posY] = *portConfig.position();
     const double width = portConfig.width();
+    const double length = portConfig.length();
 
+    const double widthDirX = -std::round(std::sin(angle));
+    const double widthDirY = std::round(std::cos(angle));
+    const double propDirX = std::round(std::cos(angle));
+    const double propDirY = std::round(std::sin(angle));
+
+    // This position is the selected run's centre, unlike a pad port's departure point. Centre the
+    // whole MSL span so its two ends remain inside the straight run the heuristic validated.
     const Point3 start = {
-        std::round(posX - (width / 2) * std::round(std::cos(angle))),
-        std::round(posY - (width / 2) * std::round(std::sin(angle))),
+        std::round(posX - (width / 2) * widthDirX - (length / 2) * propDirX),
+        std::round(posY - (width / 2) * widthDirY - (length / 2) * propDirY),
         std::round(startZ),
     };
     const Point3 stop = {
-        std::round(posX + (width / 2) * std::round(std::cos(angle))),
-        std::round(posY - (width / 2) * std::round(std::sin(angle))),
+        std::round(posX + (width / 2) * widthDirX + (length / 2) * propDirX),
+        std::round(posY + (width / 2) * widthDirY + (length / 2) * propDirY),
+        std::round(stopZ),
+    };
+
+    logDebug("Adding impedance probe at start: " + _point3ToString(start) + " end: " + _point3ToString(stop));
+    // excite=0, feedR<0 (skip the resistor entirely, see MSLPort's own constructor) -- a pure
+    // measurement point: no synthetic metal, no termination, zero effect on the simulated fields.
+    _ports.push_back(std::make_unique<MSLPort>(*_csx, portNumber, start, stop, dirIt->second, "z",
+                                                /*excite=*/0.0, /*feedR=*/-1.0, 100));
+    return {};
+}
+
+std::expected<void, std::string> Simulation::addResistivePort(PortConfig& portConfig, std::int32_t portNumber,
+                                                                bool excite) {
+    logDebug("Adding port number " + std::to_string(_ports.size()));
+    if (!portConfig.position().has_value() || !portConfig.direction().has_value()) {
+        logError("Port has no defined position or rotation, skipping");
+        return {};
+    }
+
+    const auto startZResult = getMetalLayerOffset(portConfig.layer());
+    if (!startZResult) {
+        return std::unexpected(startZResult.error());
+    }
+    const auto stopZResult = getMetalLayerOffset(portConfig.plane());
+    if (!stopZResult) {
+        return std::unexpected(stopZResult.error());
+    }
+    const double startZ = *startZResult;
+    const double stopZ = *stopZResult;
+    const double angle = *portConfig.direction() / 360.0 * 2 * M_PI;
+    const auto [posX, posY] = *portConfig.position();
+    const double width = portConfig.width();
+
+    // The resistor is vertical from pad to reference plane (excDir "z" below -- current here never
+    // depends on `direction` at all) and covers the whole pad in XY; `direction` only orients that
+    // XY footprint to the pad's own real (possibly non-cardinal) rotation -- port_resolution.cpp
+    // populates it from the pad's own rotation, not a derived trace-departure angle, so this no
+    // longer needs to reject anything: true sin/cos (not rounded to the nearest cardinal) gives the
+    // exact axis-aligned bounding box of the pad's real rotated rectangle at any angle, and reduces
+    // to the old rounded behavior exactly at true cardinal angles anyway. Both dimensions matter:
+    // spanning only transversely creates a zero-thickness sheet along the propagation axis, so a
+    // small mesh-line displacement can leave it containing no Z-directed Yee edges and therefore
+    // produce no excitation at all.
+    const double widthDirX = -std::sin(angle);
+    const double widthDirY = std::cos(angle);
+    const double propDirX = std::cos(angle);
+    const double propDirY = std::sin(angle);
+    const double length = portConfig.length();
+    const double halfExtentX = (std::abs(widthDirX) * width + std::abs(propDirX) * length) / 2.0;
+    const double halfExtentY = (std::abs(widthDirY) * width + std::abs(propDirY) * length) / 2.0;
+    const Point3 start = {
+        std::round(posX - halfExtentX),
+        std::round(posY - halfExtentY),
+        std::round(startZ),
+    };
+    const Point3 stop = {
+        std::round(posX + halfExtentX),
+        std::round(posY + halfExtentY),
         std::round(stopZ),
     };
 
     logDebug("Adding resistive port at start: " + _point3ToString(start) + " end: " + _point3ToString(stop));
-    _ports.push_back(std::make_unique<LumpedPort>(*_csx, static_cast<std::int32_t>(_ports.size()),
+    _ports.push_back(std::make_unique<LumpedPort>(*_csx, portNumber,
                                                     portConfig.impedance(), start, stop, "z", excite ? 1.0 : 0.0, 100));
     return {};
 }
@@ -993,6 +1155,9 @@ std::expected<Simulation::PortParameters, std::string> Simulation::getPortParame
             params.reflected.push_back(naNPlaceholder);
             params.probeVoltage.emplace(static_cast<std::int32_t>(index), _ports[index]->ufTot());
             params.probeCurrent.emplace(static_cast<std::int32_t>(index), _ports[index]->ifTot());
+            if (_simConfig.ports()[index].isTraceProbe()) {
+                params.probeImpedance.emplace(static_cast<std::int32_t>(index), _ports[index]->zRef());
+            }
         }
         logDebug("Found data for port " + std::to_string(index));
     }
@@ -1037,6 +1202,101 @@ std::expected<void, std::string> Simulation::addLumpedComponents() {
     static const std::map<std::int32_t, std::string> dirMap = {{0, "x"}, {90, "y"}, {180, "x"}, {270, "y"}};
 
     for (const auto& component : components) {
+        if (component.cornerBridge()) {
+            // Non-cardinally-aligned 2-pin component (see LumpedComponentConfig::cornerBridge()'s own
+            // doc comment): an L-shaped route through a synthetic corner, each leg individually
+            // cardinal-aligned -- but routed entirely through open airspace a small distance above (or
+            // below, for a bottom-layer part) the board, connected to each real pad by a short
+            // vertical PEC pillar, rather than running along the board's own copper layer. A board-
+            // layer route would need to avoid every *other* net's own copper on that layer to not
+            // accidentally connect into it -- workable for isolated pads/tracks, but a real board very
+            // commonly has a ground pour covering most of a layer near any given component, which
+            // would make that check fail almost everywhere. Nothing else this codebase places ever
+            // occupies the airspace just above/below the board, so the horizontal bridge itself needs
+            // no interference check at all; only the two short pillars, confined to each pad's own
+            // (x, y) footprint, could conceivably need one, and since that's already legitimately this
+            // component's own territory there's nothing new to check there either. This also happens
+            // to be more physically realistic than a flush 2D bridge: a real 2-pin SMD part's own body
+            // genuinely does sit above the board surface, connected down to its pads by solder.
+            const auto zResult = getMetalLayerOffset(component.layer());
+            if (!zResult) {
+                return std::unexpected(zResult.error());
+            }
+            const double padZ = std::round(*zResult);
+            const double bridgeZ = _cornerBridgeZ(padZ, component.layer());
+            logInfo("Simulation: corner-bridge for " + component.reference() + ": layer=" +
+                     std::to_string(component.layer()) + " padZ=" + std::to_string(padZ) +
+                     " bridgeZ=" + std::to_string(bridgeZ) + " pos1=(" + std::to_string(component.position1().first) +
+                     "," + std::to_string(component.position1().second) + ") pos2=(" +
+                     std::to_string(component.position2().first) + "," + std::to_string(component.position2().second) +
+                     ") corner=(" + std::to_string(component.bridgeCorner().first) + "," +
+                     std::to_string(component.bridgeCorner().second) + ") width=" + std::to_string(component.width()));
+
+            const auto buildPillar = [&](const std::string& suffix, std::pair<double, double> at) {
+                const double width = component.width();
+                const Point3 start = {std::round(at.first - width / 2.0), std::round(at.second - width / 2.0),
+                                        std::min(padZ, bridgeZ)};
+                const Point3 stop = {std::round(at.first + width / 2.0), std::round(at.second + width / 2.0),
+                                       std::max(padZ, bridgeZ)};
+                CSPropMetal* wire = addMetal(*_csx, "LumpedBridgePillar_" + component.reference() + "_" + suffix);
+                addBox(*wire, start, stop, 100);
+            };
+            const auto buildLeg = [&](std::pair<double, double> from, std::pair<double, double> to, double direction,
+                                       bool carriesComponent) -> std::expected<void, std::string> {
+                std::int32_t dir = static_cast<std::int32_t>(direction);
+                while (dir < 0) {
+                    dir += 360;
+                }
+                const auto dirIt = dirMap.find(dir);
+                if (dirIt == dirMap.end()) {
+                    return std::unexpected("Lumped component " + component.reference() +
+                                            "'s corner-bridge leg direction is not a multiple of 90 degrees");
+                }
+                const std::int32_t axisIndex = dirIt->second == "x" ? 0 : 1;
+                const double angle = direction / 360.0 * 2 * M_PI;
+                const double width = component.width();
+                const auto [x1, y1] = from;
+                const auto [x2, y2] = to;
+                // See the plain cardinal case below for why this uses the perpendicular vector.
+                const double halfWidthX = std::abs(std::round(std::sin(angle))) * width / 2.0;
+                const double halfWidthY = std::abs(std::round(std::cos(angle))) * width / 2.0;
+                const Point3 start = {
+                    std::round(std::min(x1, x2) - halfWidthX),
+                    std::round(std::min(y1, y2) - halfWidthY),
+                    bridgeZ,
+                };
+                const Point3 stop = {
+                    std::round(std::max(x1, x2) + halfWidthX),
+                    std::round(std::max(y1, y2) + halfWidthY),
+                    bridgeZ,
+                };
+                if (carriesComponent) {
+                    CSPropLumpedElement* prop =
+                        addLumpedElement(*_csx, "Lumped_" + component.reference(), axisIndex,
+                                          /*caps=*/false, component.resistance(), CSPropLumpedElement::SERIES,
+                                          component.inductance(), component.capacitance());
+                    addBox(*prop, start, stop, 100);
+                } else {
+                    CSPropMetal* wire = addMetal(*_csx, "LumpedBridgeWire_" + component.reference());
+                    addBox(*wire, start, stop, 100);
+                }
+                return {};
+            };
+            buildPillar("A", component.position1());
+            buildPillar("B", component.position2());
+            if (auto result =
+                    buildLeg(component.position1(), component.bridgeCorner(), component.direction(), true);
+                !result) {
+                return std::unexpected(result.error());
+            }
+            if (auto result =
+                    buildLeg(component.bridgeCorner(), component.position2(), component.direction2(), false);
+                !result) {
+                return std::unexpected(result.error());
+            }
+            continue;
+        }
+
         std::int32_t direction = static_cast<std::int32_t>(component.direction());
         while (direction < 0) {
             direction += 360;
@@ -1100,12 +1360,6 @@ std::expected<void, std::string> Simulation::addPassiveProbe(PortConfig& portCon
         logError("Port has no defined position or rotation, skipping");
         return {};
     }
-    static const std::map<std::int32_t, std::string> dirMap = {{0, "y"}, {90, "x"}, {180, "y"}, {270, "x"}};
-    const auto dirIt = dirMap.find(static_cast<std::int32_t>(*portConfig.direction()));
-    if (dirIt == dirMap.end()) {
-        logError("Ports rotation is not a multiple of 90 degrees which is not supported, skipping");
-        return {};
-    }
 
     // Same vertical (trace layer -> reference plane) span addResistivePort() uses, not
     // addMslPort()'s horizontal one -- a passive probe reads trace-to-plane voltage and
@@ -1126,14 +1380,16 @@ std::expected<void, std::string> Simulation::addPassiveProbe(PortConfig& portCon
     const auto [posX, posY] = *portConfig.position();
     const double width = portConfig.width();
 
+    // See addResistivePort()'s own comment on why true (not rounded-to-cardinal) sin/cos is correct
+    // here: `direction` is the pad's own real rotation, not necessarily a multiple of 90 degrees.
     const Point3 start = {
-        std::round(posX - (width / 2) * std::round(std::cos(angle))),
-        std::round(posY - (width / 2) * std::round(std::sin(angle))),
+        std::round(posX - (width / 2) * std::cos(angle)),
+        std::round(posY - (width / 2) * std::sin(angle)),
         std::round(startZ),
     };
     const Point3 stop = {
-        std::round(posX + (width / 2) * std::round(std::cos(angle))),
-        std::round(posY - (width / 2) * std::round(std::sin(angle))),
+        std::round(posX + (width / 2) * std::cos(angle)),
+        std::round(posY - (width / 2) * std::sin(angle)),
         std::round(stopZ),
     };
 
@@ -1148,12 +1404,23 @@ std::expected<void, std::string> Simulation::addPorts() {
     auto& ports = _simConfig.ports();
     for (std::size_t index = 0; index < ports.size(); ++index) {
         const auto portNumber = static_cast<std::int32_t>(index);
-        // absorbSignal()==false means no metal/resistor termination at all -- a passive read-only
-        // probe (see PortConfig::absorbSignal()'s own doc comment). port_resolution.cpp guarantees
+        // isTraceProbe() is checked first: a trace probe also has absorbSignal()==false (see
+        // PortConfig::isTraceProbe()'s own doc comment) but needs MSLPort-style geometry, not
+        // addPassiveProbe()'s pad-anchored one. Otherwise, absorbSignal()==false means no metal/
+        // resistor termination at all -- a passive read-only probe. port_resolution.cpp guarantees
         // excite() is never true here when absorbSignal() is false, so this check alone is enough.
-        if (auto result = ports[index].absorbSignal() ? addMslPort(ports[index], portNumber, true)
-                                                        : addPassiveProbe(ports[index], portNumber);
-            !result) {
+        std::expected<void, std::string> result;
+        if (ports[index].isTraceProbe()) {
+            result = addImpedanceProbe(ports[index], portNumber);
+        } else if (ports[index].absorbSignal()) {
+            // Component-facing ports model the attached component impedance at its pad. Their S
+            // parameters are therefore normalized to that explicit resistance by LumpedPort,
+            // independently of the trace-impedance MSL probes placed farther down the route.
+            result = addResistivePort(ports[index], portNumber, ports[index].excite());
+        } else {
+            result = addPassiveProbe(ports[index], portNumber);
+        }
+        if (!result) {
             return result;
         }
     }

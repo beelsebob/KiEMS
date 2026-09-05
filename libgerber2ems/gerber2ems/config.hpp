@@ -121,6 +121,12 @@ public:
     const std::string& padNumber() const { return _padNumber; }
     void setPadNumber(std::string value) { _padNumber = std::move(value); }
 
+    /// Display form of the KiCad net this resolved port belongs to. Like footprintRef/padNumber,
+    /// this is derived by port_resolution.cpp and copied into scaled configurations, never
+    /// serialized as user-authored configuration.
+    const std::string& netName() const { return _netName; }
+    void setNetName(std::string value) { _netName = std::move(value); }
+
     const std::optional<std::pair<double, double>>& position() const { return _position; }
     void setPosition(std::pair<double, double> value) { _position = value; }
 
@@ -149,14 +155,38 @@ public:
     void setExcite(bool value) { _excite = value; }
 
     /// Whether this port physically loads/terminates the line it sits on -- true (the historical,
-    /// still-default behavior) means a real metal trace + impedance-matched feed resistor gets
-    /// built (Simulation::addMslPort()); false means only U/I probe boxes get placed
+    /// still-default behavior) means a pad-sized lumped resistor gets built between the pad and
+    /// reference plane (Simulation::addResistivePort()); false means only U/I probe boxes get placed
     /// (Simulation::addPassiveProbe()), a purely passive read point with zero effect on the
     /// simulated fields. excite() always implies the full absorbing structure regardless of this
     /// flag's own value -- see port_resolution.cpp's resolution rule, which never lets an excited
     /// pad end up with absorbSignal()==false.
     bool absorbSignal() const { return _absorbSignal; }
     void setAbsorbSignal(bool value) { _absorbSignal = value; }
+
+    /// True for a net-level, auto-placed trace-impedance probe (see InvolvedNetConfig::
+    /// probeImpedance()'s own doc comment) -- selects Simulation::addImpedanceProbe() in
+    /// addPorts()'s dispatch, ahead of the absorbSignal() check (a trace probe is never pad-
+    /// anchored, so it's also never added to port_resolution.cpp's own _PortIndex the way every
+    /// other port is). Always paired with absorbSignal()==false (it has zero effect on the
+    /// simulated fields, same reasoning as a PassiveProbe) and excite()==false.
+    bool isTraceProbe() const { return _isTraceProbe; }
+    void setIsTraceProbe(bool value) { _isTraceProbe = value; }
+
+    /// Whether this port should appear as a named, selectable entry in Results (the port picker,
+    /// S-parameter matrix, impedance charts, etc.) -- entirely a *display* concern, orthogonal to
+    /// excite()/absorbSignal(): a resistive termination (Simulation::addResistivePort(), still
+    /// selected purely by absorbSignal()) gets built either way, so an "absorb-only" pin (probe()==
+    /// false, absorbSignal()==true, excite()==false) still physically loads its own trace exactly
+    /// like a real probed pin would -- it just never shows up as something to look at. Meant for a
+    /// pin that only exists to keep an otherwise-unmodeled downstream trace (one running to an IC or
+    /// resistor outside this simulation's own involved/probed set) from behaving like an open,
+    /// fully-reflecting stub in the FDTD field, without cluttering results with a "port" nobody
+    /// asked to measure. Defaults true (every pre-existing probed/excited pin stays exactly as
+    /// reportable as it always was); see InvolvedNetConfig::setPinAbsorbOnly()'s own doc comment for
+    /// how a config entry ends up with probe()==false here.
+    bool probe() const { return _probe; }
+    void setProbe(bool value) { _probe = value; }
 
     /// Scales width/length into simulation units (mirrors the `*= UNIT_MULTIPLIER` done in
     /// Config.load).
@@ -166,6 +196,7 @@ private:
     std::string _name = "Unnamed";
     std::string _footprintRef;
     std::string _padNumber;
+    std::string _netName;
     std::optional<std::pair<double, double>> _position;
     std::optional<double> _direction;
     double _width = 200;
@@ -176,6 +207,8 @@ private:
     double _dBMargin = -15;
     bool _excite = false;
     bool _absorbSignal = true;
+    bool _isTraceProbe = false;
+    bool _probe = true;
 };
 
 /// Which of a LumpedComponentConfig's R/L/C fields are physically present -- mirrors how
@@ -216,15 +249,69 @@ public:
     void setPosition2(std::pair<double, double> value) { _position2 = value; }
 
     /// Cardinal degrees (0/90/180/270) from position1 towards position2 -- same convention as
-    /// PortConfig::direction().
+    /// PortConfig::direction(). When cornerBridge() is true, this is the pos1->bridgeCorner() leg's
+    /// own axis instead (see cornerBridge()'s own doc comment) -- position2 isn't reached by
+    /// travelling along this direction in that mode.
     double direction() const { return _direction; }
     void setDirection(double value) { _direction = value; }
+
+    /// Only meaningful when cornerBridge() is true -- the bridgeCorner()->position2 leg's own axis
+    /// (same 0/90/180/270 convention as direction(), which is the pos1->corner leg's axis in that
+    /// mode).
+    double direction2() const { return _direction2; }
+    void setDirection2(double value) { _direction2 = value; }
+
+    /// True if this component's two pads aren't cardinally aligned with each other (see
+    /// port_resolution.cpp's own _resolveLumpedComponents() doc comment for why that can happen --
+    /// a 2-pin part's footprint placed at a diagonal board angle). CSPropLumpedElement/
+    /// Operator_Ext_LumpedRLC have no concept of a diagonal element (a lumped component modifies one
+    /// E-field edge's own update equation along a single Cartesian axis, not a filled 3D region like
+    /// real copper), so Simulation::addLumpedComponents() dispatches this to a genuinely different
+    /// code path: an ordinary, single-axis lumped R/L/C element from position1() to bridgeCorner()
+    /// (along direction()), plus a second, plain zero-impedance PEC wire segment from bridgeCorner()
+    /// to position2() (along direction2()) -- an L-shaped route through a synthetic corner point,
+    /// each leg individually cardinal-aligned even though the true pad1->pad2 line isn't. This
+    /// replaced an earlier "remote pair" mechanism (a shared Norton-node branch-current state
+    /// bridging two independent, non-adjacent terminals with no real geometric connection at all --
+    /// see git history for CopperLumpedRLCPair.hpp/CopperLumpedRLCPairDiscovery.*, now deleted)
+    /// abandoned after two separate real-board failures: first, no single axis-aligned box size
+    /// could both fully cover a terminal's own real (rotated) pad *and* avoid overlapping a
+    /// tightly-pitched neighbour's pad; second, and more fundamentally, that mechanism's own
+    /// per-terminal "local bare capacitance" (recovered from the tiny claimed edges' own admittance)
+    /// has no way to represent "this terminal sits on a large, well-connected, low-impedance real
+    /// trace" -- every value tried (geometry-derived, or an artificially large fixed constant) turned
+    /// the branch into a divider dominated by that terminal capacitance rather than the real R/L/C,
+    /// confirmed empirically (a real board's own reported cd values reproduced a frequency-
+    /// *independent* attenuation matching a plain two-capacitor charge-sharing ratio, not the near-
+    /// total transmission a 220nF cap should show at 100MHz-6GHz). A real geometric connection (this
+    /// field) sidesteps that meta-problem entirely: current only ever flows through real, ordinary
+    /// Yee-grid physics, the same as any other trace. See bridgeCorner()'s own doc comment for how
+    /// the corner point is chosen to guarantee it (and both legs) can't interfere with any other net's
+    /// real copper. When false (the common case), position1()->position2() along direction() is one
+    /// ordinary axis-aligned run, exactly as before this field existed.
+    bool cornerBridge() const { return _cornerBridge; }
+    void setCornerBridge(bool value) { _cornerBridge = value; }
+
+    /// Only meaningful when cornerBridge() is true -- the synthetic L-shaped route's own corner point
+    /// (x, y), already in simulation-frame units (like position1()/position2(), so never touched by
+    /// scaleToSimulationUnits()). Always one of the two axis-aligned choices ((position2().x,
+    /// position1().y) or (position1().x, position2().y)) -- port_resolution.cpp's own
+    /// _resolveLumpedComponents() picks whichever of the two keeps both legs (as real-width bridge
+    /// geometry, not just this single point) clear of every *other* net's own pads, tracks, and
+    /// copper pours on this component's own layer (a real geometric query against the board itself,
+    /// not a heuristic), or leaves cornerBridge() false and drops the component entirely (logged) if
+    /// neither choice is clear -- silently connecting into an unrelated net would be a worse outcome
+    /// than not modelling this component at all.
+    const std::pair<double, double>& bridgeCorner() const { return _bridgeCorner; }
+    void setBridgeCorner(std::pair<double, double> value) { _bridgeCorner = value; }
 
     std::int32_t layer() const { return _layer; }
     void setLayer(std::int32_t value) { _layer = value; }
 
     /// Transverse box width, in file units until scaleToSimulationUnits() runs -- matches
-    /// PortConfig::width()'s own default.
+    /// PortConfig::width()'s own default. When cornerBridge() is true, both legs (position1()-
+    /// >bridgeCorner() and bridgeCorner()->position2()) use this same width, and it's also the
+    /// clearance width port_resolution.cpp's own interference check requires around each leg.
     double width() const { return _width; }
     void setWidth(double value) { _width = value; }
 
@@ -238,7 +325,10 @@ private:
     double _capacitance = std::numeric_limits<double>::quiet_NaN();
     std::pair<double, double> _position1;
     std::pair<double, double> _position2;
+    std::pair<double, double> _bridgeCorner;
     double _direction = 0;
+    double _direction2 = 0;
+    bool _cornerBridge = false;
     std::int32_t _layer = 0;
     double _width = 200;
 };
@@ -254,6 +344,8 @@ public:
 
     const std::optional<std::int32_t>& resolvedIndex() const { return _resolvedIndex; }
     void setResolvedIndex(std::int32_t index) { _resolvedIndex = index; }
+    void setFootprint(std::string value) { _footprint = std::move(value); }
+    void setPin(std::string value) { _pin = std::move(value); }
 
 private:
     friend void to_json(nlohmann::json& j, const PortRef& p);
@@ -274,6 +366,23 @@ enum class NetSelectorKind {
     FootprintPin,
 };
 
+/// How fully an InvolvedNetConfig entry participates in the simulation -- the "Simulation Net" vs.
+/// "Included in Simulation" source-list checkboxes. SimulationNet is full participation (today's
+/// only behavior, pre-dating this distinction): the net's copper defines/grows the hull region
+/// (board_slicing.cpp's own InflatePaths of the involved-net union), feeds sim.resolvedNets()
+/// (port_resolution.cpp), and its pads are eligible for Probe/Absorb/Excite ports. GeometryOnly is a
+/// strict subset: the net's copper is composited into the simulated geometry (clipped to whatever
+/// hull the SimulationNet-level entries already produced, exactly like ground-net copper already
+/// is -- see board_slicing.cpp), but never grows the hull itself, never enters resolvedNets(), and
+/// never becomes port/probe/excitation-eligible. Meant for geometry (e.g. via-stitched ground-
+/// adjacent structure) that needs to physically exist in the mesh/model but isn't itself something
+/// being probed or exciting a response -- see grid_gen.cpp's own ground-net density treatment for
+/// the same reasoning applied one layer up (mesh density, not geometry inclusion).
+enum class NetInclusionLevel {
+    SimulationNet,
+    GeometryOnly,
+};
+
 /// One footprint+pin pair, identifying a single pad the way port_resolution.cpp's own PadIdentity
 /// does (footprintRef/padNumber) -- but as plain, JSON-serializable strings, since this is a
 /// config-file field, not a live board query result.
@@ -287,13 +396,20 @@ struct ExcludedPin {
 void to_json(nlohmann::json& j, const ExcludedPin& p);
 void from_json(const nlohmann::json& j, ExcludedPin& p);
 
-/// One footprint+pin+absorb triple -- the opt-*in* per-pin selection the source list's "Probe"/
-/// "Absorb Signal" checkboxes drive (see InvolvedNetConfig::probedPins()'s own doc comment for how
-/// this coexists with the older, opt-*out* ExcludedPin list).
+/// One footprint+pin+absorb(+probe) entry -- the opt-*in* per-pin selection the source list's
+/// "Probe"/"Absorb Signal" checkboxes drive (see InvolvedNetConfig::probedPins()'s own doc comment
+/// for how this coexists with the older, opt-*out* ExcludedPin list). `probe` defaults true (every
+/// pre-existing entry -- from before this field existed -- keeps meaning exactly what it always did:
+/// a real, reportable S-parameter/impedance probe); `probe=false` is InvolvedNetConfig::
+/// setPinAbsorbOnly()'s own state -- a real resistive termination with nothing shown in Results (see
+/// PortConfig::probe()'s own doc comment). `probe` is declared *after* absorbSignal so every
+/// existing 3-argument positional `ProbedPin{footprint, pin, absorbSignal}` construction keeps
+/// working unchanged, defaulting the new field to true.
 struct ProbedPin {
     std::string footprint;
     std::string pin;
     bool absorbSignal = true;
+    bool probe = true;
 
     bool operator==(const ProbedPin& other) const { return footprint == other.footprint && pin == other.pin; }
 };
@@ -345,6 +461,10 @@ void from_json(const nlohmann::json& j, PinDirectionOverride& p);
 class InvolvedNetConfig {
 public:
     NetSelectorKind kind() const { return _kind; }
+    /// Defaults to SimulationNet -- an entry from a simulation.json predating this distinction loads
+    /// with exactly its old, only-ever-had behavior. See NetInclusionLevel's own doc comment.
+    NetInclusionLevel inclusionLevel() const { return _inclusionLevel; }
+    void setInclusionLevel(NetInclusionLevel value) { _inclusionLevel = value; }
     const std::optional<std::string>& netClass() const { return _netClass; }
     const std::optional<std::string>& net() const { return _net; }
     const std::optional<std::string>& footprint() const { return _footprint; }
@@ -372,23 +492,77 @@ public:
         });
         return it != _probedPins.end() ? std::optional<bool>(it->absorbSignal) : std::nullopt;
     }
+    /// nullopt if `footprint`.`pin` isn't in probedPins() at all -- otherwise that entry's own
+    /// `probe` flag (see ProbedPin's own doc comment). Distinct from probedPinAbsorbs(): a pin can
+    /// be in this list (get a real port) while probe() is false (absorb-only, not reportable).
+    std::optional<bool> probedPinIsProbe(const std::string& footprint, const std::string& pin) const {
+        const auto it = std::find_if(_probedPins.begin(), _probedPins.end(), [&](const ProbedPin& p) {
+            return p.footprint == footprint && p.pin == pin;
+        });
+        return it != _probedPins.end() ? std::optional<bool>(it->probe) : std::nullopt;
+    }
     /// Sets (`absorbSignal` has a value) or clears (nullopt) this one pad's probed state. Always
     /// sets hasExplicitPinSelections() true, even when clearing -- the act of editing a pin's Probe
     /// state at all is what commits this net to the new, explicit resolution mode (see this class's
-    /// own doc comment); there's no way back to legacy mode once any pin has been touched.
+    /// own doc comment); there's no way back to legacy mode once any pin has been touched. Always
+    /// sets probe=true (a reportable probe) -- see setPinAbsorbOnly() for the other state this same
+    /// list can hold.
     void setPinProbed(const std::string& footprint, const std::string& pin, std::optional<bool> absorbSignal) {
         _hasExplicitPinSelections = true;
         _probedPins.erase(std::remove_if(_probedPins.begin(), _probedPins.end(),
                                           [&](const ProbedPin& p) { return p.footprint == footprint && p.pin == pin; }),
                            _probedPins.end());
         if (absorbSignal.has_value()) {
-            _probedPins.push_back({footprint, pin, *absorbSignal});
+            _probedPins.push_back({footprint, pin, *absorbSignal, /*probe=*/true});
+        }
+    }
+    /// Sets (enabled) or clears (!enabled) this one pad as absorb-only: a real resistive termination
+    /// port gets built for it (see PortConfig::absorbSignal()'s own doc comment on
+    /// Simulation::addResistivePort()), so it doesn't behave as an open, fully-reflecting stub in
+    /// the FDTD field -- but it's never shown as a measured port in Results (PortConfig::probe()==
+    /// false) and never becomes an excitation target on its own. Works on a GeometryOnly entry too
+    /// (unlike setPinProbed(), which is meaningless there -- see NetInclusionLevel's own doc comment
+    /// and port_resolution.cpp's resolveSimulationPorts(), which reads probedPins() for a
+    /// GeometryOnly entry only to find absorb-only pins like this one, never to grow resolvedNets()
+    /// or place a reportable probe). Mutually exclusive with setPinProbed() for the same pin -- a pin
+    /// is either measured or just loaded, never both -- so this replaces any existing entry outright,
+    /// same erase-then-maybe-push_back shape as setPinProbed().
+    void setPinAbsorbOnly(const std::string& footprint, const std::string& pin, bool enabled) {
+        _hasExplicitPinSelections = true;
+        _probedPins.erase(std::remove_if(_probedPins.begin(), _probedPins.end(),
+                                          [&](const ProbedPin& p) { return p.footprint == footprint && p.pin == pin; }),
+                           _probedPins.end());
+        if (enabled) {
+            _probedPins.push_back({footprint, pin, /*absorbSignal=*/true, /*probe=*/false});
         }
     }
 
     double impedance() const { return _impedance; }
     double length() const { return _length; } // -> PortConfig::length()
     std::int32_t plane() const { return _plane; }
+    /// Net/NetClass-kind entries only (meaningless for a FootprintPin-kind entry, which names a
+    /// single pad, not a routed net to search for straight trace runs on). When true,
+    /// resolveSimulationPorts() additionally auto-places up to a handful of non-loading, trace-
+    /// anchored impedance-measurement probes (PortConfig::isTraceProbe()==true) along this net's
+    /// own straight, pad-clear routed copper -- independent of, and in addition to, whatever ports
+    /// this net's own pads already resolve to via probedPins()/excludedPins(). Neither impedance()
+    /// nor length() is read for this: a trace probe measures Z rather than being sized to one, and
+    /// its width and propagation-axis extent are derived from the selected KiCad track run (see
+    /// port_resolution.cpp's probe-placement loop) -- so a net that's only ever probed for
+    /// impedance genuinely needs neither field set.
+    bool probeImpedance() const { return _probeImpedance; }
+    void setProbeImpedance(bool value) { _probeImpedance = value; }
+    /// For Net-kind entries that were added together as a differential pair, names the other
+    /// entry's net.  Stored reciprocally on both entries so either one remains self-describing
+    /// when edited through the UI.
+    const std::optional<std::string>& differentialPairPartner() const { return _differentialPairPartner; }
+    void setDifferentialPairPartner(std::optional<std::string> value) {
+        _differentialPairPartner = std::move(value);
+    }
+    /// When enabled, the paired ports are interpreted as an odd-mode stimulus and mixed-mode
+    /// S-parameters/impedance are produced. Pair membership itself is retained when this is off.
+    bool simulateAsDifferentialPair() const { return _simulateAsDifferentialPair; }
+    void setSimulateAsDifferentialPair(bool value) { _simulateAsDifferentialPair = value; }
     const std::optional<double>& width() const { return _width; }
     const std::optional<double>& dBMargin() const { return _dBMargin; }
     const std::optional<double>& direction() const { return _direction; } // escape hatch, see port_resolution.cpp
@@ -440,6 +614,7 @@ private:
     friend void from_json(const nlohmann::json& j, InvolvedNetConfig& p);
 
     NetSelectorKind _kind = NetSelectorKind::Net;
+    NetInclusionLevel _inclusionLevel = NetInclusionLevel::SimulationNet;
     std::optional<std::string> _netClass;
     std::optional<std::string> _net;
     std::optional<std::string> _footprint;
@@ -450,6 +625,9 @@ private:
     double _impedance = 45;
     double _length = 1000;
     std::int32_t _plane = 1;
+    bool _probeImpedance = false;
+    std::optional<std::string> _differentialPairPartner;
+    bool _simulateAsDifferentialPair = false;
     std::optional<double> _width;
     std::optional<double> _dBMargin;
     std::optional<double> _direction;
@@ -547,6 +725,9 @@ public:
     const PortRef& stopN() const { return _stopN; }
     PortRef& stopN() { return _stopN; }
     const std::optional<std::string>& name() const { return _name; }
+    void setName(std::optional<std::string> value) { _name = std::move(value); }
+    bool automatic() const { return _automatic; }
+    void setAutomatic(bool value) { _automatic = value; }
     bool correct() const { return _correct; }
 
     /// Validate that every PortRef resolved to a real port (mirrors __post_init__, now
@@ -563,6 +744,7 @@ private:
     PortRef _stopN;
     std::optional<std::string> _name;
     bool _correct = true; // not (de)serialized
+    bool _automatic = false; // derived from involved-net pairing; never serialized
 };
 
 void to_json(nlohmann::json& j, const DifferentialPairConfig& p);
@@ -704,6 +886,17 @@ public:
     double z() const { return _z; }
     void setZ(double value) { _z = value; }
 
+    /// Grows xy/z (never shrinks) so the gap between the modeled structure and the PML boundary is
+    /// at least a quarter of `minWavelength` (same micrometer units as _xy/_z, pre-
+    /// scaleToSimulationUnits() -- see Grid::applyFrequencyConstraint()'s own call site). The fixed
+    /// 1.5mm/2mm defaults below were tuned for lower-frequency nets; PML absorbs incoming plane
+    /// waves well but is much less effective against near-field/evanescent content that hasn't
+    /// settled by the time it reaches the boundary, and at several-GHz content (e.g. USB SuperSpeed)
+    /// 1.5mm can be electrically tight enough to show up as a visible reflection artifact right at
+    /// the board edge. Quarter-wavelength is a conservative standard buffer, not a rigorously
+    /// derived value -- a reasonable starting point to tune from if artifacts persist.
+    void applyFrequencyConstraint(double minWavelength);
+
     void scaleToSimulationUnits(std::int32_t unitMultiplier);
 
 private:
@@ -797,6 +990,11 @@ public:
     void setViaEdgeDistance(double value) { _viaEdgeDistance = value; }
     double viaSpacing() const { return _viaSpacing; }
     void setViaSpacing(double value) { _viaSpacing = value; }
+    /// Serial data rate used when synthesizing the PRBS waveform for eye-diagram analysis. A
+    /// non-positive value means "automatic"; results generation then uses the analysis stop
+    /// frequency so older configurations acquire a useful eye without a migration step.
+    double eyeBitRate() const { return _eyeBitRate; }
+    void setEyeBitRate(double value) { _eyeBitRate = value; }
 
     std::vector<ExcitationConfig>& excitations() { return _excitations; }
     const std::vector<ExcitationConfig>& excitations() const { return _excitations; }
@@ -843,6 +1041,7 @@ private:
     double _hullPadding = 5000;
     double _viaEdgeDistance = 1500;
     double _viaSpacing = 1500;
+    double _eyeBitRate = 0;
     std::vector<ExcitationConfig> _excitations;
     std::vector<SingleEndedConfig> _traces;
     std::vector<DifferentialPairConfig> _diffPairs;

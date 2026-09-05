@@ -2,7 +2,7 @@
 // addLumpedComponents(), see libgerber2ems/gerber2ems/simulation.cpp) and computes the same
 // per-cell ADE coefficients openEMS's own Engine_Ext_LumpedRLC would -- but as a clean-room
 // reimplementation of just the SERIES branch of Operator_Ext_LumpedRLC::BuildExtension()
-// (vendor/openEMS/FDTD/extensions/operator_ext_lumpedRLC.cpp), using only public Operator/
+// (openEMS/FDTD/extensions/operator_ext_lumpedRLC.cpp), using only public Operator/
 // CSPropLumpedElement API, since that extension's own already-computed coefficients are `protected`
 // (only `friend class Engine_Ext_LumpedRLC`, see operator_ext_lumpedRLC.h) and its Operator-mutating
 // helpers (EC_C/EC_G/Calc_ECOperatorPos) are likewise inaccessible from outside the extension

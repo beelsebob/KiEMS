@@ -10,7 +10,7 @@ namespace copper {
 namespace {
 
 // Ported from Operator_Ext_LumpedRLC::BuildExtension()'s SERIES branch
-// (vendor/openEMS/FDTD/extensions/operator_ext_lumpedRLC.cpp:264-297,361-400) -- see this file's
+// (openEMS/FDTD/extensions/operator_ext_lumpedRLC.cpp:264-297,361-400) -- see this file's
 // header comment for why this is a clean-room reimplementation rather than a read of that
 // extension's own (protected) state.
 std::vector<CopperLumpedRLCCell> _discoverForProperty(CSPropLumpedElement& prop, const CopperYeeGrid& grid,
