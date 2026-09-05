@@ -265,6 +265,7 @@ MSLPort::MSLPort(ContinuousStructure& csx, std::int32_t portNr, Point3 start, Po
       _propNy(axisIndex(propDir)) {
     const auto excNy = static_cast<std::size_t>(_excNy);
     const auto propNy = static_cast<std::size_t>(_propNy);
+    const auto widthNy = static_cast<std::size_t>(3 - _excNy - _propNy);
     const double direction = (_stop[propNy] - _start[propNy]) < 0 ? -1.0 : 1.0;
     const double upsideDown = (_stop[excNy] - _start[excNy]) < 0 ? -1.0 : 1.0;
 
@@ -281,8 +282,13 @@ MSLPort::MSLPort(ContinuousStructure& csx, std::int32_t portNr, Point3 start, Po
 
     CSRectGrid* mesh = _csx.GetGrid();
     const std::vector<double> propLines = gridLines(*mesh, _propNy, true);
+    const std::vector<double> widthLines = gridLines(*mesh, static_cast<std::int32_t>(widthNy), true);
+    const std::vector<double> heightLines = gridLines(*mesh, _excNy, true);
     if (propLines.size() <= 5) {
         throw std::runtime_error("At least 5 lines in propagation direction required!");
+    }
+    if (widthLines.size() < 2 || heightLines.size() < 5) {
+        throw std::runtime_error("MSLPort: insufficient mesh lines around the trace cross-section");
     }
     std::int64_t measPosIdx = static_cast<std::int64_t>(_argminAbsDiff(propLines, measplanePos));
     if (measPosIdx == 0) {
@@ -302,12 +308,19 @@ MSLPort::MSLPort(ContinuousStructure& csx, std::int32_t portNr, Point3 start, Po
     }
 
     _uDelta = {uPropePos[1] - uPropePos[0], uPropePos[2] - uPropePos[1]};
+    // Match AddMSLPort.m: voltage is sampled on the transverse E-grid line nearest the centre of
+    // the strip. Leaving this at an arbitrary geometric coordinate works only when that coordinate
+    // happens to survive mesh smoothing unchanged.
+    const double widthCentre = 0.5 * (_start[widthNy] + _stop[widthNy]);
+    const double voltageProbeWidth = widthLines[_argminAbsDiff(widthLines, widthCentre)];
     const std::array<std::string, 3> suffix = {"A", "B", "C"};
     for (std::size_t n = 0; n < 3; ++n) {
         Point3 uStart = {0.5 * (_start[0] + _stop[0]), 0.5 * (_start[1] + _stop[1]), 0.5 * (_start[2] + _stop[2])};
         Point3 uStop = uStart;
         uStart[propNy] = uPropePos[n];
         uStop[propNy] = uPropePos[n];
+        uStart[widthNy] = voltageProbeWidth;
+        uStop[widthNy] = voltageProbeWidth;
         uStart[excNy] = _start[excNy];
         uStop[excNy] = _stop[excNy];
         const std::string uName = _label("ut") + suffix[n];
@@ -318,9 +331,31 @@ MSLPort::MSLPort(ContinuousStructure& csx, std::int32_t portNr, Point3 start, Po
 
     const std::array<double, 2> iPropePos = {uPropePos[0] + _uDelta[0] / 2.0, uPropePos[1] + _uDelta[1] / 2.0};
     _iDelta = iPropePos[1] - iPropePos[0];
-    Point3 iStart = _start;
-    Point3 iStop = _stop;
-    iStop[excNy] = _start[excNy];
+
+    // A current probe measures the closed H-field contour around the strip; it must surround the
+    // conductor, not collapse onto the conductor's own plane. This is the mesh-aware placement
+    // used by the reference MATLAB AddMSLPort implementation. The older Python port simply made
+    // both height coordinates equal to start[excNy], which can omit most of the contour on a
+    // smoothed/nonuniform Yee grid and substantially under-report current (therefore over-reporting
+    // characteristic impedance).
+    const double widthMin = std::min(_start[widthNy], _stop[widthNy]);
+    const double widthMax = std::max(_start[widthNy], _stop[widthNy]);
+    const std::size_t widthMinIdx = _argminAbsDiff(widthLines, widthMin);
+    const std::size_t widthMaxIdx = _argminAbsDiff(widthLines, widthMax);
+    const std::size_t traceHeightIdx = _argminAbsDiff(heightLines, _start[excNy]);
+    if (widthMinIdx == 0 || widthMaxIdx + 1 >= widthLines.size() || traceHeightIdx < 2 ||
+        traceHeightIdx + 2 >= heightLines.size()) {
+        throw std::runtime_error("MSLPort: trace is too close to a mesh boundary for current-probe placement");
+    }
+
+    Point3 iStart = {std::min(_start[0], _stop[0]), std::min(_start[1], _stop[1]),
+                     std::min(_start[2], _stop[2])};
+    Point3 iStop = {std::max(_start[0], _stop[0]), std::max(_start[1], _stop[1]),
+                    std::max(_start[2], _stop[2])};
+    iStart[widthNy] = 0.5 * (widthLines[widthMinIdx - 1] + widthLines[widthMinIdx]);
+    iStop[widthNy] = 0.5 * (widthLines[widthMaxIdx] + widthLines[widthMaxIdx + 1]);
+    iStart[excNy] = 0.5 * (heightLines[traceHeightIdx - 2] + heightLines[traceHeightIdx - 1]);
+    iStop[excNy] = 0.5 * (heightLines[traceHeightIdx + 1] + heightLines[traceHeightIdx + 2]);
     for (std::size_t n = 0; n < 2; ++n) {
         iStart[propNy] = iPropePos[n];
         iStop[propNy] = iPropePos[n];

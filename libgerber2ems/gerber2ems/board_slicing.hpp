@@ -65,8 +65,21 @@ struct SlicedBoard {
     /// as the rest of the pipeline (relative to the *original* board's Edge_Cuts origin, not
     /// re-origined to its own bounding box -- so xMin/yMin are generally nonzero, unlike the
     /// whole-board [0,pcbWidth] x [0,pcbHeight] convention), replacing Edge_Cuts for
-    /// substrate/plane sizing.
+    /// substrate/plane sizing. Only the *largest* loop of the true cutout region (see cutoutLoops
+    /// below) -- fine for substrate/plane sizing (a single rectangle-ish box already only
+    /// approximates the true shape), but NOT a substitute for cutoutLoops wherever the true,
+    /// possibly-disjoint/possibly-holed shape actually matters.
     std::vector<Position> outline;
+    /// The true cutout region computed by sliceBoardForSimulation() -- every loop of it, not just
+    /// the largest (unlike outline above): a spatially disjoint involved-net footprint produces more
+    /// than one outer loop here, and Intersect()-ing against the real board outline can also leave
+    /// genuine holes (opposite winding from their enclosing outer loop, standard Clipper2Lib
+    /// convention). grid_gen.cpp uses this for a real point-in-polygon membership test (mesh-DENSITY
+    /// placement must only look at copper genuinely within the actual sliced geometry, not
+    /// pre-cutout copper that happens to fall in outline's single-loop approximation's bounding
+    /// region) -- ray-cast parity summed across every loop here handles both disjoint regions and
+    /// holes correctly without needing to know which loops are holes ahead of time.
+    std::vector<std::vector<Position>> cutoutLoops;
     double xMin = 0;
     double yMin = 0;
     double width = 0;
@@ -116,7 +129,8 @@ inline void to_json(nlohmann::json& j, const SlicedBoard& b) {
                         {"topMaskTriangles", b.topMaskTriangles}, {"bottomMaskTriangles", b.bottomMaskTriangles},
                         {"topMaskOpeningLoops", b.topMaskOpeningLoops},
                         {"bottomMaskOpeningLoops", b.bottomMaskOpeningLoops},
-                        {"previewLayerTriangles", b.previewLayerTriangles}};
+                        {"previewLayerTriangles", b.previewLayerTriangles},
+                        {"cutoutLoops", b.cutoutLoops}};
 }
 
 inline void from_json(const nlohmann::json& j, SlicedBoard& b) {
@@ -154,6 +168,13 @@ inline void from_json(const nlohmann::json& j, SlicedBoard& b) {
         j.at("previewLayerTriangles").get_to(b.previewLayerTriangles);
     } else {
         b.previewLayerTriangles = b.layerTriangles;
+    }
+    // Absent in geometry.json written before cutoutLoops existed -- defaults to empty, which
+    // grid_gen.cpp's own point-in-polygon filter treats as "no polygon filtering, bbox only" (this
+    // function's original, less precise behaviour) rather than failing to load an otherwise-valid
+    // cached geometry stage.
+    if (j.contains("cutoutLoops")) {
+        j.at("cutoutLoops").get_to(b.cutoutLoops);
     }
 }
 

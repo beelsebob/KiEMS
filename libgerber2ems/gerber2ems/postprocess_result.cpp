@@ -55,6 +55,12 @@ std::expected<PostprocessResult, std::string> PostprocessResult::compute(const S
                 if (voltage.has_value() && current.has_value()) {
                     post->addProbeData(probe, excitedPort, *voltage, *current);
                 }
+                if (simConfig.ports()[static_cast<std::size_t>(probe)].isTraceProbe()) {
+                    if (auto impedance = simulation.getProbeImpedance(simConfig.name(), probe, excitedPort);
+                        impedance.has_value()) {
+                        post->addProbeImpedance(probe, excitedPort, *impedance);
+                    }
+                }
             }
         }
         post->processData();
@@ -112,6 +118,12 @@ std::optional<std::vector<std::complex<double>>> PostprocessResult::getProbeCurr
                                                                                        std::int32_t excitedPort) const {
     const Postprocessor* post = postprocessorFor(simulationName);
     return post == nullptr ? std::nullopt : post->getProbeCurrent(probe, excitedPort);
+}
+
+std::optional<std::vector<std::complex<double>>> PostprocessResult::getProbeImpedance(
+    const std::string& simulationName, std::int32_t probe, std::int32_t excitedPort) const {
+    const Postprocessor* post = postprocessorFor(simulationName);
+    return post == nullptr ? std::nullopt : post->getProbeImpedance(probe, excitedPort);
 }
 
 void PostprocessResult::renderProbes(const std::string& simulationName, bool transparent,

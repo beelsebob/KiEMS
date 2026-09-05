@@ -69,6 +69,9 @@ struct SimulationPortResults {
     /// for non-absorbing ports.
     std::map<std::int32_t, std::vector<std::complex<double>>> probeVoltage;
     std::map<std::int32_t, std::vector<std::complex<double>>> probeCurrent;
+    /// Measured characteristic impedance vs. frequency, for a trace-impedance probe only (a strict
+    /// subset of the non-absorbing ports above) -- see Simulation::PortParameters' own doc comment.
+    std::map<std::int32_t, std::vector<std::complex<double>>> probeImpedance;
 };
 
 /// Every excited port's own FDTD run, for one SimulationConfig -- keyed by excited port index.

@@ -80,6 +80,12 @@ public:
     /// characteristic impedance to decompose against) ever produces.
     const std::vector<std::complex<double>>& ufTot() const { return _ufTot; }
     const std::vector<std::complex<double>>& ifTot() const { return _ifTot; }
+    /// Per-frequency reference/characteristic impedance -- for a plain Port/PassiveProbe/LumpedPort
+    /// this is only ever a flat refImpedance (or empty, if calcPort()/readUiData() was never called
+    /// with one), but MSLPort::readUiData() populates it with a genuine local characteristic
+    /// impedance derived from its own 3-plane E/H measurement (see that override's own doc comment)
+    /// -- what Simulation::addImpedanceProbe()'s non-loading MSLPort-based probes exist to read.
+    const std::vector<std::complex<double>>& zRef() const { return _zRef; }
 
 protected:
     std::string _label(const std::string& tag) const { return _prefix + "port_" + tag + "_" + std::to_string(_number); }

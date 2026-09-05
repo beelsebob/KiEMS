@@ -4,10 +4,10 @@
 // NOTE on plotting fidelity: the Python source styles matplotlib plots with a custom
 // "antmicro.mplstyle" stylesheet and draws Smith charts via scikit-rf (skrf.Network.plot_s_smith).
 // matplot++ (a gnuplot-backed plotting library, the closest std-library-friendly C++ equivalent)
-// cannot reproduce that exact styling or skrf's Smith chart grid renderer. This port produces
+// cannot reproduce that exact styling or skrf's Smith chart renderer. This port produces
 // functionally equivalent plots (same data, axes, legends) with matplot++'s own default styling,
-// and a hand-drawn simplified Smith chart (unit circle + axes + VSWR circle + the S11(f) trace)
-// rather than skrf's full constant-R/X grid. The underlying numeric results (S-parameters,
+// including a normalized-impedance Smith grid (constant-R/X curves, VSWR circle, and S11 trace).
+// The underlying numeric results (S-parameters,
 // impedances, delays, and the CSV files written) are ported with full fidelity.
 #pragma once
 
@@ -95,6 +95,15 @@ public:
     std::optional<std::vector<std::complex<double>>> getProbeVoltage(std::int32_t probe, std::int32_t excitedPort) const;
     std::optional<std::vector<std::complex<double>>> getProbeCurrent(std::int32_t probe, std::int32_t excitedPort) const;
 
+    /// Adds a trace-impedance probe's measured characteristic impedance vs. frequency (Port::zRef())
+    /// -- only ever called for a probe with PortConfig::isTraceProbe()==true, a strict subset of the
+    /// non-absorbing ports addProbeData() covers.
+    void addProbeImpedance(std::int32_t probe, std::int32_t excitedPort, const std::vector<std::complex<double>>& zRef);
+    /// nullopt if `probe` never had addProbeImpedance() called for it at `excitedPort` (e.g. it's
+    /// not a trace-impedance probe at all -- only ever addProbeData()).
+    std::optional<std::vector<std::complex<double>>> getProbeImpedance(std::int32_t probe,
+                                                                          std::int32_t excitedPort) const;
+
     void renderSParams(bool plotPhase, bool transparent, const std::filesystem::path& outputDir) const;
     void renderDiffPairSParams(bool transparent, const std::filesystem::path& outputDir) const;
     void renderDiffImpedance(bool transparent, const std::filesystem::path& outputDir) const;
@@ -134,6 +143,9 @@ private:
     // _reflected for consistency, only ever populated at non-absorbing-port row indices.
     std::vector<std::vector<std::vector<std::complex<double>>>> _probeVoltage;
     std::vector<std::vector<std::vector<std::complex<double>>>> _probeCurrent;
+    // Same shape again, only ever populated at trace-impedance-probe row indices (a strict subset
+    // of _probeVoltage/_probeCurrent's own non-absorbing-port rows).
+    std::vector<std::vector<std::vector<std::complex<double>>>> _probeImpedance;
 
     // [output_port][input_port][frequency]
     std::vector<std::vector<std::vector<std::complex<double>>>> _sParams;

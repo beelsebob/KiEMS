@@ -75,6 +75,16 @@ std::optional<std::vector<std::complex<double>>> SimulationResult::getProbeCurre
     return post->getProbeCurrent(probe, excitedPort);
 }
 
+std::optional<std::vector<std::complex<double>>> SimulationResult::getProbeImpedance(const std::string& simulationName,
+                                                                                        std::int32_t probe,
+                                                                                        std::int32_t excitedPort) const {
+    const Postprocessor* post = _postprocessorFor(simulationName);
+    if (post == nullptr) {
+        return std::nullopt;
+    }
+    return post->getProbeImpedance(probe, excitedPort);
+}
+
 void SimulationResult::sparamToFile(const std::string& simulationName, const std::filesystem::path& outputDir) const {
     const Postprocessor* post = _postprocessorFor(simulationName);
     if (post == nullptr) {

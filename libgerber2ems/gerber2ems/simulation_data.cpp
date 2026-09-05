@@ -70,10 +70,10 @@ std::expected<SimulationResults, std::string> generateResults(const SimulationDa
         if (!paramsResult) {
             return std::unexpected(paramsResult.error());
         }
-        auto& [reflected, incident, probeVoltage, probeCurrent] = *paramsResult;
+        auto& [reflected, incident, probeVoltage, probeCurrent, probeImpedance] = *paramsResult;
         results.byExcitedPort.emplace(
             excitedPortIndex, SimulationPortResults{std::move(reflected), std::move(incident), std::move(probeVoltage),
-                                                      std::move(probeCurrent)});
+                                                      std::move(probeCurrent), std::move(probeImpedance)});
     }
     return results;
 }
@@ -91,6 +91,9 @@ SimulationPostprocessing generatePostprocessing(const SimulationData<SimulationS
             } else {
                 postprocessor->addProbeData(index, excitedPortIndex, portResults.probeVoltage.at(index),
                                              portResults.probeCurrent.at(index));
+                if (ports[measuredPort].isTraceProbe()) {
+                    postprocessor->addProbeImpedance(index, excitedPortIndex, portResults.probeImpedance.at(index));
+                }
             }
         }
     }

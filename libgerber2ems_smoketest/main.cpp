@@ -3,6 +3,7 @@
 // churn in later refactor phases fails here at compile time rather than only being caught by a
 // full CLI re-run. Not a test framework -- plain asserts, pass/fail printed to stdout.
 
+#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <cstdlib>
@@ -13,6 +14,7 @@
 #include "gerber2ems/component_value.hpp"
 #include "gerber2ems/config.hpp"
 #include "gerber2ems/constants.hpp"
+#include "gerber2ems/eye_diagram.hpp"
 #include "logging.hpp"
 #include "gerber2ems/postprocess.hpp"
 
@@ -36,6 +38,7 @@ EMSConfig makeSyntheticConfig() {
     sim.setHullPadding(2500);
     sim.setViaEdgeDistance(350);
     sim.setViaSpacing(550);
+    sim.setEyeBitRate(5e9);
     sim.groundNet().setKind(GroundSelectorKind::Net);
     sim.groundNet().setNet("GND");
 
@@ -44,6 +47,7 @@ EMSConfig makeSyntheticConfig() {
     net.setNet("USB_DP");
     net.setImpedance(45);
     net.setLength(1200);
+    net.setProbeImpedance(true);
     net.setPinProbed("U8", "4", true);
     net.setPinProbed("U8", "5", false);
     sim.involvedNets().push_back(net);
@@ -119,6 +123,10 @@ bool checkConfigMutateSaveRoundTrip() {
         std::cerr << "FAIL: hullPadding() didn't round-trip, or was scaled\n";
         ok = false;
     }
+    if (reparsed.simulations().empty() || reparsed.simulations().front().eyeBitRate() != 5e9) {
+        std::cerr << "FAIL: eyeBitRate() didn't round-trip\n";
+        ok = false;
+    }
     if (reparsed.simulations().front().involvedNets().size() != 1 ||
         reparsed.simulations().front().involvedNets().front().net() != std::optional<std::string>("USB_DP")) {
         std::cerr << "FAIL: involved_nets entry didn't round-trip\n";
@@ -128,6 +136,10 @@ bool checkConfigMutateSaveRoundTrip() {
         const InvolvedNetConfig& net = reparsed.simulations().front().involvedNets().front();
         if (!net.hasExplicitPinSelections()) {
             std::cerr << "FAIL: hasExplicitPinSelections() didn't round-trip as true\n";
+            ok = false;
+        }
+        if (!net.probeImpedance()) {
+            std::cerr << "FAIL: probeImpedance() didn't round-trip as true\n";
             ok = false;
         }
         if (net.probedPinAbsorbs("U8", "4") != std::optional<bool>(true)) {
@@ -308,6 +320,14 @@ bool checkPostprocessorRawAccessors() {
         ok = false;
     }
 
+    // Empty data means an absent/disabled probe, not a valid curve. If accepted, the app creates a
+    // fixed-height chart section for it but has no samples to draw, leaving unexplained whitespace.
+    post.addProbeData(0, 0, {}, {});
+    if (post.getProbeVoltage(0, 0).has_value() || post.getProbeCurrent(0, 0).has_value()) {
+        std::cerr << "FAIL: Postprocessor accepted an empty probe result as a valid curve\n";
+        ok = false;
+    }
+
     const auto sdd = post.getDiffPairSdd(0);
     if (!sdd.has_value() || !sdd->sdd11Db.has_value() || !sdd->sdd21Db.has_value() ||
         sdd->sdd11Db->size() != freqs.size() || sdd->sdd21Db->size() != freqs.size()) {
@@ -389,6 +409,31 @@ bool checkParseComponentValue() {
     return ok;
 }
 
+bool checkEyeDiagram() {
+    std::vector<double> frequencies(129);
+    std::vector<std::complex<double>> transfer(frequencies.size(), {1.0, 0.0});
+    for (std::size_t i = 0; i < frequencies.size(); ++i) {
+        frequencies[i] = static_cast<double>(i) * 4e9 / static_cast<double>(frequencies.size() - 1);
+    }
+    const auto eye = computeEyeDiagram(frequencies, transfer, 1e9);
+    if (!eye.has_value() || eye->timeUI.size() != 65 || eye->traces.empty()) {
+        std::cerr << "FAIL: computeEyeDiagram() didn't produce a two-UI identity-channel eye\n";
+        return false;
+    }
+    for (const auto& trace : eye->traces) {
+        if (trace.size() != eye->timeUI.size() ||
+            !std::all_of(trace.begin(), trace.end(), [](double value) { return std::isfinite(value); })) {
+            std::cerr << "FAIL: computeEyeDiagram() produced a malformed/non-finite trace\n";
+            return false;
+        }
+    }
+    if (computeEyeDiagram(frequencies, transfer, 0).has_value()) {
+        std::cerr << "FAIL: computeEyeDiagram() accepted a zero bit rate\n";
+        return false;
+    }
+    return true;
+}
+
 bool checkLogging() {
     // Checks that the stream-building temporary accepts heterogeneous values and logs once when
     // its destructor runs at the end of the full expression.
@@ -412,6 +457,7 @@ int main() {
     ok &= checkScaledToSimulationUnitsIsAPureCopy();
     ok &= checkPostprocessorRawAccessors();
     ok &= checkParseComponentValue();
+    ok &= checkEyeDiagram();
     ok &= checkLogging();
 
     if (ok) {

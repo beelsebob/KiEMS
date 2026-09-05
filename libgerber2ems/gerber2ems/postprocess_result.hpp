@@ -52,6 +52,11 @@ public:
                                                                        std::int32_t probe, std::int32_t excitedPort) const;
     std::optional<std::vector<std::complex<double>>> getProbeCurrent(const std::string& simulationName,
                                                                        std::int32_t probe, std::int32_t excitedPort) const;
+    /// Measured characteristic impedance for a trace-impedance probe only (PortConfig::
+    /// isTraceProbe()==true, a strict subset of the non-absorbing ports above).
+    std::optional<std::vector<std::complex<double>>> getProbeImpedance(const std::string& simulationName,
+                                                                          std::int32_t probe,
+                                                                          std::int32_t excitedPort) const;
 
     // Explicit save/render calls, matching Postprocessor's own signatures -- no-ops if
     // `simulationName` isn't in config().

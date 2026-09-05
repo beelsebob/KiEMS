@@ -1,6 +1,7 @@
 #include "postprocess.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -109,6 +110,7 @@ Postprocessor::Postprocessor(std::vector<double> frequencies, const SimulationCo
     _reflected = make3(kComplexNaN);
     _probeVoltage = make3(kComplexNaN);
     _probeCurrent = make3(kComplexNaN);
+    _probeImpedance = make3(kComplexNaN);
     _sParams = make3(kComplexNaN);
     _delays = std::vector<std::vector<std::vector<double>>>(
         static_cast<std::size_t>(_count),
@@ -123,7 +125,11 @@ Postprocessor::Postprocessor(std::vector<double> frequencies, const SimulationCo
 }
 
 bool Postprocessor::isValid(const std::vector<std::complex<double>>& array) {
-    return std::none_of(array.begin(), array.end(), [](std::complex<double> v) { return isValid(v) == false; });
+    // `none_of` is vacuously true for an empty vector, but an empty series means that no result was
+    // produced (not a valid, zero-length curve). Treating it as valid lets disabled/missing probes
+    // leak into the results preview as fixed-height charts with nothing to draw.
+    return !array.empty() &&
+           std::none_of(array.begin(), array.end(), [](std::complex<double> v) { return isValid(v) == false; });
 }
 
 bool Postprocessor::isValid(std::complex<double> value) { return !std::isnan(value.real()) && !std::isnan(value.imag()); }
@@ -162,6 +168,20 @@ std::optional<std::vector<std::complex<double>>> Postprocessor::getProbeCurrent(
     }
     const auto& i = _probeCurrent[static_cast<std::size_t>(probe)][static_cast<std::size_t>(excitedPort)];
     return isValid(i) ? std::optional(i) : std::nullopt;
+}
+
+void Postprocessor::addProbeImpedance(std::int32_t probe, std::int32_t excitedPort,
+                                        const std::vector<std::complex<double>>& zRef) {
+    _probeImpedance[static_cast<std::size_t>(probe)][static_cast<std::size_t>(excitedPort)] = zRef;
+}
+
+std::optional<std::vector<std::complex<double>>> Postprocessor::getProbeImpedance(std::int32_t probe,
+                                                                                     std::int32_t excitedPort) const {
+    if (probe >= _count || excitedPort >= _count) {
+        return std::nullopt;
+    }
+    const auto& z = _probeImpedance[static_cast<std::size_t>(probe)][static_cast<std::size_t>(excitedPort)];
+    return isValid(z) ? std::optional(z) : std::nullopt;
 }
 
 void Postprocessor::calculateSparams() {
@@ -387,14 +407,11 @@ std::optional<Postprocessor::DiffPairImpedance> Postprocessor::getDiffPairImpeda
     result.magnitudeOhm.resize(_frequencies.size());
     result.angleDeg.resize(_frequencies.size());
     for (std::size_t f = 0; f < _frequencies.size(); ++f) {
-        const std::complex<double> s11 = _sParams[sp][sp][f];
-        const std::complex<double> s21 = _sParams[sn][sp][f];
-        const std::complex<double> s12 = _sParams[sp][sn][f];
-        const std::complex<double> s22 = _sParams[sn][sn][f];
+        // Mixed-mode reflection for an ideal odd-mode incident wave. Each single-ended port is
+        // normalized to z0, therefore the differential reference impedance is 2*z0 (not z0).
         const std::complex<double> gamma =
-            ((2.0 * s11 - s21) * (1.0 - s22 - s12) + (1.0 - s11 - s21) * (1.0 + s22 - 2.0 * s12)) /
-            ((2.0 - s21) * (1.0 - s22 - s12) + (1.0 - s11 - s21) * (1.0 + s22));
-        const std::complex<double> impedance = z0 * (1.0 + gamma) / (1.0 - gamma);
+            0.5 * (_sParams[sp][sp][f] - _sParams[sn][sp][f] - _sParams[sp][sn][f] + _sParams[sn][sn][f]);
+        const std::complex<double> impedance = (2.0 * z0) * (1.0 + gamma) / (1.0 - gamma);
         result.magnitudeOhm[f] = std::abs(impedance);
         result.angleDeg[f] = std::arg(impedance) * 180.0 / M_PI;
     }
@@ -549,10 +566,11 @@ void Postprocessor::renderSmith(bool transparent, const std::filesystem::path& o
         }
 
         auto fig = _newFigure();
-        matplot::hold(true);
+        auto ax = fig->current_axes();
+        matplot::hold(ax, true);
 
-        // Unit circle (|Gamma|=1) and real axis, standing in for skrf's full Smith chart grid
-        // (see the file-level fidelity note).
+        // Normalized-impedance Smith grid. For z=r+jx, Γ=(z-1)/(z+1): fixed r produces a circle
+        // centred at r/(r+1) with radius 1/(r+1), while fixed x produces an arc from the rim to Γ=1.
         std::vector<double> circleX;
         std::vector<double> circleY;
         for (std::int32_t d = 0; d <= 360; ++d) {
@@ -560,8 +578,42 @@ void Postprocessor::renderSmith(bool transparent, const std::filesystem::path& o
             circleX.push_back(std::cos(a));
             circleY.push_back(std::sin(a));
         }
-        matplot::plot(circleX, circleY)->color("black");
-        matplot::plot(std::vector<double>{-1, 1}, std::vector<double>{0, 0})->color("black");
+        matplot::plot(ax, circleX, circleY)->color("black").line_width(1.2F);
+
+        constexpr std::array<double, 5> gridValues{0.2, 0.5, 1.0, 2.0, 5.0};
+        for (const double resistance : gridValues) {
+            std::vector<double> x;
+            std::vector<double> y;
+            const double radius = 1 / (1 + resistance);
+            const double center = resistance / (1 + resistance);
+            for (std::int32_t d = 0; d <= 360; ++d) {
+                const double angle = static_cast<double>(d) * M_PI / 180.0;
+                x.push_back(center + radius * std::cos(angle));
+                y.push_back(radius * std::sin(angle));
+            }
+            matplot::plot(ax, x, y)->color({0.65F, 0.65F, 0.65F, 0.65F}).line_width(0.6F);
+        }
+
+        for (const double magnitude : gridValues) {
+            for (const double reactance : {magnitude, -magnitude}) {
+                std::vector<double> x;
+                std::vector<double> y;
+                auto appendGamma = [&](double resistance) {
+                    const double denominator = (resistance + 1) * (resistance + 1) + reactance * reactance;
+                    x.push_back((resistance * resistance + reactance * reactance - 1) / denominator);
+                    y.push_back(2 * reactance / denominator);
+                };
+                appendGamma(0);
+                for (std::int32_t sample = 0; sample <= 180; ++sample) {
+                    appendGamma(std::pow(10.0, -4.0 + 8.0 * static_cast<double>(sample) / 180.0));
+                }
+                x.push_back(1);
+                y.push_back(0);
+                matplot::plot(ax, x, y)->color({0.75F, 0.75F, 0.75F, 0.75F}).line_width(0.5F);
+            }
+        }
+        matplot::plot(ax, std::vector<double>{-1, 1}, std::vector<double>{0, 0})
+            ->color("black").line_width(0.8F);
 
         const double s11Margin = _simConfig.ports()[static_cast<std::size_t>(port)].dBMargin();
         const double vswrMargin = (std::pow(10.0, s11Margin / 20.0) + 1) / (std::pow(10.0, s11Margin / 20.0) - 1);
@@ -573,7 +625,7 @@ void Postprocessor::renderSmith(bool transparent, const std::filesystem::path& o
             vswrX.push_back(vswrGamma * std::cos(a));
             vswrY.push_back(vswrGamma * std::sin(a));
         }
-        matplot::plot(vswrX, vswrY)->line_style("--").color("red").display_name("VSWR margin");
+        matplot::plot(ax, vswrX, vswrY)->line_style("--").color("red").display_name("VSWR margin");
 
         std::vector<double> reGamma(s.size());
         std::vector<double> imGamma(s.size());
@@ -581,9 +633,14 @@ void Postprocessor::renderSmith(bool transparent, const std::filesystem::path& o
             reGamma[f] = s[f].real();
             imGamma[f] = s[f].imag();
         }
-        matplot::plot(reGamma, imGamma)->display_name("$S_{" + std::to_string(port + 1) + std::to_string(port + 1) + "}$");
+        matplot::plot(ax, reGamma, imGamma)
+            ->line_width(1.5F)
+            .display_name("$S_{" + std::to_string(port + 1) + std::to_string(port + 1) + "}$");
 
-        matplot::legend();
+        matplot::axis(ax, matplot::equal);
+        ax->xlim({-1.05, 1.05});
+        ax->ylim({-1.05, 1.05});
+        matplot::legend(ax);
         _saveFigure(fig, outputDir / ("S_" + std::to_string(port + 1) + std::to_string(port + 1) + "_smith.png"),
                     transparent);
     }
@@ -743,7 +800,8 @@ void Postprocessor::probePortToFile(std::int32_t probeNumber, const std::filesys
     std::string header = "Frequency [MHz], ";
     for (std::int32_t i = 0; i < _count; ++i) {
         header += "re(V-" + std::to_string(i) + "), im(V-" + std::to_string(i) + "), re(I-" + std::to_string(i) +
-                  "), im(I-" + std::to_string(i) + "), ";
+                  "), im(I-" + std::to_string(i) + "), re(Z-" + std::to_string(i) + "), im(Z-" + std::to_string(i) +
+                  "), ";
     }
 
     std::ofstream file(path / _probePath(probeNumber));
@@ -753,7 +811,8 @@ void Postprocessor::probePortToFile(std::int32_t probeNumber, const std::filesys
         for (std::int32_t i = 0; i < _count; ++i) {
             const auto ii = static_cast<std::size_t>(i);
             file << ", " << _probeVoltage[p][ii][f].real() << ", " << _probeVoltage[p][ii][f].imag() << ", "
-                 << _probeCurrent[p][ii][f].real() << ", " << _probeCurrent[p][ii][f].imag();
+                 << _probeCurrent[p][ii][f].real() << ", " << _probeCurrent[p][ii][f].imag() << ", "
+                 << _probeImpedance[p][ii][f].real() << ", " << _probeImpedance[p][ii][f].imag();
         }
         file << "\n";
     }
@@ -932,7 +991,8 @@ std::expected<void, std::string> Postprocessor::loadProbes(const std::filesystem
         std::getline(csvfile, headerLine);
         const std::vector<std::string> header = _splitCsvLine(headerLine);
 
-        static const std::regex viPattern(R"(([vi])-([0-9]+))");
+        // 'v'/'i'/'z' -- voltage, current, and (trace-impedance probes only) measured impedance.
+        static const std::regex viPattern(R"(([viz])-([0-9]+))");
         std::map<std::pair<char, std::int32_t>, std::size_t> reCol, imCol;
         for (std::size_t colNum = 0; colNum < header.size(); ++colNum) {
             const std::string lcell = _lower(_trim(header[colNum]));
@@ -972,7 +1032,7 @@ std::expected<void, std::string> Postprocessor::loadProbes(const std::filesystem
             for (std::size_t r = 0; r < rows.size(); ++r) {
                 series[r] = std::complex<double>(rows[r][col], rows[r][imIt->second]);
             }
-            auto& dest = key.first == 'v' ? _probeVoltage : _probeCurrent;
+            auto& dest = key.first == 'v' ? _probeVoltage : key.first == 'i' ? _probeCurrent : _probeImpedance;
             dest[idx][static_cast<std::size_t>(key.second)] = std::move(series);
         }
     }

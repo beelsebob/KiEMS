@@ -201,12 +201,20 @@ std::optional<std::filesystem::path> _copperGerberForFileName(const std::filesys
 
 std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const SimulationConfig& sim, const EMSConfig& config,
                                                                   const PathsConfig& paths) {
+    // Split by inclusion level (see NetInclusionLevel's own doc comment): SimulationNet-kind entries
+    // define/grow the hull below exactly as every entry always has; GeometryOnly-kind entries get
+    // composited into the final geometry the same way ground-net copper already is (clipped to
+    // whatever hull the SimulationNet entries produced), but never contribute to signalUnionAllLayers
+    // -- so a geometry-only net can never itself grow the hull, satisfying "Included in Simulation"'s
+    // own documented behavior.
     std::unordered_set<NetName, NetNameHash> involvedNets;
+    std::unordered_set<NetName, NetNameHash> geometryOnlyNets;
     for (const InvolvedNetConfig& entry : sim.involvedNets()) {
         auto nets = libkicad_query::resolveInvolvedNetNames(paths, entry);
         if (!nets) return std::unexpected(std::move(nets).error());
+        auto& target = entry.inclusionLevel() == NetInclusionLevel::GeometryOnly ? geometryOnlyNets : involvedNets;
         for (const std::string& net : *nets) {
-            involvedNets.insert(NetName(net));
+            target.insert(NetName(net));
         }
     }
     std::unordered_set<NetName, NetNameHash> groundNets;
@@ -224,15 +232,17 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
     const BoundingBox& origin = *originResult;
     const std::vector<LayerConfig> metals = config.getMetals();
 
-    // Per layer: the involved-net and ground-net composites (pre-cutout), and the GerberFile they
-    // came from (kept alive for _opsOnNets' aperture lookups during compositing). Every other net's
-    // copper (including unnamed/net-less pours) is deliberately never composited at all -- it never
-    // survives into layerTriangles below (only signalPerLayer/groundInCutout do), so it was never
-    // actually present in the simulated geometry for a stitching via's own full-depth barrel to
-    // short against; an earlier version of this function also rejected via candidates that merely
-    // sat over such copper *on the original, unsliced board*, which was overly conservative for
-    // exactly that reason -- see the stitching-via placement loop below.
+    // Per layer: the involved-net, geometry-only-net, and ground-net composites (pre-cutout), and
+    // the GerberFile they came from (kept alive for _opsOnNets' aperture lookups during
+    // compositing). Every other net's copper (including unnamed/net-less pours) is deliberately
+    // never composited at all -- it never survives into layerTriangles below (only
+    // signalPerLayer/geometryOnlyInCutout/groundInCutout do), so it was never actually present in
+    // the simulated geometry for a stitching via's own full-depth barrel to short against; an
+    // earlier version of this function also rejected via candidates that merely sat over such copper
+    // *on the original, unsliced board*, which was overly conservative for exactly that reason --
+    // see the stitching-via placement loop below.
     std::vector<Clipper2Lib::Paths64> signalPerLayer(metals.size());
+    std::vector<Clipper2Lib::Paths64> geometryOnlyPerLayer(metals.size());
     std::vector<Clipper2Lib::Paths64> groundPerLayer(metals.size());
     std::vector<Clipper2Lib::PolyTree64> groundTreePerLayer(metals.size());
 
@@ -249,6 +259,8 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
 
         const std::vector<CopperOp> involvedOps = _opsOnNets(gerber, involvedNets);
         signalPerLayer[layerIndex] = compositeOps(gerber, involvedOps, origin.xMin, origin.yMin, tessellationTolerance);
+        geometryOnlyPerLayer[layerIndex] =
+            compositeOps(gerber, _opsOnNets(gerber, geometryOnlyNets), origin.xMin, origin.yMin, tessellationTolerance);
         groundPerLayer[layerIndex] =
             compositeOps(gerber, _opsOnNets(gerber, groundNets), origin.xMin, origin.yMin, tessellationTolerance);
 
@@ -634,21 +646,29 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
     }
 
     // Final per-layer copper: involved-net composite (already inside the cutout by construction)
-    // union ground-net composite intersected with the cutout. layerTriangles (fed to the real FDTD
-    // geometry) deliberately skips the NPTH/via hole subtraction -- see its own doc comment for why
-    // that's redundant there (both already get correctly overridden by higher-priority CSXCAD
-    // primitives regardless) and measurably expensive (many extra small triangle primitives, each
-    // checked at every quarter-cell query across the whole mesh during real FDTD setup).
-    // previewLayerTriangles is the same copper with those holes cut, computed as a second, separate
-    // triangulation purely for GeometryPreviewBridge's own rendering.
+    // union geometry-only-net composite union ground-net composite, the latter two each intersected
+    // with the cutout first -- geometry-only nets get exactly the same "present, but clipped to
+    // whatever hull the involved nets alone produced" treatment ground copper already had, per
+    // NetInclusionLevel's own doc comment (this is the whole point: they can never grow the hull
+    // themselves). layerTriangles (fed to the real FDTD geometry) deliberately skips the NPTH/via
+    // hole subtraction -- see its own doc comment for why that's redundant there (both already get
+    // correctly overridden by higher-priority CSXCAD primitives regardless) and measurably expensive
+    // (many extra small triangle primitives, each checked at every quarter-cell query across the
+    // whole mesh during real FDTD setup). previewLayerTriangles is the same copper with those holes
+    // cut, computed as a second, separate triangulation purely for GeometryPreviewBridge's own
+    // rendering.
     SlicedBoard result;
     result.layerTriangles.resize(metals.size());
     result.previewLayerTriangles.resize(metals.size());
     for (std::size_t layerIndex = 0; layerIndex < metals.size(); ++layerIndex) {
+        const Clipper2Lib::Paths64 geometryOnlyInCutout =
+            Clipper2Lib::Intersect(geometryOnlyPerLayer[layerIndex], cutout, Clipper2Lib::FillRule::NonZero);
         const Clipper2Lib::Paths64 groundInCutout =
             Clipper2Lib::Intersect(groundPerLayer[layerIndex], cutout, Clipper2Lib::FillRule::NonZero);
+        const Clipper2Lib::Paths64 signalAndGeometryOnly =
+            Clipper2Lib::Union(signalPerLayer[layerIndex], geometryOnlyInCutout, Clipper2Lib::FillRule::NonZero);
         const Clipper2Lib::Paths64 finalLayer =
-            Clipper2Lib::Union(signalPerLayer[layerIndex], groundInCutout, Clipper2Lib::FillRule::NonZero);
+            Clipper2Lib::Union(signalAndGeometryOnly, groundInCutout, Clipper2Lib::FillRule::NonZero);
         result.layerTriangles[layerIndex] =
             triangulate(finalLayer, tessellationTolerance, "simulation \"" + sim.name() + "\" layer " + std::to_string(layerIndex));
 
@@ -742,11 +762,19 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
     result.yMin = yMin;
     result.width = xMax - xMin;
     result.height = yMax - yMin;
+    // Every loop of the true cutout, not just the largest -- see cutoutLoops' own doc comment
+    // (board_slicing.hpp) for why grid_gen.cpp needs this rather than `outline` above.
+    result.cutoutLoops.reserve(cutout.size());
+    for (const Clipper2Lib::Path64& loop : cutout) {
+        result.cutoutLoops.push_back(_path64ToPositions(loop));
+    }
     result.stitchingVias = std::move(stitchingVias);
     result.failedStitchingViaAttempts = std::move(failedStitchingViaAttempts);
 
-    logInfo("Simulation \"" + sim.name() + "\": sliced board to " + std::to_string(result.width) + "x" +
-             std::to_string(result.height) + " sim units, " + std::to_string(result.stitchingVias.size()) +
+    logInfo("Simulation \"" + sim.name() + "\": sliced board bbox = [" + std::to_string(result.xMin) + "," +
+             std::to_string(result.xMin + result.width) + "] x [" + std::to_string(result.yMin) + "," +
+             std::to_string(result.yMin + result.height) + "] (" + std::to_string(result.width) + "x" +
+             std::to_string(result.height) + " sim units), " + std::to_string(result.stitchingVias.size()) +
              " stitching via(s), " + std::to_string(result.failedStitchingViaAttempts.size()) +
              " failed attempt(s) [DIAG: " + std::to_string(diagNoGroundCopperCount) + " no-ground-copper, " +
              std::to_string(diagTooCloseCount) + " too-close-to-existing-via]");
