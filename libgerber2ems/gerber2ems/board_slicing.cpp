@@ -2,8 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
-#include <filesystem>
 #include <limits>
 #include <unordered_set>
 
@@ -12,7 +10,6 @@
 #include "config.hpp"
 #include "constants.hpp"
 #include "gerber_composite.hpp"
-#include "gerber_io.hpp"
 #include "libkicad_query.hpp"
 #include "logging.hpp"
 
@@ -32,6 +29,38 @@ Clipper2Lib::Path64 _positionsToPath64(const std::vector<Position>& points, doub
     return path;
 }
 
+double _mmToSimUnits(double mm) {
+    return mm / 1000.0 / constants::baseUnit * static_cast<double>(constants::unitMultiplier);
+}
+
+Clipper2Lib::Path64 _polygonLoopToPath64(const libkicad_query::PolygonLoop& loop, double originX,
+                                         double originY) {
+    Clipper2Lib::Path64 path;
+    path.reserve(loop.pointsMm.size());
+    for (const auto& [xMm, yMm] : loop.pointsMm) {
+        path.emplace_back(static_cast<std::int64_t>(std::llround(_mmToSimUnits(xMm) - originX)),
+                          static_cast<std::int64_t>(std::llround(_mmToSimUnits(yMm) - originY)));
+    }
+    const bool shouldBePositive = !loop.hole;
+    if (path.size() >= 3 && Clipper2Lib::IsPositive(path) != shouldBePositive) {
+        std::reverse(path.begin(), path.end());
+    }
+    return path;
+}
+
+Clipper2Lib::Paths64 _polygonLoopsToPaths64(const std::vector<libkicad_query::PolygonLoop>& loops,
+                                             double originX, double originY) {
+    Clipper2Lib::Paths64 paths;
+    paths.reserve(loops.size());
+    for (const libkicad_query::PolygonLoop& loop : loops) {
+        Clipper2Lib::Path64 path = _polygonLoopToPath64(loop, originX, originY);
+        if (path.size() >= 3) {
+            paths.push_back(std::move(path));
+        }
+    }
+    return paths;
+}
+
 std::vector<Position> _path64ToPositions(const Clipper2Lib::Path64& path) {
     std::vector<Position> points;
     points.reserve(path.size());
@@ -39,84 +68,6 @@ std::vector<Position> _path64ToPositions(const Clipper2Lib::Path64& path) {
         points.emplace_back(static_cast<double>(pt.x), static_cast<double>(pt.y));
     }
     return points;
-}
-
-constexpr double kOutlineChainToleranceSimUnits = 100.0; // 10 microns, at 10 sim-units/micron
-
-/// Reassembles `segments` into a single connected loop by repeatedly matching each new segment's
-/// nearest endpoint to the growing chain's current end -- KiCad plots Edge_Cuts as separate draw
-/// primitives (individual lines/arcs, each arc itself tessellated into several short segments), not
-/// necessarily emitted in geometric traversal order the way a zone's already-closed fill boundary
-/// is, so file order alone isn't a usable loop ordering for anything but the simplest rectangular
-/// board. A real board outline is a simple closed curve (each vertex touched by exactly two
-/// segments), so this greedy nearest-endpoint walk is exact as long as segment endpoints coincide
-/// within tolerance -- true of a single kicad-cli Gerber export. Leaves any segments that couldn't
-/// be chained (a genuinely disjoint second loop, or a malformed outline) in `remaining`.
-std::vector<Position> _chainSegmentsIntoLoop(std::vector<TraceSegment> remaining) {
-    if (remaining.empty()) {
-        return {};
-    }
-    std::vector<Position> loop = {remaining.front().start(), remaining.front().stop()};
-    remaining.erase(remaining.begin());
-
-    bool foundMatch = true;
-    while (!remaining.empty() && foundMatch) {
-        foundMatch = false;
-        const Position& current = loop.back();
-        for (std::size_t i = 0; i < remaining.size(); ++i) {
-            const double startDist =
-                std::hypot(remaining[i].start().x() - current.x(), remaining[i].start().y() - current.y());
-            const double stopDist =
-                std::hypot(remaining[i].stop().x() - current.x(), remaining[i].stop().y() - current.y());
-            if (startDist <= kOutlineChainToleranceSimUnits || stopDist <= kOutlineChainToleranceSimUnits) {
-                loop.push_back(startDist <= stopDist ? remaining[i].stop() : remaining[i].start());
-                remaining.erase(remaining.begin() + static_cast<std::ptrdiff_t>(i));
-                foundMatch = true;
-                break;
-            }
-        }
-    }
-    if (!remaining.empty()) {
-        logWarning("Edge_Cuts outline: " + std::to_string(remaining.size()) +
-                   " segment(s) didn't chain into the main loop (disjoint loop, or a gap bigger than " +
-                   std::to_string(kOutlineChainToleranceSimUnits / 10.0) + " microns) -- ignored");
-    }
-    return loop;
-}
-
-/// The board's real Edge_Cuts outline as one closed polygon loop, in the same re-origined frame as
-/// every composited copper layer. Assumes the outline is a single closed loop (true of every real
-/// board this pipeline has been validated against); a board whose Edge_Cuts is multiple disjoint
-/// loops (a cutout/slot as a separate closed loop, rather than a single self-touching "keyhole"
-/// outline -- see gerber_io.cpp's own note on the same assumption for zone regions) would need this
-/// extended to collect multiple loops, which isn't done here.
-std::expected<Clipper2Lib::Path64, std::string> _realBoardOutline(const std::filesystem::path& fabDir,
-                                                                    double originX, double originY,
-                                                                    double tessellationTolerance) {
-    std::optional<std::filesystem::path> edgeCutsPath;
-    std::error_code ec;
-    if (std::filesystem::is_directory(fabDir, ec)) {
-        for (const auto& entry : std::filesystem::directory_iterator(fabDir, ec)) {
-            const std::string name = entry.path().filename().string();
-            if (name.size() >= 13 && name.compare(name.size() - 13, 13, "Edge_Cuts.gbr") == 0) {
-                edgeCutsPath = entry.path();
-                break;
-            }
-        }
-    }
-    if (!edgeCutsPath.has_value()) {
-        return std::unexpected("No EdgeCuts gerber in fab dir(" + fabDir.string() + ")");
-    }
-    auto edgeCutsResult = GerberFile::load(*edgeCutsPath, tessellationTolerance);
-    if (!edgeCutsResult) {
-        return std::unexpected(std::move(edgeCutsResult).error());
-    }
-    const GerberFile& edgeCuts = *edgeCutsResult;
-    const std::vector<Position> loop = _chainSegmentsIntoLoop(edgeCuts.traceForNet(NetName("no-net")).segments());
-    if (loop.size() < 3) {
-        return std::unexpected("Edge_Cuts outline has fewer than 3 points");
-    }
-    return _positionsToPath64(loop, originX, originY);
 }
 
 /// Shortest distance from `pt` to the polyline formed by `path`'s edges (treated as a closed loop).
@@ -138,6 +89,14 @@ double _distancePointToPolyline(const Clipper2Lib::Point64& pt, const Clipper2Li
         const double dx = static_cast<double>(pt.x) - px;
         const double dy = static_cast<double>(pt.y) - py;
         best = std::min(best, std::hypot(dx, dy));
+    }
+    return best;
+}
+
+double _distancePointToPolylines(const Clipper2Lib::Point64& pt, const Clipper2Lib::Paths64& paths) {
+    double best = std::numeric_limits<double>::infinity();
+    for (const Clipper2Lib::Path64& path : paths) {
+        best = std::min(best, _distancePointToPolyline(pt, path));
     }
     return best;
 }
@@ -166,35 +125,21 @@ bool _pointInComposite(const Clipper2Lib::Point64& pt, const Clipper2Lib::PolyTr
     return inside;
 }
 
-// _opsOnNets() below compares net names straight against Gerber's own copperOps() (already NetName,
-// real-unescaped-slash form -- see gerber_io.cpp), while involvedNets/groundNets come from
-// libkicad_query in KiCad's own escaped form ("{slash}" standing in for a literal "/" in a
-// hierarchical-sheet-path net name, e.g. "/MCU/USB/Upstream/SSRx-"). Wrapping both sides in NetName
-// (rather than manually reversing the escaping here, as this used to) lets NetName's own
-// normalize-before-compare handle that mismatch structurally -- see net_name.hpp's own doc comment.
-std::vector<CopperOp> _opsOnNets(const GerberFile& gerber, const std::unordered_set<NetName, NetNameHash>& nets) {
-    std::vector<CopperOp> filtered;
-    for (const CopperOp& op : gerber.copperOps()) {
-        if (nets.count(op.net) != 0) {
-            filtered.push_back(op);
+Clipper2Lib::Paths64 _copperOnNets(const libkicad_query::BoardGeometry& geometry,
+                                   const std::string& layerName,
+                                   const std::unordered_set<NetName, NetNameHash>& nets,
+                                   double originX, double originY) {
+    Clipper2Lib::Paths64 paths;
+    for (const libkicad_query::CopperPolygon& polygon : geometry.copper) {
+        if (polygon.copperLayerName != layerName || nets.count(NetName(polygon.netName)) == 0) {
+            continue;
+        }
+        Clipper2Lib::Path64 path = _polygonLoopToPath64(polygon.loop, originX, originY);
+        if (path.size() >= 3) {
+            paths.push_back(std::move(path));
         }
     }
-    return filtered;
-}
-
-std::optional<std::filesystem::path> _copperGerberForFileName(const std::filesystem::path& fabDir,
-                                                                const std::string& layerFileName) {
-    const std::string suffix = "-" + layerFileName + ".gbr";
-    std::error_code ec;
-    if (std::filesystem::is_directory(fabDir, ec)) {
-        for (const auto& entry : std::filesystem::directory_iterator(fabDir, ec)) {
-            const std::string name = entry.path().filename().string();
-            if (name.size() >= suffix.size() && name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
-                return entry.path();
-            }
-        }
-    }
-    return std::nullopt;
+    return Clipper2Lib::Union(paths, Clipper2Lib::FillRule::NonZero);
 }
 
 } // namespace
@@ -227,14 +172,30 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
     }
 
     const double tessellationTolerance = static_cast<double>(config.pixelSize()) * constants::unitMultiplier;
-    auto originResult = edgeCutsBoundingBox(paths.fabDir, tessellationTolerance);
-    if (!originResult) return std::unexpected(std::move(originResult).error());
-    const BoundingBox& origin = *originResult;
+    auto geometryResult = libkicad_query::boardGeometry(paths, "Loading board geometry");
+    if (!geometryResult) return std::unexpected(std::move(geometryResult).error());
+    const libkicad_query::BoardGeometry& geometry = *geometryResult;
+
+    BoundingBox origin;
+    for (const libkicad_query::PolygonLoop& loop : geometry.outline) {
+        for (const auto& [xMm, yMm] : loop.pointsMm) {
+            const double x = _mmToSimUnits(xMm);
+            const double y = _mmToSimUnits(yMm);
+            origin.xMin = std::min(origin.xMin, x);
+            origin.xMax = std::max(origin.xMax, x);
+            origin.yMin = std::min(origin.yMin, y);
+            origin.yMax = std::max(origin.yMax, y);
+        }
+    }
+    if (!std::isfinite(origin.xMin) || !std::isfinite(origin.yMin)) {
+        return std::unexpected("Board geometry has no usable Edge.Cuts points");
+    }
+    const Clipper2Lib::Paths64 realOutline =
+        _polygonLoopsToPaths64(geometry.outline, origin.xMin, origin.yMin);
     const std::vector<LayerConfig> metals = config.getMetals();
 
-    // Per layer: the involved-net, geometry-only-net, and ground-net composites (pre-cutout), and
-    // the GerberFile they came from (kept alive for _opsOnNets' aperture lookups during
-    // compositing). Every other net's copper (including unnamed/net-less pours) is deliberately
+    // Per layer: the involved-net, geometry-only-net, and ground-net composites (pre-cutout).
+    // Every other net's copper (including unnamed/net-less pours) is deliberately
     // never composited at all -- it never survives into layerTriangles below (only
     // signalPerLayer/geometryOnlyInCutout/groundInCutout do), so it was never actually present in
     // the simulated geometry for a stitching via's own full-depth barrel to short against; an
@@ -248,21 +209,12 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
 
     Clipper2Lib::Paths64 signalUnionAllLayers;
     for (std::size_t layerIndex = 0; layerIndex < metals.size(); ++layerIndex) {
-        const std::optional<std::filesystem::path> gerberPath =
-            _copperGerberForFileName(paths.fabDir, metals[layerIndex].file());
-        if (!gerberPath.has_value()) {
-            continue; // No copper on this layer at all.
-        }
-        auto gerberResult = GerberFile::load(*gerberPath, tessellationTolerance);
-        if (!gerberResult) return std::unexpected(std::move(gerberResult).error());
-        const GerberFile& gerber = *gerberResult;
-
-        const std::vector<CopperOp> involvedOps = _opsOnNets(gerber, involvedNets);
-        signalPerLayer[layerIndex] = compositeOps(gerber, involvedOps, origin.xMin, origin.yMin, tessellationTolerance);
+        const std::string& layerName = metals[layerIndex].name();
+        signalPerLayer[layerIndex] = _copperOnNets(geometry, layerName, involvedNets, origin.xMin, origin.yMin);
         geometryOnlyPerLayer[layerIndex] =
-            compositeOps(gerber, _opsOnNets(gerber, geometryOnlyNets), origin.xMin, origin.yMin, tessellationTolerance);
+            _copperOnNets(geometry, layerName, geometryOnlyNets, origin.xMin, origin.yMin);
         groundPerLayer[layerIndex] =
-            compositeOps(gerber, _opsOnNets(gerber, groundNets), origin.xMin, origin.yMin, tessellationTolerance);
+            _copperOnNets(geometry, layerName, groundNets, origin.xMin, origin.yMin);
 
         Clipper2Lib::BooleanOp(Clipper2Lib::ClipType::Union, Clipper2Lib::FillRule::NonZero, groundPerLayer[layerIndex], {}, groundTreePerLayer[layerIndex]);
 
@@ -277,22 +229,19 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
     // Cutout region: involved-net footprint padded by hull_padding, clipped to the real board
     // outline (see board_slicing.hpp's algorithm doc comment -- this stands in for a true concave
     // hull/alpha-shape, which isn't implemented here).
-    auto realOutlineResult = _realBoardOutline(paths.fabDir, origin.xMin, origin.yMin, tessellationTolerance);
-    if (!realOutlineResult) return std::unexpected(std::move(realOutlineResult).error());
-    const Clipper2Lib::Path64& realOutline = *realOutlineResult;
     const Clipper2Lib::Paths64 padded =
         Clipper2Lib::InflatePaths(signalUnionAllLayers, sim.hullPadding(), Clipper2Lib::JoinType::Round,
                                     Clipper2Lib::EndType::Polygon, 2.0, tessellationTolerance);
     const Clipper2Lib::Paths64 cutout =
-        Clipper2Lib::Intersect(padded, {realOutline}, Clipper2Lib::FillRule::NonZero);
+        Clipper2Lib::Intersect(padded, realOutline, Clipper2Lib::FillRule::NonZero);
     if (cutout.empty()) {
         return std::unexpected("Simulation \"" + sim.name() + "\": computed cutout region is empty");
     }
 
     // Real vias near this simulation, seeding the clearance/spacing checks below -- a stitching via
     // must never collide with one, and (if the real via is itself on the ground net) must respect
-    // the same viaSpacing from it as from another stitching via. Best-effort: if the drill file
-    // can't be read, stitching vias just place without this check rather than failing the whole
+    // the same viaSpacing from it as from another stitching via. Best-effort: if the KiCad hole
+    // query fails, stitching vias just place without this check rather than failing the whole
     // slice over it (the same as if the board genuinely had no other vias nearby).
     struct ExistingVia {
         double x = 0;
@@ -390,7 +339,7 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
                 continue; // degenerate edge: leave isNewCut false, it'll just be skipped
             }
             const Clipper2Lib::Point64 midpoint((a.x + b.x) / 2, (a.y + b.y) / 2);
-            isNewCut[i] = _distancePointToPolyline(midpoint, realOutline) > kOnEdgeToleranceSimUnits;
+            isNewCut[i] = _distancePointToPolylines(midpoint, realOutline) > kOnEdgeToleranceSimUnits;
         }
 
         // Run-start indices: an edge starts a new run if it's a new cut and its predecessor isn't
@@ -589,13 +538,13 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
     }
 
     // Non-plated through-holes (mechanical/alignment holes -- e.g. a USB connector's elongated
-    // mounting slots) have no copper of their own anywhere and never appear in any copper Gerber at
+    // mounting slots) have no copper of their own anywhere and never appear in KiCad's copper polygons at
     // all, so nothing upstream already carves them out of a zone/plane pour that happens to cover
     // that area the way it would for a real pad or trace -- they have to be explicitly subtracted
     // from every layer's final copper below. Modeled as capsule/stadium shapes (round-jointed
     // InflatePaths of the hole's own two endpoints, same technique _strokeToPaths uses for a
     // circular-aperture stroke) so an elongated slot comes out as an actual elongated cutout, not
-    // just a hole at its center point. Best-effort: if the drill file can't be read, the board just
+    // just a hole at its center point. Best-effort: if the KiCad hole query fails, the board just
     // doesn't get these holes cut (as if this feature didn't exist), rather than failing the whole
     // slice over it.
     Clipper2Lib::Paths64 npthHolePolygons;
@@ -683,33 +632,23 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
             previewLayer, tessellationTolerance, "simulation \"" + sim.name() + "\" layer " + std::to_string(layerIndex) + " (preview)");
     }
 
-    // Solder mask: F_Mask.gbr/B_Mask.gbr draw the board's own copper-exposure openings, not the
-    // mask's own covering shape -- confirmed by inspecting a real export, these files carry
-    // %TF.FilePolarity,Negative% and their drawn shapes are pad/via-shaped cutouts, not the mask
-    // itself. Produces two representations of the same mask (see SlicedBoard::topMaskTriangles'
+    // Solder mask geometry from KiCad is the board's copper-exposure openings, not the mask's own
+    // covering shape. Produces two representations of the same mask (see SlicedBoard::topMaskTriangles'
     // own doc comment for why): the raw opening loops (cropped to this simulation's own cutout
     // region, same as every other per-simulation layer here) for Simulation::addSolderMask() to
     // punch a small number of cutouts out of one big coverage box; and, only for
     // GeometryPreviewBridge's benefit, the full triangulated "coverage minus openings" shape,
     // computed the same Difference()-then-triangulate() way copper-minus-holes is just above.
-    // Gracefully empty (not an error) if the board has no mask gerbers exported, or a mask layer
-    // parses to zero draws (no pads on this side at all, however unlikely).
-    auto maskForFile = [&](const std::string& fileName, std::vector<Triangle>& outTriangles,
+    auto maskForLoops = [&](const std::vector<libkicad_query::PolygonLoop>& sourceLoops,
+                            const std::string& layerName, std::vector<Triangle>& outTriangles,
                             std::vector<std::vector<Position>>& outOpeningLoops) {
-        const std::optional<std::filesystem::path> maskPath = _copperGerberForFileName(paths.fabDir, fileName);
-        if (!maskPath.has_value()) {
-            return;
-        }
-        auto maskGerberResult = GerberFile::load(*maskPath, tessellationTolerance);
-        if (!maskGerberResult) {
-            logWarning("Simulation \"" + sim.name() + "\": failed to load solder mask gerber " +
-                       maskPath->string() + ": " + maskGerberResult.error() + " -- solder mask not modeled");
-            return;
-        }
-        const Clipper2Lib::Paths64 openingsWholeBoard = compositeOps(
-            *maskGerberResult, maskGerberResult->copperOps(), origin.xMin, origin.yMin, tessellationTolerance);
+        const Clipper2Lib::Paths64 rawOpenings =
+            _polygonLoopsToPaths64(sourceLoops, origin.xMin, origin.yMin);
+        const Clipper2Lib::Paths64 openingsWholeBoard =
+            Clipper2Lib::Union(rawOpenings, Clipper2Lib::FillRule::NonZero);
         if (openingsWholeBoard.empty()) {
-            outTriangles = triangulate(cutout, tessellationTolerance, "simulation \"" + sim.name() + "\" solder mask " + fileName);
+            outTriangles = triangulate(cutout, tessellationTolerance,
+                                       "simulation \"" + sim.name() + "\" solder mask " + layerName);
             return;
         }
         const Clipper2Lib::Paths64 openings =
@@ -718,10 +657,11 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const Simulation
             outOpeningLoops.push_back(_path64ToPositions(loop));
         }
         const Clipper2Lib::Paths64 coverage = Clipper2Lib::Difference(cutout, openings, Clipper2Lib::FillRule::NonZero);
-        outTriangles = triangulate(coverage, tessellationTolerance, "simulation \"" + sim.name() + "\" solder mask " + fileName);
+        outTriangles = triangulate(coverage, tessellationTolerance,
+                                   "simulation \"" + sim.name() + "\" solder mask " + layerName);
     };
-    maskForFile("F_Mask", result.topMaskTriangles, result.topMaskOpeningLoops);
-    maskForFile("B_Mask", result.bottomMaskTriangles, result.bottomMaskOpeningLoops);
+    maskForLoops(geometry.frontMaskOpenings, "F.Mask", result.topMaskTriangles, result.topMaskOpeningLoops);
+    maskForLoops(geometry.backMaskOpenings, "B.Mask", result.bottomMaskTriangles, result.bottomMaskOpeningLoops);
 
     // Kept (as already-tessellated polygon loops, not raw NPTHHoles) so Simulation::addNPTHHoles()
     // can also cut these out of the substrate model -- the copper subtraction above only affects

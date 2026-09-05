@@ -46,23 +46,14 @@ struct ViaHole {
     double diameter = 0;
 };
 
-/// Exports gerbers, an Excellon drill file, and a position file from a KiCad PCB into
-/// `paths.fabDir` (creating it if needed), by shelling out to `paths.kicadCliPath` -- KiCad's own
-/// officially-maintained headless export tool. There is no practical way to do this without
-/// invoking KiCad's own tooling: its IPC API only gained export support in KiCad 11, and its
-/// internal plotting classes (GERBER_PLOTTER etc.) are undocumented internals that pull in KiCad's
-/// full wxWidgets/Cairo/Boost dependency stack with no stable ABI -- both considered and rejected
-/// for the same reasons linking libgerbv directly was rejected earlier in this project.
+/// Copies the KiCad board/project into `paths.fabDir` for persistent libkicad queries. The
+/// historical function name is retained for source compatibility; no manufacturing files are
+/// exported.
 std::expected<void, std::string> exportKicadPcb(const PathsConfig& paths, const std::filesystem::path& kicadPcbPath);
 
-/// Parses `paths.fabDir`'s `*-PTH.drl` (Excellon drill file) for plated through-hole via
-/// positions/diameters, re-origined by (originX, originY) -- pass edgeCutsBoundingBox()'s
-/// xMin/yMin, exactly like compositeOps(), for the same [0, pcbWidth] x [0, pcbHeight] convention
-/// the rest of the pipeline uses. Excellon coordinates come out of kicad-cli relative to the
-/// board's auxiliary origin, the same as every Gerber this pipeline reads (both exported with
-/// --use-drill-file-origin) -- without this shift, a via's position isn't comparable to anything
-/// else this pipeline computes (a SlicedBoard's outline, a layer's triangulated copper, ...),
-/// which silently broke every "does this via still fall inside the sliced board" check downstream.
+/// Reads plated through-hole positions and drill shapes directly from libkicad and re-origins them
+/// by (originX, originY), preserving the downstream capsule representation used for round and
+/// slotted holes.
 std::expected<std::vector<ViaHole>, std::string> getVias(const PathsConfig& paths, double originX, double originY);
 
 /// A non-plated through-hole -- a bare mechanical/alignment hole with no copper of its own anywhere
@@ -78,14 +69,8 @@ struct NPTHHole {
     double diameter = 0;
 };
 
-/// Parses `paths.fabDir`'s `*-NPTH.drl` (Excellon non-plated-hole drill file) for every mechanical
-/// hole, round or slotted, re-origined the same way getVias() re-origins PTH holes (see its own doc
-/// comment) so this lands in the same frame as everything else in this pipeline. Returns an empty
-/// vector (not an error) if the board has no NPTH holes at all -- unlike a PTH file, which every
-/// real board has at least one via in, a board with only plated vias and no mechanical holes is
-/// entirely normal, so a missing/empty file isn't a parsing failure here. This is a hole to be
-/// *subtracted* from copper wherever it falls (see board_slicing.cpp), not copper to add -- unlike
-/// getVias()'s output, it never feeds Simulation::addVias().
+/// Reads every mechanical hole directly from KiCad NPTH pads and re-origins it like getVias().
+/// This is a hole to be subtracted from copper, never copper to add.
 std::expected<std::vector<NPTHHole>, std::string> getNPTHHoles(const PathsConfig& paths, double originX,
                                                                   double originY);
 

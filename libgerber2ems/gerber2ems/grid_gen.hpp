@@ -1,7 +1,6 @@
 // Dynamic simulation grid generation. Ported from gerber2ems/grid_gen.py.
 #pragma once
 
-#include <filesystem>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -11,6 +10,7 @@
 
 #include "config.hpp"
 #include "gerber_io.hpp"
+#include "paths_config.hpp"
 
 namespace gerber2ems {
 
@@ -63,7 +63,7 @@ public:
     /// geometry. Passing an empty list (the caller's own choice, e.g. if ground net resolution
     /// failed) reproduces this function's original behaviour exactly -- that copper covered only by
     /// the coarse whole-board pass, regardless of its own local complexity.
-    CSRectGrid& generate(CSRectGrid& grid, const SimulationConfig& simConfig, const std::filesystem::path& fabDir,
+    CSRectGrid& generate(CSRectGrid& grid, const SimulationConfig& simConfig, const PathsConfig& paths,
                         const std::vector<std::string>& additionalDensityNets = {});
 
     /// The core mesh's own extent along each axis -- everywhere *inside* the PML band generate()

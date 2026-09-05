@@ -149,6 +149,20 @@ RawZonesResult _failZones(std::string error) {
     return result;
 }
 
+RawBoardGeometryResult _failBoardGeometry(std::string error) {
+    RawBoardGeometryResult result;
+    result.ok = false;
+    result.error = std::move(error);
+    return result;
+}
+
+RawNonPlatedHolesResult _failNonPlatedHoles(std::string error) {
+    RawNonPlatedHolesResult result;
+    result.ok = false;
+    result.error = std::move(error);
+    return result;
+}
+
 RawPadResult _failPad(std::string error) {
     RawPadResult result;
     result.ok = false;
@@ -280,6 +294,45 @@ PAD* _findFootprintPad(BOARD* board, const std::string& footprintRef, const std:
         return nullptr;
     }
     return pad;
+}
+
+PolygonLoop _polygonLoop(const SHAPE_LINE_CHAIN& contour, bool hole, const VECTOR2I& auxOrigin) {
+    PolygonLoop loop;
+    loop.hole = hole;
+    loop.pointsMm.reserve(static_cast<std::size_t>(contour.PointCount()));
+    for (const VECTOR2I& point : contour.CPoints()) {
+        const VECTOR2I relative = point - auxOrigin;
+        loop.pointsMm.emplace_back(pcbIUScale.IUTomm(relative.x), -pcbIUScale.IUTomm(relative.y));
+    }
+    return loop;
+}
+
+template <typename AppendLoop>
+void _forEachPolygonLoop(const SHAPE_POLY_SET& polygons, const VECTOR2I& auxOrigin, AppendLoop appendLoop) {
+    for (int outlineIndex = 0; outlineIndex < polygons.OutlineCount(); ++outlineIndex) {
+        const SHAPE_LINE_CHAIN& outline = polygons.COutline(outlineIndex);
+        if (outline.PointCount() >= 3) {
+            appendLoop(_polygonLoop(outline, false, auxOrigin));
+        }
+        for (int holeIndex = 0; holeIndex < polygons.HoleCount(outlineIndex); ++holeIndex) {
+            const SHAPE_LINE_CHAIN& hole = polygons.CHole(outlineIndex, holeIndex);
+            if (hole.PointCount() >= 3) {
+                appendLoop(_polygonLoop(hole, true, auxOrigin));
+            }
+        }
+    }
+}
+
+void _appendCopperPolygons(const SHAPE_POLY_SET& polygons, const VECTOR2I& auxOrigin,
+                           const std::string& netName, const std::string& layerName,
+                           std::vector<CopperPolygon>& destination) {
+    _forEachPolygonLoop(polygons, auxOrigin, [&](PolygonLoop loop) {
+        CopperPolygon polygon;
+        polygon.netName = netName;
+        polygon.copperLayerName = layerName;
+        polygon.loop = std::move(loop);
+        destination.push_back(std::move(polygon));
+    });
 }
 
 } // namespace
@@ -597,7 +650,7 @@ RawZonesResult zonesRaw(const std::string& projectPath, const std::string& board
                 ZoneInfo zoneInfo;
                 zoneInfo.netName = zone->GetNetname().ToStdString();
                 zoneInfo.copperLayerName = board->GetLayerName(layer).ToStdString();
-                zoneInfo.outlineMm.reserve(contour.PointCount());
+                zoneInfo.outlineMm.reserve(static_cast<std::size_t>(contour.PointCount()));
                 for (const VECTOR2I& point : contour.CPoints()) {
                     const VECTOR2I relative = point - auxOrigin;
                     // Y flip: see the identical comment in resolvePinRaw().
@@ -607,6 +660,89 @@ RawZonesResult zonesRaw(const std::string& projectPath, const std::string& board
             }
         }
     }
+    return result;
+}
+
+RawBoardGeometryResult boardGeometryRaw(const std::string& projectPath, const std::string& boardPath) {
+    std::string error;
+    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    if (!loaded) {
+        return _failBoardGeometry(std::move(error));
+    }
+    BOARD* board = loaded->board;
+    const VECTOR2I auxOrigin = board->GetDesignSettings().GetAuxOrigin();
+    const int maxError = board->GetDesignSettings().m_MaxError;
+
+    RawBoardGeometryResult result;
+    result.ok = true;
+
+    SHAPE_POLY_SET boardOutline;
+    if (!board->GetBoardPolygonOutlines(boardOutline, false, nullptr, false, false)) {
+        return _failBoardGeometry("Board Edge.Cuts do not form valid closed polygons");
+    }
+    _forEachPolygonLoop(boardOutline, auxOrigin,
+                        [&](PolygonLoop loop) { result.geometry.outline.push_back(std::move(loop)); });
+    if (result.geometry.outline.empty()) {
+        return _failBoardGeometry("Board has no closed Edge.Cuts outline");
+    }
+
+    for (PCB_LAYER_ID layer : board->GetEnabledLayers().CuStack()) {
+        const std::string layerName = board->GetLayerName(layer).ToStdString();
+
+        for (PCB_TRACK* track : board->Tracks()) {
+            if (!track->IsOnLayer(layer)) {
+                continue;
+            }
+            SHAPE_POLY_SET polygons;
+            track->TransformShapeToPolygon(polygons, layer, 0, maxError, ERROR_INSIDE);
+            _appendCopperPolygons(polygons, auxOrigin, track->GetNetname().ToStdString(), layerName,
+                                  result.geometry.copper);
+        }
+
+        for (FOOTPRINT* footprint : board->Footprints()) {
+            for (PAD* pad : footprint->Pads()) {
+                if (!pad->FlashLayer(layer)) {
+                    continue;
+                }
+                SHAPE_POLY_SET polygons;
+                pad->TransformShapeToPolygon(polygons, layer, 0, maxError, ERROR_INSIDE);
+                _appendCopperPolygons(polygons, auxOrigin, pad->GetNetname().ToStdString(), layerName,
+                                      result.geometry.copper);
+            }
+            for (ZONE* zone : footprint->Zones()) {
+                if (!zone->GetLayerSet().Contains(layer)) {
+                    continue;
+                }
+                SHAPE_POLY_SET polygons;
+                zone->TransformSolidAreasShapesToPolygon(layer, polygons);
+                _appendCopperPolygons(polygons, auxOrigin, zone->GetNetname().ToStdString(), layerName,
+                                      result.geometry.copper);
+            }
+        }
+
+        for (ZONE* zone : board->Zones()) {
+            if (!zone->GetLayerSet().Contains(layer)) {
+                continue;
+            }
+            SHAPE_POLY_SET polygons;
+            zone->TransformSolidAreasShapesToPolygon(layer, polygons);
+            _appendCopperPolygons(polygons, auxOrigin, zone->GetNetname().ToStdString(), layerName,
+                                  result.geometry.copper);
+        }
+    }
+
+    SHAPE_POLY_SET frontMask;
+    board->ConvertBrdLayerToPolygonalContours(F_Mask, frontMask);
+    _forEachPolygonLoop(frontMask, auxOrigin, [&](PolygonLoop loop) {
+        result.geometry.frontMaskOpenings.push_back(std::move(loop));
+    });
+
+    SHAPE_POLY_SET backMask;
+    board->ConvertBrdLayerToPolygonalContours(B_Mask, backMask);
+    _forEachPolygonLoop(backMask, auxOrigin, [&](PolygonLoop loop) {
+        result.geometry.backMaskOpenings.push_back(std::move(loop));
+    });
+
     return result;
 }
 
@@ -837,10 +973,40 @@ RawThroughHolesResult throughHolesRaw(const std::string& projectPath, const std:
             hole.padHeightMm = pcbIUScale.IUTomm(pad->GetSizeY());
             hole.drillWidthMm = pcbIUScale.IUTomm(pad->GetDrillSizeX());
             hole.drillHeightMm = pcbIUScale.IUTomm(pad->GetDrillSizeY());
+            hole.orientationDeg = pad->GetOrientation().AsDegrees();
             result.holes.push_back(std::move(hole));
         }
     }
 
+    return result;
+}
+
+RawNonPlatedHolesResult nonPlatedHolesRaw(const std::string& projectPath, const std::string& boardPath) {
+    std::string error;
+    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    if (!loaded) {
+        return _failNonPlatedHoles(std::move(error));
+    }
+    BOARD* board = loaded->board;
+
+    RawNonPlatedHolesResult result;
+    result.ok = true;
+    const VECTOR2I auxOrigin = board->GetDesignSettings().GetAuxOrigin();
+    for (FOOTPRINT* footprint : board->Footprints()) {
+        for (PAD* pad : footprint->Pads()) {
+            if (pad->GetAttribute() != PAD_ATTRIB::NPTH) {
+                continue;
+            }
+            const VECTOR2I position = pad->GetPosition() - auxOrigin;
+            NonPlatedHole hole;
+            hole.xMm = pcbIUScale.IUTomm(position.x);
+            hole.yMm = -pcbIUScale.IUTomm(position.y);
+            hole.drillWidthMm = pcbIUScale.IUTomm(pad->GetDrillSizeX());
+            hole.drillHeightMm = pcbIUScale.IUTomm(pad->GetDrillSizeY());
+            hole.orientationDeg = pad->GetOrientation().AsDegrees();
+            result.holes.push_back(std::move(hole));
+        }
+    }
     return result;
 }
 

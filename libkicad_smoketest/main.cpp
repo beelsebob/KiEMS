@@ -17,6 +17,7 @@ std::string _formatDouble(double value) {
     return oss.str();
 }
 
+
 void _printPad(const libkicad::PadPosition& pad) {
     std::cout << pad.footprintRef << '\t' << pad.padNumber << '\t' << pad.netName << '\t' << _formatDouble(pad.xMm)
                << '\t' << _formatDouble(pad.yMm) << '\t' << _formatDouble(pad.orientationDeg) << '\t'
@@ -43,6 +44,14 @@ std::string _stackupLayerKindName(libkicad::StackupLayerKind kind) {
 void _printStackupLayer(const libkicad::StackupLayer& layer) {
     std::cout << _stackupLayerKindName(layer.kind) << '\t' << layer.name << '\t' << _formatDouble(layer.thicknessMm)
                << '\t' << _formatDouble(layer.epsilonR) << '\t' << _formatDouble(layer.lossTangent) << '\n';
+}
+
+void _printPolygonLoop(const std::string& prefix, const libkicad::PolygonLoop& loop) {
+    std::cout << prefix << '\t' << (loop.hole ? "1" : "0");
+    for (const auto& [x, y] : loop.pointsMm) {
+        std::cout << '\t' << _formatDouble(x) << ',' << _formatDouble(y);
+    }
+    std::cout << '\n';
 }
 
 // One line per pin (not one line per footprint): the caller groups by the reference column, same
@@ -168,6 +177,33 @@ int _runQuery(int argc, char** argv) {
         return 0;
     }
 
+    if (command == "board-geometry" && argc == 4) {
+        const std::expected<libkicad::BoardGeometry, std::string> geometry =
+                libkicad::boardGeometry(argv[2], argv[3]);
+        if (!geometry.has_value()) {
+            std::cerr << geometry.error() << "\n";
+            return 1;
+        }
+        for (const libkicad::PolygonLoop& loop : geometry->outline) {
+            _printPolygonLoop("outline", loop);
+        }
+        for (const libkicad::CopperPolygon& polygon : geometry->copper) {
+            std::cout << "copper\t" << polygon.netName << '\t' << polygon.copperLayerName << '\t'
+                      << (polygon.loop.hole ? "1" : "0");
+            for (const auto& [x, y] : polygon.loop.pointsMm) {
+                std::cout << '\t' << _formatDouble(x) << ',' << _formatDouble(y);
+            }
+            std::cout << '\n';
+        }
+        for (const libkicad::PolygonLoop& loop : geometry->frontMaskOpenings) {
+            _printPolygonLoop("front-mask", loop);
+        }
+        for (const libkicad::PolygonLoop& loop : geometry->backMaskOpenings) {
+            _printPolygonLoop("back-mask", loop);
+        }
+        return 0;
+    }
+
     if (command == "resolve-pin" && argc == 6) {
         const std::expected<libkicad::PadPosition, std::string> pad = libkicad::resolvePin(argv[2], argv[3], argv[4], argv[5]);
         if (!pad.has_value()) {
@@ -249,7 +285,23 @@ int _runQuery(int argc, char** argv) {
         for (const libkicad::ThroughHole& hole : *holes) {
             std::cout << (hole.footprintRef.empty() ? "(via)" : hole.footprintRef) << "\t" << hole.padNumber << "\t"
                        << hole.netName << "\t" << hole.xMm << "\t" << hole.yMm << "\t" << hole.padWidthMm << "\t"
-                       << hole.padHeightMm << "\t" << hole.drillWidthMm << "\t" << hole.drillHeightMm << "\n";
+                       << hole.padHeightMm << "\t" << hole.drillWidthMm << "\t" << hole.drillHeightMm << "\t"
+                       << hole.orientationDeg << "\n";
+        }
+        return 0;
+    }
+
+    if (command == "non-plated-holes" && argc == 4) {
+        const std::expected<std::vector<libkicad::NonPlatedHole>, std::string> holes =
+                libkicad::nonPlatedHoles(argv[2], argv[3]);
+        if (!holes.has_value()) {
+            std::cerr << holes.error() << "\n";
+            return 1;
+        }
+        for (const libkicad::NonPlatedHole& hole : *holes) {
+            std::cout << _formatDouble(hole.xMm) << '\t' << _formatDouble(hole.yMm) << '\t'
+                      << _formatDouble(hole.drillWidthMm) << '\t' << _formatDouble(hole.drillHeightMm) << '\t'
+                      << _formatDouble(hole.orientationDeg) << '\n';
         }
         return 0;
     }
@@ -295,6 +347,7 @@ int _runQuery(int argc, char** argv) {
                   "<footprint> <pin> | stackup <project> <board> | layer-colors <project> <board> | "
                   "net-classes <project> <board> | all-nets <project> <board> | "
                   "footprints <project> <board> | through-holes <project> <board> | "
+                  "non-plated-holes <project> <board> | board-geometry <project> <board> | "
                   "export-component-models <project> <board> <component_filter_csv> <output_stl_path>}\n";
     return 2;
 }
@@ -412,7 +465,9 @@ int _runSmoketest(int argc, char** argv) {
 const std::vector<std::string> kQueryCommands = {"net-for-pin",  "nets-in-class", "pads-on-net", "tracks-on-net",
                                                   "all-pads",     "all-tracks",    "zones",       "resolve-pin",
                                                   "stackup",      "layer-colors",  "net-classes", "all-nets",
-                                                  "footprints",   "through-holes", "export-component-models"};
+                                                  "footprints",   "through-holes", "non-plated-holes",
+                                                  "board-geometry",
+                                                  "export-component-models"};
 
 } // namespace
 

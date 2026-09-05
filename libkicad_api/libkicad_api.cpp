@@ -72,6 +72,15 @@ std::expected<std::vector<ZoneInfo>, std::string> zones(const std::string& proje
     return raw.zones;
 }
 
+std::expected<BoardGeometry, std::string> boardGeometry(const std::string& projectPath,
+                                                           const std::string& boardPath) {
+    detail::RawBoardGeometryResult raw = detail::boardGeometryRaw(projectPath, boardPath);
+    if (!raw.ok) {
+        return std::unexpected(std::move(raw.error));
+    }
+    return raw.geometry;
+}
+
 std::expected<std::vector<PadPosition>, std::string> allPads(const std::string& projectPath,
                                                                 const std::string& boardPath) {
     detail::RawPadsOnNetResult raw = detail::allPadsRaw(projectPath, boardPath);
@@ -138,6 +147,15 @@ std::expected<std::vector<FootprintInfo>, std::string> footprints(const std::str
 std::expected<std::vector<ThroughHole>, std::string> throughHoles(const std::string& projectPath,
                                                                      const std::string& boardPath) {
     detail::RawThroughHolesResult raw = detail::throughHolesRaw(projectPath, boardPath);
+    if (!raw.ok) {
+        return std::unexpected(std::move(raw.error));
+    }
+    return raw.holes;
+}
+
+std::expected<std::vector<NonPlatedHole>, std::string> nonPlatedHoles(const std::string& projectPath,
+                                                                        const std::string& boardPath) {
+    detail::RawNonPlatedHolesResult raw = detail::nonPlatedHolesRaw(projectPath, boardPath);
     if (!raw.ok) {
         return std::unexpected(std::move(raw.error));
     }

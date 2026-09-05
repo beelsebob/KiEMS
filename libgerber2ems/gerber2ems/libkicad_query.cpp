@@ -199,6 +199,18 @@ ComponentTriangle _parseComponentTriangleLine(const std::string& line) {
     return t;
 }
 
+PolygonLoop _parsePolygonLoop(const std::vector<std::string>& fields, std::size_t holeIndex) {
+    PolygonLoop loop;
+    loop.hole = fields.at(holeIndex) == "1";
+    loop.pointsMm.reserve(fields.size() - holeIndex - 1);
+    for (std::size_t i = holeIndex + 1; i < fields.size(); ++i) {
+        const std::size_t comma = fields[i].find(',');
+        loop.pointsMm.emplace_back(std::stod(fields[i].substr(0, comma)),
+                                   std::stod(fields[i].substr(comma + 1)));
+    }
+    return loop;
+}
+
 } // namespace
 
 std::expected<std::string, std::string> netForFootprintPin(const PathsConfig& paths, const std::string& footprint,
@@ -302,6 +314,36 @@ std::expected<std::vector<ZoneGeometry>, std::string> zones(const PathsConfig& p
     return zones;
 }
 
+std::expected<BoardGeometry, std::string> boardGeometry(const PathsConfig& paths, const std::string& context) {
+    auto lines = _query(paths, "board-geometry", {}, context);
+    if (!lines) return std::unexpected(std::move(lines).error());
+
+    BoardGeometry geometry;
+    for (const std::string& line : *lines) {
+        const std::vector<std::string> fields = _splitTabs(line);
+        const std::string& kind = fields.at(0);
+        if (kind == "outline") {
+            geometry.outline.push_back(_parsePolygonLoop(fields, 1));
+        } else if (kind == "copper") {
+            CopperPolygon polygon;
+            polygon.netName = fields.at(1);
+            polygon.copperLayerName = fields.at(2);
+            polygon.loop = _parsePolygonLoop(fields, 3);
+            geometry.copper.push_back(std::move(polygon));
+        } else if (kind == "front-mask") {
+            geometry.frontMaskOpenings.push_back(_parsePolygonLoop(fields, 1));
+        } else if (kind == "back-mask") {
+            geometry.backMaskOpenings.push_back(_parsePolygonLoop(fields, 1));
+        } else {
+            return std::unexpected(context + ": unknown board geometry row: " + kind);
+        }
+    }
+    if (geometry.outline.empty()) {
+        return std::unexpected(context + ": board geometry response has no outline");
+    }
+    return geometry;
+}
+
 std::expected<std::vector<StackupLayer>, std::string> stackup(const PathsConfig& paths, const std::string& context) {
     auto lines = _query(paths, "stackup", {}, context);
     if (!lines) return std::unexpected(std::move(lines).error());
@@ -349,7 +391,25 @@ std::expected<std::vector<ThroughHole>, std::string> throughHoles(const PathsCon
         hole.padHeightMm = std::stod(fields.at(6));
         hole.drillWidthMm = std::stod(fields.at(7));
         hole.drillHeightMm = std::stod(fields.at(8));
+        hole.orientationDeg = std::stod(fields.at(9));
         holes.push_back(std::move(hole));
+    }
+    return holes;
+}
+
+std::expected<std::vector<NonPlatedHole>, std::string> nonPlatedHoles(const PathsConfig& paths,
+                                                                         const std::string& context) {
+    auto lines = _query(paths, "non-plated-holes", {}, context);
+    if (!lines) return std::unexpected(std::move(lines).error());
+    std::vector<NonPlatedHole> holes;
+    holes.reserve(lines->size());
+    for (const std::string& line : *lines) {
+        const std::vector<std::string> fields = _splitTabs(line);
+        holes.push_back(NonPlatedHole{.xMm = std::stod(fields.at(0)),
+                                      .yMm = std::stod(fields.at(1)),
+                                      .drillWidthMm = std::stod(fields.at(2)),
+                                      .drillHeightMm = std::stod(fields.at(3)),
+                                      .orientationDeg = std::stod(fields.at(4))});
     }
     return holes;
 }

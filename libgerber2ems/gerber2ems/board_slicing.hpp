@@ -111,7 +111,7 @@ struct SlicedBoard {
     /// across the *entire* mesh, not just near where it actually is, so primitive count matters far
     /// more than which of these two shapes is geometrically "correct" -- both represent the same
     /// mask, just via a different number of CSXCAD primitives). Both empty (not an error) if the
-    /// board has no mask gerbers, or no solder mask stackup layer at all.
+    /// board has no mask openings, or no solder mask stackup layer at all.
     std::vector<Triangle> topMaskTriangles;
     std::vector<Triangle> bottomMaskTriangles;
     std::vector<std::vector<Position>> topMaskOpeningLoops;
@@ -180,8 +180,8 @@ inline void from_json(const nlohmann::json& j, SlicedBoard& b) {
 
 /// Slices `sim`'s board geometry. Algorithm:
 /// 1. Resolve involved-net and ground-net names (libkicad_query, same as port_resolution.cpp).
-/// 2. Per copper layer, composite involved-net copper and ground-net copper separately (filtering
-///    CopperOp::net -- see gerber_composite.hpp's compositeOps()).
+/// 2. Per copper layer, union KiCad's filled polygons for involved-net and ground-net copper
+///    separately.
 /// 3. Union the involved-net composite across every layer into one 2D shape and inflate it by
 ///    sim.hullPadding() -- this is the cutout region. (No separate concave-hull/alpha-shape
 ///    algorithm: inflating the involved nets' own copper union by a real physical distance already
@@ -192,7 +192,7 @@ inline void from_json(const nlohmann::json& j, SlicedBoard& b) {
 /// 4. Per layer, final copper = involved-net composite (already inside the cutout by construction)
 ///    unioned with ground-net composite intersected with the cutout, minus every non-plated
 ///    through-hole (NPTH) on the board -- a mechanical/alignment hole (e.g. a USB connector's
-///    elongated mounting slots) has no copper of its own and never appears in any copper Gerber, so
+///    elongated mounting slots) has no copper of its own in KiCad's copper polygons, so
 ///    nothing upstream already carves it out of a zone/plane pour that happens to cover that area;
 ///    it's subtracted explicitly here, as a capsule/stadium shape so an elongated slot comes out
 ///    elongated rather than as a hole only at its center point.

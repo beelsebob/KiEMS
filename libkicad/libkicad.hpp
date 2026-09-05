@@ -56,6 +56,10 @@ std::expected<std::vector<TrackSegment>, std::string> tracksOnNet(const std::str
 std::expected<std::vector<ZoneInfo>, std::string> zones(const std::string& projectPath,
                                                            const std::string& boardPath);
 
+/// Exact board outline, net-owned copper, and solder-mask openings from KiCad's BOARD model.
+std::expected<BoardGeometry, std::string> boardGeometry(const std::string& projectPath,
+                                                           const std::string& boardPath);
+
 /// Every pad on the board regardless of net, in one single board load -- see
 /// detail::allPadsRaw()'s own doc comment for why this exists alongside padsOnNet().
 std::expected<std::vector<PadPosition>, std::string> allPads(const std::string& projectPath,
@@ -98,7 +102,11 @@ std::expected<std::vector<FootprintInfo>, std::string> footprints(const std::str
 /// (e.g. a connector's SHIELD pin) -- with their real copper (annular ring / pad) and drill sizes.
 /// See ThroughHole's own doc comment; non-plated holes are never included.
 std::expected<std::vector<ThroughHole>, std::string> throughHoles(const std::string& projectPath,
-                                                                     const std::string& boardPath);
+                                                                    const std::string& boardPath);
+
+/// Every non-plated mechanical hole/slot on the board, read directly from NPTH footprint pads.
+std::expected<std::vector<NonPlatedHole>, std::string> nonPlatedHoles(const std::string& projectPath,
+                                                                        const std::string& boardPath);
 
 /// Returns `componentFilter`'s own footprints' real, placed 3D models (their real position/
 /// rotation/offset on the board, no board body/copper/tracks/pads) as a flat, real-colored triangle

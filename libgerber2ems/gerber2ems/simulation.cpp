@@ -21,7 +21,6 @@
 
 #include "constants.hpp"
 #include "csx_grid_utils.hpp"
-#include "gerber_composite.hpp"
 #include "libkicad_query.hpp"
 #include "logging.hpp"
 
@@ -116,6 +115,27 @@ bool _viaIntersectsOutline(double x, double y, double diameter, const std::vecto
         return true;
     }
     return _distanceToPolygonBoundary(x, y, outline) <= diameter / 2;
+}
+
+std::expected<std::pair<double, double>, std::string> _boardOrigin(const PathsConfig& paths) {
+    auto geometry = libkicad_query::boardGeometry(paths, "Loading board outline for via placement");
+    if (!geometry) {
+        return std::unexpected(std::move(geometry).error());
+    }
+    double xMin = std::numeric_limits<double>::infinity();
+    double yMin = std::numeric_limits<double>::infinity();
+    for (const libkicad_query::PolygonLoop& loop : geometry->outline) {
+        for (const auto& [xMm, yMm] : loop.pointsMm) {
+            const double x = xMm / 1000.0 / constants::baseUnit * constants::unitMultiplier;
+            const double y = yMm / 1000.0 / constants::baseUnit * constants::unitMultiplier;
+            xMin = std::min(xMin, x);
+            yMin = std::min(yMin, y);
+        }
+    }
+    if (!std::isfinite(xMin) || !std::isfinite(yMin)) {
+        return std::unexpected("KiCad board geometry has no usable Edge.Cuts points");
+    }
+    return std::pair{xMin, yMin};
 }
 
 std::string _normalizeLayerName(std::string name) {
@@ -464,7 +484,7 @@ void Simulation::addGrid() {
                        resolved.error());
         }
     }
-    _gridGen->generate(*_grid, _simConfig, _paths.fabDir, additionalDensityNets);
+    _gridGen->generate(*_grid, _simConfig, _paths, additionalDensityNets);
     printGridStats();
 }
 
@@ -811,18 +831,12 @@ void Simulation::addSolderMask() {
 }
 
 std::expected<void, std::string> Simulation::addVias() {
-    logInfo("Adding vias from excellon file");
-    // Excellon coordinates come out of kicad-cli relative to the board's auxiliary origin, like
-    // every Gerber this pipeline reads -- re-derived here the same way board_slicing.cpp derives
-    // it (see BoundingBox's own doc comment on why that's a deliberate re-derive-per-use-site, not
-    // a shared cache) so getVias()'s output lands in the same [0, pcbWidth] x [0, pcbHeight] frame
-    // as _slicedBoard, comparable to it directly.
-    const double tessellationTolerance = static_cast<double>(_config.pixelSize()) * constants::unitMultiplier;
-    auto originResult = edgeCutsBoundingBox(_paths.fabDir, tessellationTolerance);
+    logInfo("Adding vias from KiCad board geometry");
+    auto originResult = _boardOrigin(_paths);
     if (!originResult) {
         return std::unexpected(originResult.error());
     }
-    auto viasResult = getVias(_paths, originResult->xMin, originResult->yMin);
+    auto viasResult = getVias(_paths, originResult->first, originResult->second);
     if (!viasResult) {
         return std::unexpected(viasResult.error());
     }
@@ -837,7 +851,7 @@ std::expected<void, std::string> Simulation::addVias() {
         if (_viaIntersectsOutline(via.x, via.y, via.diameter, _slicedBoard.outline) ||
             _viaIntersectsOutline(via.x2, via.y2, via.diameter, _slicedBoard.outline)) {
             // A real via's own copper pad on each layer is already modeled separately (it's part
-            // of that layer's composited copper, read straight from the Gerbers) -- this outer
+            // of that layer's copper geometry read directly from KiCad) -- this outer
             // ring only needs to be wide enough for the drilled barrel's actual conductive wall,
             // not a full pad, unlike a stitching via below. Cropped to the sliced outline
             // (cropToOutline=true) since this via was kept precisely because its disc *reaches*

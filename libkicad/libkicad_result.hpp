@@ -118,6 +118,20 @@ struct ThroughHole {
     double padHeightMm = 0;
     double drillWidthMm = 0;
     double drillHeightMm = 0;
+    /// Rotation of the drill's local X axis in KiCad board coordinates. Needed to reconstruct the
+    /// centerline of an oblong drill without round-tripping through an Excellon G85 record.
+    double orientationDeg = 0;
+};
+
+/// One non-plated footprint-pad hole. KiCad represents both round mechanical holes and routed
+/// slots as NPTH pads; the drill width/height plus orientation describe either exactly. Unlike a
+/// ThroughHole this has no copper annulus and is only subtracted from board materials.
+struct NonPlatedHole {
+    double xMm = 0;
+    double yMm = 0;
+    double drillWidthMm = 0;
+    double drillHeightMm = 0;
+    double orientationDeg = 0;
 };
 
 /// One copper zone/pour's outline, on one of the copper layers it's filled on -- a single ZONE
@@ -134,6 +148,29 @@ struct ZoneInfo {
     std::string copperLayerName;
     /// Outer contour only, in the same auxiliary-origin-relative millimetre frame as PadPosition.
     std::vector<std::pair<double, double>> outlineMm;
+};
+
+/// One polygon contour from KiCad geometry. Holes are kept explicit so the subprocess wire format
+/// does not depend on winding conventions changing when KiCad's Y-down coordinates are converted
+/// to gerber2ems's Y-up frame.
+struct PolygonLoop {
+    bool hole = false;
+    std::vector<std::pair<double, double>> pointsMm;
+};
+
+/// One net-owned copper contour on one physical copper layer.
+struct CopperPolygon {
+    std::string netName;
+    std::string copperLayerName;
+    PolygonLoop loop;
+};
+
+/// Geometry needed by libgerber2ems, extracted from the loaded BOARD without plotting Gerbers.
+struct BoardGeometry {
+    std::vector<PolygonLoop> outline;
+    std::vector<CopperPolygon> copper;
+    std::vector<PolygonLoop> frontMaskOpenings;
+    std::vector<PolygonLoop> backMaskOpenings;
 };
 
 /// One mesh triangle of a footprint's real, placed 3D model -- mirrors STEP_COMPONENT_TRIANGLE
@@ -240,6 +277,12 @@ struct RawZonesResult {
     std::vector<ZoneInfo> zones;
 };
 
+struct RawBoardGeometryResult {
+    bool ok = false;
+    std::string error;
+    BoardGeometry geometry;
+};
+
 struct RawStackupResult {
     bool ok = false;
     std::string error;
@@ -281,6 +324,8 @@ RawAllTracksResult allTracksRaw(const std::string& projectPath, const std::strin
 
 RawZonesResult zonesRaw(const std::string& projectPath, const std::string& boardPath);
 
+RawBoardGeometryResult boardGeometryRaw(const std::string& projectPath, const std::string& boardPath);
+
 RawStackupResult stackupRaw(const std::string& projectPath, const std::string& boardPath);
 
 RawLayerColorsResult layerColorsRaw(const std::string& projectPath, const std::string& boardPath);
@@ -298,6 +343,14 @@ struct RawThroughHolesResult {
 };
 
 RawThroughHolesResult throughHolesRaw(const std::string& projectPath, const std::string& boardPath);
+
+struct RawNonPlatedHolesResult {
+    bool ok = false;
+    std::string error;
+    std::vector<NonPlatedHole> holes;
+};
+
+RawNonPlatedHolesResult nonPlatedHolesRaw(const std::string& projectPath, const std::string& boardPath);
 
 struct RawComponentModelExportResult {
     bool ok = false;

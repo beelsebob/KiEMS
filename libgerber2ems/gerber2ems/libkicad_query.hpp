@@ -53,6 +53,24 @@ struct ZoneGeometry {
     std::vector<std::pair<double, double>> outlineMm;
 };
 
+struct PolygonLoop {
+    bool hole = false;
+    std::vector<std::pair<double, double>> pointsMm;
+};
+
+struct CopperPolygon {
+    std::string netName;
+    std::string copperLayerName;
+    PolygonLoop loop;
+};
+
+struct BoardGeometry {
+    std::vector<PolygonLoop> outline;
+    std::vector<CopperPolygon> copper;
+    std::vector<PolygonLoop> frontMaskOpenings;
+    std::vector<PolygonLoop> backMaskOpenings;
+};
+
 /// Resolves one footprint's pin to its net name. `paths` supplies the board/project to query and
 /// the query-helper binary to run (see PathsConfig); `context` prefixes any error message -- every
 /// caller treats a failure here as an unrecoverable config error (a typo'd footprint/pin name
@@ -70,9 +88,8 @@ std::expected<std::vector<std::string>, std::string> netsInNetClass(const PathsC
 std::expected<std::vector<PadIdentity>, std::string> padsOnNet(const PathsConfig& paths, const std::string& netName,
                                                                  const std::string& context);
 
-/// Straight routed-track primitives from KiCad itself. Gerber remains the source of the final
-/// copper polygons used by FDTD; this semantic query is for selecting reliable impedance-probe
-/// spans and retaining the actual designed track width/layer.
+/// Straight routed-track primitives from KiCad itself, used for reliable impedance-probe spans and
+/// mesh refinement while boardGeometry() supplies the final copper polygons.
 std::expected<std::vector<TrackSegment>, std::string> tracksOnNet(const PathsConfig& paths,
                                                                     const std::string& netName,
                                                                     const std::string& context);
@@ -95,6 +112,10 @@ std::expected<std::vector<std::pair<std::string, TrackSegment>>, std::string> al
 /// Every copper zone/pour on the board, one entry per copper layer each is actually on -- see
 /// ZoneGeometry's own doc comment.
 std::expected<std::vector<ZoneGeometry>, std::string> zones(const PathsConfig& paths, const std::string& context);
+
+/// Exact board outline, filled net-owned copper, and solder-mask openings from one KiCad board
+/// load. This is the geometry source for simulation; no plotted Gerber intermediates are involved.
+std::expected<BoardGeometry, std::string> boardGeometry(const PathsConfig& paths, const std::string& context);
 
 enum class StackupLayerKind {
     Copper,
@@ -174,6 +195,7 @@ struct ThroughHole {
     double padHeightMm = 0;
     double drillWidthMm = 0;
     double drillHeightMm = 0;
+    double orientationDeg = 0;
 };
 
 /// Every plated through-hole on the board (vias and through-hole footprint pads alike), with their
@@ -183,6 +205,18 @@ struct ThroughHole {
 /// netForFootprintPin for `context`.
 std::expected<std::vector<ThroughHole>, std::string> throughHoles(const PathsConfig& paths,
                                                                      const std::string& context);
+
+/// One non-plated mechanical hole/slot -- mirrors libkicad::NonPlatedHole.
+struct NonPlatedHole {
+    double xMm = 0;
+    double yMm = 0;
+    double drillWidthMm = 0;
+    double drillHeightMm = 0;
+    double orientationDeg = 0;
+};
+
+std::expected<std::vector<NonPlatedHole>, std::string> nonPlatedHoles(const PathsConfig& paths,
+                                                                         const std::string& context);
 
 /// One mesh triangle of a footprint's real, placed 3D model -- mirrors libkicad::ComponentTriangle.
 /// Vertex positions are absolute, in millimetres, in the same board-auxiliary-origin-relative frame

@@ -14,7 +14,7 @@ namespace gerber2ems {
 struct PathsConfig {
     std::filesystem::path configFile;      // the resolved simulation.json path itself
     std::filesystem::path configDir;       // configFile's parent directory; base for the rest
-    std::filesystem::path fabDir;          // configDir / "fab" -- kicad-cli-regenerated gerbers/drill/pos
+    std::filesystem::path fabDir;          // configDir / "fab" -- persistent KiCad board/project copies
     std::filesystem::path fabBoardFile;    // configDir / "fab/board.kicad_pcb"
     std::filesystem::path fabProjectFile;  // configDir / "fab/board.kicad_pro"
     std::filesystem::path baseDir;         // configDir / "ems"
@@ -25,7 +25,7 @@ struct PathsConfig {
     // Explicit paths to bundleable helper tools this library shells out to -- never resolved via
     // $PATH or a location relative to this process's own binary (see importer.hpp/libkicad_query.hpp
     // and simulation.hpp's Simulation::run(), which posix_spawns fdtdWorkerPath).
-    std::filesystem::path kicadCliPath;
+    std::filesystem::path kicadCliPath;    // Legacy compatibility field; geometry no longer invokes it.
     std::filesystem::path kicadQueryHelperPath;
     std::filesystem::path fdtdWorkerPath;
     // Same kind of path as fdtdWorkerPath -- posix_spawn'd instead of it when

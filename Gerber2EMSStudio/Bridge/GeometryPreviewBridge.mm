@@ -18,7 +18,6 @@
 #include "gerber2ems/board_slicing.hpp"
 #include "gerber2ems/config.hpp"
 #include "gerber2ems/constants.hpp"
-#include "gerber2ems/gerber_composite.hpp"
 #include "gerber2ems/importer.hpp"
 #include "gerber2ems/libkicad_query.hpp"
 #include "logging.hpp"
@@ -43,8 +42,27 @@ CGPoint toCGPoint(const gerber2ems::Position& position) {
 // needs applying by the caller, this just handles the unit conversion.
 double mmToSimUnits(double mm) { return mm / 1000.0 / gerber2ems::constants::baseUnit * gerber2ems::constants::unitMultiplier; }
 
-// A real via's *actual* copper pad is already drawn separately, as part of that layer's composited
-// copper (read straight from the Gerbers) -- Simulation::addVia() only needs its own ring to be
+std::expected<std::pair<double, double>, std::string> boardOrigin(const PathsConfig& paths) {
+    auto geometry = gerber2ems::libkicad_query::boardGeometry(paths, "Loading board outline for geometry preview");
+    if (!geometry) {
+        return std::unexpected(std::move(geometry).error());
+    }
+    double xMin = std::numeric_limits<double>::infinity();
+    double yMin = std::numeric_limits<double>::infinity();
+    for (const gerber2ems::libkicad_query::PolygonLoop& loop : geometry->outline) {
+        for (const auto& [xMm, yMm] : loop.pointsMm) {
+            xMin = std::min(xMin, mmToSimUnits(xMm));
+            yMin = std::min(yMin, mmToSimUnits(yMm));
+        }
+    }
+    if (!std::isfinite(xMin) || !std::isfinite(yMin)) {
+        return std::unexpected("KiCad board geometry has no usable Edge.Cuts points");
+    }
+    return std::pair{xMin, yMin};
+}
+
+// A real via's *actual* copper pad is already drawn separately, as part of that layer's copper
+// geometry read directly from KiCad -- Simulation::addVia() only needs its own ring to be
 // wide enough for the drilled barrel's real conductive wall (config.via().platingThickness(), a
 // physically thin quantity -- a few tens of microns -- correct for FDTD conductor modeling), not a
 // full pad. But that same thin margin looks wrong reused here for the *preview*'s own ring,
@@ -95,12 +113,10 @@ std::vector<RealHoleSize> buildRealHoleSizes(const gerber2ems::PathsConfig& path
 
 // Nearest-position lookup into `sizes` (see buildRealHoleSizes()) -- a plain linear scan, not a
 // spatial index: this runs against a few thousand through-holes at most, once per geometry build,
-// nowhere near enough to need one. `sizes` and `getVias()`'s own Excellon-derived positions are two
-// *independently* computed representations of the same real board data (one read straight from
-// KiCad's internal model, the other reconstructed by parsing an exported drill file) -- a tolerance
-// (not exact equality) accounts for the small floating-point/rounding differences between them,
-// tight enough that a match still can't accidentally cross to a genuinely different, merely nearby,
-// via.
+// nowhere near enough to need one. `sizes` and `getVias()` are two independently converted views
+// of the same board data read directly from KiCad -- a tolerance (not exact equality) accounts for
+// the small floating-point/rounding differences between them, while remaining tight enough that a
+// match cannot cross to a genuinely different, merely nearby via.
 std::optional<RealHoleSize> matchRealHoleSize(const std::vector<RealHoleSize>& sizes, double xSim, double ySim) {
     constexpr double kMatchToleranceSimUnits = 200.0; // 20 microns
     double bestDistance = std::numeric_limits<double>::infinity();
@@ -305,6 +321,7 @@ ComponentExportOutcome exportComponentTriangles(const PathsConfig& paths, const 
     return self;
 }
 @end
+
 
 @implementation EMSGeometryLayer
 - (instancetype)initWithName:(NSString*)name
@@ -904,7 +921,7 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
                                                 annularRingDiameter:via.annularRingDiameter]];
     }
 
-    // Real board vias (from the board's own drill file) -- kept only where they still overlap this
+    // Real board vias (from the KiCad board) -- kept only where they still overlap this
     // simulation's sliced outline, exactly like Simulation::addVias() itself (see
     // viaIntersectsOutline's own doc comment for why that's a disc test, not just the via center).
     // These are already baked into the actual FDTD geometry the geometry step just built; without
@@ -913,13 +930,11 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
     // coordinate this preview uses already has (see getVias()'s own doc comment) -- re-derived here
     // rather than threaded through, matching sliceBoardForSimulation()'s own internal re-derivation
     // of the identical value.
-    if (auto originResult = gerber2ems::edgeCutsBoundingBox(
-            paths.fabDir, static_cast<double>(scaledConfig.pixelSize()) * gerber2ems::constants::unitMultiplier);
-        originResult) {
+    if (auto originResult = boardOrigin(paths); originResult) {
         // Queried once, up front, rather than per-via -- see buildRealHoleSizes()'s own comment.
         const std::vector<RealHoleSize> realHoleSizes =
-            buildRealHoleSizes(paths, originResult->xMin, originResult->yMin);
-        if (auto realVias = gerber2ems::getVias(paths, originResult->xMin, originResult->yMin); realVias) {
+            buildRealHoleSizes(paths, originResult->first, originResult->second);
+        if (auto realVias = gerber2ems::getVias(paths, originResult->first, originResult->second); realVias) {
             for (const auto& via : *realVias) {
                 // Tested against both ends of the via's own centerline -- for a plain round via
                 // (x2==x, y2==y) this is just the same point twice; for an elongated one (see
@@ -1002,12 +1017,7 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
         for (const auto& ref : refs) {
             [renderedRefs addObject:@(ref.c_str())];
         }
-        // Re-derives the Edge_Cuts bounding-box origin again, matching this file's own established
-        // pattern (see the real-vias section above's identical comment) rather than threading it
-        // through as a new parameter.
-        if (auto originResult = gerber2ems::edgeCutsBoundingBox(
-                paths.fabDir, static_cast<double>(scaledConfig.pixelSize()) * gerber2ems::constants::unitMultiplier);
-            originResult) {
+        if (auto originResult = boardOrigin(paths); originResult) {
             const ComponentExportOutcome outcome = exportComponentTriangles(paths, refs);
             for (const auto& message : outcome.messages) {
                 [componentModelExportMessages addObject:@(message.c_str())];
@@ -1032,7 +1042,8 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
             // (and no chance of reproducing the same real-vs-idealized-copper mismatch) needed here.
             const double topCopperZSim = mmToSimUnits(outcome.topCopperZMm);
             const auto toSim = [&](double xMm, double yMm, double zMm) {
-                return simd_make_double3(mmToSimUnits(xMm) - originResult->xMin, mmToSimUnits(yMm) - originResult->yMin,
+                return simd_make_double3(mmToSimUnits(xMm) - originResult->first,
+                                          mmToSimUnits(yMm) - originResult->second,
                                           mmToSimUnits(zMm) - topCopperZSim);
             };
             for (const auto& triangle : outcome.triangles) {
@@ -1044,7 +1055,7 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
                                       color:simd_make_double4(triangle.r, triangle.g, triangle.b, triangle.a)]];
             }
         } else {
-            logWarning("GeometryPreview: edgeCutsBoundingBox() failed, skipping component model "
+            logWarning("GeometryPreview: board outline query failed, skipping component model "
                                      "export entirely: " + originResult.error());
         }
     }

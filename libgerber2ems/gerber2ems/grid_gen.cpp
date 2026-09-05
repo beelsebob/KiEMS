@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
-#include <filesystem>
 #include <functional>
 #include <limits>
 #include <set>
@@ -14,7 +13,7 @@
 #include "config.hpp"
 #include "constants.hpp"
 #include "csx_grid_utils.hpp"
-#include "gerber_composite.hpp"
+#include "libkicad_query.hpp"
 #include "logging.hpp"
 
 namespace gerber2ems {
@@ -920,14 +919,13 @@ double pointSegmentDistance(const Position& p, const Position& a, const Position
 /// Standard even-odd ray-casting point-in-polygon test, summed (XORed) across every loop of a
 /// possibly multi-loop, possibly-holed shape (each closed loop's last point need not repeat its
 /// first). This is the standard technique for testing membership against an already-resolved
-/// Clipper2Lib polygon set: a hole loop's opposite winding doesn't need to be identified explicitly
+/// polygon set: a hole loop's opposite winding doesn't need to be identified explicitly
 /// -- ray-casting parity naturally flips back to "outside" once a ray has crossed into and back out
 /// of a hole, and a genuinely separate, disjoint outer loop just contributes its own independent
-/// crossings the same way. Deliberately not Clipper2Lib::PointInPolygon -- this file otherwise
-/// re-parses gerbers and does its own geometry entirely independently of board_slicing.cpp's own
-/// Clipper2Lib-based machinery (fixed-point coordinates, boolean-operation support neither needed
-/// here), so a plain membership test on the same double-precision Position data everything else in
-/// this file already uses avoids pulling in a new dependency/coordinate-space conversion for it.
+/// crossings the same way. Deliberately not Clipper2Lib::PointInPolygon: boolean operations and
+/// fixed-point coordinates are not needed here, so a plain membership test on the same
+/// double-precision Position data already produced from KiCad avoids an unnecessary coordinate
+/// conversion.
 bool pointInPolygonSet(const Position& p, const std::vector<std::vector<Position>>& loops) {
     bool inside = false;
     for (const std::vector<Position>& loop : loops) {
@@ -1117,45 +1115,38 @@ struct GridGenerator::Impl {
         return result;
     }
 
-    CSRectGrid& generate(CSRectGrid& grid, const SimulationConfig& simConfig, const std::filesystem::path& fabDir,
+    CSRectGrid& generate(CSRectGrid& grid, const SimulationConfig& simConfig, const PathsConfig& paths,
                         const std::vector<std::string>& additionalDensityNets) {
-        const double tessellationTolerance = static_cast<double>(_config.pixelSize()) * constants::unitMultiplier;
-        // GerberFile::load() itself returns raw, unshifted file coordinates -- every other consumer
-        // of trace/pad positions in this codebase (board_slicing.cpp, gerber_composite.cpp) re-origins
-        // by this same edgeCutsBoundingBox() before using them, matching xmin/xmax/ymin/ymax above
-        // (from GridGenerator's own constructor args, ultimately SlicedBoard::xMin/yMin -- see its own
-        // doc comment on being Edge_Cuts-bounding-box-relative) and _board (compileGrid()'s own core
-        // extent, the same frame). Without this, every trace/pad position parsed below is off by
-        // this same origin from everything else in this function -- inBounds() below would reject
-        // it outright (on a board whose Edge_Cuts doesn't happen to start near its own native gerber
-        // origin), and even where it didn't, addLinesFromTrace()/addLinesFromPads()'s own placements
-        // would land far outside _board's own span, discarded entirely once compileGrid() clips the
-        // final line list to the real domain -- leaving only _board's own uniform density, with none
-        // of the real per-trace/pad mesh refinement this whole nets/gerbers loop exists to produce.
-        auto originResult = edgeCutsBoundingBox(fabDir, tessellationTolerance);
-        if (!originResult) {
-            logError(originResult.error());
+        auto geometryResult = libkicad_query::boardGeometry(paths, "Loading board geometry for grid generation");
+        if (!geometryResult) {
+            logError(geometryResult.error());
             std::exit(1);
         }
-        const BoundingBox& origin = *originResult;
-        auto reOrigin = [&](const Position& p) { return Position(p.x() - origin.xMin, p.y() - origin.yMin); };
-
-        std::vector<GerberFile> gerbers;
-        std::error_code ec;
-        if (std::filesystem::is_directory(fabDir, ec)) {
-            for (const auto& entry : std::filesystem::directory_iterator(fabDir, ec)) {
-                const std::string name = entry.path().filename().string();
-                if (name.size() >= 7 && name.compare(name.size() - 7, 7, "_Cu.gbr") == 0) {
-                    auto gerberResult = GerberFile::load(entry.path(), tessellationTolerance);
-                    if (!gerberResult) {
-                        logError(gerberResult.error());
-                        std::exit(1);
-                    }
-                    gerbers.push_back(std::move(*gerberResult));
-                }
+        const libkicad_query::BoardGeometry& geometry = *geometryResult;
+        double originX = std::numeric_limits<double>::infinity();
+        double originY = std::numeric_limits<double>::infinity();
+        for (const libkicad_query::PolygonLoop& loop : geometry.outline) {
+            for (const auto& [xMm, yMm] : loop.pointsMm) {
+                const double xPosition = xMm / 1000.0 / constants::baseUnit * constants::unitMultiplier;
+                const double yPosition = yMm / 1000.0 / constants::baseUnit * constants::unitMultiplier;
+                originX = std::min(originX, xPosition);
+                originY = std::min(originY, yPosition);
             }
         }
+        if (!std::isfinite(originX) || !std::isfinite(originY)) {
+            logError("KiCad board geometry has no usable Edge.Cuts points");
+            std::exit(1);
+        }
+        auto pointFromMm = [&](double xMm, double yMm) {
+            return Position(xMm / 1000.0 / constants::baseUnit * constants::unitMultiplier - originX,
+                            yMm / 1000.0 / constants::baseUnit * constants::unitMultiplier - originY);
+        };
 
+        auto allTracksResult = libkicad_query::allTracks(paths, "Loading board tracks for grid generation");
+        if (!allTracksResult) {
+            logError(allTracksResult.error());
+            std::exit(1);
+        }
         // "Nets of interest" for mesh-DENSITY placement purposes are this simulation's own resolved
         // involved nets (see SimulationConfig::resolvedNets()'s own doc comment, populated by
         // resolveSimulationPorts()) plus `additionalDensityNets` (ground plus any GeometryOnly-level
@@ -1164,12 +1155,7 @@ struct GridGenerator::Impl {
         // density naturally self-modulates with that net's own local complexity, wide open pour vs
         // dense stitching). The mesh's core-boundary (domain SIZE) is floored directly from the
         // sliced board's own extent below, independent of either list.
-        // Wrapped in NetName rather than manually reversing KiCad's own "{slash}" escaping here (as
-        // this used to) -- resolvedNets()/additionalDensityNets are in KiCad's escaped form, while
-        // gbr.traceForNet()/addLinesFromPads() below compare straight against Gerber-derived data
-        // (already NetName, real-unescaped-slash form -- see gerber_io.cpp); NetName's own
-        // normalize-before-compare handles that mismatch structurally instead. See net_name.hpp's own
-        // doc comment.
+        // NetName normalizes KiCad's escaped hierarchical names before comparison.
         std::vector<NetName> nets;
         for (const std::string& net : simConfig.resolvedNets()) {
             nets.emplace_back(net);
@@ -1263,71 +1249,70 @@ struct GridGenerator::Impl {
                      std::to_string(bboxArea > 0 ? 100.0 * cutoutArea / bboxArea : 0.0) + "% of bbox) ###");
         }
 
-        logInfo("### Grid Generator: parse gerber files ###");
-        // Retained (net name -> every segment found for it, across every gerber/layer) purely for
+        logInfo("### Grid Generator: load KiCad copper geometry ###");
+        // Retained (net name -> every routed centerline segment) purely for
         // the differential-pair coupling-gap pass below -- addLinesFromTrace() itself has no concept
         // of net identity (see its own doc comment), so this is the only point in this function where
         // "these segments belong to net X" is still known.
         std::unordered_map<NetName, std::vector<TraceSegment>, NetNameHash> segmentsByNet;
         std::size_t acceptedSegments = 0;
         std::size_t rejectedSegments = 0;
-        std::size_t acceptedPads = 0;
-        std::size_t rejectedPads = 0;
-        for (auto& gbr : gerbers) {
-            for (const auto& net : nets) {
-                const Trace trace = gbr.traceForNet(net);
-                std::vector<TraceSegment> segments;
-                for (const auto& seg : trace.segments()) {
-                    const Position start = reOrigin(seg.start());
-                    const Position stop = reOrigin(seg.stop());
-                    // Both endpoints, not just one: addLinesFromTrace() builds this segment's own
-                    // density Region spanning its *original* start/stop coordinates verbatim (see
-                    // that method's own doc comment -- it has no concept of the cutout shape at all,
-                    // just raw geometry), so accepting a segment on the strength of only one endpoint
-                    // being near the true cutout let its Region's other end -- wherever the segment's
-                    // real, unclipped far endpoint happened to be -- densify everything in between.
-                    // Harmless back when the filter was bbox-only (a segment crossing that boundary
-                    // couldn't reach far outside it either), but with the precise polygon test above,
-                    // a single long edge of an otherwise-correctly-excluded pour (one endpoint just
-                    // inside the true cutout, the other far out in open vacuum, e.g. tracing the
-                    // pour's own real perimeter) produced exactly this: a real, but wildly
-                    // disproportionate, density region reaching arbitrarily far from any actually
-                    // simulated copper. A segment straddling the true boundary now gets dropped
-                    // entirely instead of partially trimmed -- an acceptable trade since
-                    // sim.hullPadding() (baked into the cutout shape itself) already gives real,
-                    // in-bounds copper a generous allowance before this boundary is even reached.
-                    if (inBounds(start) && inBounds(stop)) {
-                        segments.emplace_back(start, stop, seg.aperture(), seg.width(), seg.mode(), seg.normal());
-                        ++acceptedSegments;
-                    } else {
-                        ++rejectedSegments;
-                    }
-                }
-                x.addLinesFromTrace(segments);
-                y.addLinesFromTrace(segments);
-                auto& accumulated = segmentsByNet[net];
-                accumulated.insert(accumulated.end(), segments.begin(), segments.end());
+        auto isSelectedNet = [&](const NetName& net) {
+            return std::find(nets.begin(), nets.end(), net) != nets.end();
+        };
+
+        for (const auto& [rawNetName, track] : *allTracksResult) {
+            const NetName net(rawNetName);
+            if (!isSelectedNet(net)) {
+                continue;
             }
-            std::vector<Pad> pads;
-            for (const auto& pad : gbr.pads()) {
-                const Position pos = reOrigin(pad.pos());
-                if (inBounds(pos)) {
-                    pads.emplace_back(pad.aperture(), pad.net(), pos, pad.pinRef(), pad.additive(), pad.mirror(),
-                                        pad.rotation(), pad.scale());
-                    ++acceptedPads;
-                } else {
-                    ++rejectedPads;
-                }
+            const Position start = pointFromMm(track.startXMm, track.startYMm);
+            const Position stop = pointFromMm(track.endXMm, track.endYMm);
+            if (inBounds(start) && inBounds(stop)) {
+                const double width = track.widthMm / 1000.0 / constants::baseUnit * constants::unitMultiplier;
+                TraceSegment segment(start, stop, "", width);
+                x.addLinesFromTrace({segment});
+                y.addLinesFromTrace({segment});
+                segmentsByNet[net].push_back(std::move(segment));
+                ++acceptedSegments;
+            } else {
+                ++rejectedSegments;
             }
-            pads.insert(pads.end(), addPads.begin(), addPads.end());
-            gbr.addApertures(addApertures);
-            nets.push_back(NetName("PORT"));
-            x.addLinesFromPads(pads, nets, gbr.apertures());
-            y.addLinesFromPads(pads, nets, gbr.apertures());
         }
+
+        std::size_t acceptedBoundarySegments = 0;
+        std::size_t rejectedBoundarySegments = 0;
+        for (const libkicad_query::CopperPolygon& polygon : geometry.copper) {
+            if (!isSelectedNet(NetName(polygon.netName)) || polygon.loop.pointsMm.size() < 3) {
+                continue;
+            }
+            std::vector<TraceSegment> boundary;
+            for (std::size_t i = 0; i < polygon.loop.pointsMm.size(); ++i) {
+                const auto& [startX, startY] = polygon.loop.pointsMm[i];
+                const auto& [stopX, stopY] = polygon.loop.pointsMm[(i + 1) % polygon.loop.pointsMm.size()];
+                const Position start = pointFromMm(startX, startY);
+                const Position stop = pointFromMm(stopX, stopY);
+                if (inBounds(start) && inBounds(stop)) {
+                    boundary.emplace_back(start, stop, "", 0.0);
+                    ++acceptedBoundarySegments;
+                } else {
+                    ++rejectedBoundarySegments;
+                }
+            }
+            x.addLinesFromTrace(boundary);
+            y.addLinesFromTrace(boundary);
+        }
+
+        std::vector<NetName> padNets = nets;
+        padNets.push_back(NetName("PORT"));
+        x.addLinesFromPads(addPads, padNets, addApertures);
+        y.addLinesFromPads(addPads, padNets, addApertures);
+
         logInfo("### Grid Generator: inBounds filter accepted " + std::to_string(acceptedSegments) + "/" +
-                 std::to_string(acceptedSegments + rejectedSegments) + " trace segment(s), " +
-                 std::to_string(acceptedPads) + "/" + std::to_string(acceptedPads + rejectedPads) + " pad(s) ###");
+                 std::to_string(acceptedSegments + rejectedSegments) + " routed centerline segment(s), " +
+                 std::to_string(acceptedBoundarySegments) + "/" +
+                 std::to_string(acceptedBoundarySegments + rejectedBoundarySegments) +
+                 " copper-boundary segment(s) ###");
         logInfo("### Grid Generator: inBounds() point-level breakdown: " + std::to_string(bothPassed) +
                  " passed both bbox+polygon, " + std::to_string(bboxRejected) + " rejected by bbox, " +
                  std::to_string(polygonRejected) + " passed bbox but rejected by polygon ###");
@@ -1405,9 +1390,9 @@ double GridGenerator::pmlInnerYMax() const { return _impl->y.pmlInnerMax(); }
 double GridGenerator::pmlInnerZMin() const { return _impl->_pmlInnerZMin; }
 double GridGenerator::pmlInnerZMax() const { return _impl->_pmlInnerZMax; }
 
-CSRectGrid& GridGenerator::generate(CSRectGrid& grid, const SimulationConfig& simConfig,
-                                     const std::filesystem::path& fabDir, const std::vector<std::string>& additionalDensityNets) {
-    return _impl->generate(grid, simConfig, fabDir, additionalDensityNets);
+CSRectGrid& GridGenerator::generate(CSRectGrid& grid, const SimulationConfig& simConfig, const PathsConfig& paths,
+                                     const std::vector<std::string>& additionalDensityNets) {
+    return _impl->generate(grid, simConfig, paths, additionalDensityNets);
 }
 
 } // namespace gerber2ems

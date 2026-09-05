@@ -25,8 +25,7 @@ inline std::filesystem::path simResultsDir(const std::string& simName) { return 
 
 inline const std::filesystem::path defaultConfigPath = "./simulation.json";
 
-// Persistent copies of the source board/project, kept alongside the kicad-cli-exported
-// gerbers/drill/pos files so port_resolution.cpp (libkicad-based net/pad queries) always has a
+// Persistent copies of the source board/project so direct libkicad geometry/net/pad queries always have a
 // board to query, even when -g/-s/-p are invoked in a separate process from the original -i export.
 // Not built from a separate "fab dir" constant: importer.cpp already has several same-named local
 // `fabDir` variables (via its own `using namespace constants`), which would shadow one here.

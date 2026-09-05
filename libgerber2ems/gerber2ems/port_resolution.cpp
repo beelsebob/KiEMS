@@ -5,7 +5,6 @@
 #include <cmath>
 #include <cstdlib>
 #include <expected>
-#include <filesystem>
 #include <limits>
 #include <numbers>
 #include <optional>
@@ -56,39 +55,23 @@ std::string _unescapeForDisplay(std::string name) {
     return name;
 }
 
-// Duplicates the small Edge_Cuts-bounding-box scan already performed independently by
-// importer.cpp's getDimensions() and gerber_composite.cpp's edgeCutsBoundingBox() -- this
-// project's established pattern for board extent (see gerber_composite.cpp's comment on
-// edgeCutsBoundingBox: re-derived at each use site rather than threading a shared cache through
-// unrelated modules for a parse that costs microseconds). Needed here so pad positions (from
-// libkicad, aux-origin-relative) land in the exact same re-origined frame gerber_composite.cpp
-// places composited copper triangles in.
-std::expected<Position, std::string> _edgeCutsOrigin(const std::filesystem::path& fabDir,
-                                                       double tessellationTolerance) {
-    std::error_code ec;
-    std::optional<std::filesystem::path> edgeCutsPath;
-    if (std::filesystem::is_directory(fabDir, ec)) {
-        for (const auto& entry : std::filesystem::directory_iterator(fabDir, ec)) {
-            const std::string name = entry.path().filename().string();
-            if (name.size() >= 13 && name.compare(name.size() - 13, 13, "Edge_Cuts.gbr") == 0) {
-                edgeCutsPath = entry.path();
-                break;
-            }
-        }
-    }
-    if (!edgeCutsPath.has_value()) {
-        return std::unexpected("No EdgeCuts gerber in fab dir(" + fabDir.string() + ")");
+double _mmToSimUnits(double mm);
+
+std::expected<Position, std::string> _edgeCutsOrigin(const PathsConfig& paths) {
+    auto geometry = libkicad_query::boardGeometry(paths, "Loading board outline for port placement");
+    if (!geometry) {
+        return std::unexpected(std::move(geometry).error());
     }
     double xMin = std::numeric_limits<double>::infinity();
     double yMin = std::numeric_limits<double>::infinity();
-    auto edgeCutsResult = GerberFile::load(*edgeCutsPath, tessellationTolerance);
-    if (!edgeCutsResult) {
-        return std::unexpected(std::move(edgeCutsResult).error());
+    for (const libkicad_query::PolygonLoop& loop : geometry->outline) {
+        for (const auto& [xMm, yMm] : loop.pointsMm) {
+            xMin = std::min(xMin, _mmToSimUnits(xMm));
+            yMin = std::min(yMin, _mmToSimUnits(yMm));
+        }
     }
-    const GerberFile& edgeCuts = *edgeCutsResult;
-    for (const auto& seg : edgeCuts.traceForNet(NetName("no-net")).segments()) {
-        xMin = std::min({seg.start().x(), seg.stop().x(), xMin});
-        yMin = std::min({seg.start().y(), seg.stop().y(), yMin});
+    if (!std::isfinite(xMin) || !std::isfinite(yMin)) {
+        return std::unexpected("KiCad board geometry has no usable Edge.Cuts points");
     }
     return Position(xMin, yMin);
 }
@@ -523,8 +506,7 @@ std::expected<void, std::string> _resolvePortRef(const PathsConfig& paths, PortR
 } // namespace
 
 std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const PathsConfig& paths) {
-    const double tessellationTolerance = static_cast<double>(config.pixelSize()) * constants::unitMultiplier;
-    auto edgeCutsOriginResult = _edgeCutsOrigin(paths.fabDir, tessellationTolerance);
+    auto edgeCutsOriginResult = _edgeCutsOrigin(paths);
     if (!edgeCutsOriginResult) return std::unexpected(std::move(edgeCutsOriginResult).error());
     const Position& edgeCutsOrigin = *edgeCutsOriginResult;
 
