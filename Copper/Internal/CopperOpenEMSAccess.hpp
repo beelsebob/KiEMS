@@ -62,6 +62,14 @@ public:
     unsigned int GetNumberOfTimestepsForGPU() { return NrTS; }
 };
 
+/// Test-only access to CalcPEC's protected paint pass and counters. Same zero-data-member access
+/// pattern as CopperUPMLAccess below; production Copper code does not use this class.
+class CopperOperatorAccess : public Operator {
+public:
+    using Operator::m_Nr_PEC;
+    using Operator::PaintPECColumn;
+};
+
 class CopperUPMLAccess : public Operator_Ext_UPML {
 public:
     using Operator_Ext_UPML::m_BC;

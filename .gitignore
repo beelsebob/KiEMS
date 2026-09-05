@@ -1,5 +1,9 @@
 build/
 /vendor/
+/openEMS/build/
+__pycache__/
+*.pyc
+*.egg-info/
 *.profraw
 /.et
 /.ht

@@ -11,7 +11,7 @@
 			isa = PBXAggregateTarget;
 			buildConfigurationList = 92F3FD48841987F0EA491F78 /* Build configuration list for PBXAggregateTarget "openEMS" */;
 			buildPhases = (
-				CB27AEC541EBD226F206B0B7 /* Build vendor/openEMS against local CSXCAD */,
+				CB27AEC541EBD226F206B0B7 /* Build openEMS fork against local CSXCAD */,
 			);
 			dependencies = (
 				24ED90D28ED207331A6B57D2 /* PBXTargetDependency */,
@@ -72,9 +72,11 @@
 		7927928D62C83DD9538C10AF /* CSPrimWire.cpp in Sources */ = {isa = PBXBuildFile; fileRef = DFB34E1830D6A43D7D93419D /* CSPrimWire.cpp */; };
 		7A76B8DB5C0FDE31D6F72BB1 /* CSPrimUserDefined.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A25590547D328A76A372C1BC /* CSPrimUserDefined.cpp */; };
 		828DBB24BCE54FE076A3D616 /* CSPrimPolygon.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 30A0506109278583137803EB /* CSPrimPolygon.cpp */; };
+		846A32C3BB81E3C29B621792 /* libhdf5.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 30877432D1026706D7E805DA /* libhdf5.dylib */; };
 		888CB706001C0A6703D7A727 /* liblibkicad.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */; };
 		8958C50381BAEB4BAD69FC88 /* CSBackgroundMaterial.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E71F417BE3BD7729F8FEFB2A /* CSBackgroundMaterial.cpp */; };
 		8979779CA20D12908A2A7A0E /* Copper.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71AD3CD6302FAAD5006D5847 /* Copper.framework */; };
+		8B10C2000B105C2000000001 /* libblosc2.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 8B10C2000B105C2000000002 /* libblosc2.a */; };
 		95774DCF0FD168F325B94432 /* CSPropExcitation.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 4FF84FE99AC0D432168071A2 /* CSPropExcitation.cpp */; };
 		95D69C1BA0DEEF1883C61841 /* CSPrimBox.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C139A80CEF80445CE007CF3F /* CSPrimBox.cpp */; };
 		980D7708FC6E8DCF73829C69 /* CSPropLumpedElement.cpp in Sources */ = {isa = PBXBuildFile; fileRef = B6C786F74AABEF635C528E85 /* CSPropLumpedElement.cpp */; };
@@ -89,6 +91,11 @@
 		BD20F3B01E8F3B160B1E3302 /* CSPrimitives.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 4E54CA0C8800E5C1A813CF8C /* CSPrimitives.cpp */; };
 		BE0F1C78843BBDA09DFB1E8C /* CSModeData.cpp in Sources */ = {isa = PBXBuildFile; fileRef = BBE93FDB8DF79DA6F0A50C94 /* CSModeData.cpp */; };
 		C0A71A000000000000000001 /* libCopperUtils.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 71B4EE8E304224C5002796EC /* libCopperUtils.a */; };
+		C0A71A000000000000000011 /* libopenEMS.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = C0A71A000000000000000010 /* libopenEMS.dylib */; };
+		C0A71A000000000000000012 /* libopenEMS.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = C0A71A000000000000000010 /* libopenEMS.dylib */; };
+		C0A71A000000000000000013 /* libopenEMS.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = C0A71A000000000000000010 /* libopenEMS.dylib */; };
+		C0A71A000000000000000014 /* libopenEMS.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = C0A71A000000000000000010 /* libopenEMS.dylib */; };
+		C0A71A000000000000000015 /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B8F4508947040AF3A200E11 /* libCSXCAD.dylib */; };
 		C1FE7C82D3B6D6DF1E6CAFAC /* CSPrimSphericalShell.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 4CCA7271B4E816E2DE044E5C /* CSPrimSphericalShell.cpp */; };
 		D1A3596A45AFCC1D666CCAD9 /* CSPrimSphere.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A4ABB3E67FA995DFC15350A7 /* CSPrimSphere.cpp */; };
 		D1B97BD0204C249DCB935BE0 /* ParameterCoord.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 801882DFF924DC3D075A3E2A /* ParameterCoord.cpp */; };
@@ -274,6 +281,13 @@
 			proxyType = 1;
 			remoteGlobalIDString = 71B4EE8D304224C5002796EC;
 			remoteInfo = CopperUtils;
+		};
+		73C8EB5BB682575EC87A171A /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E71870C603134ADA6EEEA950;
+			remoteInfo = HDF5;
 		};
 		748C85D85BC5D0AE4750DF0C /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -465,6 +479,7 @@
 		252340AF2DF277394293A777 /* CSPrimPolyhedronReader.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimPolyhedronReader.h; sourceTree = "<group>"; };
 		26BECA8A0D515EF0EB787386 /* CSPropLorentzMaterial.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropLorentzMaterial.h; sourceTree = "<group>"; };
 		2E0A6B0B01BDA7784504DBD7 /* CSPrimRotPoly.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimRotPoly.cpp; sourceTree = "<group>"; };
+		30877432D1026706D7E805DA /* libhdf5.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = libhdf5.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
 		30A0506109278583137803EB /* CSPrimPolygon.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimPolygon.cpp; sourceTree = "<group>"; };
 		33049C004A0AD9DE5FF7DB67 /* CSPropResBox.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropResBox.cpp; sourceTree = "<group>"; };
 		335167B1A5FB2AF84C42F74A /* CSPropAbsorbingBC.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropAbsorbingBC.cpp; sourceTree = "<group>"; };
@@ -503,6 +518,7 @@
 		7A9D6B5C429B30F4A76B69E9 /* CSPrimPolygon.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimPolygon.h; sourceTree = "<group>"; };
 		7D20DA97F11E5FD1E45B1BEC /* CSPropDumpBox.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropDumpBox.h; sourceTree = "<group>"; };
 		801882DFF924DC3D075A3E2A /* ParameterCoord.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = ParameterCoord.cpp; sourceTree = "<group>"; };
+		8B10C2000B105C2000000002 /* libblosc2.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libblosc2.a; sourceTree = BUILT_PRODUCTS_DIR; };
 		8BAEFA9E1EC092E0D890A14C /* CSPrimPoint.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimPoint.cpp; sourceTree = "<group>"; };
 		903517FF02E224D68957B03E /* CSPropMetal.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropMetal.h; sourceTree = "<group>"; };
 		91339221556288FDC08080CD /* CSPropExcitation.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropExcitation.h; sourceTree = "<group>"; };
@@ -529,6 +545,7 @@
 		B9EEAA74EC592385260923B1 /* CSPropMaterial.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropMaterial.h; sourceTree = "<group>"; };
 		BBE93FDB8DF79DA6F0A50C94 /* CSModeData.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSModeData.cpp; sourceTree = "<group>"; };
 		C092FF8B6A375F76FC193A6E /* CSPrimCylindricalShell.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimCylindricalShell.cpp; sourceTree = "<group>"; };
+		C0A71A000000000000000010 /* libopenEMS.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = libopenEMS.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
 		C139A80CEF80445CE007CF3F /* CSPrimBox.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimBox.cpp; sourceTree = "<group>"; };
 		C259DFC8925FEF6254736BAF /* CSPrimMultiBox.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimMultiBox.cpp; sourceTree = "<group>"; };
 		C4226023679CEE1592511C1C /* CSPropDebyeMaterial.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropDebyeMaterial.cpp; sourceTree = "<group>"; };
@@ -644,6 +661,11 @@
 			path = Gerber2EMSStudio;
 			sourceTree = "<group>";
 		};
+		C0A71A000000000000000020 /* openEMS */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = openEMS;
+			sourceTree = "<group>";
+		};
 		E331D08A3BF5F110095DBF0C /* copper_fdtd_worker */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = copper_fdtd_worker;
@@ -687,6 +709,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C0A71A000000000000000013 /* libopenEMS.dylib in Frameworks */,
 				71B40FE93042E264002796EC /* libCSXCAD.dylib in Frameworks */,
 				479136241E9A85AC3E2BFC9B /* GerberCharts.framework in Frameworks */,
 				71AD3CEB302FAAD5006D5847 /* Copper.framework in Frameworks */,
@@ -724,6 +747,9 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C0A71A000000000000000011 /* libopenEMS.dylib in Frameworks */,
+				846A32C3BB81E3C29B621792 /* libhdf5.dylib in Frameworks */,
+				8B10C2000B105C2000000001 /* libblosc2.a in Frameworks */,
 				71B40FE83042E24F002796EC /* Accelerate.framework in Frameworks */,
 				71B40FE63042E223002796EC /* Metal.framework in Frameworks */,
 				71B40FE43042E1F3002796EC /* libCopperUtils.a in Frameworks */,
@@ -750,6 +776,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C0A71A000000000000000014 /* libopenEMS.dylib in Frameworks */,
 				71B40FEA3042E2B5002796EC /* libCSXCAD.dylib in Frameworks */,
 				3094727E7CECFEFF14791831 /* liblibgerber2ems.a in Frameworks */,
 			);
@@ -759,6 +786,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C0A71A000000000000000012 /* libopenEMS.dylib in Frameworks */,
+				C0A71A000000000000000015 /* libCSXCAD.dylib in Frameworks */,
 				F61D45C729E10F8A998D6D1D /* Cocoa.framework in Frameworks */,
 				5BFB8526C3E1D7DF9AD2AA50 /* Copper.framework in Frameworks */,
 			);
@@ -780,6 +809,7 @@
 		71AD228930263515006D5847 = {
 			isa = PBXGroup;
 			children = (
+				C0A71A000000000000000020 /* openEMS */,
 				1E051C9DFB9D9A4CF7CB1120 /* GerberCharts */,
 				B7D891E5D67D73D341733A71 /* Gerber2EMSStudio */,
 				71AD229430263516006D5847 /* geber2ems */,
@@ -797,12 +827,14 @@
 				4E2D6DA9B78D9652EE4FC096 /* Copper_smoketest */,
 				E331D08A3BF5F110095DBF0C /* copper_fdtd_worker */,
 				ECADA86A6A99C5289CA01658 /* CSXCAD */,
+				71BD2E653044E2D900663022 /* Recovered References */,
 			);
 			sourceTree = "<group>";
 		};
 		71AD229330263516006D5847 /* Products */ = {
 			isa = PBXGroup;
 			children = (
+				C0A71A000000000000000010 /* libopenEMS.dylib */,
 				5653046AD79D4C9071AF237F /* Gerber2EMSStudio.app */,
 				71AD229230263516006D5847 /* geber2ems */,
 				A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */,
@@ -819,6 +851,15 @@
 				71B4EE8E304224C5002796EC /* libCopperUtils.a */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		71BD2E653044E2D900663022 /* Recovered References */ = {
+			isa = PBXGroup;
+			children = (
+				30877432D1026706D7E805DA /* libhdf5.dylib */,
+				8B10C2000B105C2000000002 /* libblosc2.a */,
+			);
+			name = "Recovered References";
 			sourceTree = "<group>";
 		};
 		77AE1A0D84F974CC1EDDD9F6 /* Frameworks */ = {
@@ -1173,6 +1214,7 @@
 			dependencies = (
 				00D38236B762AE5D5D6823F0 /* PBXTargetDependency */,
 				BEBA09E76AE1E48919E8DCC4 /* PBXTargetDependency */,
+				C826A6FCE48478DCB74F2134 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				71AD3CD7302FAAD5006D5847 /* Copper */,
@@ -1388,12 +1430,13 @@
 			outputPaths = (
 				"$(BUILT_PRODUCTS_DIR)/libhdf5.dylib",
 				"$(BUILT_PRODUCTS_DIR)/libhdf5_hl.dylib",
+				"$(BUILT_PRODUCTS_DIR)/libblosc2.a",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "set -e\n\"$SRCROOT/Scripts/build_hdf5.sh\"\n";
 		};
-		CB27AEC541EBD226F206B0B7 /* Build vendor/openEMS against local CSXCAD */ = {
+		CB27AEC541EBD226F206B0B7 /* Build openEMS fork against local CSXCAD */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
@@ -1406,7 +1449,7 @@
 				"$(BUILT_PRODUCTS_DIR)/libhdf5.dylib",
 				"$(BUILT_PRODUCTS_DIR)/libhdf5_hl.dylib",
 			);
-			name = "Build vendor/openEMS against local CSXCAD";
+			name = "Build openEMS fork against local CSXCAD";
 			outputFileListPaths = (
 			);
 			outputPaths = (
@@ -1780,6 +1823,12 @@
 			target = 917B3FABD7921813B7A8BF98 /* CSXCAD */;
 			targetProxy = B8F896C59FEA2EF0C5CB5610 /* PBXContainerItemProxy */;
 		};
+		C826A6FCE48478DCB74F2134 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = HDF5;
+			target = E71870C603134ADA6EEEA950 /* HDF5 */;
+			targetProxy = 73C8EB5BB682575EC87A171A /* PBXContainerItemProxy */;
+		};
 		D13B427235532B3778A56070 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			name = openEMS;
@@ -1873,7 +1922,7 @@
 		2C2EBF8FC2F3ECDD99E41EF9 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_CXX_LANGUAGE_STANDARD = "c++23";
 				CODE_SIGN_STYLE = Automatic;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/Copper";
@@ -1885,8 +1934,9 @@
 				SDKROOT = macosx;
 				SYSTEM_HEADER_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(SRCROOT)/vendor/openEMS",
+					"$(SRCROOT)/openEMS",
 					"$(SRCROOT)/CSXCAD/CSXCAD",
+					"$(BUILT_PRODUCTS_DIR)/hdf5-local-prefix/include",
 				);
 			};
 			name = Debug;
@@ -1902,7 +1952,6 @@
 					"-lpng16",
 					"-lz",
 					"-lClipper2",
-					"-lCSXCAD",
 				);
 				PRODUCT_NAME = openEMS;
 			};
@@ -1940,7 +1989,7 @@
 		5B9776B955F328B8143534B4 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_CXX_LANGUAGE_STANDARD = "c++23";
 				CODE_SIGN_STYLE = Automatic;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/Copper";
@@ -1952,8 +2001,9 @@
 				SDKROOT = macosx;
 				SYSTEM_HEADER_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(SRCROOT)/vendor/openEMS",
+					"$(SRCROOT)/openEMS",
 					"$(SRCROOT)/CSXCAD/CSXCAD",
+					"$(BUILT_PRODUCTS_DIR)/hdf5-local-prefix/include",
 				);
 			};
 			name = Release;
@@ -2369,7 +2419,7 @@
 		71AD3CEF302FAAD5006D5847 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_CXX_LANGUAGE_STANDARD = "c++23";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -2389,11 +2439,8 @@
 				);
 				MARKETING_VERSION = 1.0;
 				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
-				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++20";
-				OTHER_LDFLAGS = (
-					"$(inherited)",
-					"-lopenEMS",
-				);
+				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 c++23";
+				OTHER_LDFLAGS = "$(inherited)";
 				PRODUCT_BUNDLE_IDENTIFIER = com.tomdavie.Copper;
 				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
 				SKIP_INSTALL = YES;
@@ -2401,8 +2448,10 @@
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SYSTEM_HEADER_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(SRCROOT)/vendor/openEMS",
+					"$(SRCROOT)/openEMS",
 					"$(SRCROOT)/CSXCAD/CSXCAD",
+					"$(BUILT_PRODUCTS_DIR)/hdf5-local-prefix/include",
+					"$(BUILT_PRODUCTS_DIR)/blosc2-local-prefix/include",
 				);
 				VERSIONING_SYSTEM = "apple-generic";
 				VERSION_INFO_PREFIX = "";
@@ -2412,7 +2461,7 @@
 		71AD3CF0302FAAD5006D5847 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_CXX_LANGUAGE_STANDARD = "c++23";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -2432,11 +2481,8 @@
 				);
 				MARKETING_VERSION = 1.0;
 				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
-				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++20";
-				OTHER_LDFLAGS = (
-					"$(inherited)",
-					"-lopenEMS",
-				);
+				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 c++23";
+				OTHER_LDFLAGS = "$(inherited)";
 				PRODUCT_BUNDLE_IDENTIFIER = com.tomdavie.Copper;
 				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
 				SKIP_INSTALL = YES;
@@ -2444,8 +2490,10 @@
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SYSTEM_HEADER_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(SRCROOT)/vendor/openEMS",
+					"$(SRCROOT)/openEMS",
 					"$(SRCROOT)/CSXCAD/CSXCAD",
+					"$(BUILT_PRODUCTS_DIR)/hdf5-local-prefix/include",
+					"$(BUILT_PRODUCTS_DIR)/blosc2-local-prefix/include",
 				);
 				VERSIONING_SYSTEM = "apple-generic";
 				VERSION_INFO_PREFIX = "";
@@ -2527,6 +2575,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
+					"$(SRCROOT)",
 					"$(SRCROOT)/libgerber2ems",
 				);
 				LIBRARY_SEARCH_PATHS = (
@@ -2536,7 +2585,6 @@
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lClipper2",
-					"-lopenEMS",
 					"-lmatplot",
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -2552,6 +2600,7 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
+					"$(SRCROOT)",
 					"$(SRCROOT)/libgerber2ems",
 				);
 				INFOPLIST_FILE = Gerber2EMSStudio/Info.plist;
@@ -2566,7 +2615,6 @@
 				MARKETING_VERSION = 1.0;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
-					"-lopenEMS",
 					"-lClipper2",
 					"-lmatplot",
 				);
@@ -2589,7 +2637,6 @@
 					"-lpng16",
 					"-lz",
 					"-lClipper2",
-					"-lCSXCAD",
 				);
 				PRODUCT_NAME = openEMS;
 			};
@@ -3185,6 +3232,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
+					"$(SRCROOT)",
 					"$(SRCROOT)/libgerber2ems",
 				);
 				LIBRARY_SEARCH_PATHS = (
@@ -3194,7 +3242,6 @@
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lClipper2",
-					"-lopenEMS",
 					"-lmatplot",
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -3208,6 +3255,10 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				SWIFT_VERSION = 5.0;
+				SYSTEM_HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)",
+				);
 			};
 			name = Release;
 		};
@@ -3218,6 +3269,10 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				SWIFT_VERSION = 5.0;
+				SYSTEM_HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)",
+				);
 			};
 			name = Debug;
 		};
@@ -3323,6 +3378,7 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
+					"$(SRCROOT)",
 					"$(SRCROOT)/libgerber2ems",
 				);
 				INFOPLIST_FILE = Gerber2EMSStudio/Info.plist;
@@ -3337,7 +3393,6 @@
 				MARKETING_VERSION = 1.0;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
-					"-lopenEMS",
 					"-lClipper2",
 					"-lmatplot",
 				);

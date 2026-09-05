@@ -36,6 +36,7 @@
 #include <CSPropMetal.h>
 #include <CSPropProbeBox.h>
 #include <CSPrimBox.h>
+#include <CSPrimPolygon.h>
 #include <CSRectGrid.h>
 #include <ContinuousStructure.h>
 
@@ -115,6 +116,60 @@ ContinuousStructure* buildPecCavityNoExcitation() {
     grid->AddDiscLine(2, 0.0);
     grid->AddDiscLine(2, 1.0);
     grid->AddDiscLine(2, 2.0);
+    return csx;
+}
+
+/// Small fixture for checking CalcPEC's primitive-paint cache against the former per-edge priority
+/// query. It deliberately combines overlapping metal/material boxes (the higher-priority material
+/// must mask PEC) with a zero-thickness z-normal metal polygon, matching the primitive used for
+/// real PCB copper and its unusual GetBoundBox() contract (valid values with a false return).
+ContinuousStructure* buildPecPaintFixture() {
+    auto* csx = new ContinuousStructure();
+    CSRectGrid* grid = csx->GetGrid();
+    grid->SetDeltaUnit(1e-3);
+    for (int axis = 0; axis < 3; ++axis) {
+        for (int i = 0; i <= 4; ++i) {
+            grid->AddDiscLine(axis, static_cast<double>(i));
+        }
+    }
+
+    auto* metal = new CSPropMetal(csx->GetParameterSet());
+    metal->SetName("paint_metal");
+    csx->AddProperty(metal);
+    auto* metalBox = new CSPrimBox(metal->GetParameterSet(), metal);
+    for (int axis = 0; axis < 3; ++axis) {
+        metalBox->SetCoord(2 * axis, 0.75);
+        metalBox->SetCoord(2 * axis + 1, 3.25);
+    }
+    metalBox->SetPriority(10);
+
+    auto* metalPolygon = new CSPrimPolygon(metal->GetParameterSet(), metal);
+    metalPolygon->ClearCoords();
+    metalPolygon->AddCoord(0.5);
+    metalPolygon->AddCoord(0.5);
+    metalPolygon->AddCoord(3.5);
+    metalPolygon->AddCoord(0.5);
+    metalPolygon->AddCoord(3.5);
+    metalPolygon->AddCoord(3.5);
+    metalPolygon->AddCoord(0.5);
+    metalPolygon->AddCoord(3.5);
+    metalPolygon->SetNormDir(2);
+    metalPolygon->SetElevation(4.0);
+    metalPolygon->SetPriority(15);
+
+    auto* material = new CSPropMaterial(csx->GetParameterSet());
+    material->SetName("paint_material_mask");
+    material->SetEpsilon(2.0);
+    csx->AddProperty(material);
+    auto* materialBox = new CSPrimBox(material->GetParameterSet(), material);
+    materialBox->SetCoord(0, 1.75);
+    materialBox->SetCoord(1, 3.25);
+    materialBox->SetCoord(2, 0.75);
+    materialBox->SetCoord(3, 3.25);
+    materialBox->SetCoord(4, 0.75);
+    materialBox->SetCoord(5, 3.25);
+    materialBox->SetPriority(20);
+
     return csx;
 }
 
@@ -282,6 +337,59 @@ int main() {
     Operator* op = fdtd.GetOperatorForGPU();
     if (op == nullptr) {
         fail("CopperOpenEMS::GetOperatorForGPU() returned null after SetupFDTD()");
+    }
+
+    // --- Phase 0b: CalcPEC's paint cache must be exactly equivalent to its old priority query. ---
+    {
+        ContinuousStructure* pecCsx = buildPecPaintFixture();
+        copper::CopperOpenEMS pecFdtd;
+        pecFdtd.SetCSX(pecCsx);
+        pecFdtd.SetGaussExcite(2.5e9, 2.5e9);
+        for (int side = 0; side < 6; ++side) {
+            pecFdtd.Set_BC_Type(side, 0);
+        }
+        pecFdtd.SetNumberOfTimeSteps(10);
+        if (pecFdtd.SetupFDTD() != 0) {
+            fail("Phase 0b fixture: openEMS::SetupFDTD() returned non-zero");
+        }
+        Operator* pecOp = pecFdtd.GetOperatorForGPU();
+        if (pecOp == nullptr) {
+            fail("Phase 0b fixture: GetOperatorForGPU() returned null");
+        }
+        auto* pecAccess = static_cast<copper::CopperOperatorAccess*>(pecOp);
+
+        unsigned int paintedMetal[3] = {0, 0, 0};
+        unsigned int pos[3] = {0, 0, 0};
+        double coord[3];
+        OperatorPECColumnCache cache;
+        for (pos[0] = 0; pos[0] < pecOp->GetNumberOfLines(0); ++pos[0]) {
+            for (pos[1] = 0; pos[1] < pecOp->GetNumberOfLines(1); ++pos[1]) {
+                pecAccess->PaintPECColumn(pos[0], pos[1], cache);
+                const std::vector<CSPrimitives*> candidates = pecOp->GetPrimitivesBoundBox(
+                    static_cast<int>(pos[0]), static_cast<int>(pos[1]), -1,
+                    static_cast<CSProperties::PropertyType>(CSProperties::MATERIAL | CSProperties::METAL));
+                for (pos[2] = 0; pos[2] < pecOp->GetNumberOfLines(2); ++pos[2]) {
+                    for (int axis = 0; axis < 3; ++axis) {
+                        pecOp->GetYeeCoords(axis, pos, coord, false);
+                        CSPrimitives* referenceWinner = nullptr;
+                        pecCsx->GetPropertyByCoordPriority(coord, candidates, false, &referenceWinner);
+                        if (cache.data[axis][pos[2]] != referenceWinner) {
+                            fail("Phase 0b: CalcPEC paint-cache winner differs from the legacy priority query");
+                        }
+                        if (referenceWinner && referenceWinner->GetProperty()->GetType() == CSProperties::METAL) {
+                            ++paintedMetal[axis];
+                        }
+                    }
+                }
+            }
+        }
+        for (int axis = 0; axis < 3; ++axis) {
+            if (paintedMetal[axis] != pecAccess->m_Nr_PEC[axis]) {
+                fail("Phase 0b: CalcPEC's applied PEC count differs from the paint-cache reference");
+            }
+        }
+        std::printf("Phase 0b: CalcPEC paint cache matches legacy lookup (%u/%u/%u PEC edges)\n",
+                    paintedMetal[0], paintedMetal[1], paintedMetal[2]);
     }
 
     const unsigned int nx = op->GetNumberOfLines(0);

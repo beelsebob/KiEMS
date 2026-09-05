@@ -1,5 +1,5 @@
 #!/bin/bash
-# Rebuilds vendor/openEMS's own libopenEMS against this project's own CSXCAD and HDF5 targets (see
+# Rebuilds this project's openEMS fork against its own CSXCAD and HDF5 targets (see
 # CSXCAD/CSXCAD/CSSpatialIndex.{h,cpp} and Scripts/build_hdf5.sh's own doc comment for why HDF5 is
 # vendored too), entirely self-contained within this repo's build output -- never touches
 # /Users/tdavie/opt/openEMS or Homebrew's hdf5. Invoked from the "openEMS" Xcode target's Run Script
@@ -9,14 +9,23 @@ set -euo pipefail
 
 : "${SRCROOT:?SRCROOT must be set (run from an Xcode build phase)}"
 : "${BUILT_PRODUCTS_DIR:?BUILT_PRODUCTS_DIR must be set (run from an Xcode build phase)}"
+: "${TARGET_TEMP_DIR:?TARGET_TEMP_DIR must be set (run from an Xcode build phase)}"
 
-PREFIX="${SRCROOT}/build/csxcad-local-prefix"
+PREFIX="${BUILT_PRODUCTS_DIR}/csxcad-local-prefix"
 mkdir -p "${PREFIX}/include" "${PREFIX}/lib"
 ln -sfn "${SRCROOT}/CSXCAD/CSXCAD" "${PREFIX}/include/CSXCAD"
 ln -sfn "${BUILT_PRODUCTS_DIR}/libCSXCAD.dylib" "${PREFIX}/lib/libCSXCAD.dylib"
 
-VENDOR_DIR="${SRCROOT}/vendor/openEMS"
-BUILD_DIR="${VENDOR_DIR}/build"
+OPENEMS_DIR="${SRCROOT}/openEMS"
+if grep -Eq 'find_package[[:space:]]*\([[:space:]]*Boost' "${OPENEMS_DIR}/CMakeLists.txt"; then
+  echo "error: ${OPENEMS_DIR} is not the project-local Boost-free openEMS fork" >&2
+  exit 1
+fi
+echo "Configuring project-local openEMS fork from ${OPENEMS_DIR}"
+
+# Like HDF5, keep generated CMake state scoped to this Xcode build so simultaneous builds using
+# different DerivedData locations cannot reconfigure or relink the same object tree.
+BUILD_DIR="${TARGET_TEMP_DIR}/openems-cmake"
 
 # Xcode's own ARCHS (e.g. "arm64") and CONFIGURATION (Debug/Release) -- explicitly forced rather than
 # left to CMake's own defaults, since a stale CMakeCache.txt from a prior manual configure (or CMake's
@@ -32,10 +41,20 @@ CMAKE_CONFIG="${CONFIGURATION:-Debug}"
 # these two.
 FPARSER_TINYXML_ROOT="/Users/tdavie/opt/openEMS"
 
+# Xcode launched from Finder does not inherit Homebrew's /opt/homebrew/bin in PATH, so CMake cannot
+# discover VTK's config package through `brew --prefix`. Use Homebrew's stable opt symlink as an
+# explicit package prefix; VTK itself still supplies the imported CMake targets and link interface.
+VTK_PREFIX="/opt/homebrew/opt/vtk"
+if [ ! -d "${VTK_PREFIX}" ]; then
+  echo "error: VTK package prefix not found at ${VTK_PREFIX}" >&2
+  exit 1
+fi
+HOMEBREW_PREFIX="/opt/homebrew"
+
 # Built by the "HDF5" target's own Run Script phase (Scripts/build_hdf5.sh) -- its installed
 # lib/cmake/hdf5 config package is what makes find_package(HDF5 COMPONENTS C HL REQUIRED) below
 # resolve to this vendored copy instead of Homebrew's, as long as it's on CMAKE_PREFIX_PATH.
-HDF5_PREFIX="${SRCROOT}/build/hdf5-local-prefix"
+HDF5_PREFIX="${BUILT_PRODUCTS_DIR}/hdf5-local-prefix"
 
 # vtk_file_writer.cpp/hdf5_file_writer.cpp's own `using namespace std;` trips Clang's
 # ext_using_undefined_std ("using directive refers to implicitly-defined namespace 'std'") --
@@ -43,19 +62,22 @@ HDF5_PREFIX="${SRCROOT}/build/hdf5-local-prefix"
 # all, so there is no -Wno-<name> that can target it specifically (nor a #pragma clang diagnostic
 # ignored spelling, which also needs a named group); -w is the only lever. Scoped to this vendored
 # CMake sub-build alone -- this project's own first-party targets keep every warning they already
-# have -- since openEMS's own occasional warnings (this one included) are vendored code we don't
+# have -- since openEMS's own occasional warnings (this one included) are forked code we don't
 # maintain and wouldn't act on regardless.
-cmake -S "${VENDOR_DIR}" -B "${BUILD_DIR}" \
+cmake -S "${OPENEMS_DIR}" -B "${BUILD_DIR}" \
   -DCMAKE_BUILD_TYPE="${CMAKE_CONFIG}" \
   -DCMAKE_OSX_ARCHITECTURES="${CMAKE_ARCHS}" \
   -DCSXCAD_ROOT_DIR="${PREFIX}" \
+	-DCSXCAD_LIBRARIES="${BUILT_PRODUCTS_DIR}/libCSXCAD.dylib" \
+	-DCSXCAD_INCLUDE_DIR="${SRCROOT}/CSXCAD/CSXCAD" \
+	-DCOPPER_UTILS_ROOT_DIR="${SRCROOT}" \
   -DFPARSER_ROOT_DIR="${FPARSER_TINYXML_ROOT}" \
-  -DCMAKE_PREFIX_PATH="${FPARSER_TINYXML_ROOT};${HDF5_PREFIX}" \
+  -DCMAKE_PREFIX_PATH="${FPARSER_TINYXML_ROOT};${HDF5_PREFIX};${VTK_PREFIX};${HOMEBREW_PREFIX}" \
   -DCMAKE_C_FLAGS=-w \
   -DCMAKE_CXX_FLAGS=-w \
   -DWITH_MPI=OFF
 
-cmake --build "${BUILD_DIR}" --target openEMS -j"$(sysctl -n hw.ncpu)"
+cmake --build "${BUILD_DIR}" --target openEMS --parallel "$(sysctl -n hw.ncpu)"
 
 REAL_LIB=$(find "${BUILD_DIR}" -maxdepth 1 -name 'libopenEMS.*.*.*.dylib' | head -1)
 if [ -z "${REAL_LIB}" ]; then
