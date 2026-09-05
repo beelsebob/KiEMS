@@ -453,8 +453,9 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     const std::filesystem::path probeDir = std::filesystem::current_path();
     const copper::CopperBoundaryKind boundaryKind =
         pmlKind == PMLKind::CPML ? copper::CopperBoundaryKind::CPML : copper::CopperBoundaryKind::UPML;
+    const double cpmlAlphaMax = copper::cpmlAlphaMaxForFrequency(sim.config().frequency().start());
     const copper::CopperFDTDRunResult gpuResult = copper::runFDTDPortOnGPU(
-        sim.fdtdEngine(), sim.csx(), printCopperProgress, boundaryKind, -1.0, constants::pmlDepthCells);
+        sim.fdtdEngine(), sim.csx(), printCopperProgress, boundaryKind, cpmlAlphaMax, constants::pmlDepthCells);
     std::filesystem::current_path(cwd);
     if (!gpuResult.success) {
         return std::unexpected(gpuResult.errorMessage);
@@ -488,11 +489,12 @@ std::expected<void, std::string> dumpGPUPortInProcess(Simulation& sim, std::int3
     }
     const copper::CopperBoundaryKind boundaryKind =
         pmlKind == PMLKind::CPML ? copper::CopperBoundaryKind::CPML : copper::CopperBoundaryKind::UPML;
+    const double cpmlAlphaMax = copper::cpmlAlphaMaxForFrequency(sim.config().frequency().start());
     if (dumpOptions.dir.has_value()) {
         const std::filesystem::path portDir = *dumpOptions.dir / ("port" + std::to_string(excitedPortNumber));
         const std::string error =
             copper::dumpEarlyFrames(sim.fdtdEngine(), sim.csx(), portDir, dumpOptions.frameCount,
-                                     dumpOptions.marginCells, boundaryKind, -1.0, constants::pmlDepthCells);
+                                     dumpOptions.marginCells, boundaryKind, cpmlAlphaMax, constants::pmlDepthCells);
         if (!error.empty()) {
             std::filesystem::current_path(cwd);
             return std::unexpected(error);
@@ -502,7 +504,7 @@ std::expected<void, std::string> dumpGPUPortInProcess(Simulation& sim, std::int3
         std::fprintf(stdout, "Copper: dumpDetailedTrace for excited port %d\n", excitedPortNumber);
         const std::string error =
             copper::dumpDetailedTrace(sim.fdtdEngine(), sim.csx(), dumpOptions.traceSteps, dumpOptions.traceBoxSide,
-                                       boundaryKind, -1.0, constants::pmlDepthCells);
+                                       boundaryKind, cpmlAlphaMax, constants::pmlDepthCells);
         if (!error.empty()) {
             std::filesystem::current_path(cwd);
             return std::unexpected(error);

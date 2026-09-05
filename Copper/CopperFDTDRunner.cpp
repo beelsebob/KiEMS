@@ -4,18 +4,24 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
+#include "FieldFrameSeriesWriter.hpp"
 #include "Internal/CopperCPML.hpp"
 #include "Internal/CopperEngine.hpp"
 #include "Internal/CopperExcitation.hpp"
+#include "Internal/CopperFieldFrameSignposts.hpp"
 #include "Internal/CopperLumpedRLC.hpp"
 #include "Internal/CopperOpenEMSAccess.hpp"
 #include "Internal/CopperPML.hpp"
@@ -24,6 +30,8 @@
 #include "tools/constants.h"
 
 namespace copper {
+
+double cpmlAlphaMaxForFrequency(double lowFrequencyHz) { return 2 * M_PI * lowFrequencyHz * EPS0; }
 
 namespace {
 
@@ -51,18 +59,212 @@ private:
     std::chrono::steady_clock::time_point _last = std::chrono::steady_clock::now();
 };
 
+// A bounded producer/consumer wrapper around the deliberately synchronous HDF5 writer. There are
+// exactly two 16-frame slots: while HDF5 compresses and writes one block, the FDTD loop is free to
+// keep advancing and capture the next block into the other. If compression remains slower than
+// simulation for a complete additional block, capture() waits for the older slot -- bounded memory
+// and back-pressure rather than silently dropping frames or rebuilding the old whole-run RAM cost.
+//
+// HDF5 is touched only by `_thread` after construction and before close() flushes it. In particular,
+// we do not issue concurrent HDF5 calls: this project's vendored HDF5 is not configured thread-safe,
+// and built-in deflate is serial anyway. The parallelism here is FDTD vs. HDF5, not HDF5 vs. itself.
+class BufferedFieldFrameSeriesWriter {
+public:
+    BufferedFieldFrameSeriesWriter(FieldFrameSeriesWriter writer, std::size_t cellCount)
+        : _writer(std::move(writer)) {
+        for (Slot& slot : _slots) {
+            for (Frame& frame : slot.frames) {
+                for (std::vector<float>& component : frame.components) {
+                    // Reserve without value-initializing potentially millions of floats.
+                    // readField() assigns the actual shared-buffer contents before a frame counts
+                    // toward the block.
+                    component.reserve(cellCount);
+                }
+            }
+        }
+        _thread = std::jthread([this] { writeLoop(); });
+    }
+
+    BufferedFieldFrameSeriesWriter(const BufferedFieldFrameSeriesWriter&) = delete;
+    BufferedFieldFrameSeriesWriter& operator=(const BufferedFieldFrameSeriesWriter&) = delete;
+
+    ~BufferedFieldFrameSeriesWriter() { (void)close(); }
+
+    std::expected<void, std::string> capture(CopperEngine& engine, std::uint32_t timestep,
+                                              double timeSeconds) {
+        std::unique_lock lock(_mutex);
+        _condition.wait(lock, [&] {
+            const State state = _slots[_producerSlot].state;
+            return _failure.has_value() || _closed || state == State::Empty || state == State::Filling;
+        });
+        if (_failure.has_value()) {
+            return std::unexpected(*_failure);
+        }
+        if (_closed) {
+            return std::unexpected("Field-frame capture requested after writer close");
+        }
+        Slot& slot = _slots[_producerSlot];
+        if (slot.state == State::Empty) {
+            slot.state = State::Filling;
+            slot.frameCount = 0;
+            slot.generationSignpost = os_signpost_id_generate(fieldFrameSignpostLog());
+            os_signpost_interval_begin(fieldFrameSignpostLog(), slot.generationSignpost,
+                                       "Generate field-frame block", "block=%u capacity=%u",
+                                       _generatedBlockCount, kFramesPerBlock);
+        }
+        Frame& frame = slot.frames[slot.frameCount];
+        lock.unlock();
+
+        const os_signpost_id_t frameSignpost = os_signpost_id_generate(fieldFrameSignpostLog());
+        os_signpost_interval_begin(fieldFrameSignpostLog(), frameSignpost, "Generate field frame",
+                                   "timestep=%u block=%u frame=%u", timestep, _generatedBlockCount,
+                                   slot.frameCount);
+        frame.timestep = timestep;
+        frame.timeSeconds = timeSeconds;
+        for (std::size_t component = 0; component < frame.components.size(); ++component) {
+            engine.readField(static_cast<CopperEngine::Field>(component), frame.components[component]);
+        }
+        os_signpost_interval_end(fieldFrameSignpostLog(), frameSignpost, "Generate field frame",
+                                 "timestep=%u", timestep);
+
+        lock.lock();
+        ++slot.frameCount;
+        if (slot.frameCount == kFramesPerBlock) {
+            finishGeneratingBlock(slot, false);
+        }
+        lock.unlock();
+        _condition.notify_all();
+        return {};
+    }
+
+    std::expected<void, std::string> close() {
+        {
+            std::lock_guard lock(_mutex);
+            if (!_closed) {
+                _closed = true;
+                Slot& partial = _slots[_producerSlot];
+                if (partial.state == State::Filling && partial.frameCount > 0) {
+                    finishGeneratingBlock(partial, true);
+                }
+                _stopping = true;
+            }
+        }
+        _condition.notify_all();
+        if (_thread.joinable()) {
+            _thread.join();
+        }
+
+        auto closed = _writer.close();
+        std::lock_guard lock(_mutex);
+        if (_failure.has_value()) {
+            return std::unexpected(*_failure);
+        }
+        return closed;
+    }
+
+private:
+    static constexpr std::uint32_t kFramesPerBlock = 16;
+    enum class State { Empty, Filling, Ready, Writing };
+    struct Frame {
+        std::uint32_t timestep = 0;
+        double timeSeconds = 0.0;
+        std::array<std::vector<float>, 6> components;
+    };
+    struct Slot {
+        std::array<Frame, kFramesPerBlock> frames;
+        std::uint32_t frameCount = 0;
+        State state = State::Empty;
+        os_signpost_id_t generationSignpost = OS_SIGNPOST_ID_INVALID;
+    };
+
+    void finishGeneratingBlock(Slot& slot, bool partial) {
+        os_signpost_interval_end(fieldFrameSignpostLog(), slot.generationSignpost,
+                                 "Generate field-frame block", "block=%u frames=%u partial=%d",
+                                 _generatedBlockCount, slot.frameCount, partial ? 1 : 0);
+        slot.generationSignpost = OS_SIGNPOST_ID_INVALID;
+        slot.state = State::Ready;
+        ++_generatedBlockCount;
+        _producerSlot = (_producerSlot + 1) % _slots.size();
+    }
+
+    void writeLoop() {
+        while (true) {
+            std::unique_lock lock(_mutex);
+            _condition.wait(lock, [&] {
+                return _failure.has_value() || _slots[_consumerSlot].state == State::Ready || _stopping;
+            });
+            if (_failure.has_value()) {
+                return;
+            }
+            Slot& slot = _slots[_consumerSlot];
+            if (slot.state != State::Ready) {
+                // Producer and consumer advance through the same two slots in order. Therefore if
+                // the next consumer slot is not ready once stopping is set, there is no later frame
+                // hidden in the other slot that may legally be written first.
+                if (_stopping) {
+                    return;
+                }
+                continue;
+            }
+            slot.state = State::Writing;
+            lock.unlock();
+
+            std::expected<void, std::string> written;
+            for (std::uint32_t frameIndex = 0; frameIndex < slot.frameCount; ++frameIndex) {
+                const Frame& frame = slot.frames[frameIndex];
+                written = _writer.writeFrame(frame.timestep, frame.timeSeconds, frame.components[0],
+                                              frame.components[1], frame.components[2], frame.components[3],
+                                              frame.components[4], frame.components[5]);
+                if (!written) {
+                    break;
+                }
+            }
+
+            lock.lock();
+            if (!written) {
+                _failure = written.error();
+                lock.unlock();
+                _condition.notify_all();
+                return;
+            }
+            slot.state = State::Empty;
+            slot.frameCount = 0;
+            _consumerSlot = (_consumerSlot + 1) % _slots.size();
+            lock.unlock();
+            _condition.notify_all();
+        }
+    }
+
+    FieldFrameSeriesWriter _writer;
+    std::array<Slot, 2> _slots;
+    std::size_t _producerSlot = 0;
+    std::size_t _consumerSlot = 0;
+    std::uint32_t _generatedBlockCount = 0;
+    std::mutex _mutex;
+    std::condition_variable _condition;
+    std::jthread _thread;
+    std::optional<std::string> _failure;
+    bool _stopping = false;
+    bool _closed = false;
+};
+
 } // namespace
 
 CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
                                       const CopperFDTDProgressCallback& onProgress,
                                       CopperBoundaryKind boundaryKind, double cpmlAlphaMax,
-                                      std::uint32_t pmlDepthCells, const std::function<bool()>& isCancelled) {
+                                      std::uint32_t pmlDepthCells, const std::function<bool()>& isCancelled,
+                                      const std::optional<FieldFrameSeriesRequest>& fieldFrameSeries) {
     CopperFDTDRunResult result;
     // See CopperFDTDRunner.h's own doc comment on cpmlAlphaMax's default -- 100MHz is every real
     // board this codebase has actually simulated so far, not an arbitrary round number.
-    constexpr double kDefaultCpmlLowFrequencyHz = 100e6;
     if (cpmlAlphaMax < 0.0) {
-        cpmlAlphaMax = 2 * M_PI * kDefaultCpmlLowFrequencyHz * EPS0;
+        // See CopperFDTDRunner.h's own doc comment on cpmlAlphaMax's default -- 100MHz is every
+        // real board this codebase had actually simulated as of when that default was chosen, not
+        // an arbitrary round number, but a caller with a lower configured sweep floor should prefer
+        // cpmlAlphaMaxForFrequency() with that simulation's own value instead of relying on this.
+        constexpr double kDefaultCpmlLowFrequencyHz = 100e6;
+        cpmlAlphaMax = cpmlAlphaMaxForFrequency(kDefaultCpmlLowFrequencyHz);
     }
     PhaseTimer timer;
     try {
@@ -114,6 +316,12 @@ CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
         const CopperExcitation excitation = buildExcitation(*op);
         if (!onProgress) {
             timer.mark("buildExcitation");
+        }
+        if (excitation.voltageCells.empty() && excitation.currentCells.empty()) {
+            result.errorMessage =
+                "Copper: the enabled excitation does not intersect any Yee-grid cells; check the port geometry "
+                "and mesh placement";
+            return result;
         }
         // Auto-discovered lumped RLC components (gerber2ems::Simulation::addLumpedComponents(), see
         // CopperLumpedRLC.hpp's own top comment) -- discovered once up front like `excitation`, but
@@ -185,29 +393,77 @@ CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
         result.fieldSnapshot.lineX.assign(grid.lineX.begin(), grid.lineX.end());
         result.fieldSnapshot.lineY.assign(grid.lineY.begin(), grid.lineY.end());
         result.fieldSnapshot.lineZ.assign(grid.lineZ.begin(), grid.lineZ.end());
-        const std::uint32_t minCaptureStepSpacing = 100;
-        std::uint32_t lastCaptureStep = 0;
-        bool anyFrameCaptured = false;
-        auto captureFieldFrame = [&](std::uint32_t globalTimestep) {
-            CopperFieldFrame frame;
-            frame.timestep = globalTimestep;
-            frame.timeSeconds = static_cast<double>(globalTimestep) * grid.timestepSeconds;
-            const std::vector<float> ex = engine.readField(CopperEngine::Field::Ex);
-            const std::vector<float> ey = engine.readField(CopperEngine::Field::Ey);
-            const std::vector<float> ez = engine.readField(CopperEngine::Field::Ez);
-            const std::vector<float> hx = engine.readField(CopperEngine::Field::Hx);
-            const std::vector<float> hy = engine.readField(CopperEngine::Field::Hy);
-            const std::vector<float> hz = engine.readField(CopperEngine::Field::Hz);
-            const std::size_t cellCount = ex.size();
-            frame.cellEnergy.resize(cellCount);
-            for (std::size_t i = 0; i < cellCount; ++i) {
-                const float eSq = ex[i] * ex[i] + ey[i] * ey[i] + ez[i] * ez[i];
-                const float hSq = hx[i] * hx[i] + hy[i] * hy[i] + hz[i] * hz[i];
-                frame.cellEnergy[i] = static_cast<float>(EPS0) * eSq + static_cast<float>(MUE0) * hSq;
+
+        // Opt-in persistence of field frames to disk instead of retaining them in the result -- see
+        // FieldFrameSeriesRequest's own doc comment. A failure here is reported by leaving
+        // result.fieldFrameSeriesPath empty; the caller decides whether losing visualization data
+        // should also invalidate the otherwise-complete probe result.
+        std::unique_ptr<BufferedFieldFrameSeriesWriter> fieldFrameSeriesWriter;
+        if (fieldFrameSeries) {
+            FieldFrameSeriesWriter::Header header;
+            header.simulationName = fieldFrameSeries->simulationName;
+            header.excitedPort = fieldFrameSeries->excitedPort;
+            header.nx = grid.dims.nx;
+            header.ny = grid.dims.ny;
+            header.nz = grid.dims.nz;
+            header.timestepSeconds = grid.timestepSeconds;
+            header.boardZMin = fieldFrameSeries->boardZMin;
+            header.boardZMax = fieldFrameSeries->boardZMax;
+            header.lineX.assign(grid.lineX.begin(), grid.lineX.end());
+            header.lineY.assign(grid.lineY.begin(), grid.lineY.end());
+            header.lineZ.assign(grid.lineZ.begin(), grid.lineZ.end());
+            auto writer = FieldFrameSeriesWriter::create(fieldFrameSeries->path, header, fieldFrameSeries->chunkFrames);
+            if (writer) {
+                if (fieldFrameSeries->onWriterReady) {
+                    fieldFrameSeries->onWriterReady(fieldFrameSeries->path);
+                }
+                fieldFrameSeriesWriter = std::make_unique<BufferedFieldFrameSeriesWriter>(
+                    std::move(*writer), static_cast<std::size_t>(grid.dims.cellCount()));
+            } else {
+                std::fprintf(stderr, "Copper: could not create field frame-series file %s: %s\n",
+                             fieldFrameSeries->path.string().c_str(), writer.error().c_str());
             }
-            result.fieldSnapshot.frames.push_back(std::move(frame));
+        }
+
+        const std::uint32_t minCaptureStepSpacing = 1000;
+        std::uint32_t lastCaptureStep = 0;
+        std::uint32_t capturedFrameCount = 0;
+        auto captureFieldFrame = [&](std::uint32_t globalTimestep) {
             lastCaptureStep = globalTimestep;
-            anyFrameCaptured = true;
+            ++capturedFrameCount;
+
+            if (fieldFrameSeriesWriter) {
+                // capture() waits only when both reusable 16-frame block slots are occupied.
+                // Ordinarily the writer owns one complete block while these six GPU-shared-buffer
+                // copies add a frame to the other, after which this thread resumes FDTD stepping.
+                auto written = fieldFrameSeriesWriter->capture(
+                    engine, globalTimestep, static_cast<double>(globalTimestep) * grid.timestepSeconds);
+                if (!written) {
+                    std::fprintf(stderr, "Copper: field frame-series write failed, disabling further writes: %s\n",
+                                 written.error().c_str());
+                    fieldFrameSeriesWriter.reset();
+                }
+            } else if (!fieldFrameSeries) {
+                // Preserve the original result for callers which did not request a series. The app
+                // always supplies one, so its full-grid frames never accumulate in memory.
+                const std::vector<float> ex = engine.readField(CopperEngine::Field::Ex);
+                const std::vector<float> ey = engine.readField(CopperEngine::Field::Ey);
+                const std::vector<float> ez = engine.readField(CopperEngine::Field::Ez);
+                const std::vector<float> hx = engine.readField(CopperEngine::Field::Hx);
+                const std::vector<float> hy = engine.readField(CopperEngine::Field::Hy);
+                const std::vector<float> hz = engine.readField(CopperEngine::Field::Hz);
+                CopperFieldFrame frame;
+                frame.timestep = globalTimestep;
+                frame.timeSeconds = static_cast<double>(globalTimestep) * grid.timestepSeconds;
+                const std::size_t cellCount = ex.size();
+                frame.cellEnergy.resize(cellCount);
+                for (std::size_t i = 0; i < cellCount; ++i) {
+                    const float eSq = ex[i] * ex[i] + ey[i] * ey[i] + ez[i] * ez[i];
+                    const float hSq = hx[i] * hx[i] + hy[i] * hy[i] + hz[i] * hz[i];
+                    frame.cellEnergy[i] = static_cast<float>(EPS0) * eSq + static_cast<float>(MUE0) * hSq;
+                }
+                result.fieldSnapshot.frames.push_back(std::move(frame));
+            }
         };
 
         // Energy-decay end criteria, matching openEMS's own RunFDTD() loop (openems.cpp) exactly:
@@ -259,6 +515,15 @@ CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
                 }
             };
         }
+
+        // Captures the true pristine initial condition (E=H=0, before any leapfrog update has run)
+        // as frame 0 -- CopperEngine::runWithProbeSampling()'s own sampler callback never actually
+        // receives globalTimestep==0 (its first invocation is always 1, *after* the first step has
+        // already landed; see CopperEngine::Impl::currentTimestep's own doc comment), so a
+        // `globalTimestep == 0` check inside that callback -- which this file used to have -- was
+        // silently unreachable and the series' own first frame was simply missing. This is the only
+        // place that value is ever actually captured.
+        captureFieldFrame(0);
 
         engine.runWithProbeSampling(
             steps,
@@ -317,15 +582,17 @@ CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
                         endCriteriaReached = true;
                     }
                 }
-                // Piggybacks on the same >4s wall-clock check above (so a
-                // field-frame capture never adds its own separate timing pass),
-                // but only actually captures once at least minCaptureStepSpacing
-                // steps have passed since the last one -- bounding the total
-                // frame count to roughly kFieldFrameBudget regardless of how long
-                // the run itself takes. Always captures the very last step's own
-                // state, whatever the spacing landed on.
-                if (sinceLastPrint > 4.0 && (globalTimestep - lastCaptureStep >= minCaptureStepSpacing ||
-                                             globalTimestep == 0 || globalTimestep == steps)) {
+                // Periodic capture piggybacks on the same >4s wall-clock check above (so a
+                // field-frame capture never adds its own separate timing pass), and only actually
+                // captures once at least minCaptureStepSpacing steps have passed since the last one
+                // -- bounding the total frame count regardless of how long the run itself takes.
+                // The final step's own state is captured unconditionally, deliberately NOT gated
+                // behind the wall-clock check too -- a run whose last step happens to land <4s after
+                // the previous progress tick (common on a short/fast run) would otherwise silently
+                // drop its own last frame the same way frame 0 used to be dropped (see this
+                // function's own captureFieldFrame(0) call, above the loop).
+                if (globalTimestep == steps ||
+                    (sinceLastPrint > 4.0 && globalTimestep - lastCaptureStep >= minCaptureStepSpacing)) {
                     captureFieldFrame(globalTimestep);
                 }
                 // Checked every timestep (not gated behind the >4s wall-clock
@@ -338,12 +605,10 @@ CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
                 return !endCriteriaReached && !cancelled;
             },
             applyLumpedRLC);
-        if (!anyFrameCaptured) {
-            // A run that ends (max steps or early-stop) before ever crossing the >4s cadence above
-            // -- a short/fast simulation -- would otherwise leave the field snapshot with zero
-            // frames; always guarantee at least the final state.
-            captureFieldFrame(stepsActuallyRun);
-        }
+        // No "zero frames captured" fallback needed here any more -- captureFieldFrame(0) above the
+        // loop and the unconditional `globalTimestep == steps` capture inside it together already
+        // guarantee at least the initial and final states are always captured, even for a run that
+        // never crosses the periodic >4s wall-clock cadence at all.
         if (!onProgress) {
             timer.mark("FDTD run (all timesteps + per-timestep probe sampling)");
             if (endCriteriaReached) {
@@ -359,12 +624,24 @@ CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
 
         if (!onProgress) {
             timer.mark("field snapshot capture (6x readField + per-cell energy, per frame)");
-            std::fprintf(stdout, "Copper: captured %zu field frame(s)\n", result.fieldSnapshot.frames.size());
+            std::fprintf(stdout, "Copper: captured %u field frame(s)\n", capturedFrameCount);
+        }
+
+        if (fieldFrameSeriesWriter) {
+            // Best-effort even here -- a cancelled run (see `cancelled` below) still leaves
+            // whatever frames were captured before cancellation as a valid, reopenable file (every
+            // completed chunk was already flushed inside captureFieldFrame/writeFrame); this just
+            // finalizes the last, possibly-partial chunk.
+            if (auto closed = fieldFrameSeriesWriter->close(); !closed) {
+                std::fprintf(stderr, "Copper: field frame-series close() failed: %s\n", closed.error().c_str());
+            } else {
+                result.fieldFrameSeriesPath = fieldFrameSeries->path;
+            }
         }
 
         if (cancelled) {
-            // Deliberately !success -- probes/fieldSnapshot above only hold whatever partial data
-            // was gathered before the sampler stopped early, not a complete/usable run. See
+            // Deliberately !success -- probes and the field series/snapshot above only hold whatever
+            // partial data was gathered before the sampler stopped early, not a complete run. See
             // CopperFDTDRunResult::cancelled's own doc comment for why a caller should check this
             // before treating an unsuccessful result as a genuine failure.
             result.cancelled = true;
@@ -381,9 +658,13 @@ CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
 std::string dumpEarlyFrames(openEMS& fdtd, ContinuousStructure& /*csx*/, const std::filesystem::path& outputDir,
                              std::uint32_t frameCount, std::uint32_t marginCells, CopperBoundaryKind boundaryKind,
                              double cpmlAlphaMax, std::uint32_t pmlDepthCells) {
-    constexpr double kDefaultCpmlLowFrequencyHz = 100e6;
     if (cpmlAlphaMax < 0.0) {
-        cpmlAlphaMax = 2 * M_PI * kDefaultCpmlLowFrequencyHz * EPS0;
+        // See CopperFDTDRunner.h's own doc comment on cpmlAlphaMax's default -- 100MHz is every
+        // real board this codebase had actually simulated as of when that default was chosen, not
+        // an arbitrary round number, but a caller with a lower configured sweep floor should prefer
+        // cpmlAlphaMaxForFrequency() with that simulation's own value instead of relying on this.
+        constexpr double kDefaultCpmlLowFrequencyHz = 100e6;
+        cpmlAlphaMax = cpmlAlphaMaxForFrequency(kDefaultCpmlLowFrequencyHz);
     }
     try {
         auto& copperFdtd = static_cast<CopperOpenEMS&>(fdtd);
@@ -575,9 +856,13 @@ std::string dumpEarlyFrames(openEMS& fdtd, ContinuousStructure& /*csx*/, const s
 std::string dumpDetailedTrace(openEMS& fdtd, ContinuousStructure& /*csx*/, std::uint32_t stepCount,
                                std::uint32_t boxSide, CopperBoundaryKind boundaryKind, double cpmlAlphaMax,
                                std::uint32_t pmlDepthCells) {
-    constexpr double kDefaultCpmlLowFrequencyHz = 100e6;
     if (cpmlAlphaMax < 0.0) {
-        cpmlAlphaMax = 2 * M_PI * kDefaultCpmlLowFrequencyHz * EPS0;
+        // See CopperFDTDRunner.h's own doc comment on cpmlAlphaMax's default -- 100MHz is every
+        // real board this codebase had actually simulated as of when that default was chosen, not
+        // an arbitrary round number, but a caller with a lower configured sweep floor should prefer
+        // cpmlAlphaMaxForFrequency() with that simulation's own value instead of relying on this.
+        constexpr double kDefaultCpmlLowFrequencyHz = 100e6;
+        cpmlAlphaMax = cpmlAlphaMaxForFrequency(kDefaultCpmlLowFrequencyHz);
     }
     try {
         auto& copperFdtd = static_cast<CopperOpenEMS&>(fdtd);

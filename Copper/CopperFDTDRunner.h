@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -22,6 +23,25 @@ class openEMS;
 class ContinuousStructure;
 
 namespace copper {
+
+/// Opt-in request to persist this run's field-frame time series to disk in the field frame-series
+/// format (see docs/field_frame_series_format.md and FieldFrameSeriesWriter.hpp). When present, the
+/// captured frames are streamed to this file instead of being retained in CopperFDTDRunResult's
+/// in-memory fieldSnapshot; callers can reopen them lazily with FieldFrameSeriesReader. Left unset
+/// preserves the original in-memory result for callers which do not have an on-disk consumer.
+struct FieldFrameSeriesRequest {
+    std::filesystem::path path;
+    std::string simulationName;
+    std::int32_t excitedPort = 0;
+    double boardZMin = 0.0;
+    double boardZMax = 0.0;
+    /// See FieldFrameSeriesWriter::create()'s own `chunkFrames` parameter.
+    std::uint32_t chunkFrames = 16;
+    /// Called after the file has been created and entered SWMR-write mode, before frame generation
+    /// starts. A live viewer can begin opening `path` here without racing file creation or mistaking
+    /// a stale file from an earlier run for this one.
+    std::function<void(const std::filesystem::path&)> onWriterReady;
+};
 
 /// Voltage vs current -- deliberately a distinct type from Internal/CopperProbes.hpp's own
 /// CopperProbeType, not a shared one: that header uses the flat/source-checkout include form (see
@@ -41,6 +61,18 @@ enum class CopperProbeKind { Voltage, Current };
 /// comparison/fallback. Kept a plain enum here (not buried inside CopperPML.hpp) so a caller
 /// selecting it doesn't need to know anything about how either is actually computed.
 enum class CopperBoundaryKind { UPML, CPML };
+
+/// `2*pi*lowFrequencyHz*EPS0` -- the value runFDTDPortOnGPU()'s own `cpmlAlphaMax` parameter expects
+/// for a simulation whose own frequency sweep floor is `lowFrequencyHz`, matching the formula its
+/// generic 100MHz-based default already uses internally (see that parameter's own doc comment). CPML's
+/// alpha (CFS) term is what keeps the PML's decay bounded away from 1 even where ordinary conductivity
+/// grading is weak/zero -- exactly the mechanism that fixes late-time instability -- but it does so
+/// relative to *this* frequency: leaving cpmlAlphaMax at a value derived from a higher frequency than a
+/// simulation's own actual sweep floor under-damps whatever content lies between the two, which then
+/// persists and grows in relative visibility over a long run instead of decaying. Every real caller
+/// should pass this (with its own EMSConfig's Frequency::start(), the same value that determines the
+/// sweep's own frequency-domain floor) rather than relying on runFDTDPortOnGPU()'s generic default.
+double cpmlAlphaMaxForFrequency(double lowFrequencyHz);
 
 /// One (time, value) sample -- `value` already has the probe's own weight applied (matching
 /// ProcessIntegral::Process's own `m_Results[n] * m_weight`, see Internal/CopperProbes.hpp's
@@ -114,9 +146,9 @@ struct CopperFieldSnapshot {
 /// a pure compute function now, and persisting the result -- if a caller needs to at all, e.g. to
 /// keep gerber2ems's existing on-disk S-parameter pipeline working unmodified -- is an explicit,
 /// visible step in that caller's own code, via CopperProbeResult::data() above, not an implicit
-/// side effect buried in here). `fieldSnapshot` is likewise only meaningful when `success`; always
-/// populated with at least one frame (the extra full-grid reads are a handful of MB each, negligible
-/// against a real run's own runtime -- see CopperFDTDRunner.cpp for the capture cadence).
+/// side effect buried in here). Field captures are likewise only meaningful when `success`: they
+/// are either available through `fieldFrameSeriesPath` when disk persistence was requested, or as
+/// at least one in-memory `fieldSnapshot.frames` entry otherwise.
 struct CopperFDTDRunResult {
     bool success = false;
     std::string errorMessage; // only meaningful when !success
@@ -127,6 +159,9 @@ struct CopperFDTDRunResult {
     /// check this rather than treating every `!success` the same way.
     bool cancelled = false;
     std::vector<CopperProbeResult> probes;
+    /// Populated only when a requested FieldFrameSeriesRequest was written and closed successfully.
+    /// In that case fieldSnapshot contains mesh metadata but no frames.
+    std::optional<std::filesystem::path> fieldFrameSeriesPath;
     CopperFieldSnapshot fieldSnapshot;
 };
 
@@ -188,8 +223,11 @@ using CopperFDTDProgressCallback = std::function<void(const CopperFDTDProgress&)
 /// formulation instead. `cpmlAlphaMax` is only meaningful when `boundaryKind` is CPML -- CPML's own
 /// alpha (CFS) parameter, in S/m (see Internal/CopperCPML.hpp's own doc comment); defaults to
 /// `2*pi*100MHz*EPS0`, matching this codebase's own real boards' lowest excited frequency to date --
-/// a caller whose simulation's own frequency sweep floor differs should pass `2*pi*f_low*EPS0` for
-/// that simulation's own value instead. `pmlDepthCells` is only meaningful when `boundaryKind` is
+/// a caller whose simulation's own frequency sweep floor differs should pass
+/// `cpmlAlphaMaxForFrequency(f_low)` for that simulation's own configured start frequency instead
+/// (see that function's own doc comment for why leaving this at the generic default under-damps a
+/// simulation whose own sweep floor is well below 100MHz, producing exactly the late-time-growing
+/// energy CPML exists to prevent). `pmlDepthCells` is only meaningful when `boundaryKind` is
 /// CPML -- see Internal/CopperCPML.hpp's own top comment for why a CPML run must never have called
 /// openEMS's own Set_BC_PML() (the caller is responsible for that; this is just told the depth it
 /// would otherwise have passed there, in cells, uniform on all 6 faces) and instead computes its own
@@ -202,11 +240,16 @@ using CopperFDTDProgressCallback = std::function<void(const CopperFDTDProgress&)
 /// returning true stops the run within a timestep or two, well under a second even on a long run.
 /// Left as the default (empty) means the run can never be cancelled this way. See
 /// CopperFDTDRunResult::cancelled for how a caller tells this apart from a genuine failure.
+///
+/// `fieldFrameSeries`, if given, persists every captured field frame to disk instead of retaining
+/// the frames in memory (see FieldFrameSeriesRequest's own doc comment). Left at the default
+/// (nullopt) preserves the original in-memory CopperFDTDRunResult::fieldSnapshot behaviour.
 CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
                                       const CopperFDTDProgressCallback& onProgress = {},
                                       CopperBoundaryKind boundaryKind = CopperBoundaryKind::CPML,
                                       double cpmlAlphaMax = -1.0, std::uint32_t pmlDepthCells = 16,
-                                      const std::function<bool()>& isCancelled = {});
+                                      const std::function<bool()>& isCancelled = {},
+                                      const std::optional<FieldFrameSeriesRequest>& fieldFrameSeries = std::nullopt);
 
 /// One-off diagnostic, NOT part of the normal run path: sets up exactly like runFDTDPortOnGPU() (same
 /// grid/coefficient/excitation extraction, same CopperEngine), then instead of running to completion,

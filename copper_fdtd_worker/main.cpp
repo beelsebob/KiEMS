@@ -156,8 +156,9 @@ int main(int argc, char** argv) {
     // value Simulation::setBoundaryConditions() used -- or, for a CPML run, deliberately did *not*
     // pass to openEMS's own Set_BC_PML() -- see that function's own comment) rather than relying on
     // runFDTDPortOnGPU()'s own default staying in sync with it.
+    const double cpmlAlphaMax = copper::cpmlAlphaMaxForFrequency(simulation.config().frequency().start());
     const copper::CopperFDTDRunResult gpuResult = copper::runFDTDPortOnGPU(
-        simulation.fdtdEngine(), simulation.csx(), {}, copper::CopperBoundaryKind::CPML, -1.0,
+        simulation.fdtdEngine(), simulation.csx(), {}, copper::CopperBoundaryKind::CPML, cpmlAlphaMax,
         gerber2ems::constants::pmlDepthCells);
     std::filesystem::current_path(cwd);
     if (!gpuResult.success) {

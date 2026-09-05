@@ -11,6 +11,7 @@
 #include <fstream>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "gerber2ems/config.hpp"
@@ -47,7 +48,8 @@ using gerber2ems::SimulationStage;
                  energyChangeDB:(double)energyChangeDB
            targetEnergyChangeDB:(double)targetEnergyChangeDB
                  absoluteEnergy:(double)absoluteEnergy
-               duringExcitation:(BOOL)duringExcitation {
+               duringExcitation:(BOOL)duringExcitation
+                 excitedNetName:(nullable NSString*)excitedNetName {
     self = [super init];
     if (self) {
         _phase = phase;
@@ -56,6 +58,7 @@ using gerber2ems::SimulationStage;
         _targetEnergyChangeDB = targetEnergyChangeDB;
         _absoluteEnergy = absoluteEnergy;
         _duringExcitation = duringExcitation;
+        _excitedNetName = [excitedNetName copy];
     }
     return self;
 }
@@ -67,6 +70,21 @@ NSError* makeError(const std::string& message) {
     return [NSError errorWithDomain:EMSConfigErrorDomain
                                 code:1
                             userInfo:@{NSLocalizedDescriptionKey : @(message.c_str())}];
+}
+
+// std::filesystem::current_path()'s default (no error_code) overload throws on failure -- an
+// uncaught exception there previously crashed the whole app outright (rather than just failing this
+// one job) when the process's cwd was deleted out from under a still-running background job (see
+// JobScheduler::cleanUpDirectory(_:)'s own doc comment for the actual race that caused this in
+// practice). Used at every runGPUPortInProcess() call site that queries the current directory,
+// converting that failure into this function's own std::expected error channel instead.
+std::expected<std::filesystem::path, std::string> currentPathOrError() {
+    std::error_code ec;
+    std::filesystem::path path = std::filesystem::current_path(ec);
+    if (ec) {
+        return std::unexpected("Could not determine the current working directory: " + ec.message());
+    }
+    return path;
 }
 
 // A distinct error code (rather than matching on makeError()'s own message text) so
@@ -109,15 +127,18 @@ std::vector<double> linspace(double start, double stop, std::int32_t num) {
 /// is a plain `std::size_t&` (not atomic/thread-safety-guarded) because generateResults() calls this
 /// FDTDPortRunner for each excited port strictly sequentially, never concurrently.
 ///
-/// `outFieldSnapshot`, if non-null, is overwritten with this port's own full-grid field snapshot on
-/// success (see copper::CopperFDTDRunResult::fieldSnapshot) -- for a multi-port simulation this
-/// means whichever port runs *last* wins; the Field Viewer only ever shows one snapshot at a time
-/// and there's no per-port selector yet, so "the most recently computed port's own field state" is
-/// the simplest reasonable default rather than keeping one per port.
+/// `outFieldFrameSeriesPath`, if non-null, is overwritten with this port's own on-disk field series
+/// on success. The caller supplies a distinct path per excitation so every completed run remains
+/// available to the field viewer.
 std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32_t excitedPortNumber,
                                                        EMSPipelineProgressHandler progressHandler,
                                                        std::size_t totalExcitedPorts, std::size_t& portsCompleted,
-                                                       copper::CopperFieldSnapshot* outFieldSnapshot,
+                                                       const std::string& simulationName,
+                                                       const std::string& excitedNetName,
+                                                       double boardZMinMeters, double boardZMaxMeters,
+                                                       const std::filesystem::path& fieldFrameSeriesPath,
+                                                       std::function<void(const std::filesystem::path&)> onWriterReady,
+                                                       std::filesystem::path* outFieldFrameSeriesPath,
                                                        const std::atomic<bool>& cancelRequested) {
     // Checked before doing any work for this port at all -- a multi-port simulation's excited
     // ports run strictly sequentially (see this function's own caller, generateResults()'s
@@ -127,7 +148,11 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     if (cancelRequested.load()) {
         return std::unexpected(kCancelledMessage);
     }
-    const std::filesystem::path cwd = std::filesystem::current_path();
+    auto cwdResult = currentPathOrError();
+    if (!cwdResult) {
+        return std::unexpected(cwdResult.error());
+    }
+    const std::filesystem::path cwd = *cwdResult;
     // sim.setupFDTDOperator() (openEMS's own SetupFDTD()/CalcECOperator()) is the one call in this
     // whole pipeline with genuinely no progress hook of its own -- it's also, per real-world timing,
     // the single most expensive step of the entire Simulation phase on anything but a tiny board (see
@@ -142,23 +167,43 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
                                                       energyChangeDB:0.0
                                                 targetEnergyChangeDB:0.0
                                                       absoluteEnergy:0.0
-                                                    duringExcitation:NO]);
+                                                    duringExcitation:NO
+                                                      excitedNetName:@(excitedNetName.c_str())]);
     }
     if (auto result = sim.setupFDTDOperator(excitedPortNumber); !result) {
         return std::unexpected(result.error());
     }
-    const std::filesystem::path probeDir = std::filesystem::current_path();
-    // Boundary kind and alphaMax both left at runFDTDPortOnGPU()'s own defaults (real CPML -- see
-    // Internal/CopperCPML.hpp -- with alphaMax = 2*pi*100MHz*EPS0) -- matches the CLI's own default;
-    // no app-side toggle for gerber2ems::PMLKind yet (plain UPML, openEMS's own original formulation,
-    // is reachable via `--pml upml` on the CLI for comparison/fallback -- see PMLKind's own doc
-    // comment). pmlDepthCells passed explicitly (matching gerber2ems::constants::pmlDepthCells, the
-    // same value Simulation::setBoundaryConditions() used -- or, for a CPML run, deliberately did
-    // *not* pass to openEMS's own Set_BC_PML() -- see that function's own comment) rather than
-    // relying on runFDTDPortOnGPU()'s own default staying in sync with it.
+    auto probeDirResult = currentPathOrError();
+    if (!probeDirResult) {
+        return std::unexpected(probeDirResult.error());
+    }
+    const std::filesystem::path probeDir = *probeDirResult;
+    // Boundary kind left at runFDTDPortOnGPU()'s own default (real CPML -- see
+    // Internal/CopperCPML.hpp) -- no app-side toggle for gerber2ems::PMLKind yet (plain UPML,
+    // openEMS's own original formulation, is reachable via `--pml upml` on the CLI for
+    // comparison/fallback -- see PMLKind's own doc comment). alphaMax is *not* left at
+    // runFDTDPortOnGPU()'s own generic 100MHz-based default -- see copper::cpmlAlphaMaxForFrequency()'s
+    // own doc comment for why a simulation whose configured sweep floor is below 100MHz (this app's own
+    // Frequency::start() default is 1MHz -- config.hpp) needs alphaMax computed from that simulation's
+    // own value instead, or late-time energy from the under-damped gap between the two frequencies
+    // persists and visibly grows over a long run.
+    //
+    // pmlDepthCells passed explicitly (matching gerber2ems::constants::pmlDepthCells, the same value
+    // Simulation::setBoundaryConditions() used -- or, for a CPML run, deliberately did *not* pass to
+    // openEMS's own Set_BC_PML() -- see that function's own comment) rather than relying on
+    // runFDTDPortOnGPU()'s own default staying in sync with it.
+    const double cpmlAlphaMax = copper::cpmlAlphaMaxForFrequency(sim.config().frequency().start());
     copper::CopperFDTDProgressCallback onCopperProgress;
     if (progressHandler) {
         onCopperProgress = [&](const copper::CopperFDTDProgress& p) {
+            // runFDTDPortOnGPU brackets its own GPU-buffer/discovery setup with synthetic 0/1 and
+            // 1/1 reports.  That work is still part of the indeterminate SettingUp phase reported
+            // above; treating those markers as timestep progress made the simulation bar run
+            // 0% -> 100% and then jump back to the real FDTD fraction.  Only actual timesteps belong
+            // on the determinate Simulation progress bar.
+            if (p.phase != copper::CopperFDTDPhase::FDTDRun) {
+                return;
+            }
             const double stepFraction =
                 p.totalSteps > 0 ? static_cast<double>(p.currentStep) / static_cast<double>(p.totalSteps) : 0.0;
             const double overall = totalExcitedPorts > 0
@@ -171,14 +216,28 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
                                               energyChangeDB:p.energyChangeDB
                                         targetEnergyChangeDB:p.targetEnergyChangeDB
                                               absoluteEnergy:p.absoluteEnergy
-                                            duringExcitation:p.duringExcitation];
+                                            duringExcitation:p.duringExcitation
+                                              excitedNetName:@(excitedNetName.c_str())];
             progressHandler(progress);
         };
     }
+    copper::FieldFrameSeriesRequest fieldSeries;
+    fieldSeries.path = fieldFrameSeriesPath;
+    fieldSeries.simulationName = simulationName;
+    fieldSeries.excitedPort = excitedPortNumber;
+    fieldSeries.boardZMin = boardZMinMeters;
+    fieldSeries.boardZMax = boardZMaxMeters;
+    fieldSeries.onWriterReady = std::move(onWriterReady);
+    // Keep the writer's default multi-frame chunk. FieldFrameSeriesReader maps a requested frame to
+    // its containing chunk and caches exactly that chunk, making sequential playback cheap without
+    // ever reading the rest of the series.
     const copper::CopperFDTDRunResult gpuResult = copper::runFDTDPortOnGPU(
-        sim.fdtdEngine(), sim.csx(), onCopperProgress, copper::CopperBoundaryKind::CPML, -1.0,
-        gerber2ems::constants::pmlDepthCells, [&] { return cancelRequested.load(); });
-    std::filesystem::current_path(cwd);
+        sim.fdtdEngine(), sim.csx(), onCopperProgress, copper::CopperBoundaryKind::CPML, cpmlAlphaMax,
+        gerber2ems::constants::pmlDepthCells, [&] { return cancelRequested.load(); }, fieldSeries);
+    // Best-effort restore -- `cwd` no longer existing shouldn't discard an otherwise-successful run's
+    // own results (unlike currentPathOrError()'s other two call sites above, both load-bearing).
+    std::error_code restoreEc;
+    std::filesystem::current_path(cwd, restoreEc);
     if (gpuResult.cancelled) {
         return std::unexpected(kCancelledMessage);
     }
@@ -186,8 +245,11 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
         return std::unexpected(gpuResult.errorMessage);
     }
     ++portsCompleted;
-    if (outFieldSnapshot != nullptr) {
-        *outFieldSnapshot = gpuResult.fieldSnapshot;
+    if (!gpuResult.fieldFrameSeriesPath.has_value()) {
+        return std::unexpected("Copper completed without producing its requested field-frame series");
+    }
+    if (outFieldFrameSeriesPath != nullptr) {
+        *outFieldFrameSeriesPath = *gpuResult.fieldFrameSeriesPath;
     }
 
     for (const copper::CopperProbeResult& probeResult : gpuResult.probes) {
@@ -225,11 +287,22 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     // to be, it must not be rebuilt on every call. Reset alongside `_geometry`/`_grid` themselves
     // (see -invalidateFromStage:) since it's derived from exactly those two.
     EMSGeometryPreview* _geometryPreviewCache;
+    EMSResultsPreview* _resultsPreviewCache;
 
-    // The last excited port's own full-grid field snapshot, captured alongside `_results` -- see
-    // runGPUPortInProcess()'s own doc comment for why "last port wins" rather than one per port.
-    // Reset together with `_results` (see -invalidateFromStage:).
-    std::optional<copper::CopperFieldSnapshot> _lastFieldSnapshot;
+    // One file per excited port. The Objective-C snapshots contain only metadata/lazy frame handles,
+    // each sharing one open reader for its own series, so retaining every excitation does not retain
+    // every field grid in RAM.
+    std::vector<std::pair<std::int32_t, std::filesystem::path>> _fieldFrameSeries;
+    std::mutex _fieldFrameSeriesMutex;
+    std::uint64_t _fieldFrameSeriesGeneration;
+    // Path -> last snapshot built for that exact SWMR series file, guarded by the same mutex above
+    // -- -fieldSnapshots reuses each entry's own reader (refreshing it in place) across calls
+    // instead of reopening the file from scratch every time, so a live progress-driven refresh
+    // doesn't cold-start the decode/prefetch caches a still-open FieldViewer depends on for smooth
+    // playback. Keyed by path rather than port index so a rerun's ping-ponged path (see
+    // fieldFrameSeriesSlot below) naturally misses this cache and opens fresh, rather than
+    // refreshing and serving the previous run's now-abandoned file.
+    NSMutableDictionary<NSString*, EMSFieldSnapshot*>* _fieldSnapshotCache;
 
     // Set by -requestCancellation (any thread), read by -ensurePrepared:/-ensureStage: (the
     // background thread actually running them) at each checkpoint -- see -requestCancellation's own
@@ -381,7 +454,8 @@ kicadQueryHelperPath:(NSString*)helperPath
                                                            energyChangeDB:0
                                                      targetEnergyChangeDB:0
                                                            absoluteEnergy:0
-                                                         duringExcitation:NO]);
+                                                         duringExcitation:NO
+                                                           excitedNetName:nil]);
         }
     };
 
@@ -471,11 +545,47 @@ kicadQueryHelperPath:(NSString*)helperPath
         // call below -- generateResults() calls its FDTDPortRunner once per excited port strictly
         // sequentially, never concurrently, so there's no real data race to guard against.
         std::size_t portsCompleted = 0;
-        copper::CopperFieldSnapshot capturedFieldSnapshot;
-        auto portRunner = [self, progressHandler, totalExcitedPorts, &portsCompleted, &capturedFieldSnapshot](
+        double boardThickness = 0.0;
+        for (const auto& substrate : _scaledConfig->getSubstrates()) {
+            boardThickness += substrate.thickness();
+        }
+        constexpr double kSimUnitsToMeters =
+            gerber2ems::constants::baseUnit / static_cast<double>(gerber2ems::constants::unitMultiplier);
+        const double boardZMinMeters = -boardThickness * kSimUnitsToMeters;
+        // Alternate files: the viewer may still have the preceding generation open while a rerun
+        // begins, so truncating one fixed path is unsafe. Two slots avoid that collision without
+        // leaving one potentially-large series behind for every rerun during the document's life.
+        const std::uint64_t fieldFrameSeriesSlot = ++_fieldFrameSeriesGeneration % 2;
+        const std::filesystem::path fieldFrameSeriesDirectory = _paths->simulationDir / _simulationName;
+        {
+            std::lock_guard lock(_fieldFrameSeriesMutex);
+            _fieldFrameSeries.clear();
+            _fieldSnapshotCache = nil;
+        }
+        auto portRunner = [self, progressHandler, totalExcitedPorts, &portsCompleted,
+                           boardZMinMeters, fieldFrameSeriesDirectory,
+                           fieldFrameSeriesSlot](
                                Simulation& sim, std::int32_t excitedPortNumber) {
-            return runGPUPortInProcess(sim, excitedPortNumber, progressHandler, totalExcitedPorts, portsCompleted,
-                                        &capturedFieldSnapshot, self->_cancelRequested);
+            const std::string& excitedNetName =
+                self->_simConfig->ports().at(static_cast<std::size_t>(excitedPortNumber)).netName();
+            const std::filesystem::path requestedPath =
+                fieldFrameSeriesDirectory /
+                ("field_frames_port_" + std::to_string(excitedPortNumber) + "_" +
+                 std::to_string(fieldFrameSeriesSlot) + ".h5");
+            // Advertise only after Copper has created and entered SWMR mode. The alternating path
+            // may still contain an older run before H5Fcreate truncates it, so publishing it sooner
+            // could briefly show stale fields during setup.
+            auto onWriterReady = [self, excitedPortNumber](const std::filesystem::path& readyPath) {
+                std::lock_guard lock(self->_fieldFrameSeriesMutex);
+                self->_fieldFrameSeries.emplace_back(excitedPortNumber, readyPath);
+            };
+            std::filesystem::path completedPath;
+            auto result = runGPUPortInProcess(sim, excitedPortNumber, progressHandler, totalExcitedPorts,
+                                               portsCompleted, self->_simulationName, excitedNetName,
+                                               boardZMinMeters, 0.0, requestedPath, std::move(onWriterReady),
+                                               &completedPath,
+                                               self->_cancelRequested);
+            return result;
         };
         auto resultsResult =
             gerber2ems::generateResults(*_grid, *_scaledConfig, options, *_paths, frequencies, portRunner);
@@ -494,7 +604,6 @@ kicadQueryHelperPath:(NSString*)helperPath
             return NO;
         }
         _results.emplace(*_grid, std::move(*resultsResult));
-        _lastFieldSnapshot = std::move(capturedFieldSnapshot);
     }
 
     if (!_postprocessing.has_value()) {
@@ -531,25 +640,53 @@ kicadQueryHelperPath:(NSString*)helperPath
     if (!_postprocessing.has_value()) {
         return nil;
     }
-    return buildResultsPreview(*_postprocessing->postprocessing().postprocessor, *_simConfig);
+    if (!_resultsPreviewCache) {
+        _resultsPreviewCache = buildResultsPreview(*_postprocessing->postprocessing().postprocessor, *_simConfig,
+                                                   _scaledConfig->frequency());
+    }
+    return _resultsPreviewCache;
 }
 
-- (nullable EMSFieldSnapshot*)fieldSnapshot {
-    if (!_lastFieldSnapshot.has_value()) {
-        return nil;
+- (void)updateEyeBitRate:(double)bitRate {
+    if (_simConfig != nullptr) {
+        _simConfig->setEyeBitRate(bitRate);
     }
-    // Board top is always Z=0, bottom is the substrate stack's own total thickness below that --
-    // matches GridGenerator::Impl::_generateZ()'s own convention exactly (offset starts at 0,
-    // decreases by each substrate layer's thickness() -- see grid_gen.cpp), computed independently
-    // here since GridGenerator has no public accessor for it (only xmin()/ymin()). `.thickness()`
-    // is already in simulation units (LayerConfig's own doc comment), same frame buildFieldSnapshot
-    // converts Copper's own metres-based lineZ into -- no further scaling needed.
-    double boardThickness = 0.0;
-    const std::vector<gerber2ems::LayerConfig> substrates = _scaledConfig->getSubstrates();
-    for (const auto& substrate : substrates) {
-        boardThickness += substrate.thickness();
+    _resultsPreviewCache = nil;
+}
+
+- (NSArray<EMSFieldSnapshot*>*)fieldSnapshots {
+    std::vector<std::pair<std::int32_t, std::filesystem::path>> series;
+    NSDictionary<NSString*, EMSFieldSnapshot*>* previousCache;
+    {
+        std::lock_guard lock(_fieldFrameSeriesMutex);
+        series = _fieldFrameSeries;
+        previousCache = [_fieldSnapshotCache copy];
     }
-    return buildFieldSnapshot(*_lastFieldSnapshot, -boardThickness, 0.0);
+    // Refreshes the lightweight SWMR readers already open from a previous call (see
+    // buildFieldSnapshot()'s own doc comment) on each UI progress refresh, discovering newly
+    // published blocks without reopening the file or sharing an HDF5 handle across the simulation
+    // and UI threads; each returned snapshot then owns its reader for lazy frame decoding/playback.
+    NSMutableArray<EMSFieldSnapshot*>* snapshots = [NSMutableArray arrayWithCapacity:series.size()];
+    NSMutableDictionary<NSString*, EMSFieldSnapshot*>* refreshedCache =
+        [NSMutableDictionary dictionaryWithCapacity:series.size()];
+    for (const auto& [portIndex, path] : series) {
+        if (portIndex < 0 || static_cast<std::size_t>(portIndex) >= _simConfig->ports().size()) {
+            continue;
+        }
+        const std::string& excitationName = _simConfig->ports()[static_cast<std::size_t>(portIndex)].name();
+        NSString* pathKey = @(path.string().c_str());
+        if (EMSFieldSnapshot* snapshot = buildFieldSnapshot(path, excitationName, previousCache[pathKey])) {
+            [snapshots addObject:snapshot];
+            refreshedCache[pathKey] = snapshot;
+        }
+    }
+    {
+        std::lock_guard lock(_fieldFrameSeriesMutex);
+        // Only entries for paths still current survive -- a rerun's ping-ponged path naturally
+        // drops the previous run's now-abandoned reader here instead of retaining it forever.
+        _fieldSnapshotCache = refreshedCache;
+    }
+    return [snapshots copy];
 }
 
 - (void)invalidateFromStage:(EMSPipelineStage)stage {
@@ -560,8 +697,13 @@ kicadQueryHelperPath:(NSString*)helperPath
         // might just as well have changed something scaledToSimulationUnits() would scale
         // differently, e.g. hull padding).
         _postprocessing.reset();
+        _resultsPreviewCache = nil;
         _results.reset();
-        _lastFieldSnapshot.reset();
+        {
+            std::lock_guard lock(_fieldFrameSeriesMutex);
+            _fieldFrameSeries.clear();
+            _fieldSnapshotCache = nil;
+        }
         _grid.reset();
         _geometry.reset();
         _geometryPreviewCache = nil;
@@ -573,8 +715,13 @@ kicadQueryHelperPath:(NSString*)helperPath
     case EMSPipelineStageGrid:
         // Geometry stays valid -- only the grid lines (and anything built from them) get redone.
         _postprocessing.reset();
+        _resultsPreviewCache = nil;
         _results.reset();
-        _lastFieldSnapshot.reset();
+        {
+            std::lock_guard lock(_fieldFrameSeriesMutex);
+            _fieldFrameSeries.clear();
+            _fieldSnapshotCache = nil;
+        }
         _grid.reset();
         _geometryPreviewCache = nil;
         break;
@@ -582,8 +729,13 @@ kicadQueryHelperPath:(NSString*)helperPath
         // Geometry (and the grid lines placed on it) stay valid -- only the FDTD run and its own
         // postprocessing get redone.
         _postprocessing.reset();
+        _resultsPreviewCache = nil;
         _results.reset();
-        _lastFieldSnapshot.reset();
+        {
+            std::lock_guard lock(_fieldFrameSeriesMutex);
+            _fieldFrameSeries.clear();
+            _fieldSnapshotCache = nil;
+        }
         break;
     }
 }

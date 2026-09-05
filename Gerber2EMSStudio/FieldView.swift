@@ -10,22 +10,48 @@ import simd
 /// comment for why this needs its own shader pair), with the same mouse-drag orbit/right-drag pan/
 /// scroll-zoom interaction.
 final class FieldView: MTKView, MTKViewDelegate {
+    private var isReplacingSnapshot = false
     var preview: EMSGeometryPreview? {
         didSet {
             rebuildOverlayBuffers()
-            hasFitCamera = false
+            // geometryPreview() on the pipeline side caches and returns the same instance until
+            // something actually invalidates it, so identity here reliably means "unchanged" --
+            // see fieldSnapshot's own didSet for why that distinction matters (this mirrors it).
+            if oldValue !== preview {
+                hasFitCamera = false
+            }
             needsDisplay = true
         }
     }
 
-    var fieldSnapshot: EMSFieldSnapshot? {
+    private(set) var fieldSnapshot: EMSFieldSnapshot? {
         didSet {
             let frameCount = fieldSnapshot?.frames.count ?? 0
             currentFrameIndex = frameCount > 0 ? min(currentFrameIndex, frameCount - 1) : 0
+            // A live SWMR refresh hands back a brand-new EMSFieldSnapshot object for the *same*
+            // series (same simulationName+excitedPort, just with more frames published) on every
+            // progress tick, even though it now reuses the same underlying reader/decode cache
+            // rather than reopening it -- see buildFieldSnapshot()'s own doc comment. Re-fitting the
+            // camera on every one of those ticks would silently reset the zoom/pan out from under
+            // whoever's currently inspecting the view, and rescanning seriesOnBoardMaxEnergy from
+            // scratch would repeatedly re-decode frames this view has already scanned. Only reset
+            // either when the series itself actually changed (including the first time one is ever
+            // shown) -- done before rebuildVoxelGeometry() below, which is what actually extends the
+            // scan for whatever's new.
+            if !Self.isSameSeries(oldValue, fieldSnapshot) {
+                hasFitCamera = false
+                seriesOnBoardMaxEnergy = 0
+                seriesOnBoardMaxEnergyScannedCount = 0
+            }
             rebuildVoxelGeometry()
-            hasFitCamera = false
             needsDisplay = true
+            prefetchAhead()
         }
+    }
+
+    private static func isSameSeries(_ a: EMSFieldSnapshot?, _ b: EMSFieldSnapshot?) -> Bool {
+        guard let a, let b else { return false }
+        return a.simulationName == b.simulationName && a.excitedPort == b.excitedPort
     }
 
     /// Which of `fieldSnapshot.frames` the voxel cloud currently displays -- see
@@ -35,10 +61,43 @@ final class FieldView: MTKView, MTKViewDelegate {
     /// that would now be out of range (see fieldSnapshot's own didSet).
     var currentFrameIndex: Int = 0 {
         didSet {
-            guard currentFrameIndex != oldValue else { return }
+            guard !isReplacingSnapshot, currentFrameIndex != oldValue else { return }
             updateVoxelColors(forFrame: currentFrameIndex)
             needsDisplay = true
+            prefetchAhead()
         }
+    }
+
+    /// How many frames ahead of `currentFrameIndex` to keep warm on disk -- deliberately more than
+    /// one on-disk HDF5 chunk's worth (the writer's own default is 8 frames/chunk; see
+    /// FieldFrameSeriesWriter's chunkFrames default and docs/field_frame_series_format.md) so that,
+    /// from anywhere within the chunk currently being displayed, the *next* chunk's decode has
+    /// already been kicked off well before playback actually reaches its boundary -- avoiding the
+    /// pause that used to happen every `chunkFrames`-th frame while that chunk was decoded
+    /// synchronously on demand. EMSFieldFrame.prefetch() itself is a cheap no-op once the target
+    /// chunk is already cached or already being prefetched, so calling this on every single frame
+    /// advance (not just once per chunk) costs effectively nothing.
+    private static let prefetchLookaheadFrames = 16
+
+    /// Kicks off (or no-ops, if already warm/in flight) an async decode of the on-disk chunk
+    /// containing a frame some way ahead of `currentFrameIndex` -- see prefetchLookaheadFrames' own
+    /// doc comment for why. Called whenever the displayed frame or the whole snapshot changes.
+    private func prefetchAhead() {
+        guard let frames = fieldSnapshot?.frames, !frames.isEmpty else { return }
+        let aheadIndex = min(currentFrameIndex + Self.prefetchLookaheadFrames, frames.count - 1)
+        frames[aheadIndex].prefetch()
+    }
+
+    /// Replaces the series and chooses its initial frame as one atomic viewer operation. Setting the
+    /// two properties independently can briefly read a frame from the old series before the new
+    /// snapshot arrives; this suppresses that intermediate read and rebuilds once at `frameIndex`.
+    func show(snapshot: EMSFieldSnapshot, frameIndex: Int) {
+        let count = snapshot.frames.count
+        let clampedIndex = count > 0 ? min(max(frameIndex, 0), count - 1) : 0
+        isReplacingSnapshot = true
+        currentFrameIndex = clampedIndex
+        fieldSnapshot = snapshot
+        isReplacingSnapshot = false
     }
 
     override var acceptsFirstResponder: Bool { true }
@@ -85,11 +144,25 @@ final class FieldView: MTKView, MTKViewDelegate {
     private var voxelCachedNx = 0
     private var voxelCachedNy = 0
     private var voxelCachedZRange: ClosedRange<Int>?
-    /// The peak cell energy across every captured frame, but only within voxelCachedZRange (the
-    /// board-thickness Z crop) -- see updateVoxelColors(forFrame:)'s own doc comment for why this,
-    /// not EMSFieldSnapshot.maxCellEnergy (the whole mesh's own peak, including the PML/margin
-    /// region well outside the board), is what the color gradient is scaled against.
+    /// The color scale's peak for the currently-displayed frame -- now always equal to
+    /// seriesOnBoardMaxEnergy (see its own doc comment), not that one frame's own peak.
     private var voxelCachedMaxEnergy: Float = 0
+
+    /// The on-board (voxelCachedZRange-restricted -- excludes the PML-dominated margin) energy peak
+    /// across every frame of the *current series* scanned so far, not just the currently-displayed
+    /// one. updateVoxelColors(forFrame:) normalizes every frame against this fixed value instead of
+    /// each frame's own peak, so a decaying signal visibly fades toward the floor color across
+    /// playback instead of being re-normalized back up to full brightness every single frame purely
+    /// because nothing bigger happens to be left in that one frame -- a per-frame scale made "the
+    /// pulse has fully died out" and "there's still a small stable near-port field" look identical
+    /// (both "maximally bright"), which is what actually prompted this change.
+    private var seriesOnBoardMaxEnergy: Float = 0
+    /// How many of fieldSnapshot.frames (from the start) are already folded into
+    /// seriesOnBoardMaxEnergy -- extendSeriesOnBoardMaxEnergyScan(_:zRange:) uses this to extend the
+    /// scan by only the frames a live update just published, rather than rescanning frames whose
+    /// on-disk chunk may since have been evicted from the reader's own cache. Reset to 0 alongside
+    /// seriesOnBoardMaxEnergy whenever fieldSnapshot's didSet sees the series itself change.
+    private var seriesOnBoardMaxEnergyScannedCount = 0
     /// One entry per included Z layer, recording its own center Z and the instance range (within
     /// voxelGeometryBuffer/voxelColorBuffer) that draws it -- see draw()'s own doc comment for why
     /// these are issued as separate draw calls, sorted back-to-front by the current camera each
@@ -820,99 +893,41 @@ final class FieldView: MTKView, MTKViewDelegate {
         voxelCachedNx = nx
         voxelCachedNy = ny
         voxelCachedZRange = zStart...zEnd
-        voxelCachedMaxEnergy = Self.maxEnergy(in: snapshot.frames, nx: nx, ny: ny, zRange: zStart...zEnd)
+        voxelCachedMaxEnergy = 0
+        extendSeriesOnBoardMaxEnergyScan(snapshot: snapshot, zRange: zStart...zEnd)
         Cu.logDebug("[FieldView] rebuildVoxelGeometry: built \(voxelInstanceCount) instances, "
-            + "voxelGeometryBuffer=\(voxelGeometryBuffer != nil) onBoardMaxEnergy=\(voxelCachedMaxEnergy) "
-            + "(whole-mesh maxEnergy was \(snapshot.maxCellEnergy))")
-        // TEMPORARY diagnostic: reports the actual on-board energy distribution for the *last*
-        // captured frame -- see this file's own top comment on why the voxel cloud reportedly never
-        // shows energy anywhere but the excited port, which would contradict this run's own
-        // estimateEnergy() dynamics (tracked extensively during the CPML work) unless something in
-        // this capture/render path specifically is wrong.
-        if let lastFrame = snapshot.frames.last {
-            Self.logEnergyDistribution(frame: lastFrame, nx: nx, ny: ny, zRange: zStart...zEnd,
-                                        onBoardMaxEnergy: voxelCachedMaxEnergy)
-        }
+            + "voxelGeometryBuffer=\(voxelGeometryBuffer != nil)")
 
         updateVoxelColors(forFrame: currentFrameIndex)
     }
 
-    private static func logEnergyDistribution(frame: EMSFieldFrame, nx: Int, ny: Int, zRange: ClosedRange<Int>,
-                                                onBoardMaxEnergy: Float) {
-        let stride = nx * ny
-        let startIndex = zRange.lowerBound * stride
-        let endIndex = (zRange.upperBound + 1) * stride
-        var countsAboveDB: [Double: Int] = [:]
-        // Extended well past -60dB -- distinguishes "energy is everywhere but heavily attenuated"
-        // (nonzero out to -150dB/-200dB, just too faint to matter for color) from "energy is exactly
-        // zero outside a tiny cluster" (nothing at all past a hard cutoff, however far the threshold
-        // is pushed) -- those two would look identical in the original -60dB-floored counts, but
-        // imply completely different bugs (a broken/scaled coupling term vs. e.g. a dispatch or
-        // capture bug that never touches most cells at all).
-        let thresholds: [Double] = [0, -10, -20, -30, -40, -50, -60, -100, -150, -200, -250, -300]
-        var totalCells = 0
-        var exactlyZeroCells = 0
-        var maxIndex = -1
-        var maxValue: Float = -.infinity
-        frame.cellEnergyData.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) in
-            let floats = buffer.bindMemory(to: Float.self)
-            guard floats.count >= endIndex else { return }
-            for i in startIndex..<endIndex {
-                let v = floats[i]
-                totalCells += 1
-                if v > maxValue {
-                    maxValue = v
-                    maxIndex = i
-                }
-                if v <= 0 {
-                    exactlyZeroCells += 1
-                    continue
-                }
-                guard onBoardMaxEnergy > 0 else { continue }
-                let db = 10 * log10(Double(v) / Double(onBoardMaxEnergy))
-                for threshold in thresholds where db >= threshold {
-                    countsAboveDB[threshold, default: 0] += 1
-                }
+    /// Extends seriesOnBoardMaxEnergy to cover every one of `snapshot.frames` not yet folded into it
+    /// (see seriesOnBoardMaxEnergyScannedCount's own doc comment), restricted to `zRange` the same
+    /// way updateVoxelColors(forFrame:) restricts its own per-cell walk -- excluding the PML/margin
+    /// cells outside the board keeps a handful of enormous boundary-adjacent values from swamping the
+    /// scale the same way snapshot.maxCellEnergy (a whole-grid, PML-included figure -- see its own
+    /// doc comment) would if used directly. Touches each newly-covered frame's cellEnergyData once, a
+    /// real decode -- for a fresh series this scans every already-published frame the first time it's
+    /// shown; for a live update to a series already on screen, only the frames published since the
+    /// last scan (the reader's own chunk cache from FieldFrameSeriesReader.hpp keeps this cheap
+    /// either way, per the earlier prefetch/reuse work).
+    private func extendSeriesOnBoardMaxEnergyScan(snapshot: EMSFieldSnapshot, zRange: ClosedRange<Int>) {
+        guard seriesOnBoardMaxEnergyScannedCount < snapshot.frames.count else { return }
+        let nx = Int(snapshot.nx)
+        let ny = Int(snapshot.ny)
+        let energyStride = nx * ny
+        let onBoardStart = zRange.lowerBound * energyStride
+        let onBoardEnd = (zRange.upperBound + 1) * energyStride
+        for index in seriesOnBoardMaxEnergyScannedCount..<snapshot.frames.count {
+            let cellEnergy = snapshot.frames[index].cellEnergyData.withUnsafeBytes { buffer -> [Float] in
+                Array(buffer.bindMemory(to: Float.self))
+            }
+            guard onBoardEnd <= cellEnergy.count else { continue }
+            if let frameMax = cellEnergy[onBoardStart..<onBoardEnd].max() {
+                seriesOnBoardMaxEnergy = max(seriesOnBoardMaxEnergy, frameMax)
             }
         }
-        var maxIx = -1, maxIy = -1, maxIz = -1
-        if maxIndex >= 0 {
-            let local = maxIndex - startIndex
-            maxIz = zRange.lowerBound + local / stride
-            let rem = local % stride
-            maxIy = rem / nx
-            maxIx = rem % nx
-        }
-        let countsText = thresholds.map { "\($0)dB:\(countsAboveDB[$0] ?? 0)" }.joined(separator: " ")
-        let nonzeroCells = totalCells - exactlyZeroCells
-        Cu.logDebug("[FieldView] energy distribution (last frame, on-board \(totalCells) cells, "
-            + "\(nonzeroCells) nonzero, \(exactlyZeroCells) exactly zero): "
-            + "peak=\(maxValue) at (ix=\(maxIx),iy=\(maxIy),iz=\(maxIz)) counts-above-threshold: \(countsText)")
-    }
-
-    /// Scans every captured frame's own cellEnergyData, but only the cells within `zRange` (the
-    /// board-thickness Z crop rebuildVoxelGeometry() already computed) -- see
-    /// updateVoxelColors(forFrame:)'s own doc comment for why the color gradient is scaled to this,
-    /// not EMSFieldSnapshot.maxCellEnergy (the *whole* mesh's own peak, including the PML/margin
-    /// region well outside the board, which can run orders of magnitude higher and would otherwise
-    /// make every on-board cell map down near the gradient's dim end regardless of its own real
-    /// energy). cellEnergy is z-major (`ix + nx*(iy + ny*iz)`), so each frame's on-board cells form
-    /// one contiguous span -- sliced directly rather than decoding/re-copying the whole buffer.
-    private static func maxEnergy(in frames: [EMSFieldFrame], nx: Int, ny: Int, zRange: ClosedRange<Int>) -> Float {
-        let stride = nx * ny
-        let startIndex = zRange.lowerBound * stride
-        let endIndex = (zRange.upperBound + 1) * stride
-        var result: Float = 0
-        for frame in frames {
-            frame.cellEnergyData.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) in
-                let floats = buffer.bindMemory(to: Float.self)
-                guard floats.count >= endIndex else { return }
-                for i in startIndex..<endIndex {
-                    result = max(result, floats[i])
-                }
-            }
-        }
-        return result
+        seriesOnBoardMaxEnergyScannedCount = snapshot.frames.count
     }
 
     /// Recomputes just the per-instance color buffer for one playback frame, reusing the cell-grid
@@ -944,22 +959,19 @@ final class FieldView: MTKView, MTKViewDelegate {
             return
         }
 
-        // Scoped to the on-board Z crop (voxelCachedMaxEnergy), not EMSFieldSnapshot.maxCellEnergy's
-        // own whole-mesh peak -- see maxEnergy(in:nx:ny:zRange:)'s own doc comment: the PML/margin
-        // region well outside the board can carry energy orders of magnitude above anything on the
-        // board itself, and scaling against that domain-wide peak made every on-board cell map down
-        // near the gradient's dim (blue) end regardless of its own real value.
-        let maxEnergy = voxelCachedMaxEnergy
+        // The scale is the on-board peak across *every* frame of this series (seriesOnBoardMaxEnergy,
+        // kept up to date by extendSeriesOnBoardMaxEnergyScan(_:zRange:) -- see its own doc comment
+        // for why this used to be derived from just the selected frame, and why that made a decayed,
+        // physically tiny residual field look identical to the original pulse at full brightness).
+        let maxEnergy = seriesOnBoardMaxEnergy
+        voxelCachedMaxEnergy = maxEnergy
         // 60dB below peak -- the same end-criteria dynamic-range convention already used
         // throughout this run's own progress reporting (see CopperFDTDRunner.cpp's own
         // `endCriteria = 1e-6`), reused here so "the bottom of the gradient" means something the
         // rest of this app's own numbers already established, not an arbitrarily chosen floor.
         // Energy is famously log-distributed spatially, so the gradient is mapped over log10(energy)
         // -- a plain linear min...max mapping would render nearly every cell as the very bottom of
-        // the gradient except the single brightest spot, defeating the point of a spatial map. The
-        // range is fixed across every frame (voxelCachedMaxEnergy is the run's own on-board peak
-        // across every frame, not this one frame's own), so color is comparable across playback
-        // rather than each frame independently rescaling to full brightness.
+        // the gradient except the single brightest spot, defeating the point of a spatial map.
         let floorEnergy = maxEnergy > 0 ? maxEnergy * 1e-6 : 0
         let logMax = log10(max(maxEnergy, Float.leastNormalMagnitude))
         let logFloor = log10(max(floorEnergy, Float.leastNormalMagnitude))

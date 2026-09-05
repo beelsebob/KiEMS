@@ -99,6 +99,12 @@ public:
     /// parity checks, which already want the whole grid).
     std::vector<float> readField(Field field) const;
 
+    /// Copies a complete component into caller-owned storage. Unlike the value-returning overload,
+    /// this retains `destination`'s allocation when its capacity is already large enough. Field
+    /// frame persistence uses two such reusable sets of vectors so simulation and compression can
+    /// ping-pong without allocating another six full-grid arrays for every captured frame.
+    void readField(Field field, std::vector<float>& destination) const;
+
     /// Reads a single field cell directly from GPU-shared memory -- O(1), no allocation, safe to
     /// call many times per timestep (this is what probe sampling should use). Same indexing/layout
     /// as readField()/copperGridIndex().

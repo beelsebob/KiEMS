@@ -12,6 +12,14 @@ final class FieldViewerViewController: NSViewController {
     private let fieldView = FieldView()
     private let progressStatus = ProgressStatusView()
 
+    // MARK: - Simulation/excitation selection
+
+    private let seriesSelectorBackground = NSVisualEffectView()
+    private let seriesPopUp = NSPopUpButton()
+    private var currentSnapshots: [EMSFieldSnapshot] = []
+    private var selectedExcitedPortBySimulation: [Int: Int] = [:]
+    private var displayedSeriesKey: String?
+
     // MARK: - Playback transport (video-player-style controls over fieldSnapshot.frames)
 
     private let transportBackground = NSVisualEffectView()
@@ -79,8 +87,44 @@ final class FieldViewerViewController: NSViewController {
         ])
 
         setUpTransport(in: container)
+        setUpSeriesSelector(in: container)
 
         view = container
+    }
+
+    private func setUpSeriesSelector(in container: NSView) {
+        seriesSelectorBackground.material = .hudWindow
+        seriesSelectorBackground.blendingMode = .withinWindow
+        seriesSelectorBackground.state = .active
+        seriesSelectorBackground.wantsLayer = true
+        seriesSelectorBackground.layer?.cornerRadius = 8
+        seriesSelectorBackground.translatesAutoresizingMaskIntoConstraints = false
+        seriesSelectorBackground.isHidden = true
+        container.addSubview(seriesSelectorBackground)
+
+        let label = NSTextField(labelWithString: "Field:")
+        label.textColor = .labelColor
+
+        seriesPopUp.target = self
+        seriesPopUp.action = #selector(seriesSelectionChanged)
+
+        let stack = NSStackView(views: [label, seriesPopUp])
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 8
+        stack.edgeInsets = NSEdgeInsets(top: 7, left: 10, bottom: 7, right: 10)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        seriesSelectorBackground.addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            seriesSelectorBackground.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
+            seriesSelectorBackground.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            stack.topAnchor.constraint(equalTo: seriesSelectorBackground.topAnchor),
+            stack.leadingAnchor.constraint(equalTo: seriesSelectorBackground.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: seriesSelectorBackground.trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: seriesSelectorBackground.bottomAnchor),
+            seriesPopUp.widthAnchor.constraint(greaterThanOrEqualToConstant: 300),
+        ])
     }
 
     private func setUpTransport(in container: NSView) {
@@ -139,6 +183,7 @@ final class FieldViewerViewController: NSViewController {
     func showField(forSimulationIndex index: Int) {
         if currentIndex != index {
             stopPlayback()
+            displayedSeriesKey = nil
         }
         currentIndex = index
         refreshDisplay()
@@ -172,22 +217,23 @@ final class FieldViewerViewController: NSViewController {
         let name = document.config.simulations[currentIndex].name
         let pipeline = document.pipeline(forSimulationNamed: name)
 
-        if pipeline.hasStage(.results), let snapshot = pipeline.fieldSnapshot() {
-            // fieldSnapshot before preview, not the other way round -- preview's own didSet reads
-            // fieldSnapshot?.boardZMax/boardZMin synchronously (see FieldView.rebuildOverlayBuffers())
-            // to place each copper layer at its own real Z; setting preview first left it reading
-            // whatever fieldSnapshot was *before* this call (nil on the very first display), which is
-            // exactly what was producing a silently-zero board thickness despite EMSFieldSnapshot
-            // itself carrying the real value all along.
-            fieldView.fieldSnapshot = snapshot
-            fieldView.preview = pipeline.geometryPreview()
+        let snapshots = pipeline.fieldSnapshots()
+        // A completed SWMR block is viewable while the results stage is still running. Before the
+        // first block is published, fieldSnapshots() is empty and the normal progress UI remains.
+        if !snapshots.isEmpty {
+            currentSnapshots = snapshots
+            let preferredPort = selectedExcitedPortBySimulation[currentIndex]
+            let selectedIndex = snapshots.firstIndex(where: { $0.excitedPort == preferredPort }) ?? 0
+            let snapshot = snapshots[selectedIndex]
+            selectedExcitedPortBySimulation[currentIndex] = snapshot.excitedPort
+            updateSeriesSelector(snapshots: snapshots, selectedIndex: selectedIndex)
+            display(snapshot: snapshot, preview: pipeline.geometryPreview())
             fieldView.isHidden = false
             progressStatus.setState(.hidden)
-            updateTransport(for: snapshot)
         } else if let error = errors[currentIndex] {
             fieldView.isHidden = true
             progressStatus.setState(.error(error))
-            hideTransport()
+            hideFieldSeriesControls()
         } else if runningIndices.contains(currentIndex) {
             fieldView.isHidden = true
             let progress = latestProgress[currentIndex]
@@ -202,7 +248,7 @@ final class FieldViewerViewController: NSViewController {
                 fraction: isSettingUp ? nil : (progress?.fraction ?? 0),
                 timeEstimateText: isSettingUp ? nil
                     : (timeEstimateText[currentIndex] ?? TimeRemainingFormatter.string(secondsRemaining: nil))))
-            hideTransport()
+            hideFieldSeriesControls()
         } else if (JobScheduler.shared.job(document: document, simulationName: name, kind: .fieldPostProcessing)
                 ?? JobScheduler.shared.job(document: document, simulationName: name, kind: .simulation)
                 ?? JobScheduler.shared.job(document: document, simulationName: name,
@@ -212,24 +258,56 @@ final class FieldViewerViewController: NSViewController {
             // own doc comment for why this is shown rather than a blank content area.
             fieldView.isHidden = true
             progressStatus.setState(.queued("Waiting to start…", currentJob: JobScheduler.shared.jobs.first?.progressStatusInfo))
-            hideTransport()
+            hideFieldSeriesControls()
         } else {
             fieldView.isHidden = true
             progressStatus.setState(.hidden)
-            hideTransport()
+            hideFieldSeriesControls()
         }
+    }
+
+    private func updateSeriesSelector(snapshots: [EMSFieldSnapshot], selectedIndex: Int) {
+        seriesPopUp.removeAllItems()
+        for snapshot in snapshots {
+            seriesPopUp.addItem(withTitle: "\(snapshot.simulationName) – \(snapshot.excitationName)")
+        }
+        seriesPopUp.selectItem(at: selectedIndex)
+        seriesSelectorBackground.isHidden = false
+    }
+
+    private func display(snapshot: EMSFieldSnapshot, preview: EMSGeometryPreview?) {
+        let seriesKey = "\(snapshot.simulationName)|\(snapshot.excitedPort)"
+        let seriesChanged = displayedSeriesKey != seriesKey
+        if seriesChanged {
+            stopPlayback()
+        }
+        // Set the snapshot before the preview: preview placement reads the snapshot's board Z range.
+        // A genuinely new series (including the very first one ever shown) starts at its first
+        // frame; a live update to the series already being shown -- more frames published, same
+        // simulationName+excitedPort -- never moves the frame the user is currently looking at.
+        let targetFrame = seriesChanged ? 0 : min(fieldView.currentFrameIndex, max(snapshot.frames.count - 1, 0))
+        fieldView.show(snapshot: snapshot, frameIndex: targetFrame)
+        fieldView.preview = preview
+        displayedSeriesKey = seriesKey
+        updateTransport(for: snapshot)
+    }
+
+    @objc private func seriesSelectionChanged() {
+        guard let currentIndex, seriesPopUp.indexOfSelectedItem >= 0,
+              seriesPopUp.indexOfSelectedItem < currentSnapshots.count,
+              let document, currentIndex < document.config.simulations.count else { return }
+        let snapshot = currentSnapshots[seriesPopUp.indexOfSelectedItem]
+        selectedExcitedPortBySimulation[currentIndex] = snapshot.excitedPort
+        let simulationName = document.config.simulations[currentIndex].name
+        display(snapshot: snapshot, preview: document.pipeline(forSimulationNamed: simulationName).geometryPreview())
     }
 
     // MARK: - Playback transport
 
-    /// Shows/refreshes the transport bar for a newly-(re)fetched EMSFieldSnapshot -- called on every
-    /// refreshDisplay() while results are available, not just the first time (pipeline.fieldSnapshot()
-    /// hands back a freshly-built object each call, see EMSSimulationPipelineBridge's own -fieldSnapshot
-    /// accessor), so this only resets scrub position/play state when the frame count itself changed,
-    /// preserving whatever the user was doing across an otherwise-unrelated refresh.
+    /// Shows/refreshes the transport bar for the selected series. A genuine series change starts at
+    /// its final captured frame; unrelated UI refreshes preserve the user's playback position.
     private func updateTransport(for snapshot: EMSFieldSnapshot) {
         let frames = snapshot.frames
-        let frameCountChanged = frames.count != currentFrames.count
         currentFrames = frames
         guard frames.count > 1 else {
             hideTransport()
@@ -238,9 +316,6 @@ final class FieldViewerViewController: NSViewController {
         transportBackground.isHidden = false
         frameSlider.minValue = 0
         frameSlider.maxValue = Double(frames.count - 1)
-        if frameCountChanged {
-            fieldView.currentFrameIndex = frames.count - 1
-        }
         frameSlider.integerValue = fieldView.currentFrameIndex
         updateFrameLabel()
         updatePlayPauseIcon()
@@ -250,6 +325,13 @@ final class FieldViewerViewController: NSViewController {
         transportBackground.isHidden = true
         stopPlayback()
         currentFrames = []
+    }
+
+    private func hideFieldSeriesControls() {
+        seriesSelectorBackground.isHidden = true
+        currentSnapshots = []
+        displayedSeriesKey = nil
+        hideTransport()
     }
 
     @objc private func togglePlayback() {
@@ -368,7 +450,7 @@ final class FieldViewerViewController: NSViewController {
             case .queued, nil:
                 guard wasRunning else { continue }
                 finishTracking(forSimulationIndex: index)
-                if pipeline.fieldSnapshot() != nil {
+                if !pipeline.fieldSnapshots().isEmpty {
                     onRunFinished?(index, true)
                 } else {
                     onRunCancelled?(index)
@@ -411,14 +493,9 @@ final class FieldViewerViewController: NSViewController {
             timeEstimateText[index] = TimeRemainingFormatter.string(secondsRemaining: secondsRemaining)
         }
         if currentIndex == index, runningIndices.contains(index) {
-            let isSettingUp = progress.phase == .settingUp
-            progressStatus.setState(.progress(
-                status: isSettingUp ? "Setting up Simulation…"
-                    : "Running simulation…\n\nA full FDTD run can take several minutes.",
-                fraction: isSettingUp ? nil : progress.fraction,
-                timeEstimateText: isSettingUp ? nil
-                    : (timeEstimateText[index] ?? TimeRemainingFormatter.string(secondsRemaining: nil))),
-                animated: true)
+            // This both updates the ordinary progress state and reopens the SWMR series to discover
+            // a newly-published frame block. Once one exists, the field replaces the progress UI.
+            refreshDisplay()
         }
     }
 }

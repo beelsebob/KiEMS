@@ -563,11 +563,17 @@ void CopperEngine::runWithProbeSampling(std::uint32_t steps, const ProbeSampler&
 }
 
 std::vector<float> CopperEngine::readField(Field field) const {
+    std::vector<float> result;
+    readField(field, result);
+    return result;
+}
+
+void CopperEngine::readField(Field field, std::vector<float>& destination) const {
     const int axis = static_cast<int>(field) % 3;
     const bool isH = static_cast<int>(field) >= 3;
     id<MTLBuffer> buffer = isH ? _impl->hField[axis] : _impl->eField[axis];
     const auto* data = static_cast<const float*>(buffer.contents);
-    return std::vector<float>(data, data + _impl->dims.cellCount());
+    destination.assign(data, data + _impl->dims.cellCount());
 }
 
 float CopperEngine::readFieldCell(Field field, std::uint32_t x, std::uint32_t y, std::uint32_t z) const {

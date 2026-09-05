@@ -59,6 +59,8 @@ typedef NS_ENUM(NSInteger, EMSPipelineProgressPhase) {
 @property (nonatomic, readonly) double targetEnergyChangeDB;
 @property (nonatomic, readonly) double absoluteEnergy;
 @property (nonatomic, readonly) BOOL duringExcitation;
+/// Display name of the net driven by this setup/FDTD pass; nil during geometry generation.
+@property (nonatomic, copy, readonly, nullable) NSString *excitedNetName;
 @end
 
 typedef void (^EMSPipelineProgressHandler)(EMSPipelineProgress *progress);
@@ -124,10 +126,14 @@ kicadQueryHelperPath:(NSString *)helperPath
 /// A renderable results preview -- nil unless hasStage:EMSPipelineStageResults is true.
 - (nullable EMSResultsPreview *)resultsPreview;
 
-/// A renderable field/energy snapshot from the most recently completed excited port's own GPU run
-/// -- nil unless hasStage:EMSPipelineStageResults is true (see EMSFieldSnapshot's own doc comment;
-/// for a multi-port simulation this is the *last* port run, not a combination of all of them).
-- (nullable EMSFieldSnapshot *)fieldSnapshot;
+/// Updates the analysis-only eye rate in an already-prepared simulation snapshot and drops only
+/// the renderable preview cache. The expensive FDTD/Postprocessor data remains valid.
+- (void)updateEyeBitRate:(double)bitRate;
+
+/// One renderable field/energy series for every excitation completed by the Results stage, in port
+/// execution order. The array contains lightweight metadata/lazy frame handles; field grids remain
+/// on disk until a selected frame is displayed.
+- (NSArray<EMSFieldSnapshot *> *)fieldSnapshots;
 
 /// Discards this stage and every stage after it (e.g. after an edit that could change the sliced
 /// geometry or FDTD results) -- the next ensureStage: call recomputes from here on. Cheap,

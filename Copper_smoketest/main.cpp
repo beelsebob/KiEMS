@@ -22,6 +22,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <utility>
 
 // Flat (unnamespaced) includes, not <CSXCAD/...> -- openEMS's own internal headers (pulled in via
@@ -40,6 +41,8 @@
 #include <CSRectGrid.h>
 #include <ContinuousStructure.h>
 
+#include "FieldFrameSeriesReader.hpp"
+#include "FieldFrameSeriesWriter.hpp"
 #include "Internal/CopperCPML.hpp"
 #include "Internal/CopperEngine.hpp"
 #include "Internal/CopperExcitation.hpp"
@@ -1121,6 +1124,232 @@ int main() {
                  "corrected voltage");
         }
         std::printf("Phase 4d: corrected Ez produced same-step Hx=%e\n", transportedCurrent);
+    }
+
+    // --- Phase 5: field frame-series encoder/decoder round trip ---
+    // A small synthetic grid (nx*ny*nz = 3*2*2 = 12 cells) and 17 frames, chunkFrames=16 so the
+    // series spans a full chunk (frames 0-15) plus a final partial chunk (frame 16 alone) -- the two
+    // cases FieldFrameSeriesWriter's H5Dset_extent/hyperslab logic actually needs to get right.
+    // Verifies the doc's own two pinned conventions too: nx/ny/nz-length (not nx+1) line arrays,
+    // and every value read back bit-exact (Blosc2 is lossless; float32 in, float32 out, no
+    // compression-introduced error is acceptable here).
+    {
+        namespace fs = std::filesystem;
+        const fs::path path = fs::temp_directory_path() / "copper_smoketest_field_frames.h5";
+        std::error_code removeError;
+        fs::remove(path, removeError); // best-effort cleanup from a previous failed run
+
+        constexpr std::uint32_t kNx = 3, kNy = 2, kNz = 2;
+        constexpr std::size_t kCellCount = kNx * kNy * kNz;
+        constexpr std::uint32_t kFrameCount = 17;
+
+        copper::FieldFrameSeriesWriter::Header header;
+        header.simulationName = "Phase5SmokeTest";
+        header.excitedPort = 2;
+        header.nx = kNx;
+        header.ny = kNy;
+        header.nz = kNz;
+        header.timestepSeconds = 1.5e-12;
+        header.boardZMin = -0.001;
+        header.boardZMax = 0.0;
+        for (std::uint32_t i = 0; i < kNx; ++i) header.lineX.push_back(static_cast<double>(i) * 1e-4);
+        for (std::uint32_t i = 0; i < kNy; ++i) header.lineY.push_back(static_cast<double>(i) * 2e-4);
+        for (std::uint32_t i = 0; i < kNz; ++i) header.lineZ.push_back(static_cast<double>(i) * 3e-4);
+
+        // frame f, component c (0..5, matching Ex..Hz order), cell i -> a value that's unique per
+        // (f, c, i) triple, so any read-back mismatch anywhere is immediately distinguishable from
+        // any other. The negative offset makes the test exercise signed component ranges too.
+        auto valueFor = [](std::uint32_t f, int c, std::size_t i) {
+            return static_cast<float>(f) * 1000.0F + static_cast<float>(c) * 100.0F +
+                   static_cast<float>(i) - 250.0F;
+        };
+        auto makeComponent = [&](std::uint32_t f, int c) {
+            std::vector<float> values(kCellCount);
+            for (std::size_t i = 0; i < kCellCount; ++i) values[i] = valueFor(f, c, i);
+            return values;
+        };
+
+        {
+            auto writer = copper::FieldFrameSeriesWriter::create(path, header, /*chunkFrames=*/16);
+            if (!writer) {
+                fail(("Phase 5: FieldFrameSeriesWriter::create failed: " + writer.error()).c_str());
+            }
+            for (std::uint32_t f = 0; f < kFrameCount; ++f) {
+                const std::vector<float> ex = makeComponent(f, 0);
+                const std::vector<float> ey = makeComponent(f, 1);
+                const std::vector<float> ez = makeComponent(f, 2);
+                const std::vector<float> hx = makeComponent(f, 3);
+                const std::vector<float> hy = makeComponent(f, 4);
+                const std::vector<float> hz = makeComponent(f, 5);
+                auto written = writer->writeFrame(f * 10, static_cast<double>(f) * header.timestepSeconds, ex, ey, ez,
+                                                    hx, hy, hz);
+                if (!written) {
+                    fail(("Phase 5: writeFrame failed: " + written.error()).c_str());
+                }
+            }
+            auto closed = writer->close();
+            if (!closed) {
+                fail(("Phase 5: close() failed: " + closed.error()).c_str());
+            }
+        }
+
+        {
+            auto reader = copper::FieldFrameSeriesReader::open(path);
+            if (!reader) {
+                fail(("Phase 5: FieldFrameSeriesReader::open failed: " + reader.error()).c_str());
+            }
+            if (reader->frameCount() != kFrameCount) {
+                fail("Phase 5: frameCount() mismatch after round trip");
+            }
+            const auto& readHeader = reader->header();
+            if (readHeader.simulationName != header.simulationName || readHeader.excitedPort != header.excitedPort ||
+                readHeader.nx != header.nx || readHeader.ny != header.ny || readHeader.nz != header.nz ||
+                readHeader.timestepSeconds != header.timestepSeconds || readHeader.boardZMin != header.boardZMin ||
+                readHeader.boardZMax != header.boardZMax || readHeader.lineX != header.lineX ||
+                readHeader.lineY != header.lineY || readHeader.lineZ != header.lineZ) {
+                fail("Phase 5: header round trip mismatch");
+            }
+            for (std::uint32_t f = 0; f < kFrameCount; ++f) {
+                std::vector<float> ex, ey, ez, hx, hy, hz;
+                auto readResult = reader->readFrame(f, ex, ey, ez, hx, hy, hz);
+                if (!readResult) {
+                    fail(("Phase 5: readFrame failed: " + readResult.error()).c_str());
+                }
+                const std::array<const std::vector<float>*, 6> components = {&ex, &ey, &ez, &hx, &hy, &hz};
+                for (int c = 0; c < 6; ++c) {
+                    if (components[static_cast<std::size_t>(c)]->size() != kCellCount) {
+                        fail("Phase 5: read-back component has the wrong length");
+                    }
+                    for (std::size_t i = 0; i < kCellCount; ++i) {
+                        if ((*components[static_cast<std::size_t>(c)])[i] != valueFor(f, c, i)) {
+                            fail("Phase 5: read-back field value doesn't bit-match what was written");
+                        }
+                    }
+                }
+                if (reader->timeSeconds(f) != static_cast<double>(f) * header.timestepSeconds) {
+                    fail("Phase 5: time_seconds round trip mismatch");
+                }
+                if (reader->timestep(f) != f * 10) {
+                    fail("Phase 5: timestep round trip mismatch");
+                }
+                // min/max energy: derived from valueFor()'s own known values -- Ex/Ey/Ez/Hx/Hy/Hz are
+                // each a different constant offset apart per cell, so cell 0 (the smallest component
+                // values) gives the minimum energy and the last cell gives the maximum, for every frame.
+                if (reader->minEnergy(f) > reader->maxEnergy(f)) {
+                    fail("Phase 5: minEnergy() > maxEnergy() for some frame");
+                }
+                for (int c = 0; c < 6; ++c) {
+                    const auto component = static_cast<copper::FieldComponent>(c);
+                    const copper::FieldComponentRange frameRange = reader->componentRange(component, f);
+                    if (frameRange.minimum != valueFor(f, c, 0) ||
+                        frameRange.maximum != valueFor(f, c, kCellCount - 1)) {
+                        fail("Phase 5: per-frame component range mismatch");
+                    }
+                    const std::optional<copper::FieldComponentRange> seriesRange = reader->componentRange(component);
+                    if (!seriesRange || seriesRange->minimum != valueFor(0, c, 0) ||
+                        seriesRange->maximum != valueFor(kFrameCount - 1, c, kCellCount - 1)) {
+                        fail("Phase 5: whole-series component range mismatch");
+                    }
+                }
+            }
+            std::printf("Phase 5: field frame-series round trip (%u frames, chunkFrames=16) matched bit-for-bit\n",
+                        kFrameCount);
+        }
+
+        // --- Phase 5b: prefetchFrame() from a background thread while readFrame() runs on this one ---
+        // Exercises the two-slot cache: prefetch chunk 1 (frame 16, the trailing partial chunk) into
+        // the prefetch slot while the primary slot still holds chunk 0 (frames 0-15) from a fresh
+        // reader, then confirms readFrame(16) picks it up via the promotion path (not a second
+        // decode) and still returns bit-exact data -- and that concurrent calls into the reader from
+        // two real threads don't crash/deadlock/race (FieldFrameSeriesReader.hpp's own doc comment
+        // promises readFrame()/prefetchFrame() are safe to call concurrently).
+        {
+            auto reader = copper::FieldFrameSeriesReader::open(path);
+            if (!reader) {
+                fail(("Phase 5b: FieldFrameSeriesReader::open failed: " + reader.error()).c_str());
+            }
+            std::vector<float> ex, ey, ez, hx, hy, hz;
+            auto warmPrimary = reader->readFrame(0, ex, ey, ez, hx, hy, hz);
+            if (!warmPrimary) {
+                fail(("Phase 5b: warm-up readFrame(0) failed: " + warmPrimary.error()).c_str());
+            }
+            std::thread prefetchThread([&reader] { reader->prefetchFrame(16); });
+            prefetchThread.join();
+            auto readAfterPrefetch = reader->readFrame(16, ex, ey, ez, hx, hy, hz);
+            if (!readAfterPrefetch) {
+                fail(("Phase 5b: readFrame(16) after prefetch failed: " + readAfterPrefetch.error()).c_str());
+            }
+            for (int c = 0; c < 6; ++c) {
+                const std::vector<float>& values = c == 0   ? ex
+                                                    : c == 1 ? ey
+                                                    : c == 2 ? ez
+                                                    : c == 3 ? hx
+                                                    : c == 4 ? hy
+                                                             : hz;
+                for (std::size_t i = 0; i < kCellCount; ++i) {
+                    if (values[i] != valueFor(16, c, i)) {
+                        fail("Phase 5b: readFrame(16) after prefetchFrame(16) doesn't bit-match what was written");
+                    }
+                }
+            }
+            std::printf("Phase 5b: prefetchFrame() from a background thread matched bit-for-bit\n");
+        }
+
+        // --- Phase 5c: a SWMR reader follows complete blocks while the writer remains open ---
+        // The 17th frame extends every physical dataset but is intentionally invisible until the
+        // writer closes and publishes that partial block. This is the transaction boundary the live
+        // field viewer relies upon: it can never observe a mixture of old and new component arrays.
+        const fs::path livePath = fs::temp_directory_path() / "copper_smoketest_live_field_frames.h5";
+        fs::remove(livePath, removeError);
+        {
+            auto writer = copper::FieldFrameSeriesWriter::create(livePath, header, /*chunkFrames=*/16);
+            if (!writer) {
+                fail(("Phase 5c: FieldFrameSeriesWriter::create failed: " + writer.error()).c_str());
+            }
+            auto writeSyntheticFrame = [&](std::uint32_t frame) {
+                const std::vector<float> ex = makeComponent(frame, 0);
+                const std::vector<float> ey = makeComponent(frame, 1);
+                const std::vector<float> ez = makeComponent(frame, 2);
+                const std::vector<float> hx = makeComponent(frame, 3);
+                const std::vector<float> hy = makeComponent(frame, 4);
+                const std::vector<float> hz = makeComponent(frame, 5);
+                return writer->writeFrame(frame * 10, static_cast<double>(frame) * header.timestepSeconds,
+                                          ex, ey, ez, hx, hy, hz);
+            };
+            for (std::uint32_t frame = 0; frame < 16; ++frame) {
+                if (auto written = writeSyntheticFrame(frame); !written) {
+                    fail(("Phase 5c: complete-block write failed: " + written.error()).c_str());
+                }
+            }
+
+            auto reader = copper::FieldFrameSeriesReader::open(livePath);
+            if (!reader || reader->frameCount() != 16) {
+                fail("Phase 5c: SWMR reader did not see the first published block");
+            }
+            if (auto written = writeSyntheticFrame(16); !written) {
+                fail(("Phase 5c: partial-block write failed: " + written.error()).c_str());
+            }
+            auto beforeClose = reader->refresh();
+            if (!beforeClose || *beforeClose != 16) {
+                fail("Phase 5c: SWMR reader observed an unpublished partial block");
+            }
+            if (auto closed = writer->close(); !closed) {
+                fail(("Phase 5c: writer close failed: " + closed.error()).c_str());
+            }
+            auto afterClose = reader->refresh();
+            if (!afterClose || *afterClose != 17) {
+                fail("Phase 5c: SWMR reader did not discover the final published partial block");
+            }
+            std::vector<float> ex, ey, ez, hx, hy, hz;
+            if (auto read = reader->readFrame(16, ex, ey, ez, hx, hy, hz); !read ||
+                ex.front() != valueFor(16, 0, 0) || hz.back() != valueFor(16, 5, kCellCount - 1)) {
+                fail("Phase 5c: newly-published live frame did not decode correctly");
+            }
+            std::printf("Phase 5c: live SWMR reader followed complete and final partial blocks\n");
+        }
+        fs::remove(livePath, removeError);
+
+        fs::remove(path, removeError);
     }
 
     std::printf("Copper_smoketest: PASS\n");

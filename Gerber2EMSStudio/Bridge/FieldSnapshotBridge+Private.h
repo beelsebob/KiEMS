@@ -3,17 +3,21 @@
 // Objective-C interface boundary, which Swift can't see at all.
 #import "FieldSnapshotBridge.h"
 
-#include "CopperFDTDRunner.h"
+#include <filesystem>
+#include <string>
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// Builds a renderable EMSFieldSnapshot directly from a completed copper::runFDTDPortOnGPU() result
-/// (`snapshot` must be its `.fieldSnapshot`, only meaningful when `.success`) -- converts Copper's
-/// own metres to the simulation-unit frame everything else in this app already uses (see
-/// EMSFieldSnapshot's own doc comment). `boardZMin`/`boardZMax` are the caller's responsibility to
-/// compute (EMSSimulationPipelineBridge.mm does this from its own scaled EMSConfig's substrate
-/// stack) since Copper's own field snapshot has no notion of "the board" as distinct from "the
-/// mesh" -- only the mesh's own line positions.
-EMSFieldSnapshot* buildFieldSnapshot(const copper::CopperFieldSnapshot& snapshot, double boardZMin, double boardZMax);
+/// Opens (or, if `previous` was already built from this exact `seriesPath`, refreshes in place)
+/// a Copper field-frame series and builds a lightweight snapshot. Its EMSFieldFrame objects retain
+/// only frame metadata; cellEnergyData reads and converts that one raw E/H frame on demand, so the
+/// viewer never retains the full time series in memory. Passing the previous call's own snapshot
+/// for the same series (or nil, the first time) lets a live SWMR update pick up newly-published
+/// frames while keeping that snapshot's decode/prefetch caches warm, instead of reopening the file
+/// and going cold on every call -- see this function's own definition for the exact reuse
+/// conditions. Returns nil if the series cannot be opened/refreshed.
+EMSFieldSnapshot* _Nullable buildFieldSnapshot(const std::filesystem::path& seriesPath,
+                                                const std::string& excitationName,
+                                                EMSFieldSnapshot* _Nullable previous);
 
 NS_ASSUME_NONNULL_END
