@@ -53,6 +53,43 @@ std::expected<std::vector<PadPosition>, std::string> padsOnNet(const std::string
     return raw.pads;
 }
 
+std::expected<std::vector<TrackSegment>, std::string> tracksOnNet(const std::string& projectPath,
+                                                                    const std::string& boardPath,
+                                                                    const std::string& netName) {
+    detail::RawTracksOnNetResult raw = detail::tracksOnNetRaw(projectPath, boardPath, netName);
+    if (!raw.ok) {
+        return std::unexpected(std::move(raw.error));
+    }
+    return raw.tracks;
+}
+
+std::expected<std::vector<ZoneInfo>, std::string> zones(const std::string& projectPath,
+                                                           const std::string& boardPath) {
+    detail::RawZonesResult raw = detail::zonesRaw(projectPath, boardPath);
+    if (!raw.ok) {
+        return std::unexpected(std::move(raw.error));
+    }
+    return raw.zones;
+}
+
+std::expected<std::vector<PadPosition>, std::string> allPads(const std::string& projectPath,
+                                                                const std::string& boardPath) {
+    detail::RawPadsOnNetResult raw = detail::allPadsRaw(projectPath, boardPath);
+    if (!raw.ok) {
+        return std::unexpected(std::move(raw.error));
+    }
+    return raw.pads;
+}
+
+std::expected<std::vector<std::pair<std::string, TrackSegment>>, std::string> allTracks(
+    const std::string& projectPath, const std::string& boardPath) {
+    detail::RawAllTracksResult raw = detail::allTracksRaw(projectPath, boardPath);
+    if (!raw.ok) {
+        return std::unexpected(std::move(raw.error));
+    }
+    return raw.tracks;
+}
+
 std::expected<std::vector<StackupLayer>, std::string> stackup(const std::string& projectPath,
                                                                 const std::string& boardPath) {
     detail::RawStackupResult raw = detail::stackupRaw(projectPath, boardPath);

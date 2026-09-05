@@ -60,6 +60,19 @@ struct PadPosition {
     double heightMm = 0;
 };
 
+/// One straight routed copper segment. Curved PCB arcs and vias are deliberately omitted by
+/// tracksOnNet(): an MSL impedance probe needs a locally straight propagation axis and belongs on
+/// one copper layer. Coordinates use the same auxiliary-origin-relative, Y-up millimetre frame as
+/// PadPosition.
+struct TrackSegment {
+    double startXMm = 0;
+    double startYMm = 0;
+    double endXMm = 0;
+    double endYMm = 0;
+    double widthMm = 0;
+    std::string copperLayerName;
+};
+
 /// One pad on a footprint, identified the same way PadPosition/ExcitationConfig/InvolvedNetConfig
 /// selectors do: a pad number (tried first when matching) and, if present, a schematic pin
 /// function name (e.g. "GND") -- see libkicad.cpp's _findFootprintPad for the matching order this
@@ -105,6 +118,22 @@ struct ThroughHole {
     double padHeightMm = 0;
     double drillWidthMm = 0;
     double drillHeightMm = 0;
+};
+
+/// One copper zone/pour's outline, on one of the copper layers it's filled on -- a single ZONE
+/// object emits one ZoneInfo per copper layer in its own layer set, sharing the same outline (KiCad
+/// zones use one drawn outline shape across every layer they're assigned to; the *filled* shape
+/// differs per layer once clearances/thermal reliefs are applied, but that finer detail isn't
+/// captured here -- outlineMm is the raw, undjusted outline, always a conservative (equal or larger)
+/// bound on the real filled copper). Only the outer contour of the outline is returned (any cutouts
+/// drawn inside it are ignored), which is also conservative -- treating a real cutout as if it were
+/// still filled copper only ever makes this *more* cautious about calling a location "occupied",
+/// never less. netName is empty for a rule area / keepout zone with no copper connection.
+struct ZoneInfo {
+    std::string netName;
+    std::string copperLayerName;
+    /// Outer contour only, in the same auxiliary-origin-relative millimetre frame as PadPosition.
+    std::vector<std::pair<double, double>> outlineMm;
 };
 
 /// One mesh triangle of a footprint's real, placed 3D model -- mirrors STEP_COMPONENT_TRIANGLE
@@ -189,6 +218,28 @@ struct RawPadsOnNetResult {
     std::vector<PadPosition> pads;
 };
 
+struct RawTracksOnNetResult {
+    bool ok = false;
+    std::string error;
+    std::vector<TrackSegment> tracks;
+};
+
+/// Every straight PCB track segment on the board regardless of net, paired with its own net name --
+/// TrackSegment itself has no net field (tracksOnNetRaw() doesn't need one, since the net is already
+/// the query's own parameter there). See allPadsRaw()'s own doc comment for why an "every net at
+/// once" query exists alongside the per-net ones.
+struct RawAllTracksResult {
+    bool ok = false;
+    std::string error;
+    std::vector<std::pair<std::string, TrackSegment>> tracks; // (netName, segment)
+};
+
+struct RawZonesResult {
+    bool ok = false;
+    std::string error;
+    std::vector<ZoneInfo> zones;
+};
+
 struct RawStackupResult {
     bool ok = false;
     std::string error;
@@ -214,6 +265,21 @@ RawNetClassMembersResult netsInNetClassRaw(const std::string& projectPath, const
 
 RawPadsOnNetResult padsOnNetRaw(const std::string& projectPath, const std::string& boardPath,
                                  const std::string& netName);
+
+RawTracksOnNetResult tracksOnNetRaw(const std::string& projectPath, const std::string& boardPath,
+                                     const std::string& netName);
+
+/// Every pad on the board regardless of net (PadPosition::netName is still populated per pad) --
+/// unlike looping allNets()+padsOnNet() per net, this is one single board load, not one per net. See
+/// gerber2ems::LumpedComponentConfig's own doc comment on the diagonal-part cardinal-bridge
+/// interference check for why that matters: a real board can have on the order of a hundred nets,
+/// and each libkicad_query call is its own subprocess that reloads and reparses the whole board from
+/// scratch.
+RawPadsOnNetResult allPadsRaw(const std::string& projectPath, const std::string& boardPath);
+
+RawAllTracksResult allTracksRaw(const std::string& projectPath, const std::string& boardPath);
+
+RawZonesResult zonesRaw(const std::string& projectPath, const std::string& boardPath);
 
 RawStackupResult stackupRaw(const std::string& projectPath, const std::string& boardPath);
 

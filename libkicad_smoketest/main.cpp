@@ -110,6 +110,64 @@ int _runQuery(int argc, char** argv) {
         return 0;
     }
 
+    if (command == "tracks-on-net" && argc == 5) {
+        const std::expected<std::vector<libkicad::TrackSegment>, std::string> tracks =
+            libkicad::tracksOnNet(argv[2], argv[3], argv[4]);
+        if (!tracks.has_value()) {
+            std::cerr << tracks.error() << "\n";
+            return 1;
+        }
+        for (const libkicad::TrackSegment& track : *tracks) {
+            std::cout << _formatDouble(track.startXMm) << '\t' << _formatDouble(track.startYMm) << '\t'
+                      << _formatDouble(track.endXMm) << '\t' << _formatDouble(track.endYMm) << '\t'
+                      << _formatDouble(track.widthMm) << '\t' << track.copperLayerName << '\n';
+        }
+        return 0;
+    }
+
+    if (command == "all-pads" && argc == 4) {
+        const std::expected<std::vector<libkicad::PadPosition>, std::string> pads = libkicad::allPads(argv[2], argv[3]);
+        if (!pads.has_value()) {
+            std::cerr << pads.error() << "\n";
+            return 1;
+        }
+        for (const libkicad::PadPosition& pad : *pads) {
+            _printPad(pad);
+        }
+        return 0;
+    }
+
+    if (command == "all-tracks" && argc == 4) {
+        const std::expected<std::vector<std::pair<std::string, libkicad::TrackSegment>>, std::string> tracks =
+            libkicad::allTracks(argv[2], argv[3]);
+        if (!tracks.has_value()) {
+            std::cerr << tracks.error() << "\n";
+            return 1;
+        }
+        for (const auto& [netName, track] : *tracks) {
+            std::cout << netName << '\t' << _formatDouble(track.startXMm) << '\t' << _formatDouble(track.startYMm)
+                       << '\t' << _formatDouble(track.endXMm) << '\t' << _formatDouble(track.endYMm) << '\t'
+                       << _formatDouble(track.widthMm) << '\t' << track.copperLayerName << '\n';
+        }
+        return 0;
+    }
+
+    if (command == "zones" && argc == 4) {
+        const std::expected<std::vector<libkicad::ZoneInfo>, std::string> zones = libkicad::zones(argv[2], argv[3]);
+        if (!zones.has_value()) {
+            std::cerr << zones.error() << "\n";
+            return 1;
+        }
+        for (const libkicad::ZoneInfo& zone : *zones) {
+            std::cout << zone.netName << '\t' << zone.copperLayerName;
+            for (const auto& [x, y] : zone.outlineMm) {
+                std::cout << '\t' << _formatDouble(x) << ',' << _formatDouble(y);
+            }
+            std::cout << '\n';
+        }
+        return 0;
+    }
+
     if (command == "resolve-pin" && argc == 6) {
         const std::expected<libkicad::PadPosition, std::string> pad = libkicad::resolvePin(argv[2], argv[3], argv[4], argv[5]);
         if (!pad.has_value()) {
@@ -232,7 +290,8 @@ int _runQuery(int argc, char** argv) {
 
     std::cerr << "usage: " << argv[0]
                << " {net-for-pin <project> <board> <footprint> <pin> | nets-in-class <project> <board> "
-                  "<net_class> | pads-on-net <project> <board> <net> | resolve-pin <project> <board> "
+                  "<net_class> | pads-on-net <project> <board> <net> | tracks-on-net <project> <board> <net> | "
+                  "resolve-pin <project> <board> "
                   "<footprint> <pin> | stackup <project> <board> | layer-colors <project> <board> | "
                   "net-classes <project> <board> | all-nets <project> <board> | "
                   "footprints <project> <board> | through-holes <project> <board> | "
@@ -350,8 +409,9 @@ int _runSmoketest(int argc, char** argv) {
     return 0;
 }
 
-const std::vector<std::string> kQueryCommands = {"net-for-pin",  "nets-in-class", "pads-on-net",  "resolve-pin",
-                                                  "stackup",      "layer-colors",  "net-classes",  "all-nets",
+const std::vector<std::string> kQueryCommands = {"net-for-pin",  "nets-in-class", "pads-on-net", "tracks-on-net",
+                                                  "all-pads",     "all-tracks",    "zones",       "resolve-pin",
+                                                  "stackup",      "layer-colors",  "net-classes", "all-nets",
                                                   "footprints",   "through-holes", "export-component-models"};
 
 } // namespace

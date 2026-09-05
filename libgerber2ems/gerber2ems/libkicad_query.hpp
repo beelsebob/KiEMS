@@ -34,6 +34,25 @@ struct PadIdentity {
     double heightMm = 0;
 };
 
+struct TrackSegment {
+    double startXMm = 0;
+    double startYMm = 0;
+    double endXMm = 0;
+    double endYMm = 0;
+    double widthMm = 0;
+    std::string copperLayerName;
+};
+
+/// One copper zone/pour's outline on one copper layer -- see libkicad::ZoneInfo's own doc comment
+/// (this mirrors it exactly: the raw drawn outline, not the real per-layer filled shape, and only
+/// the outer contour, no cutouts subtracted -- both conservative simplifications). netName is empty
+/// for a rule area/keepout with no copper connection.
+struct ZoneGeometry {
+    std::string netName;
+    std::string copperLayerName;
+    std::vector<std::pair<double, double>> outlineMm;
+};
+
 /// Resolves one footprint's pin to its net name. `paths` supplies the board/project to query and
 /// the query-helper binary to run (see PathsConfig); `context` prefixes any error message -- every
 /// caller treats a failure here as an unrecoverable config error (a typo'd footprint/pin name
@@ -51,10 +70,31 @@ std::expected<std::vector<std::string>, std::string> netsInNetClass(const PathsC
 std::expected<std::vector<PadIdentity>, std::string> padsOnNet(const PathsConfig& paths, const std::string& netName,
                                                                  const std::string& context);
 
+/// Straight routed-track primitives from KiCad itself. Gerber remains the source of the final
+/// copper polygons used by FDTD; this semantic query is for selecting reliable impedance-probe
+/// spans and retaining the actual designed track width/layer.
+std::expected<std::vector<TrackSegment>, std::string> tracksOnNet(const PathsConfig& paths,
+                                                                    const std::string& netName,
+                                                                    const std::string& context);
+
 /// Resolves one footprint's pin to its full pad identity (position/orientation/layer/net). See
 /// netForFootprintPin.
 std::expected<PadIdentity, std::string> resolvePin(const PathsConfig& paths, const std::string& footprint,
                                                      const std::string& pin, const std::string& context);
+
+/// Every pad on the board regardless of net, in one single board load -- see
+/// libkicad::allPadsRaw()'s own doc comment for why this exists alongside padsOnNet(): looping
+/// allNets()+padsOnNet() would mean one query-helper subprocess (a full board reload) per net.
+std::expected<std::vector<PadIdentity>, std::string> allPads(const PathsConfig& paths, const std::string& context);
+
+/// Every straight PCB track segment on the board regardless of net, paired with its own net name, in
+/// one single board load -- see allPads()'s own doc comment.
+std::expected<std::vector<std::pair<std::string, TrackSegment>>, std::string> allTracks(const PathsConfig& paths,
+                                                                                          const std::string& context);
+
+/// Every copper zone/pour on the board, one entry per copper layer each is actually on -- see
+/// ZoneGeometry's own doc comment.
+std::expected<std::vector<ZoneGeometry>, std::string> zones(const PathsConfig& paths, const std::string& context);
 
 enum class StackupLayerKind {
     Copper,

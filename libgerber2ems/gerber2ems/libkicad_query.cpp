@@ -131,6 +131,18 @@ PadIdentity _parsePadLine(const std::string& line) {
     return pad;
 }
 
+TrackSegment _parseTrackLine(const std::string& line) {
+    const std::vector<std::string> fields = _splitTabs(line);
+    TrackSegment track;
+    track.startXMm = std::stod(fields.at(0));
+    track.startYMm = std::stod(fields.at(1));
+    track.endXMm = std::stod(fields.at(2));
+    track.endYMm = std::stod(fields.at(3));
+    track.widthMm = std::stod(fields.at(4));
+    track.copperLayerName = fields.at(5);
+    return track;
+}
+
 std::expected<std::vector<std::string>, std::string> _query(const PathsConfig& paths, const std::string& command,
                                                               const std::vector<std::string>& args,
                                                               const std::string& context) {
@@ -216,6 +228,19 @@ std::expected<std::vector<PadIdentity>, std::string> padsOnNet(const PathsConfig
     return pads;
 }
 
+std::expected<std::vector<TrackSegment>, std::string> tracksOnNet(const PathsConfig& paths,
+                                                                    const std::string& netName,
+                                                                    const std::string& context) {
+    auto lines = _query(paths, "tracks-on-net", {netName}, context);
+    if (!lines) return std::unexpected(std::move(lines).error());
+    std::vector<TrackSegment> tracks;
+    tracks.reserve(lines->size());
+    for (const std::string& line : *lines) {
+        tracks.push_back(_parseTrackLine(line));
+    }
+    return tracks;
+}
+
 std::expected<PadIdentity, std::string> resolvePin(const PathsConfig& paths, const std::string& footprint,
                                                      const std::string& pin, const std::string& context) {
     auto lines = _query(paths, "resolve-pin", {footprint, pin}, context);
@@ -224,6 +249,57 @@ std::expected<PadIdentity, std::string> resolvePin(const PathsConfig& paths, con
         return std::unexpected(context + ": empty response from libkicad_smoketest");
     }
     return _parsePadLine(lines->front());
+}
+
+std::expected<std::vector<PadIdentity>, std::string> allPads(const PathsConfig& paths, const std::string& context) {
+    auto lines = _query(paths, "all-pads", {}, context);
+    if (!lines) return std::unexpected(std::move(lines).error());
+    std::vector<PadIdentity> pads;
+    pads.reserve(lines->size());
+    for (const std::string& line : *lines) {
+        pads.push_back(_parsePadLine(line));
+    }
+    return pads;
+}
+
+std::expected<std::vector<std::pair<std::string, TrackSegment>>, std::string> allTracks(const PathsConfig& paths,
+                                                                                          const std::string& context) {
+    auto lines = _query(paths, "all-tracks", {}, context);
+    if (!lines) return std::unexpected(std::move(lines).error());
+    std::vector<std::pair<std::string, TrackSegment>> tracks;
+    tracks.reserve(lines->size());
+    for (const std::string& line : *lines) {
+        const std::vector<std::string> fields = _splitTabs(line);
+        TrackSegment track;
+        track.startXMm = std::stod(fields.at(1));
+        track.startYMm = std::stod(fields.at(2));
+        track.endXMm = std::stod(fields.at(3));
+        track.endYMm = std::stod(fields.at(4));
+        track.widthMm = std::stod(fields.at(5));
+        track.copperLayerName = fields.at(6);
+        tracks.emplace_back(fields.at(0), std::move(track));
+    }
+    return tracks;
+}
+
+std::expected<std::vector<ZoneGeometry>, std::string> zones(const PathsConfig& paths, const std::string& context) {
+    auto lines = _query(paths, "zones", {}, context);
+    if (!lines) return std::unexpected(std::move(lines).error());
+    std::vector<ZoneGeometry> zones;
+    zones.reserve(lines->size());
+    for (const std::string& line : *lines) {
+        const std::vector<std::string> fields = _splitTabs(line);
+        ZoneGeometry zone;
+        zone.netName = fields.at(0);
+        zone.copperLayerName = fields.at(1);
+        zone.outlineMm.reserve(fields.size() - 2);
+        for (std::size_t i = 2; i < fields.size(); ++i) {
+            const std::size_t comma = fields[i].find(',');
+            zone.outlineMm.emplace_back(std::stod(fields[i].substr(0, comma)), std::stod(fields[i].substr(comma + 1)));
+        }
+        zones.push_back(std::move(zone));
+    }
+    return zones;
 }
 
 std::expected<std::vector<StackupLayer>, std::string> stackup(const PathsConfig& paths, const std::string& context) {

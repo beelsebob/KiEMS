@@ -11,6 +11,7 @@
 
 #include <expected>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "libkicad_result.hpp"
@@ -43,6 +44,27 @@ std::expected<std::vector<std::string>, std::string> netsInNetClass(const std::s
 std::expected<std::vector<PadPosition>, std::string> padsOnNet(const std::string& projectPath,
                                                                  const std::string& boardPath,
                                                                  const std::string& netName);
+
+/// Every straight PCB track segment connected to `netName`, with its actual KiCad width and copper
+/// layer. Vias and curved arcs are excluded because they are not valid MSL probe spans.
+std::expected<std::vector<TrackSegment>, std::string> tracksOnNet(const std::string& projectPath,
+                                                                    const std::string& boardPath,
+                                                                    const std::string& netName);
+
+/// Every copper zone/pour on the board (ground fills, rule areas, ...), one entry per copper layer
+/// each is actually on -- see ZoneInfo's own doc comment.
+std::expected<std::vector<ZoneInfo>, std::string> zones(const std::string& projectPath,
+                                                           const std::string& boardPath);
+
+/// Every pad on the board regardless of net, in one single board load -- see
+/// detail::allPadsRaw()'s own doc comment for why this exists alongside padsOnNet().
+std::expected<std::vector<PadPosition>, std::string> allPads(const std::string& projectPath,
+                                                                const std::string& boardPath);
+
+/// Every straight PCB track segment on the board regardless of net, paired with its own net name, in
+/// one single board load -- see detail::allPadsRaw()'s own doc comment.
+std::expected<std::vector<std::pair<std::string, TrackSegment>>, std::string> allTracks(
+    const std::string& projectPath, const std::string& boardPath);
 
 /// The board's physical stackup (Board Setup > Board Stackup), top-to-bottom -- solder mask/paste/
 /// silkscreen entries are omitted, only copper and dielectric layers are returned. If the board's

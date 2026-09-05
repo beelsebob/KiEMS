@@ -29,6 +29,9 @@
 #include <pad.h>
 #include <padstack.h>
 #include <pcb_track.h>
+#include <zone.h>
+#include <geometry/shape_poly_set.h>
+#include <geometry/shape_line_chain.h>
 #include <netinfo.h>
 #include <netclass.h>
 #include <project/net_settings.h>
@@ -127,6 +130,20 @@ RawNetClassMembersResult _failNetClassMembers(std::string error) {
 
 RawPadsOnNetResult _failPadsOnNet(std::string error) {
     RawPadsOnNetResult result;
+    result.ok = false;
+    result.error = std::move(error);
+    return result;
+}
+
+RawTracksOnNetResult _failTracksOnNet(std::string error) {
+    RawTracksOnNetResult result;
+    result.ok = false;
+    result.error = std::move(error);
+    return result;
+}
+
+RawZonesResult _failZones(std::string error) {
+    RawZonesResult result;
     result.ok = false;
     result.error = std::move(error);
     return result;
@@ -454,6 +471,145 @@ RawPadsOnNetResult padsOnNetRaw(const std::string& projectPath, const std::strin
     return result;
 }
 
+RawTracksOnNetResult tracksOnNetRaw(const std::string& projectPath, const std::string& boardPath,
+                                     const std::string& netName) {
+    std::string error;
+    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    if (!loaded) {
+        return _failTracksOnNet(std::move(error));
+    }
+    BOARD* board = loaded->board;
+
+    RawTracksOnNetResult result;
+    result.ok = true;
+    const wxString wxNetName = wxString::FromUTF8(netName);
+    const VECTOR2I auxOrigin = board->GetDesignSettings().GetAuxOrigin();
+    for (PCB_TRACK* track : board->Tracks()) {
+        // PCB_TRACE_T is the ordinary straight segment type. Vias have no propagation axis and
+        // PCB_ARC_T would need a curved-port implementation rather than being approximated here.
+        if (track->Type() != PCB_TRACE_T || track->GetNetname() != wxNetName) {
+            continue;
+        }
+        const VECTOR2I start = track->GetStart() - auxOrigin;
+        const VECTOR2I end = track->GetEnd() - auxOrigin;
+        TrackSegment segment;
+        segment.startXMm = pcbIUScale.IUTomm(start.x);
+        segment.startYMm = -pcbIUScale.IUTomm(start.y);
+        segment.endXMm = pcbIUScale.IUTomm(end.x);
+        segment.endYMm = -pcbIUScale.IUTomm(end.y);
+        segment.widthMm = pcbIUScale.IUTomm(track->GetWidth());
+        segment.copperLayerName = board->GetLayerName(track->GetLayer()).ToStdString();
+        result.tracks.push_back(std::move(segment));
+    }
+    return result;
+}
+
+RawPadsOnNetResult allPadsRaw(const std::string& projectPath, const std::string& boardPath) {
+    std::string error;
+    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    if (!loaded) {
+        return _failPadsOnNet(std::move(error));
+    }
+    BOARD* board = loaded->board;
+
+    RawPadsOnNetResult result;
+    result.ok = true;
+    const VECTOR2I auxOrigin = board->GetDesignSettings().GetAuxOrigin();
+    for (FOOTPRINT* footprint : board->Footprints()) {
+        for (PAD* pad : footprint->Pads()) {
+            const VECTOR2I position = pad->GetPosition() - auxOrigin;
+            PadPosition padPosition;
+            padPosition.footprintRef = footprint->GetReference().ToStdString();
+            padPosition.padNumber = pad->GetNumber().ToStdString();
+            padPosition.netName = pad->GetNetname().ToStdString();
+            padPosition.xMm = pcbIUScale.IUTomm(position.x);
+            padPosition.yMm = -pcbIUScale.IUTomm(position.y);
+            padPosition.orientationDeg = pad->GetOrientation().AsDegrees();
+            padPosition.copperLayerName = board->GetLayerName(pad->GetLayer()).ToStdString();
+            padPosition.widthMm = pcbIUScale.IUTomm(pad->GetSizeX());
+            padPosition.heightMm = pcbIUScale.IUTomm(pad->GetSizeY());
+            result.pads.push_back(std::move(padPosition));
+        }
+    }
+    return result;
+}
+
+RawAllTracksResult allTracksRaw(const std::string& projectPath, const std::string& boardPath) {
+    std::string error;
+    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    if (!loaded) {
+        RawAllTracksResult result;
+        result.ok = false;
+        result.error = std::move(error);
+        return result;
+    }
+    BOARD* board = loaded->board;
+
+    RawAllTracksResult result;
+    result.ok = true;
+    const VECTOR2I auxOrigin = board->GetDesignSettings().GetAuxOrigin();
+    for (PCB_TRACK* track : board->Tracks()) {
+        if (track->Type() != PCB_TRACE_T) {
+            continue; // see tracksOnNetRaw()'s own comment: vias/arcs excluded
+        }
+        const VECTOR2I start = track->GetStart() - auxOrigin;
+        const VECTOR2I end = track->GetEnd() - auxOrigin;
+        TrackSegment segment;
+        segment.startXMm = pcbIUScale.IUTomm(start.x);
+        segment.startYMm = -pcbIUScale.IUTomm(start.y);
+        segment.endXMm = pcbIUScale.IUTomm(end.x);
+        segment.endYMm = -pcbIUScale.IUTomm(end.y);
+        segment.widthMm = pcbIUScale.IUTomm(track->GetWidth());
+        segment.copperLayerName = board->GetLayerName(track->GetLayer()).ToStdString();
+        result.tracks.emplace_back(track->GetNetname().ToStdString(), std::move(segment));
+    }
+    return result;
+}
+
+RawZonesResult zonesRaw(const std::string& projectPath, const std::string& boardPath) {
+    std::string error;
+    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    if (!loaded) {
+        return _failZones(std::move(error));
+    }
+    BOARD* board = loaded->board;
+
+    RawZonesResult result;
+    result.ok = true;
+    const VECTOR2I auxOrigin = board->GetDesignSettings().GetAuxOrigin();
+    for (ZONE* zone : board->Zones()) {
+        const SHAPE_POLY_SET* outline = zone->Outline();
+        if (outline == nullptr) {
+            continue;
+        }
+        // Every copper layer this zone is actually filled/assigned on -- a zone typically shares one
+        // drawn outline across every one of them (see ZoneInfo's own doc comment for why the raw
+        // outline, not the real per-layer filled shape, is what's returned).
+        for (PCB_LAYER_ID layer : zone->GetLayerSet().CuStack()) {
+            // Every disjoint outer contour (an island of the pour) -- any cutouts drawn inside one
+            // are deliberately not subtracted (see ZoneInfo's own doc comment: conservative, not
+            // exact).
+            for (int outlineIndex = 0; outlineIndex < outline->OutlineCount(); ++outlineIndex) {
+                const SHAPE_LINE_CHAIN& contour = outline->Outline(outlineIndex);
+                if (contour.PointCount() < 3) {
+                    continue;
+                }
+                ZoneInfo zoneInfo;
+                zoneInfo.netName = zone->GetNetname().ToStdString();
+                zoneInfo.copperLayerName = board->GetLayerName(layer).ToStdString();
+                zoneInfo.outlineMm.reserve(contour.PointCount());
+                for (const VECTOR2I& point : contour.CPoints()) {
+                    const VECTOR2I relative = point - auxOrigin;
+                    // Y flip: see the identical comment in resolvePinRaw().
+                    zoneInfo.outlineMm.emplace_back(pcbIUScale.IUTomm(relative.x), -pcbIUScale.IUTomm(relative.y));
+                }
+                result.zones.push_back(std::move(zoneInfo));
+            }
+        }
+    }
+    return result;
+}
+
 RawStackupResult stackupRaw(const std::string& projectPath, const std::string& boardPath) {
     std::string error;
     std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
@@ -602,6 +758,17 @@ RawFootprintsResult footprintsRaw(const std::string& projectPath, const std::str
         info.reference = footprint->GetReference().ToStdString();
         info.value = footprint->GetValue().ToStdString();
         for (PAD* pad : footprint->Pads()) {
+            // A pad with no number is KiCad's own convention for a non-electrical pad -- most
+            // commonly a paste-only "aperture" pad some SMD footprints (e.g. Capacitor_SMD's own
+            // 0201/0402-class parts) include purely to shape the solder-paste stencil opening, never
+            // assigned a net or a schematic pin mapping. Counting these here inflated a genuine 2-pin
+            // part's own pin count to 4, which silently disqualified it from
+            // port_resolution.cpp's _resolveLumpedComponents() (which only auto-discovers exactly
+            // 2-pin R/L/C components) -- confirmed on a real board where two coupling capacitors
+            // using this exact footprint were never detected because of it.
+            if (pad->GetNumber().IsEmpty()) {
+                continue;
+            }
             FootprintPin pin;
             pin.number = pad->GetNumber().ToStdString();
             pin.function = pad->GetPinFunction().ToStdString();
