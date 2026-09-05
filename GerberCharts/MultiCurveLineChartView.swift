@@ -50,4 +50,18 @@ public final class MultiCurveLineChartView: NSView {
         chart.setData(xValues: xValuesGHz, curves: curves.map { ChartCurve(label: $0.label, values: $0.values) },
                        leftAxisMinRange: minRange, xAxisLabel: xAxisLabel)
     }
+
+    /// A single average curve at the normal stroke weight, a shaded min/max band behind it, and
+    /// every individual measurement it was averaged from drawn as its own thin curve on top -- e.g.
+    /// several trace-impedance probes' own magnitude/angle vs. an averaged net-level value. Additive
+    /// alongside setCurves(_:) above (which stays untouched for every other, unbanded chart).
+    public func setBandedCurves(xValuesGHz: [Double], probeCurves: [(label: String, values: [Double])],
+                                 averageLabel: String, average: [Double], band: (low: [Double], high: [Double]),
+                                 minRange: (min: Double, max: Double)? = nil,
+                                 xAxisLabel: String? = "Frequency [GHz]") {
+        var curves = [ChartCurve(label: averageLabel, values: average)]
+        curves += probeCurves.map { ChartCurve(label: $0.label, values: $0.values, lineWidth: 0.75) }
+        chart.setData(xValues: xValuesGHz, curves: curves, band: ChartBand(low: band.low, high: band.high),
+                       leftAxisMinRange: minRange, xAxisLabel: xAxisLabel)
+    }
 }

@@ -14,6 +14,11 @@ import Cocoa
 /// original per-VC implementations positioned those accessories relative to their own local
 /// progress bar.
 final class ProgressStatusView: NSView {
+    struct NetStatus {
+        let prefix: String
+        let netName: String
+    }
+
     /// The scheduler's own currently-running job, shown under a `.queued` state's own barber pole --
     /// see State.queued's own doc comment for why. `label` is the caller's own already-composed
     /// "Current Job: ..." text (this view stays agnostic of JobScheduler/JobKind specifics, matching
@@ -47,12 +52,15 @@ final class ProgressStatusView: NSView {
         /// which has no progress hook at all -- see EMSPipelineProgressPhase's own doc comment).
         /// `timeEstimateText` nil hides the time-estimate row entirely (no text ever flashes in then
         /// out, which would read as flickering) rather than showing an empty/placeholder string.
-        case progress(status: String, fraction: Double?, timeEstimateText: String?)
+        case progress(status: String, netStatus: NetStatus? = nil, fraction: Double?, timeEstimateText: String?)
     }
 
     let progressBar = NSProgressIndicator()
     let timeEstimateLabel = NSTextField(labelWithString: "")
     private let statusLabel = NSTextField(labelWithString: "")
+    private let netStatusPrefixLabel = NSTextField(labelWithString: "")
+    private let netStatusNameView = NetNameView()
+    private var netStatusStack: NSStackView!
 
     // The "Current Job: ..." sub-section, shown only for a `.queued` state whose currentJob is
     // non-nil -- a horizontal rule, a label, and its own progress bar/time estimate, mirroring the
@@ -91,6 +99,14 @@ final class ProgressStatusView: NSView {
         // Auto-Layout-sized window then grows to accommodate (a real, previously-hit bug: a verbose
         // error message ballooning the whole window).
         statusLabel.preferredMaxLayoutWidth = 400
+
+        let netStatusFont = NSFont.systemFont(ofSize: 20, weight: .medium)
+        netStatusPrefixLabel.font = netStatusFont
+        netStatusPrefixLabel.textColor = .tertiaryLabelColor
+        netStatusStack = NSStackView(views: [netStatusPrefixLabel, netStatusNameView])
+        netStatusStack.orientation = .horizontal
+        netStatusStack.alignment = .centerY
+        netStatusStack.spacing = 0
 
         progressBar.style = .bar
         progressBar.isIndeterminate = false
@@ -148,11 +164,12 @@ final class ProgressStatusView: NSView {
         // manually-sized NSLayoutGuide). Centering just this one stack vertically replaces that
         // NSLayoutGuide trick entirely: whatever rows are actually visible, the stack's own natural
         // height is exactly their combined height, so a plain centerYAnchor is enough.
-        stack = NSStackView(views: [statusLabel, progressBar, timeEstimateLabel, currentJobStack])
+        stack = NSStackView(views: [statusLabel, netStatusStack, progressBar, timeEstimateLabel, currentJobStack])
         stack.orientation = .vertical
         stack.alignment = .centerX
         stack.spacing = 8
         stack.setCustomSpacing(12, after: statusLabel)
+        stack.setCustomSpacing(12, after: netStatusStack)
         stack.setCustomSpacing(6, after: progressBar)
         stack.setCustomSpacing(16, after: timeEstimateLabel)
         currentJobStack.setCustomSpacing(4, after: currentJobLabel)
@@ -185,6 +202,7 @@ final class ProgressStatusView: NSView {
         }
         progressBar.stopAnimation(nil)
         progressBar.isIndeterminate = false
+        netStatusStack.isHidden = true
         currentJobStack.isHidden = true
 
         switch newState {
@@ -216,9 +234,17 @@ final class ProgressStatusView: NSView {
                 currentJobStack.isHidden = false
             }
 
-        case .progress(let status, let fraction, let timeEstimateText):
+        case .progress(let status, let netStatus, let fraction, let timeEstimateText):
             statusLabel.stringValue = status
             statusLabel.isHidden = false
+            if let netStatus {
+                netStatusPrefixLabel.stringValue = netStatus.prefix
+                netStatusNameView.configure(
+                    name: netStatus.netName,
+                    font: netStatusPrefixLabel.font ?? .systemFont(ofSize: NSFont.systemFontSize),
+                    color: .tertiaryLabelColor)
+                netStatusStack.isHidden = false
+            }
             if let fraction {
                 if animated {
                     NSAnimationContext.runAnimationGroup { context in

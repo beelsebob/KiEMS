@@ -6,6 +6,7 @@ import Cocoa
 /// child of its net, never as a top-level row of its own.
 private final class InvolvedNetsNode: NSObject {
     enum Kind {
+        case differentialPair
         case net(name: String, impedance: Double, plane: Int)
         case excitedPin(footprintReference: String, pin: KicadFootprintPin, isMain: Bool,
                          startTime: Double, duration: Double, phaseDegrees: Double)
@@ -232,6 +233,7 @@ final class InvolvedNetsViewController: NSViewController {
         let pins: [String]
         let impedance: Double
         let plane: Int
+        let differentialPairPartner: String?
         /// Snapshotted alongside everything else (see this struct's own reasoning) -- only
         /// non-empty when hasExplicitPinSelections is true, matching probedPins' own doc comment.
         let probedPins: [(footprint: String, pin: String, absorbSignal: Bool)]
@@ -265,11 +267,23 @@ final class InvolvedNetsViewController: NSViewController {
         // Read out while still on the main thread, with the real bridge chain still alive -- see
         // InvolvedNetSnapshot/ExcitationSnapshot's doc comments.
         let sim = document.config.simulations[selectedIndex]
-        let entries = sim.involvedNets.map { entry -> InvolvedNetSnapshot in
-            let probed = entry.probedPins.map { (footprint: $0.footprintReference, pin: $0.pin, absorbSignal: $0.absorbSignal) }
+        // GeometryOnly entries ("Included in Simulation", as opposed to full "Simulation Net"
+        // participation -- see gerber2ems::NetInclusionLevel's own doc comment) are structurally
+        // never port/probe/excitation-eligible, so they'd show up here with an impedance/reference
+        // plane that means nothing and never gain excited/probed children -- this summary is
+        // specifically about what's actively simulated, not raw geometry, so they're excluded here
+        // entirely (the underlying config entry itself is untouched -- this only affects this view).
+        let entries = sim.involvedNets.filter { $0.inclusionLevel == .simulationNet }.map { entry -> InvolvedNetSnapshot in
+            // .probe==false entries are absorb-only (setPinAbsorbOnly()) -- a real termination, but
+            // never a measured probe, so they're excluded here for the same "this summary is
+            // specifically about active ports/probes/excitation" reason GeometryOnly nets are above.
+            let probed = entry.probedPins.filter(\.probe)
+                .map { (footprint: $0.footprintReference, pin: $0.pin, absorbSignal: $0.absorbSignal) }
             return InvolvedNetSnapshot(kind: entry.kind, net: entry.net, netClass: entry.netClass,
                                         footprintReference: entry.footprintReference, pins: entry.pins,
-                                        impedance: entry.impedance, plane: entry.plane, probedPins: probed)
+                                        impedance: entry.impedance, plane: entry.plane,
+                                        differentialPairPartner: entry.differentialPairPartner,
+                                        probedPins: probed)
         }
         let excitations = sim.excitations.map {
             ExcitationSnapshot(footprintReference: $0.footprintReference, pin: $0.pin, isMain: $0.isMain,
@@ -365,14 +379,33 @@ final class InvolvedNetsViewController: NSViewController {
                 probedPinsByNet[netName]?.sort { $0.pinTitle.localizedStandardCompare($1.pinTitle) == .orderedAscending }
             }
 
-            let sortedNodes = infoByNet.keys
+            let nodesByName: [String: InvolvedNetsNode] = Dictionary(uniqueKeysWithValues: infoByNet.keys
                 .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
-                .map { netName -> InvolvedNetsNode in
+                .map { netName -> (String, InvolvedNetsNode) in
                     let info = infoByNet[netName]!
                     let node = InvolvedNetsNode(kind: .net(name: netName, impedance: info.impedance, plane: info.plane))
                     node.children = (excitedPinsByNet[netName] ?? []) + (probedPinsByNet[netName] ?? [])
-                    return node
+                    return (netName, node)
+                })
+            var pairedNames = Set<String>()
+            var sortedNodes: [InvolvedNetsNode] = []
+            for entry in entries where entry.kind == .net {
+                guard let name = entry.net, let partner = entry.differentialPairPartner,
+                      !pairedNames.contains(name), !pairedNames.contains(partner),
+                      let first = nodesByName[name], let second = nodesByName[partner]
+                else { continue }
+                let group = InvolvedNetsNode(kind: .differentialPair)
+                group.children = [first, second].sorted {
+                    $0.pinTitle.localizedStandardCompare($1.pinTitle) == .orderedAscending
                 }
+                sortedNodes.append(group)
+                pairedNames.insert(name)
+                pairedNames.insert(partner)
+            }
+            sortedNodes.append(contentsOf: nodesByName.keys
+                .filter { !pairedNames.contains($0) }
+                .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+                .compactMap { nodesByName[$0] })
             DispatchQueue.main.async {
                 self?.netNodes = sortedNodes
                 self?.outlineView.reloadData()
@@ -403,6 +436,8 @@ private extension InvolvedNetsNode {
     /// (function)" format for a pin nested under a net.
     var pinTitle: String {
         switch kind {
+        case .differentialPair:
+            return "Differential Pair"
         case .net(let name, _, _):
             return name
         case .excitedPin(let footprintReference, let pin, let isMain, _, _, _):
@@ -429,6 +464,8 @@ extension InvolvedNetsViewController: NSOutlineViewDataSource, NSOutlineViewDele
         let row = outlineView.selectedRow
         guard row >= 0, let node = outlineView.item(atRow: row) as? InvolvedNetsNode else { return }
         switch node.kind {
+        case .differentialPair:
+            break
         case .net(let name, _, _):
             onSelectionRequested?(.net(name))
         case .excitedPin(let footprintReference, let pin, _, _, _, _):
@@ -467,6 +504,8 @@ extension InvolvedNetsViewController: NSOutlineViewDataSource, NSOutlineViewDele
         case Self.primaryValueColumnIdentifier:
             let text: String
             switch node.kind {
+            case .differentialPair:
+                text = ""
             case .net(_, let impedance, _):
                 text = "\(Self.impedanceFormatter.string(from: NSNumber(value: impedance)) ?? "\(impedance)") Ω"
             case .excitedPin(_, _, _, _, let duration, _):
@@ -478,6 +517,8 @@ extension InvolvedNetsViewController: NSOutlineViewDataSource, NSOutlineViewDele
         case Self.secondaryValueColumnIdentifier:
             let text: String
             switch node.kind {
+            case .differentialPair:
+                text = ""
             case .net(_, _, let plane):
                 text = planeDisplayString(for: plane)
             case .excitedPin(_, _, _, _, _, let phaseDegrees):

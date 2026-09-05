@@ -18,6 +18,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// Postprocessor (e.g. EMSSimulationPipelineBridge, which caches one per simulation across
 /// Geometry/Results tab switches) doesn't need to re-run anything just to render it.
 EMSResultsPreview* buildResultsPreview(gerber2ems::Postprocessor& postprocessor,
-                                        const gerber2ems::SimulationConfig& simConfig);
+                                        const gerber2ems::SimulationConfig& simConfig,
+                                        const gerber2ems::Frequency& frequency);
 
 NS_ASSUME_NONNULL_END

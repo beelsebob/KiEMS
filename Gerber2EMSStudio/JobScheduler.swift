@@ -6,7 +6,7 @@ import Cocoa
 /// Results, Field Viewer), not EMSPipelineStage 1:1 -- `.geometryGeneration`'s own execution always
 /// ensures the underlying bridge's `.grid` stage (not just `.geometry`), so a "Show Grid" toggle
 /// never needs its own separate fetch once this job has run once; `.fieldPostProcessing` has no
-/// bridge stage of its own at all (EMSSimulationPipelineBridge.fieldSnapshot() is a cheap, already-
+/// bridge stage of its own at all (EMSSimulationPipelineBridge.fieldSnapshots() is a cheap, already-
 /// synchronous transform once `.results` exists) -- it's tracked here purely as a genuinely
 /// separate, independently cancellable/orderable row, per the user's own request.
 enum JobKind: Int, CaseIterable {
@@ -314,6 +314,25 @@ final class JobScheduler {
         // until this document's own in-flight GPU work has genuinely stopped.
     }
 
+    /// Deletes `directory` once any currently-executing job has genuinely finished, rather than
+    /// immediately -- called by Document.deinit for its own scratch directory instead of removing it
+    /// directly. requestCancellation() (see cancelAll(for:) above) only sets a flag a running job's
+    /// own background call polls at specific checkpoints (e.g. between excited ports); it is never
+    /// observed *inside* the single most expensive, uninterruptible step of a run (openEMS's own
+    /// SetupFDTD()/CalcECOperator() -- see EMSSimulationPipelineBridge.mm's own doc comment on
+    /// setupFDTDOperator()), which can still be executing well after Document.close() returns and the
+    /// Document itself deallocates. Deleting the scratch directory out from under that still-running
+    /// background thread (which is chdir'd into a subdirectory of it) crashed the app the moment it
+    /// next asked the OS for its own current working directory. Scheduling the deletion on this same
+    /// serial executionQueue -- rather than running it inline wherever the caller happens to be --
+    /// guarantees it's ordered after whatever job closure is currently occupying that queue, exactly
+    /// like every other cross-thread access this class already serializes through it.
+    func cleanUpDirectory(_ directory: URL) {
+        executionQueue.async {
+            try? FileManager.default.removeItem(at: directory)
+        }
+    }
+
     /// Clears a `.failed` job out of the list -- called by a tab VC once it's read the failure into
     /// its own per-index error state (matching this app's existing "each VC owns its own error UI"
     /// convention), or by the Jobs window if the user dismisses it directly. A no-op for anything not
@@ -397,10 +416,10 @@ final class JobScheduler {
             // request(...) was called from), so it stays correctly ordered behind whatever
             // .simulation job it depends on, and so a rapid queue of field-viewer clicks across
             // several simulations doesn't do this out of order either.
-            let snapshot = context.pipeline.fieldSnapshot()
+            let snapshots = context.pipeline.fieldSnapshots()
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                if snapshot != nil, let document = job.document {
+                if !snapshots.isEmpty, let document = job.document {
                     self.fieldPostProcessingDone.insert(SimKey(document: ObjectIdentifier(document), simulationName: job.simulationName))
                     self.finishExecution(job, error: nil)
                 } else {

@@ -4,14 +4,22 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <map>
+#include <set>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "gerber2ems/config.hpp"
 #include "gerber2ems/postprocess.hpp"
+#include "gerber2ems/eye_diagram.hpp"
 
 using gerber2ems::Postprocessor;
 using gerber2ems::SimulationConfig;
+using gerber2ems::DifferentialPairConfig;
+using gerber2ems::ExcitationConfig;
+using gerber2ems::Frequency;
+using gerber2ems::PortConfig;
 
 namespace {
 
@@ -186,6 +194,49 @@ NSString* responseLabel(const gerber2ems::PortConfig& measuredPort) {
 }
 @end
 
+@implementation EMSResultsEyeDiagram
+- (instancetype)initWithName:(NSString*)name
+                  bitRateGbps:(double)bitRateGbps
+                 differential:(BOOL)differential
+                       timeUI:(NSArray<NSNumber*>*)timeUI
+                        traces:(NSArray<NSArray<NSNumber*>*>*)traces {
+    self = [super init];
+    if (self) {
+        _name = [name copy];
+        _bitRateGbps = bitRateGbps;
+        _differential = differential;
+        _timeUI = [timeUI copy];
+        _traces = [traces copy];
+    }
+    return self;
+}
+@end
+
+@implementation EMSResultsNetImpedanceCurve
+- (instancetype)initWithProbeName:(NSString*)probeName
+                       magnitudeOhm:(NSArray<NSNumber*>*)magnitudeOhm
+                           angleDeg:(NSArray<NSNumber*>*)angleDeg {
+    self = [super init];
+    if (self) {
+        _probeName = [probeName copy];
+        _magnitudeOhm = [magnitudeOhm copy];
+        _angleDeg = [angleDeg copy];
+    }
+    return self;
+}
+@end
+
+@implementation EMSResultsNetImpedance
+- (instancetype)initWithNetName:(NSString*)netName probes:(NSArray<EMSResultsNetImpedanceCurve*>*)probes {
+    self = [super init];
+    if (self) {
+        _netName = [netName copy];
+        _probes = [probes copy];
+    }
+    return self;
+}
+@end
+
 @implementation EMSResultsPreview
 - (instancetype)initWithFrequenciesGHz:(NSArray<NSNumber*>*)frequenciesGHz
                                   ports:(NSArray<EMSResultsPort*>*)ports
@@ -194,7 +245,9 @@ NSString* responseLabel(const gerber2ems::PortConfig& measuredPort) {
                             smithCharts:(NSArray<EMSResultsSmith*>*)smithCharts
                               diffPairs:(NSArray<EMSResultsDiffPair*>*)diffPairs
                                  traces:(NSArray<EMSResultsTrace*>*)traces
-                                 probes:(NSArray<EMSResultsProbe*>*)probes {
+                                 probes:(NSArray<EMSResultsProbe*>*)probes
+                          netImpedances:(NSArray<EMSResultsNetImpedance*>*)netImpedances
+                            eyeDiagrams:(NSArray<EMSResultsEyeDiagram*>*)eyeDiagrams {
     self = [super init];
     if (self) {
         _frequenciesGHz = [frequenciesGHz copy];
@@ -205,12 +258,15 @@ NSString* responseLabel(const gerber2ems::PortConfig& measuredPort) {
         _diffPairs = [diffPairs copy];
         _traces = [traces copy];
         _probes = [probes copy];
+        _netImpedances = [netImpedances copy];
+        _eyeDiagrams = [eyeDiagrams copy];
     }
     return self;
 }
 @end
 
-EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const SimulationConfig& simConfig) {
+EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const SimulationConfig& simConfig,
+                                       const Frequency& frequency) {
     const auto portCount = static_cast<std::int32_t>(simConfig.ports().size());
 
     NSArray<NSNumber*>* freqsGHz = toNSArray(postprocessor.frequencies(), 1e-9);
@@ -218,6 +274,15 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
     NSMutableArray<EMSResultsPort*>* ports = [NSMutableArray arrayWithCapacity:simConfig.ports().size()];
     for (std::int32_t i = 0; i < portCount; ++i) {
         const auto& port = simConfig.ports()[static_cast<std::size_t>(i)];
+        // Absorb-only ports (PortConfig::probe()==false -- see its own doc comment) are real,
+        // resistively-terminated FDTD ports, but exist purely to keep an otherwise-unmodeled
+        // downstream trace from behaving like an open, reflecting stub; they were never meant to be
+        // a named, selectable thing in Results. Filtered here (display) rather than at the source
+        // (simConfig.ports() itself) so every index below -- getSParam/getImpedance/etc., all keyed
+        // by this same dense port-index space -- keeps working unchanged.
+        if (!port.probe()) {
+            continue;
+        }
         [ports addObject:[[EMSResultsPort alloc] initWithName:@(port.name().c_str())
                                                           index:i
                                                    impedanceOhm:port.impedance()
@@ -238,6 +303,9 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
 
         NSMutableArray<EMSResultsSParamCurve*>* curves = [NSMutableArray array];
         for (std::int32_t j = 0; j < portCount; ++j) {
+            if (!simConfig.ports()[static_cast<std::size_t>(j)].probe()) {
+                continue; // same "not a named, selectable thing" reasoning as the ports array above
+            }
             const auto sParam = postprocessor.getSParam(j, i);
             if (!sParam.has_value()) {
                 continue;
@@ -277,6 +345,9 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
 
     NSMutableArray<EMSResultsImpedance*>* impedances = [NSMutableArray array];
     for (std::int32_t i = 0; i < portCount; ++i) {
+        if (!simConfig.ports()[static_cast<std::size_t>(i)].probe()) {
+            continue; // absorb-only port -- see the ports array's own comment above
+        }
         const auto impedance = postprocessor.getImpedance(i);
         if (!impedance.has_value()) {
             continue;
@@ -344,7 +415,10 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
         for (std::int32_t exc = 0; exc < portCount; ++exc) {
             const auto voltage = postprocessor.getProbeVoltage(i, exc);
             const auto current = postprocessor.getProbeCurrent(i, exc);
-            if (!voltage.has_value() || !current.has_value()) {
+            // A probe needs a complete curve over the preview's frequency axis. Empty/mismatched
+            // arrays represent absent probe output, not a chart whose values happen to be zero.
+            if (!voltage.has_value() || !current.has_value() || voltage->empty() ||
+                voltage->size() != postprocessor.frequencies().size() || current->size() != voltage->size()) {
                 continue;
             }
             std::vector<double> vMag(voltage->size());
@@ -364,6 +438,71 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
         [probes addObject:[[EMSResultsProbe alloc] initWithName:@(port.name().c_str()) index:i curves:curves]];
     }
 
+    NSMutableArray<EMSResultsNetImpedance*>* netImpedances = [NSMutableArray array];
+    {
+        std::vector<std::string> netOrder;
+        std::map<std::string, NSMutableArray<EMSResultsNetImpedanceCurve*>*> curvesByNet;
+        for (std::int32_t i = 0; i < portCount; ++i) {
+            const auto& probePort = simConfig.ports()[static_cast<std::size_t>(i)];
+            if (!probePort.isTraceProbe()) {
+                continue;
+            }
+            // Z0 is a local E/H measurement, so an excitation does not have to be on this same net
+            // (a series component can deliberately separate them). Pick the completed excitation
+            // producing the strongest voltage at this probe; that avoids throwing away downstream
+            // nets and avoids using a numerically weak run when several excitations exist.
+            std::optional<std::int32_t> excitedIndex;
+            double strongestScore = -1.0;
+            for (std::int32_t exc = 0; exc < portCount; ++exc) {
+                const auto candidateZ = postprocessor.getProbeImpedance(i, exc);
+                if (!candidateZ.has_value() || candidateZ->empty() ||
+                    candidateZ->size() != postprocessor.frequencies().size()) {
+                    continue;
+                }
+                double score = 0;
+                if (const auto voltage = postprocessor.getProbeVoltage(i, exc); voltage.has_value()) {
+                    for (const std::complex<double>& value : *voltage) {
+                        if (std::isfinite(value.real()) && std::isfinite(value.imag())) {
+                            score += std::abs(value);
+                        }
+                    }
+                }
+                if (score > strongestScore) {
+                    strongestScore = score;
+                    excitedIndex = exc;
+                }
+            }
+            if (!excitedIndex.has_value()) {
+                continue;
+            }
+            const auto impedance = postprocessor.getProbeImpedance(i, *excitedIndex);
+            if (!impedance.has_value() || impedance->empty() ||
+                impedance->size() != postprocessor.frequencies().size()) {
+                continue;
+            }
+            std::vector<double> magOhm(impedance->size());
+            std::vector<double> angleDeg(impedance->size());
+            for (std::size_t f = 0; f < impedance->size(); ++f) {
+                magOhm[f] = std::abs((*impedance)[f]);
+                angleDeg[f] = std::arg((*impedance)[f]) * 180.0 / M_PI;
+            }
+            EMSResultsNetImpedanceCurve* curve =
+                [[EMSResultsNetImpedanceCurve alloc] initWithProbeName:@(probePort.name().c_str())
+                                                            magnitudeOhm:toNSArray(magOhm)
+                                                                angleDeg:toNSArray(angleDeg)];
+            auto it = curvesByNet.find(probePort.netName());
+            if (it == curvesByNet.end()) {
+                netOrder.push_back(probePort.netName());
+                it = curvesByNet.emplace(probePort.netName(), [NSMutableArray array]).first;
+            }
+            [it->second addObject:curve];
+        }
+        for (const std::string& netName : netOrder) {
+            [netImpedances addObject:[[EMSResultsNetImpedance alloc] initWithNetName:@(netName.c_str())
+                                                                                probes:curvesByNet.at(netName)]];
+        }
+    }
+
     NSMutableArray<EMSResultsTrace*>* traces = [NSMutableArray array];
     for (std::size_t idx = 0; idx < simConfig.traces().size(); ++idx) {
         const auto& trace = simConfig.traces()[idx];
@@ -379,6 +518,92 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
         [traces addObject:[[EMSResultsTrace alloc] initWithName:name delayNs:toNSArray(*d, 1e9)]];
     }
 
+    NSMutableArray<EMSResultsEyeDiagram*>* eyeDiagrams = [NSMutableArray array];
+    const double eyeBitRate = simConfig.eyeBitRate() > 0 ? simConfig.eyeBitRate() : frequency.stop();
+    std::set<std::int32_t> differentialPorts;
+
+    const auto appendEye = [&](NSString* name, bool differential,
+                               const std::vector<std::complex<double>>& transfer) {
+        const auto eye = gerber2ems::computeEyeDiagram(postprocessor.frequencies(), transfer, eyeBitRate);
+        if (!eye.has_value()) {
+            return;
+        }
+        NSMutableArray<NSArray<NSNumber*>*>* eyeTraces =
+            [NSMutableArray arrayWithCapacity:eye->traces.size()];
+        for (const std::vector<double>& trace : eye->traces) {
+            [eyeTraces addObject:toNSArray(trace)];
+        }
+        [eyeDiagrams addObject:[[EMSResultsEyeDiagram alloc]
+            initWithName:name
+             bitRateGbps:eye->bitRate * 1e-9
+            differential:differential ? YES : NO
+                  timeUI:toNSArray(eye->timeUI)
+                   traces:eyeTraces]];
+    };
+
+    // Mixed-mode first. All four constituent ports are suppressed from the single-ended loop
+    // below: the useful received quantity is Vp-Vn after both transfer columns have been combined,
+    // not four charts for the pair's individual conductors.
+    for (std::size_t pairIndex = 0; pairIndex < simConfig.diffPairs().size(); ++pairIndex) {
+        const DifferentialPairConfig& pair = simConfig.diffPairs()[pairIndex];
+        if (!pair.correct() || !pair.startP().resolvedIndex().has_value() ||
+            !pair.startN().resolvedIndex().has_value() || !pair.stopP().resolvedIndex().has_value() ||
+            !pair.stopN().resolvedIndex().has_value()) {
+            continue;
+        }
+        const std::int32_t sp = *pair.startP().resolvedIndex();
+        const std::int32_t sn = *pair.startN().resolvedIndex();
+        const std::int32_t ep = *pair.stopP().resolvedIndex();
+        const std::int32_t en = *pair.stopN().resolvedIndex();
+        differentialPorts.insert(sp);
+        differentialPorts.insert(sn);
+        differentialPorts.insert(ep);
+        differentialPorts.insert(en);
+
+        const auto sEpSp = postprocessor.getSParam(ep, sp);
+        const auto sEpSn = postprocessor.getSParam(ep, sn);
+        const auto sEnSp = postprocessor.getSParam(en, sp);
+        const auto sEnSn = postprocessor.getSParam(en, sn);
+        if (!sEpSp.has_value() || !sEpSn.has_value() || !sEnSp.has_value() || !sEnSn.has_value() ||
+            sEpSp->size() != postprocessor.frequencies().size() || sEpSn->size() != sEpSp->size() ||
+            sEnSp->size() != sEpSp->size() || sEnSn->size() != sEpSp->size()) {
+            continue;
+        }
+        std::vector<std::complex<double>> hdd(sEpSp->size());
+        for (std::size_t f = 0; f < hdd.size(); ++f) {
+            hdd[f] = 0.5 * ((*sEpSp)[f] - (*sEpSn)[f] - (*sEnSp)[f] + (*sEnSn)[f]);
+        }
+        NSString* name = pair.name().has_value() ? @(pair.name()->c_str())
+                                                   : [NSString stringWithFormat:@"Differential Pair %zu", pairIndex + 1];
+        appendEye(name, true, hdd);
+    }
+
+    std::set<std::int32_t> mainInputs;
+    for (const ExcitationConfig& excitation : simConfig.excitations()) {
+        if (excitation.isMain() && excitation.drivenPortIndex().has_value()) {
+            mainInputs.insert(*excitation.drivenPortIndex());
+        }
+    }
+    for (const std::int32_t input : mainInputs) {
+        if (differentialPorts.contains(input)) {
+            continue;
+        }
+        for (std::int32_t output = 0; output < portCount; ++output) {
+            const PortConfig& outputPort = simConfig.ports()[static_cast<std::size_t>(output)];
+            if (outputPort.excite() || !outputPort.absorbSignal() || outputPort.isTraceProbe() ||
+                differentialPorts.contains(output)) {
+                continue;
+            }
+            const auto transfer = postprocessor.getSParam(output, input);
+            if (!transfer.has_value() || transfer->size() != postprocessor.frequencies().size()) {
+                continue;
+            }
+            NSString* name = [NSString stringWithFormat:@"%@ — from %s", responseLabel(outputPort),
+                                                       simConfig.ports()[static_cast<std::size_t>(input)].name().c_str()];
+            appendEye(name, false, *transfer);
+        }
+    }
+
     return [[EMSResultsPreview alloc] initWithFrequenciesGHz:freqsGHz
                                                         ports:ports
                                                    sParamSets:sParamSets
@@ -386,5 +611,7 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
                                                   smithCharts:smithCharts
                                                     diffPairs:diffPairs
                                                        traces:traces
-                                                       probes:probes];
+                                                       probes:probes
+                                                netImpedances:netImpedances
+                                                  eyeDiagrams:eyeDiagrams];
 }

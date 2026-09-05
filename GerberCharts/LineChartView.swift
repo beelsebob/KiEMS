@@ -17,12 +17,32 @@ public struct ChartCurve {
     public var values: [Double]
     public var axis: ChartAxisSide
     public var dashed: Bool
+    /// Stroke width in points -- defaults to the same 1.5 every curve has always drawn at. A
+    /// thinner value (e.g. for one of several individual measurements shown alongside their own
+    /// average) visually recedes behind curves at the default weight without needing a separate
+    /// drawing pass or reduced opacity.
+    public var lineWidth: CGFloat
 
-    public init(label: String, values: [Double], axis: ChartAxisSide = .left, dashed: Bool = false) {
+    public init(label: String, values: [Double], axis: ChartAxisSide = .left, dashed: Bool = false,
+                lineWidth: CGFloat = 1.5) {
         self.label = label
         self.values = values
         self.axis = axis
         self.dashed = dashed
+        self.lineWidth = lineWidth
+    }
+}
+
+/// A shaded min/max envelope drawn beneath every curve -- e.g. the range several individual
+/// measurements fell within at each X value, with their average drawn as an ordinary ChartCurve on
+/// top. `low`/`high` share the chart's own X values and left axis, like a ChartCurve's `values`.
+public struct ChartBand {
+    public var low: [Double]
+    public var high: [Double]
+
+    public init(low: [Double], high: [Double]) {
+        self.low = low
+        self.high = high
     }
 }
 
@@ -36,6 +56,7 @@ public struct ChartCurve {
 public final class LineChartView: NSView {
     private var xValues: [Double] = []
     private var curves: [ChartCurve] = []
+    private var band: ChartBand?
     private var leftAxisMinRange: (min: Double, max: Double)?
     private var rightAxisMinRange: (min: Double, max: Double)?
     private var xAxisLabel: String?
@@ -69,10 +90,12 @@ public final class LineChartView: NSView {
     /// the edge of the excitation bandwidth, where the incident wave's spectrum is weak enough that
     /// reflected/incident becomes numerically unstable) from making the axis auto-scale to a range
     /// so wide the physically meaningful part of the curve gets visually flattened.
-    public func setData(xValues: [Double], curves: [ChartCurve], leftAxisMinRange: (min: Double, max: Double)? = nil,
+    public func setData(xValues: [Double], curves: [ChartCurve], band: ChartBand? = nil,
+                         leftAxisMinRange: (min: Double, max: Double)? = nil,
                          rightAxisMinRange: (min: Double, max: Double)? = nil, xAxisLabel: String? = nil) {
         self.xValues = xValues
         self.curves = curves
+        self.band = band
         self.leftAxisMinRange = leftAxisMinRange
         self.rightAxisMinRange = rightAxisMinRange
         self.xAxisLabel = xAxisLabel
@@ -110,7 +133,10 @@ public final class LineChartView: NSView {
         guard plotRect.width > 1, plotRect.height > 1 else { return }
 
         let xRange = NiceAxisRange.range(min: xValues.min() ?? 0, max: xValues.max() ?? 1, targetTicks: 6)
-        let leftValues = leftCurves.flatMap(\.values).filter(\.isFinite)
+        var leftValues = leftCurves.flatMap(\.values).filter(\.isFinite)
+        if let band {
+            leftValues += (band.low + band.high).filter(\.isFinite)
+        }
         let leftDataMin = min(leftValues.min() ?? 0, leftAxisMinRange?.min ?? .infinity)
         let leftDataMax = max(leftValues.max() ?? 1, leftAxisMinRange?.max ?? -.infinity)
         let leftRange = NiceAxisRange.range(min: leftDataMin, max: leftDataMax, targetTicks: 5)
@@ -162,9 +188,29 @@ public final class LineChartView: NSView {
         ctx.setLineWidth(1)
         ctx.stroke(plotRect)
 
-        // Curves, clipped to the plot area so an out-of-range point doesn't draw over the margins.
+        // Band + curves, clipped to the plot area so an out-of-range point doesn't draw over the
+        // margins.
         ctx.saveGState()
         ctx.clip(to: plotRect)
+
+        if let band, !band.low.isEmpty, band.low.count == band.high.count {
+            let path = CGMutablePath()
+            var started = false
+            for (i, x) in xValues.enumerated() {
+                guard i < band.low.count, band.low[i].isFinite else { continue }
+                let point = CGPoint(x: xPixel(x), y: yPixel(band.low[i], range: leftRange))
+                if started { path.addLine(to: point) } else { path.move(to: point); started = true }
+            }
+            for i in stride(from: xValues.count - 1, through: 0, by: -1) {
+                guard i < band.high.count, band.high[i].isFinite else { continue }
+                path.addLine(to: CGPoint(x: xPixel(xValues[i]), y: yPixel(band.high[i], range: leftRange)))
+            }
+            path.closeSubpath()
+            ctx.setFillColor(NSColor.controlAccentColor.withAlphaComponent(0.15).cgColor)
+            ctx.addPath(path)
+            ctx.fillPath()
+        }
+
         let palette = ChartPalette.colors
         for (index, curve) in curves.enumerated() {
             let range = curve.axis == .left ? leftRange : rightRange
@@ -182,7 +228,7 @@ public final class LineChartView: NSView {
             }
             ctx.saveGState()
             ctx.setStrokeColor(palette[index % palette.count].cgColor)
-            ctx.setLineWidth(1.5)
+            ctx.setLineWidth(curve.lineWidth)
             if curve.dashed {
                 ctx.setLineDash(phase: 0, lengths: [4, 3])
             }
@@ -247,7 +293,7 @@ public final class LineChartView: NSView {
                 let swatchPath = NSBezierPath()
                 swatchPath.move(to: NSPoint(x: x - swatchWidth, y: y))
                 swatchPath.line(to: NSPoint(x: x, y: y))
-                swatchPath.lineWidth = entry.curve.dashed ? 1.0 : 1.5
+                swatchPath.lineWidth = entry.curve.dashed ? 1.0 : entry.curve.lineWidth
                 if entry.curve.dashed {
                     swatchPath.setLineDash([4, 3], count: 2, phase: 0)
                 }

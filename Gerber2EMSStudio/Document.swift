@@ -121,8 +121,14 @@ final class Document: NSDocument {
     }
 
     deinit {
+        // Not a direct removeItem() here -- close() (above) only *requests* cancellation of any
+        // running job for this document; the job's own background call can still be genuinely
+        // in-flight (specifically, inside openEMS's own uninterruptible SetupFDTD()) well after this
+        // Document deallocates. Deleting the directory a still-running background thread is chdir'd
+        // into crashes it the moment it next asks for its own cwd -- see cleanUpDirectory(_:)'s own
+        // doc comment for the full story and why routing through JobScheduler's serial queue fixes it.
         if let scratchDirectory {
-            try? FileManager.default.removeItem(at: scratchDirectory)
+            JobScheduler.shared.cleanUpDirectory(scratchDirectory)
         }
     }
 

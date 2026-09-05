@@ -7,6 +7,7 @@ using gerber2ems::EMSConfig;
 using gerber2ems::ExcitationConfig;
 using gerber2ems::GroundSelectorKind;
 using gerber2ems::InvolvedNetConfig;
+using gerber2ems::NetInclusionLevel;
 using gerber2ems::NetSelectorKind;
 using gerber2ems::ProbedPin;
 using gerber2ems::SimulationConfig;
@@ -90,6 +91,7 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
         _footprintStorage = probedPin.footprint;
         _pinStorage = probedPin.pin;
         _absorbSignal = probedPin.absorbSignal ? YES : NO;
+        _probe = probedPin.probe ? YES : NO;
     }
     return self;
 }
@@ -127,6 +129,20 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
         case EMSNetSelectorKindNetClass: self.cxxNet.setKind(NetSelectorKind::NetClass); break;
         case EMSNetSelectorKindNet: self.cxxNet.setKind(NetSelectorKind::Net); break;
         case EMSNetSelectorKindFootprintPin: self.cxxNet.setKind(NetSelectorKind::FootprintPin); break;
+    }
+}
+
+- (EMSNetInclusionLevel)inclusionLevel {
+    switch (self.cxxNet.inclusionLevel()) {
+        case NetInclusionLevel::SimulationNet: return EMSNetInclusionLevelSimulationNet;
+        case NetInclusionLevel::GeometryOnly: return EMSNetInclusionLevelGeometryOnly;
+    }
+    return EMSNetInclusionLevelSimulationNet;
+}
+- (void)setInclusionLevel:(EMSNetInclusionLevel)inclusionLevel {
+    switch (inclusionLevel) {
+        case EMSNetInclusionLevelSimulationNet: self.cxxNet.setInclusionLevel(NetInclusionLevel::SimulationNet); break;
+        case EMSNetInclusionLevelGeometryOnly: self.cxxNet.setInclusionLevel(NetInclusionLevel::GeometryOnly); break;
     }
 }
 
@@ -182,6 +198,28 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
     self.cxxNet.setPlane(static_cast<std::int32_t>(value));
 }
 
+- (BOOL)probeImpedance {
+    return self.cxxNet.probeImpedance() ? YES : NO;
+}
+- (void)setProbeImpedance:(BOOL)value {
+    self.cxxNet.setProbeImpedance(value ? true : false);
+}
+
+- (nullable NSString*)differentialPairPartner {
+    const auto& value = self.cxxNet.differentialPairPartner();
+    return value.has_value() ? @(value->c_str()) : nil;
+}
+- (void)setDifferentialPairPartner:(nullable NSString*)value {
+    self.cxxNet.setDifferentialPairPartner(value != nil ? std::optional<std::string>(value.UTF8String) : std::nullopt);
+}
+
+- (BOOL)simulateAsDifferentialPair {
+    return self.cxxNet.simulateAsDifferentialPair() ? YES : NO;
+}
+- (void)setSimulateAsDifferentialPair:(BOOL)value {
+    self.cxxNet.setSimulateAsDifferentialPair(value ? true : false);
+}
+
 - (nullable NSNumber*)width {
     const auto& value = self.cxxNet.width();
     return value.has_value() ? @(*value) : nil;
@@ -226,7 +264,9 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
     return self.cxxNet.hasExplicitPinSelections() ? YES : NO;
 }
 - (BOOL)isPinProbedWithFootprint:(NSString*)footprint pin:(NSString*)pin {
-    return self.cxxNet.probedPinAbsorbs(footprint.UTF8String, pin.UTF8String).has_value() ? YES : NO;
+    // probedPinIsProbe(), not just "is there any probedPins() entry at all" -- an absorb-only entry
+    // (setPinAbsorbOnly()) is also in that list, but isn't a "Probe" selection.
+    return self.cxxNet.probedPinIsProbe(footprint.UTF8String, pin.UTF8String).value_or(false) ? YES : NO;
 }
 - (BOOL)pinAbsorbsSignalWithFootprint:(NSString*)footprint pin:(NSString*)pin {
     const auto value = self.cxxNet.probedPinAbsorbs(footprint.UTF8String, pin.UTF8String);
@@ -238,6 +278,13 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
                 pin:(NSString*)pin {
     self.cxxNet.setPinProbed(footprint.UTF8String, pin.UTF8String,
                               probed ? std::optional<bool>(absorbSignal ? true : false) : std::nullopt);
+}
+- (BOOL)isPinAbsorbOnlyWithFootprint:(NSString*)footprint pin:(NSString*)pin {
+    const auto isProbe = self.cxxNet.probedPinIsProbe(footprint.UTF8String, pin.UTF8String);
+    return (isProbe.has_value() && !*isProbe) ? YES : NO;
+}
+- (void)setPinAbsorbOnly:(BOOL)enabled withFootprint:(NSString*)footprint pin:(NSString*)pin {
+    self.cxxNet.setPinAbsorbOnly(footprint.UTF8String, pin.UTF8String, enabled ? true : false);
 }
 - (NSArray<EMSProbedPinBridge*>*)probedPins {
     const auto& probed = self.cxxNet.probedPins();
@@ -385,6 +432,14 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
 }
 - (void)setViaSpacing:(double)value {
     self.cxxSim.setViaSpacing(value);
+}
+
+- (double)eyeBitRate {
+    const double configured = self.cxxSim.eyeBitRate();
+    return configured > 0 ? configured : _parent.frequencyStop;
+}
+- (void)setEyeBitRate:(double)value {
+    self.cxxSim.setEyeBitRate(value);
 }
 
 - (EMSInvolvedNetBridge*)_wrapperForInvolvedNetIndex:(NSInteger)index {
@@ -576,6 +631,13 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
     _config.setMaxSteps(static_cast<std::int32_t>(value));
 }
 
+- (double)gridDensity {
+    return _config.grid().optimal();
+}
+- (void)setGridDensity:(double)value {
+    _config.grid().setOptimal(value);
+}
+
 - (EMSSimulationBridge*)_wrapperForSimulationIndex:(NSInteger)index {
     EMSSimulationBridge* wrapper = [[EMSSimulationBridge alloc] init];
     wrapper->_parent = self;
@@ -594,6 +656,7 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
 - (EMSSimulationBridge*)addSimulationNamed:(NSString*)name {
     SimulationConfig sim;
     sim.setName(name.UTF8String);
+    sim.setEyeBitRate(_config.frequency().stop());
     // A placeholder, not a real selection -- to_json() dereferences groundNet's active-kind
     // optional unconditionally, so it can never be left unset. involvedNets() is deliberately left
     // empty here: SimulationConfig::from_json() rejects an empty involved_nets list, so a document

@@ -6,9 +6,11 @@ import Cocoa
 /// has no NSTableCellView machinery and isn't wired up as any kind of control, just a label.
 final class NetNameView: NSView {
     private var segments: [NetNameFormatting.Segment] = []
+    private var textColor: NSColor = .labelColor
 
-    func configure(name: String, font: NSFont) {
+    func configure(name: String, font: NSFont, color: NSColor = .labelColor) {
         segments = NetNameFormatting.segments(for: name, font: font)
+        textColor = color
         invalidateIntrinsicContentSize()
         needsDisplay = true
     }
@@ -24,6 +26,6 @@ final class NetNameView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        NetNameFormatting.draw(segments, in: bounds, color: .labelColor)
+        NetNameFormatting.draw(segments, in: bounds, color: textColor)
     }
 }

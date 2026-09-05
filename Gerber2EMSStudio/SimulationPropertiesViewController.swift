@@ -29,6 +29,7 @@ final class SimulationPropertiesViewController: NSViewController {
     /// the FDTD run before its energy has decayed, which is exactly the bug this field exists to let
     /// the user fix -- so a stale cached result from before raising it would defeat the point.
     var onFDTDParametersChanged: (() -> Void)?
+    var onResultsParametersChanged: ((Int) -> Void)?
 
     private let nameField = NSTextField(string: "")
     private let groundKindPopUp = NSPopUpButton()
@@ -40,6 +41,14 @@ final class SimulationPropertiesViewController: NSViewController {
     // purely for that case, so a negated ground net (e.g. "~{RESET}") still reads correctly.
     private let groundNameView = NetNameView()
     private let maxStepsField = NSTextField(string: "")
+    // The FDTD grid's own base target cell size -- document-level (EMSConfig), not per-simulation,
+    // same as maxStepsField beside it. maxTimestepValueLabel/simulationRealTimeValueLabel are
+    // read-only, derived from this and maxStepsField together (see updateDerivedTimingLabels()) --
+    // each paired with its own caption via labeled(), the same way gridDensityField/maxStepsField
+    // are, so the two rows' columns line up (see gridAndStepsRow/derivedTimingRow below).
+    private let gridDensityField = NSTextField(string: "")
+    private let maxTimestepValueLabel = NSTextField(labelWithString: "")
+    private let simulationRealTimeValueLabel = NSTextField(labelWithString: "")
     private let hullPaddingField = NSTextField(string: "")
     private let viaEdgeDistanceField = NSTextField(string: "")
     private let viaSpacingField = NSTextField(string: "")
@@ -50,10 +59,12 @@ final class SimulationPropertiesViewController: NSViewController {
     // whether a simulation is selected (see reload()/setPerSimulationFieldsEnabled()).
     private let frequencyStartField = NSTextField(string: "")
     private let frequencyStopField = NSTextField(string: "")
+    private let eyeBitRateField = NSTextField(string: "")
 
     // Length fields each get their own formatter instance -- the displayed/accepted unit is
     // per-instance state (see MicrometerValueFormatter), so sharing one across fields would make
     // them all switch units together whenever any single field's unit changed.
+    private let gridDensityFormatter = MicrometerValueFormatter()
     private let hullPaddingFormatter = MicrometerValueFormatter()
     private let viaEdgeDistanceFormatter = MicrometerValueFormatter()
     private let viaSpacingFormatter = MicrometerValueFormatter()
@@ -62,6 +73,8 @@ final class SimulationPropertiesViewController: NSViewController {
         displaySuffix: "Hz", acceptedSuffixes: ["hertz", "hz"], autoSelectsSIPrefix: true)
     private let frequencyStopFormatter = UnitSuffixValueFormatter(
         displaySuffix: "Hz", acceptedSuffixes: ["hertz", "hz"], autoSelectsSIPrefix: true)
+    private let eyeBitRateFormatter = UnitSuffixValueFormatter(
+        displaySuffix: "bit/s", acceptedSuffixes: ["bit/s", "bps"], autoSelectsSIPrefix: true)
     private let maxStepsFormatter: NumberFormatter = {
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
@@ -127,14 +140,20 @@ final class SimulationPropertiesViewController: NSViewController {
         fillingEpsilonField.formatter = Self.plainNumberFormatter
         frequencyStartField.formatter = frequencyStartFormatter
         frequencyStopField.formatter = frequencyStopFormatter
+        eyeBitRateField.formatter = eyeBitRateFormatter
         maxStepsField.formatter = maxStepsFormatter
+        gridDensityField.formatter = gridDensityFormatter
 
         for field in [hullPaddingField, viaEdgeDistanceField, viaSpacingField, platingThicknessField,
-                      fillingEpsilonField, frequencyStartField, frequencyStopField, maxStepsField] {
+                      fillingEpsilonField, frequencyStartField, frequencyStopField, maxStepsField,
+                      gridDensityField, eyeBitRateField] {
             field.alignment = .right
             field.target = self
             field.action = #selector(numberFieldChanged(_:))
         }
+
+        maxTimestepValueLabel.textColor = .secondaryLabelColor
+        simulationRealTimeValueLabel.textColor = .secondaryLabelColor
 
         viaAdvancedDisclosureButton.bezelStyle = .regularSquare
         viaAdvancedDisclosureButton.isBordered = false
@@ -149,6 +168,33 @@ final class SimulationPropertiesViewController: NSViewController {
         let groundRow = NSStackView(views: [groundKindPopUp, groundNamePopUp, groundNameView])
         groundRow.orientation = .horizontal
         groundRow.spacing = 8
+
+        // Grid density sits left of Max. timesteps in one row (same stack-of-stacks-plus-spacer
+        // shape as frequencyRow below); maxTimestepValueLabel/simulationRealTimeValueLabel are
+        // read-only values derived from both, directly beneath -- see updateDerivedTimingLabels().
+        // Built via the same labeled(_:_:labelWidth:) helper, same 130 labelWidth and 8pt spacing,
+        // as gridAndStepsRow immediately above, so both rows' two columns land at the same x --
+        // "Max timestep:"/its value line up under "Grid density:"/gridDensityField, and
+        // "Simulation real time:"/its value line up under "Max. timesteps:"/maxStepsField.
+        let gridAndStepsRowSpacer = NSView()
+        gridAndStepsRowSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let gridAndStepsRow = NSStackView(views: [
+            labeled("Grid density:", gridDensityField, labelWidth: 130),
+            labeled("Max. timesteps:", maxStepsField, labelWidth: 130),
+            gridAndStepsRowSpacer,
+        ])
+        gridAndStepsRow.orientation = .horizontal
+        gridAndStepsRow.spacing = 8
+
+        let derivedTimingRowSpacer = NSView()
+        derivedTimingRowSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let derivedTimingRow = NSStackView(views: [
+            labeled("Max timestep:", maxTimestepValueLabel, labelWidth: 130),
+            labeled("Simulation real time:", simulationRealTimeValueLabel, labelWidth: 130),
+            derivedTimingRowSpacer,
+        ])
+        derivedTimingRow.orientation = .horizontal
+        derivedTimingRow.spacing = 8
 
         let frequencyStartRow = labeled("Frequency start:", frequencyStartField, labelWidth: 130)
         // 130, not a tighter fit for "Stop:" -- matches viaSpacing's/fillingEpsilon's second-column
@@ -196,9 +242,11 @@ final class SimulationPropertiesViewController: NSViewController {
             // edge distance's field directly below -- "Via edge distance:" is the widest label here.
             labeled("Name:", nameField, labelWidth: 130),
             labeled("Ground net:", groundRow, labelWidth: 130),
-            labeled("Max. timesteps:", maxStepsField, labelWidth: 130),
+            gridAndStepsRow,
+            derivedTimingRow,
             labeled("Hull padding:", hullPaddingField, labelWidth: 130),
             frequencyRow,
+            labeled("Eye bit rate:", eyeBitRateField, labelWidth: 130),
             viaMainRow,
             viaAdvancedRow,
         ])
@@ -219,9 +267,13 @@ final class SimulationPropertiesViewController: NSViewController {
             stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 8),
             stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -8),
         ])
-        for field in [nameField, hullPaddingField, maxStepsField] {
+        for field in [nameField, hullPaddingField, maxStepsField, gridDensityField, eyeBitRateField] {
             field.widthAnchor.constraint(equalToConstant: 160).isActive = true
         }
+        // Matches gridDensityField's own column width directly above, even though this is plain
+        // text, not a bordered input box -- otherwise its own intrinsic (much narrower) width would
+        // pull "Simulation real time:" leftward out of alignment with "Max. timesteps:" above it.
+        maxTimestepValueLabel.widthAnchor.constraint(equalToConstant: 160).isActive = true
         // Same 100pt for every field in this panel, frequencyStart/Stop included -- keeps "Via
         // spacing"/"Stop"/"Via filling epsilon" (all labelWidth 130 above) lined up as one column.
         for field in [viaEdgeDistanceField, viaSpacingField, platingThicknessField, fillingEpsilonField,
@@ -288,12 +340,15 @@ final class SimulationPropertiesViewController: NSViewController {
         frequencyStartField.doubleValue = document.config.frequencyStart
         frequencyStopField.doubleValue = document.config.frequencyStop
         maxStepsField.integerValue = document.config.maxSteps
+        gridDensityField.doubleValue = document.config.gridDensity
+        updateDerivedTimingLabels()
 
         guard let sim = selectedSimulation else {
             nameField.stringValue = ""
             hullPaddingField.stringValue = ""
             viaEdgeDistanceField.stringValue = ""
             viaSpacingField.stringValue = ""
+            eyeBitRateField.stringValue = ""
             groundNamePopUp.removeAllItems()
             groundNameView.configure(name: "", font: groundNamePopUp.font ?? .systemFont(ofSize: NSFont.systemFontSize))
             setPerSimulationFieldsEnabled(false)
@@ -306,6 +361,7 @@ final class SimulationPropertiesViewController: NSViewController {
         hullPaddingField.doubleValue = sim.hullPadding
         viaEdgeDistanceField.doubleValue = sim.viaEdgeDistance
         viaSpacingField.doubleValue = sim.viaSpacing
+        eyeBitRateField.doubleValue = sim.eyeBitRate
 
         refreshNetLists()
 
@@ -330,7 +386,7 @@ final class SimulationPropertiesViewController: NSViewController {
 
     private func setPerSimulationFieldsEnabled(_ enabled: Bool) {
         for control in [nameField, groundKindPopUp, groundNamePopUp, hullPaddingField, viaEdgeDistanceField,
-                         viaSpacingField] as [NSControl] {
+                         viaSpacingField, eyeBitRateField] as [NSControl] {
             control.isEnabled = enabled
         }
     }
@@ -515,7 +571,9 @@ final class SimulationPropertiesViewController: NSViewController {
     @objc private func numberFieldChanged(_ sender: NSTextField) {
         guard let document else { return }
         var affectsGeometry = false
+        var affectsAllGeometry = false
         var affectsFDTD = false
+        var affectsResults = false
         switch sender {
         case hullPaddingField:
             selectedSimulation?.hullPadding = sender.doubleValue
@@ -526,6 +584,9 @@ final class SimulationPropertiesViewController: NSViewController {
         case viaSpacingField:
             selectedSimulation?.viaSpacing = sender.doubleValue
             affectsGeometry = true
+        case eyeBitRateField:
+            selectedSimulation?.eyeBitRate = sender.doubleValue
+            affectsResults = true
         case platingThicknessField: document.config.viaPlatingThickness = sender.doubleValue
         case fillingEpsilonField: document.config.viaFillingEpsilon = sender.doubleValue
         case frequencyStartField: document.config.frequencyStart = sender.doubleValue
@@ -533,14 +594,63 @@ final class SimulationPropertiesViewController: NSViewController {
         case maxStepsField:
             document.config.maxSteps = sender.integerValue
             affectsFDTD = true
+        case gridDensityField:
+            // Document-level, like maxSteps, but unlike maxSteps it genuinely changes the Grid
+            // pipeline stage's own output (mesh line placement) -- every simulation's cached
+            // geometry needs invalidating, not just whichever one happens to be selected right now.
+            document.config.gridDensity = sender.doubleValue
+            affectsAllGeometry = true
         default: break
         }
         document.updateChangeCount(.changeDone)
-        if affectsGeometry, let selectedIndex {
+        if affectsAllGeometry {
+            for index in document.config.simulations.indices {
+                onGeometryParametersChanged?(index)
+            }
+        } else if affectsGeometry, let selectedIndex {
             onGeometryParametersChanged?(selectedIndex)
         }
         if affectsFDTD {
             onFDTDParametersChanged?()
         }
+        if affectsResults, let selectedIndex {
+            onResultsParametersChanged?(selectedIndex)
+        }
+        updateDerivedTimingLabels()
+    }
+
+    private static let speedOfLightMetersPerSecond = 299_792_458.0
+
+    /// Recomputes maxTimestepLabel/simulationRealTimeLabel from gridDensityField/maxStepsField's
+    /// current values -- a quick, isotropic-cell CFL estimate (dt <= cellSize / (c * sqrt(3)), the
+    /// stability bound for a cubic Yee cell), not the exact value openEMS's own CalcTimestep would
+    /// compute against the real, non-uniform generated mesh (which doesn't exist until the Grid
+    /// pipeline stage actually runs, well after this panel's own fields are edited) -- close enough
+    /// to sanity-check "is max. timesteps enough simulated time to see this signal decay", the
+    /// question these two labels exist to answer at a glance.
+    private func updateDerivedTimingLabels() {
+        guard let document else {
+            maxTimestepValueLabel.stringValue = ""
+            simulationRealTimeValueLabel.stringValue = ""
+            return
+        }
+        let cellSizeMeters = document.config.gridDensity * 1e-6
+        guard cellSizeMeters > 0 else {
+            maxTimestepValueLabel.stringValue = "—"
+            simulationRealTimeValueLabel.stringValue = "—"
+            return
+        }
+        let dt = cellSizeMeters / (Self.speedOfLightMetersPerSecond * (3.0 as Double).squareRoot())
+        let realTime = dt * Double(document.config.maxSteps)
+        maxTimestepValueLabel.stringValue = Self.formatSeconds(dt)
+        simulationRealTimeValueLabel.stringValue = Self.formatSeconds(realTime)
+    }
+
+    private static func formatSeconds(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds > 0 else { return "—" }
+        if let prefix = SIPrefix.bestFitSmall(for: seconds) {
+            return String(format: "%.3g", seconds / prefix.factor) + " \(prefix.symbol)s"
+        }
+        return String(format: "%.3g", seconds) + " s"
     }
 }

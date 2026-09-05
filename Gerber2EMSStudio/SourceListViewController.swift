@@ -171,7 +171,23 @@ final class SourceListViewController: NSViewController {
     // checkboxRow(_:title:).
     // Shown only for a .net/.netClass selection -- see probeCheckbox/absorbCheckbox below for the
     // per-pin equivalent (a .pin node no longer has an "included" checkbox of its own at all).
+    // Titled "Simulation Net" -- full participation: grows the hull, gets probe/absorb/excite ports.
+    // Mutually exclusive with geometryOnlyCheckbox below (both ultimately just read/write the same
+    // underlying EMSInvolvedNetBridge.inclusionLevel -- see includedToggled()/geometryOnlyToggled()).
     private let includedCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    // Titled "Included in Simulation" -- the narrower tier (gerber2ems::NetInclusionLevel::
+    // GeometryOnly): the net's own copper physically exists in the simulated geometry/mesh (clipped
+    // to whatever hull the Simulation Net-level nets already produced, and densified the same
+    // edge-aware way -- see grid_gen.cpp), but never grows the hull itself and is never eligible for
+    // probe/absorb/excite ports. Meant for things like via-stitched ground-adjacent structure that
+    // needs to physically exist in the model without itself being probed or driven.
+    private let geometryOnlyCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    // Shown only for a .net/.netClass selection, directly under includedCheckbox, and only once
+    // it's checked (see updateValueFieldsVisibility()) -- a net-level, auto-placed, non-loading
+    // impedance-measurement probe, independent of whatever ports this net's own pins resolve to.
+    // See gerber2ems::InvolvedNetConfig::probeImpedance()'s own doc comment.
+    private let probeImpedanceCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    private let simulateAsDifferentialPairCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     // Shown only for a .pin selection. Independent of excitedCheckbox (see its own declaration
     // comment) -- checking either one auto-includes this pin's net, same as includedCheckbox does
     // for a net/net-class row. absorbCheckbox is only shown (and only meaningful) once probeCheckbox
@@ -181,7 +197,6 @@ final class SourceListViewController: NSViewController {
     private let probeCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let absorbCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let impedanceField = NSTextField(string: "")
-    private let lengthField = NSTextField(string: "")
     private let planeComboBox = NSComboBox()
     private let widthField = NSTextField(string: "")
     private let dBMarginField = NSTextField(string: "")
@@ -208,7 +223,6 @@ final class SourceListViewController: NSViewController {
     // make them all switch units together).
     private let impedanceFormatter = UnitSuffixValueFormatter(
         displaySuffix: "Ω", acceptedSuffixes: ["ohms", "ohm", "Ω"])
-    private let lengthFormatter = MicrometerValueFormatter()
     private let widthFormatter = MicrometerValueFormatter()
 
     // A horizontal rule before the excitation editor, inset the same way includedCheckbox/
@@ -227,11 +241,15 @@ final class SourceListViewController: NSViewController {
     // reserved space in detailStack, so show/hide has to target these actual arranged subviews
     // instead.
     private var includedRow: NSView!
+    private var geometryOnlyRow: NSView!
+    private var probeImpedanceRow: NSView!
+    private var simulateAsDifferentialPairRow: NSView!
     private var probeRow: NSView!
     private var absorbRow: NSView!
     private var excitedRow: NSView!
     private var excitationSeparatorRow: NSView!
-    // The Impedance/Length/Reference Plane rows -- hidden as a group whenever includedCheckbox isn't
+    private var impedanceRow: NSView!
+    // The Impedance/Reference Plane rows -- hidden as a group whenever includedCheckbox isn't
     // checked (see updateValueFieldsVisibility). widthDBAdvancedRow is handled alongside them but
     // separately, since it also depends on widthDBAdvancedRowExpanded.
     private var valueFieldRows: [NSView] = []
@@ -264,6 +282,12 @@ final class SourceListViewController: NSViewController {
 
     private var rootNodes: [SourceListNode] = []
     private var selectedNode: SourceListNode?
+    /// Every footprint (with its own pins already populated) refreshBoardData() last fetched, in
+    /// whichever scope actually queries it (.net and .footprint both do; .netClass doesn't, but
+    /// nothing needs this while browsing net classes -- see offerDifferentialPairMirror's own doc
+    /// comment). Kept around specifically so a differential-pair partner lookup doesn't need its
+    /// own separate, redundant KicadBoardBridge round trip.
+    private var allFootprints: [KicadFootprintInfo] = []
     /// Set by refreshBoardData() whenever the current scope's KicadBoardBridge query threw, so
     /// showDetail(for: nil) can show *why* the list is empty (or incomplete) instead of the generic
     /// "select something" placeholder, which used to look identical to a query that genuinely
@@ -272,9 +296,11 @@ final class SourceListViewController: NSViewController {
 
     /// The choices in directionPopUp. North/South/East/West are fixed cardinal angles, matching
     /// GeometryView's board-space convention (+X east/right, +Y north/up -- see its own isFlipped
-    /// doc comment) and the same 0/90/180/270 values gerber2ems::_deriveDirection snaps to
-    /// automatically. `custom` reveals customDirectionField for any other angle; `auto` clears the
-    /// override entirely, letting port_resolution.cpp derive it from routed copper as before.
+    /// doc comment). `custom` reveals customDirectionField for any other angle; `auto` clears the
+    /// override entirely, letting port_resolution.cpp fall back to the pad's own real rotation
+    /// (not a value derived from routed copper -- a pad with traces entering from more than one
+    /// side has no single departure direction to derive in the first place, but its own physical
+    /// rotation is always well-defined regardless of how many traces connect to it).
     private enum DirectionKind: Int, CaseIterable {
         case auto, north, south, east, west, custom
 
@@ -471,16 +497,21 @@ final class SourceListViewController: NSViewController {
 
         includedCheckbox.target = self
         includedCheckbox.action = #selector(includedToggled)
+        geometryOnlyCheckbox.target = self
+        geometryOnlyCheckbox.action = #selector(geometryOnlyToggled)
+        probeImpedanceCheckbox.target = self
+        probeImpedanceCheckbox.action = #selector(probeImpedanceToggled)
+        simulateAsDifferentialPairCheckbox.target = self
+        simulateAsDifferentialPairCheckbox.action = #selector(simulateAsDifferentialPairToggled)
         probeCheckbox.target = self
         probeCheckbox.action = #selector(probeToggled)
         absorbCheckbox.target = self
         absorbCheckbox.action = #selector(absorbToggled)
 
         impedanceField.formatter = impedanceFormatter
-        lengthField.formatter = lengthFormatter
         widthField.formatter = widthFormatter
         dBMarginField.formatter = Self.numberFormatter
-        for field in [impedanceField, lengthField, widthField, dBMarginField] {
+        for field in [impedanceField, widthField, dBMarginField] {
             field.alignment = .right
             field.target = self
             field.action = #selector(detailFieldChanged(_:))
@@ -573,17 +604,20 @@ final class SourceListViewController: NSViewController {
         excitationFieldsContainer.alignment = .leading
         excitationFieldsContainer.spacing = 8
 
-        includedRow = checkboxRow(includedCheckbox, title: "Included in Simulation")
+        includedRow = checkboxRow(includedCheckbox, title: "Simulation Net")
+        geometryOnlyRow = checkboxRow(geometryOnlyCheckbox, title: "Included in Simulation")
+        probeImpedanceRow = checkboxRow(probeImpedanceCheckbox, title: "Probe impedance")
+        simulateAsDifferentialPairRow = checkboxRow(
+            simulateAsDifferentialPairCheckbox, title: "Simulate as differential pair")
         probeRow = checkboxRow(probeCheckbox, title: "Probe")
         absorbRow = checkboxRow(absorbCheckbox, title: "Absorb Signal", labelWidth: 130)
         excitedRow = checkboxRow(excitedCheckbox, title: "Excite")
         excitationSeparatorRow = insetRow(excitationSeparator)
 
-        let impedanceRow = labeled("Impedance:", impedanceField)
-        let lengthRow = labeled("Length:", lengthField)
+        impedanceRow = labeled("Connected Component Impedance:", impedanceField)
         // No stretch-to-fill spacer here (unlike SimulationPropertiesViewController's via-settings
         // row, which this otherwise mirrors) -- this row's own content (label+combo+button) is
-        // already wider than impedanceRow/lengthRow, so forcing it to match their width via a
+        // already wider than impedanceRow, so forcing it to match their width via a
         // trailing constraint would conflict with its own minimum size instead of just being pointless.
         // The button sits directly after the combo box instead.
         let planeMainRow = NSStackView(views: [
@@ -615,19 +649,24 @@ final class SourceListViewController: NSViewController {
         // includedCheckbox is actually checked -- there's nothing meaningful to show for a net/pin
         // that isn't part of the simulation yet. widthDBAdvancedRow is handled alongside these in
         // that method, but separately, since it's also gated on widthDBAdvancedRowExpanded.
-        valueFieldRows = [impedanceRow, lengthRow, planeMainRow, directionLabeledRow]
+        valueFieldRows = [impedanceRow, planeMainRow, directionLabeledRow]
 
-        let detailStack = NSStackView(views: [
+        let leadingDetailRows: [NSView] = [
             includedRow,
+            geometryOnlyRow,
+            simulateAsDifferentialPairRow,
+            probeImpedanceRow,
             probeRow,
             absorbRow,
-        ] + valueFieldRows + [
+        ]
+        let trailingDetailRows: [NSView] = [
             widthDBAdvancedRow,
             excitationSeparatorRow,
             excitedRow,
             excitationFieldsContainer,
             detailStatusLabel,
-        ])
+        ]
+        let detailStack = NSStackView(views: leadingDetailRows + valueFieldRows + trailingDetailRows)
         detailStack.orientation = .vertical
         detailStack.alignment = .leading
         detailStack.spacing = 8
@@ -919,6 +958,12 @@ final class SourceListViewController: NSViewController {
             // just look identical to "board genuinely has zero nets/footprints," with no way to tell
             // the two apart from the UI alone.
             var queryError: String?
+            // Set (in whichever scope branch below actually fetches footprints) and applied on the
+            // main thread alongside rootNodes/boardDataError -- allFootprints is read from the main
+            // thread (differential-pair partner lookups triggered by a checkbox click), so it must
+            // never be written from this background queue directly, same reasoning as nodes/
+            // queryError themselves.
+            var fetchedFootprints: [KicadFootprintInfo]?
             switch currentScope {
             case .netClass:
                 let names: [String]
@@ -940,6 +985,7 @@ final class SourceListViewController: NSViewController {
                 } catch {
                     queryError = error.localizedDescription
                 }
+                fetchedFootprints = footprints
                 nodes = Self.hierarchicalNetNodes(from: names, footprints: footprints)
             case .footprint:
                 var footprints: [KicadFootprintInfo] = []
@@ -949,6 +995,7 @@ final class SourceListViewController: NSViewController {
                 } catch {
                     queryError = error.localizedDescription
                 }
+                fetchedFootprints = footprints
 
                 var footprintsByCategory: [String: [KicadFootprintInfo]] = [:]
                 for footprint in footprints {
@@ -982,6 +1029,9 @@ final class SourceListViewController: NSViewController {
             DispatchQueue.main.async {
                 self?.rootNodes = nodes
                 self?.boardDataError = queryError
+                if let fetchedFootprints {
+                    self?.allFootprints = fetchedFootprints
+                }
                 self?.outlineView.reloadData()
                 if let reveal = self?.pendingReveal {
                     self?.pendingReveal = nil
@@ -1138,44 +1188,80 @@ final class SourceListViewController: NSViewController {
         showDetail(for: node)
     }
 
-    /// The involvedNets() index (if any) matching `node`'s identity. "Included in Simulation" is a
-    /// property of the *net*, not the pin -- so a `.pin` node never matches a per-pin entry of its
-    /// own; it resolves straight to the `.net`-kind entry (if any) for whatever net that pin is on
-    /// (see `pin.netName`). That's why selecting a pin on an already-included net shows the
-    /// checkbox checked with the net's own impedance/length/plane (see showDetail/matchingEntry),
+    /// A node's identity, independent of any actual `SourceListNode` -- what matchingEntryIndex(for:)/
+    /// entryAutoIncluding(_:in:)/matchingExcitationIndex(for:) actually key their lookups on. Needed
+    /// so a differential-pair partner (a raw footprint+pin/net name derived from a heuristic net-name
+    /// guess -- see offerDifferentialPairMirror) can reuse those same lookups even when it has no
+    /// corresponding SourceListNode materialized in the currently-displayed scope's tree.
+    private enum ToggleIdentity {
+        case netClass(String)
+        case net(String)
+        case pin(footprintReference: String, pin: String, netName: String)
+    }
+
+    private func identity(for node: SourceListNode) -> ToggleIdentity? {
+        switch node.kind {
+        case .netClass(let name): return .netClass(name)
+        case .net(let name): return .net(name)
+        case .pin(let footprintReference, let pin):
+            return .pin(footprintReference: footprintReference, pin: pin.number, netName: pin.netName)
+        case .footprint, .group:
+            return nil
+        }
+    }
+
+    /// The involvedNets() index (if any) matching `identity`. "Included in Simulation" is a
+    /// property of the *net*, not the pin -- so a `.pin` identity never matches a per-pin entry of
+    /// its own; it resolves straight to the `.net`-kind entry (if any) for whatever net that pin is
+    /// on (see its own `netName`). That's why selecting a pin on an already-included net shows the
+    /// checkbox checked with the net's own impedance/plane (see showDetail/matchingEntry),
     /// and why editing those fields while a pin is selected edits that same shared net-level entry
     /// (see detailFieldChanged) -- there's only ever one entry per net for a pin to point at.
     /// Index-based, not object-identity-based: EMSInvolvedNetBridge wrappers are never cached (see
     /// EMSConfigBridge.mm), so two separate calls to involvedNets() never return the same instance
     /// for the same underlying entry -- `===` would never match here.
-    private func matchingEntryIndex(for node: SourceListNode) -> Int? {
+    private func matchingEntryIndex(for identity: ToggleIdentity) -> Int? {
         guard let sim = selectedSimulation else { return nil }
-        switch node.kind {
+        switch identity {
         case .netClass(let name):
             return sim.involvedNets.firstIndex { $0.kind == .netClass && $0.netClass == name }
         case .net(let name):
             return sim.involvedNets.firstIndex { $0.kind == .net && $0.net == name }
-        case .pin(_, let pin):
-            guard !pin.netName.isEmpty else { return nil }
-            return sim.involvedNets.firstIndex { $0.kind == .net && $0.net == pin.netName }
-        case .footprint, .group:
-            return nil
+        case .pin(_, _, let netName):
+            guard !netName.isEmpty else { return nil }
+            return sim.involvedNets.firstIndex { $0.kind == .net && $0.net == netName }
         }
+    }
+
+    private func matchingEntryIndex(for node: SourceListNode) -> Int? {
+        identity(for: node).flatMap { matchingEntryIndex(for: $0) }
+    }
+
+    private func matchingEntry(for identity: ToggleIdentity) -> EMSInvolvedNetBridge? {
+        matchingEntryIndex(for: identity).map { selectedSimulation!.involvedNets[$0] }
     }
 
     private func matchingEntry(for node: SourceListNode) -> EMSInvolvedNetBridge? {
         matchingEntryIndex(for: node).map { selectedSimulation!.involvedNets[$0] }
     }
 
-    /// ExcitationConfig is inherently per footprint+pin -- only a `.pin` node can match one.
-    private func matchingExcitationIndex(for node: SourceListNode) -> Int? {
-        guard case .pin(let footprintReference, let pin) = node.kind, let sim = selectedSimulation
+    /// ExcitationConfig is inherently per footprint+pin -- only a `.pin` identity can match one.
+    private func matchingExcitationIndex(for identity: ToggleIdentity) -> Int? {
+        guard case .pin(let footprintReference, let pin, _) = identity, let sim = selectedSimulation
         else { return nil }
-        return sim.excitations.firstIndex { $0.footprintReference == footprintReference && $0.pin == pin.number }
+        return sim.excitations.firstIndex { $0.footprintReference == footprintReference && $0.pin == pin }
+    }
+
+    private func matchingExcitationIndex(for node: SourceListNode) -> Int? {
+        identity(for: node).flatMap { matchingExcitationIndex(for: $0) }
     }
 
     private func matchingExcitation(for node: SourceListNode) -> EMSExcitationBridge? {
         matchingExcitationIndex(for: node).map { selectedSimulation!.excitations[$0] }
+    }
+
+    private func matchingExcitation(for identity: ToggleIdentity) -> EMSExcitationBridge? {
+        matchingExcitationIndex(for: identity).map { selectedSimulation!.excitations[$0] }
     }
 
     /// Whether `footprint`.`pin` on `entry`'s net is effectively probed, and (only meaningful when
@@ -1239,15 +1325,32 @@ final class SourceListViewController: NSViewController {
         let isPinNode: Bool
         if case .pin = node.kind { isPinNode = true } else { isPinNode = false }
         includedRow.isHidden = isPinNode
+        geometryOnlyRow.isHidden = isPinNode
+        // This is visibly paired with Included in Simulation even before the net is included. It is
+        // disabled until an involved-net entry exists, because that entry owns the setting.
+        probeImpedanceRow.isHidden = isPinNode
+        simulateAsDifferentialPairRow.isHidden = isPinNode
         probeRow.isHidden = !isPinNode
-        absorbRow.isHidden = true // set below, once this pin's own probed state is known
+        // Visible/enabled whenever probeRow is, entry or not -- absorbToggled() auto-includes the
+        // net the same way probeToggled()/excitedToggled() already do, so Absorb can be checked
+        // "from nothing" exactly like Probe can.
+        absorbRow.isHidden = !isPinNode
 
-        if let entry = matchingEntry(for: node) {
+        let entry = matchingEntry(for: node)
+        // GeometryOnly nets never get ports -- see gerber2ems::NetInclusionLevel's own doc comment
+        // -- so every field below that's meaningless without one (impedance/plane/direction rows are
+        // hidden entirely by updateValueFieldsVisibility() for exactly this reason; probe/absorb/
+        // excite are pin-level and gated right here, since they aren't covered by that method).
+        let isSimulationNetEntry = entry?.inclusionLevel == .simulationNet
+        if let entry {
             if !isPinNode {
-                includedCheckbox.state = .on
+                includedCheckbox.state = isSimulationNetEntry ? .on : .off
+                geometryOnlyCheckbox.state = isSimulationNetEntry ? .off : .on
+                probeImpedanceCheckbox.state = entry.probeImpedance ? .on : .off
+                simulateAsDifferentialPairCheckbox.state = entry.simulateAsDifferentialPair ? .on : .off
+                simulateAsDifferentialPairRow.isHidden = entry.differentialPairPartner == nil
             }
             impedanceField.doubleValue = entry.impedance
-            lengthField.doubleValue = entry.length
             planeComboBox.stringValue = planeDisplayString(for: entry.plane)
             widthField.objectValue = entry.width
             dBMarginField.objectValue = entry.dBMargin
@@ -1256,9 +1359,15 @@ final class SourceListViewController: NSViewController {
             customDirectionField.doubleValue = entry.direction?.doubleValue ?? 0
             if case .pin(let footprintReference, let pin) = node.kind {
                 let state = effectiveProbeState(for: entry, footprintReference: footprintReference, pin: pin.number)
-                probeCheckbox.state = state.probed ? .on : .off
-                absorbRow.isHidden = !state.probed
-                absorbCheckbox.state = state.absorbs ? .on : .off
+                let absorbOnly = entry.isPinAbsorbOnly(withFootprint: footprintReference, pin: pin.number)
+                // Probe stays SimulationNet-only (port_resolution.cpp never reports a GeometryOnly
+                // pin as a measured probe -- see NetInclusionLevel's own doc comment); Absorb is
+                // independent of Probe and works for either inclusion level -- see
+                // EMSInvolvedNetBridge's setPinAbsorbOnly:'s own doc comment for why a GeometryOnly
+                // net's own pin still needs a real termination even though it's never probed.
+                probeCheckbox.isEnabled = isSimulationNetEntry
+                probeCheckbox.state = isSimulationNetEntry && state.probed ? .on : .off
+                absorbCheckbox.state = (state.probed ? state.absorbs : absorbOnly) ? .on : .off
                 let override = entry.directionOverride(withFootprint: footprintReference, pin: pin.number)
                 let overrideKind = DirectionKind.kind(for: override?.doubleValue)
                 pinDirectionOverridePopUp.selectItem(at: overrideKind.rawValue)
@@ -1267,10 +1376,15 @@ final class SourceListViewController: NSViewController {
         } else {
             if !isPinNode {
                 includedCheckbox.state = .off
+                geometryOnlyCheckbox.state = .off
+                probeImpedanceCheckbox.state = .off
+                simulateAsDifferentialPairCheckbox.state = .off
+                simulateAsDifferentialPairRow.isHidden = true
             }
+            probeCheckbox.isEnabled = true
             probeCheckbox.state = .off
+            absorbCheckbox.state = .off
             impedanceField.stringValue = ""
-            lengthField.stringValue = ""
             planeComboBox.stringValue = ""
             widthField.stringValue = ""
             dBMarginField.stringValue = ""
@@ -1278,6 +1392,9 @@ final class SourceListViewController: NSViewController {
             customDirectionField.stringValue = ""
             pinDirectionOverridePopUp.selectItem(at: DirectionKind.auto.rawValue)
             pinDirectionOverrideCustomField.stringValue = ""
+        }
+        if case .pin = node.kind {
+            excitedCheckbox.isEnabled = entry == nil || isSimulationNetEntry
         }
         updateCustomDirectionFieldVisibility()
         updatePinDirectionOverrideCustomFieldVisibility()
@@ -1325,6 +1442,9 @@ final class SourceListViewController: NSViewController {
 
     private func setDetailFieldsHidden(_ hidden: Bool) {
         includedRow.isHidden = hidden
+        geometryOnlyRow.isHidden = hidden
+        simulateAsDifferentialPairRow.isHidden = hidden
+        probeImpedanceRow.isHidden = hidden
         probeRow.isHidden = hidden
         absorbRow.isHidden = hidden
         if hidden {
@@ -1344,13 +1464,18 @@ final class SourceListViewController: NSViewController {
         // pin-and-included check.
     }
 
-    /// The value fields (Impedance/Length/Reference Plane, plus Width override/dB margin override
+    /// The value fields (Impedance/Reference Plane, plus Width override/dB margin override
     /// behind their own disclosure) are net-wide settings -- shown whenever this node's net has an
     /// entry at all, regardless of this specific pin's own Probe/Excite state (unlike the old
     /// single-checkbox model, where an individually-excluded pin also hid these, even though they
     /// describe the net, not the pin).
     private func updateValueFieldsVisibility() {
-        let included = selectedNode.flatMap(matchingEntry) != nil
+        // Requires SimulationNet specifically, not just "an entry exists at all" -- these are all
+        // port/probe-oriented fields, meaningless for a GeometryOnly entry (see
+        // gerber2ems::NetInclusionLevel's own doc comment).
+        let included = selectedNode.flatMap(matchingEntry)?.inclusionLevel == .simulationNet
+        probeImpedanceCheckbox.isEnabled = included
+        simulateAsDifferentialPairCheckbox.isEnabled = included
         for row in valueFieldRows {
             row.isHidden = !included
         }
@@ -1358,6 +1483,9 @@ final class SourceListViewController: NSViewController {
         // Only meaningful for a specific pad, not a whole net/net-class -- see
         // pinDirectionOverrideRow's own declaration comment.
         let isPinNode: Bool = { if case .pin = selectedNode?.kind { return true } else { return false } }()
+        // This value describes the component attached at a selected pin, not the routed net. Net
+        // and net-class rows only expose the net-level probe controls and reference-plane options.
+        impedanceRow.isHidden = !included || !isPinNode
         pinDirectionOverrideRow.isHidden = !included || !isPinNode
     }
 
@@ -1481,21 +1609,77 @@ final class SourceListViewController: NSViewController {
 
     /// Only ever reached for a .net/.netClass node now -- a .pin node has no "included" checkbox of
     /// its own any more (see probeCheckbox/excitedCheckbox instead, both of which auto-include this
-    /// pin's net themselves when needed).
+    /// pin's net themselves when needed). Checking this while geometryOnlyCheckbox is already on
+    /// upgrades that same entry in place to .simulationNet rather than creating a second, conflicting
+    /// entry for the same net -- see geometryOnlyToggled()'s own doc comment for the mirror case, and
+    /// EMSNetInclusionLevel's own doc comment for why the two checkboxes share one underlying value.
     @objc private func includedToggled() {
         guard let node = selectedNode, let sim = selectedSimulation else { return }
         switch node.kind {
         case .netClass(let name):
             if includedCheckbox.state == .on {
-                let entry = sim.addInvolvedNet(with: .netClass)
-                entry.netClass = name
+                if let entry = matchingEntry(for: node) {
+                    entry.inclusionLevel = .simulationNet
+                } else {
+                    let entry = sim.addInvolvedNet(with: .netClass)
+                    entry.netClass = name
+                }
             } else if let index = matchingEntryIndex(for: node) {
                 sim.removeInvolvedNet(at: index)
             }
         case .net(let name):
-            if includedCheckbox.state == .on {
-                let entry = sim.addInvolvedNet(with: .net)
-                entry.net = name
+            let included = includedCheckbox.state == .on
+            if included {
+                if let entry = matchingEntry(for: node) {
+                    entry.inclusionLevel = .simulationNet
+                } else {
+                    let entry = sim.addInvolvedNet(with: .net)
+                    entry.net = name
+                }
+            } else if let index = matchingEntryIndex(for: node) {
+                sim.removeInvolvedNet(at: index)
+            }
+            refreshAfterToggle(node)
+            offerDifferentialPairMirror(netIncluded: included, netName: name)
+            return
+        case .pin, .footprint, .group:
+            break
+        }
+        refreshAfterToggle(node)
+    }
+
+    /// The "Included in Simulation" checkbox -- gerber2ems::NetInclusionLevel::GeometryOnly, the
+    /// narrower tier that gets an involved-nets entry's copper into the simulated geometry/mesh
+    /// without hull growth or port/probe/excitation eligibility (see that enum's own doc comment).
+    /// Checking this while includedCheckbox (Simulation Net) is already on downgrades that same
+    /// entry in place rather than creating a second, conflicting entry for the same net -- the two
+    /// checkboxes are mutually exclusive views onto one underlying inclusionLevel value, and
+    /// showDetail() re-derives both states from it after every change here, so no explicit
+    /// "uncheck the other one" step is needed.
+    @objc private func geometryOnlyToggled() {
+        guard let node = selectedNode, let sim = selectedSimulation else { return }
+        switch node.kind {
+        case .netClass(let name):
+            if geometryOnlyCheckbox.state == .on {
+                if let entry = matchingEntry(for: node) {
+                    entry.inclusionLevel = .geometryOnly
+                } else {
+                    let entry = sim.addInvolvedNet(with: .netClass)
+                    entry.netClass = name
+                    entry.inclusionLevel = .geometryOnly
+                }
+            } else if let index = matchingEntryIndex(for: node) {
+                sim.removeInvolvedNet(at: index)
+            }
+        case .net(let name):
+            if geometryOnlyCheckbox.state == .on {
+                if let entry = matchingEntry(for: node) {
+                    entry.inclusionLevel = .geometryOnly
+                } else {
+                    let entry = sim.addInvolvedNet(with: .net)
+                    entry.net = name
+                    entry.inclusionLevel = .geometryOnly
+                }
             } else if let index = matchingEntryIndex(for: node) {
                 sim.removeInvolvedNet(at: index)
             }
@@ -1505,25 +1689,259 @@ final class SourceListViewController: NSViewController {
         refreshAfterToggle(node)
     }
 
+    /// Only reached for a .net/.netClass node with an existing entry: the row remains visible next
+    /// to the inclusion control, but updateValueFieldsVisibility() disables it until one exists.
+    @objc private func probeImpedanceToggled() {
+        guard let node = selectedNode, let entry = matchingEntry(for: node) else { return }
+        entry.probeImpedance = probeImpedanceCheckbox.state == .on
+        refreshAfterToggle(node)
+    }
+
+    @objc private func simulateAsDifferentialPairToggled() {
+        guard let node = selectedNode, let entry = matchingEntry(for: node),
+              let partnerName = entry.differentialPairPartner
+        else { return }
+        let enabled = simulateAsDifferentialPairCheckbox.state == .on
+        entry.simulateAsDifferentialPair = enabled
+        matchingEntry(for: ToggleIdentity.net(partnerName))?.simulateAsDifferentialPair = enabled
+        if enabled, let netName = entry.net {
+            synchronizeDifferentialExcitations(netName: netName, partnerName: partnerName)
+        }
+        refreshAfterToggle(node)
+    }
+
     /// Creates `node`'s pin's net entry if it doesn't exist yet -- the auto-include behavior shared
     /// by probeToggled() and excitedToggled() (checking either one brings the net in, same as
     /// checking includedCheckbox does for a net/net-class row). Returns nil (having left the
     /// checkbox that called it unchecked) if the pin's net is somehow unknown.
-    private func entryAutoIncluding(_ node: SourceListNode, in sim: EMSSimulationBridge) -> EMSInvolvedNetBridge? {
-        if let existing = matchingEntry(for: node) {
+    private func entryAutoIncluding(_ identity: ToggleIdentity, in sim: EMSSimulationBridge) -> EMSInvolvedNetBridge? {
+        if let existing = matchingEntry(for: identity) {
             return existing
         }
-        guard case .pin(_, let pin) = node.kind, !pin.netName.isEmpty else { return nil }
+        guard case .pin(_, _, let netName) = identity, !netName.isEmpty else { return nil }
         let entry = sim.addInvolvedNet(with: .net)
-        entry.net = pin.netName
+        entry.net = netName
         return entry
     }
 
+    /// Records reciprocal pair membership on two concrete Net-kind entries. Newly inferred pairs
+    /// default to mixed-mode simulation; the checkbox can disable that without losing identity.
+    private func markDifferentialPair(_ firstName: String, _ secondName: String) {
+        guard let first = matchingEntry(for: ToggleIdentity.net(firstName)),
+              let second = matchingEntry(for: ToggleIdentity.net(secondName))
+        else { return }
+        first.differentialPairPartner = secondName
+        second.differentialPairPartner = firstName
+        first.simulateAsDifferentialPair = true
+        second.simulateAsDifferentialPair = true
+    }
+
+    /// Makes an existing pair of source excitations an ideal odd-mode drive. Independent FDTD
+    /// sweeps still use unit single-port sources; these relative settings are consumed when their
+    /// responses are superposed by ExcitationPostprocessor.
+    private func configureDifferentialComplement(_ partner: EMSExcitationBridge,
+                                                  from source: EMSExcitationBridge) {
+        partner.isMain = source.isMain
+        partner.startTime = source.startTime
+        partner.duration = source.duration
+        partner.frequency = source.frequency
+        partner.phaseDegrees = source.phaseDegrees
+        partner.amplitude = NSNumber(value: -(source.amplitude?.doubleValue ?? 1.0))
+    }
+
+    private func synchronizeDifferentialExcitations(netName: String, partnerName: String) {
+        guard let footprint = allFootprints.first(where: { footprint in
+            footprint.pins.contains { $0.netName == netName } &&
+                footprint.pins.contains { $0.netName == partnerName }
+        }),
+        let firstPin = footprint.pins.first(where: { $0.netName == netName }),
+        let secondPin = footprint.pins.first(where: { $0.netName == partnerName }),
+        let source = matchingExcitation(for: ToggleIdentity.pin(
+            footprintReference: footprint.reference, pin: firstPin.number, netName: netName)),
+        let partner = matchingExcitation(for: ToggleIdentity.pin(
+            footprintReference: footprint.reference, pin: secondPin.number, netName: partnerName))
+        else { return }
+        configureDifferentialComplement(partner, from: source)
+    }
+
+    private func entryAutoIncluding(_ node: SourceListNode, in sim: EMSSimulationBridge) -> EMSInvolvedNetBridge? {
+        guard let identity = identity(for: node) else { return nil }
+        return entryAutoIncluding(identity, in: sim)
+    }
+
+    // MARK: - Differential-pair mirroring
+
+    private static let alwaysMirrorDifferentialPairChangesDefaultsKey = "AlwaysMirrorDifferentialPairChanges"
+
+    /// A per-user (not per-document) preference -- this app's first use of UserDefaults. Deliberately
+    /// not stored in simulation.json: "don't ask me about this again" is a preference about how the
+    /// person wants to work, not part of the board's own configuration, so it shouldn't travel with
+    /// the document or be shared with anyone else who opens it.
+    private var alwaysMirrorDifferentialPairChanges: Bool {
+        get { UserDefaults.standard.bool(forKey: Self.alwaysMirrorDifferentialPairChangesDefaultsKey) }
+        set { UserDefaults.standard.set(newValue, forKey: Self.alwaysMirrorDifferentialPairChangesDefaultsKey) }
+    }
+
+    /// The pin on `footprintReference` (if any) matching a differential-pair partner candidate for
+    /// `netName`, per DifferentialPairNetHeuristic -- the first heuristic candidate that's actually
+    /// a pin of this same footprint wins. Same-footprint is the only correspondence looked for here
+    /// (a connector/choke/ESD-array part carrying both legs as different pins of one component) --
+    /// a pair implemented as two separately-referenced components (e.g. R_DP/R_DN) isn't found by
+    /// this; silently skipped rather than guessed wrong. Reads allFootprints, populated by the most
+    /// recent refreshBoardData() -- empty (so this always returns nil) while browsing in .netClass
+    /// scope, which never needs it.
+    private func differentialPairPartnerPin(footprintReference: String, netName: String) -> KicadFootprintPin? {
+        guard let footprint = allFootprints.first(where: { $0.reference == footprintReference }) else { return nil }
+        for candidate in DifferentialPairNetHeuristic.partnerCandidates(for: netName) {
+            if let pin = footprint.pins.first(where: { $0.netName == candidate }) {
+                return pin
+            }
+        }
+        return nil
+    }
+
+    /// Shows a confirmation sheet offering to mirror a differential-pair change, or applies it
+    /// silently if the user has already opted into always doing so (see
+    /// alwaysMirrorDifferentialPairChanges) -- the one shared entry point for all three mirror
+    /// offers below. Follows this app's one other NSAlert precedent (JobsWindowController's
+    /// requestCancel): a sheet, not a blocking runModal call, since apply() may itself need to touch
+    /// UI state (outlineView.reloadData()) after the fact.
+    private func confirmAndMirrorDifferentialPairChange(actionVerb: String, targetDescription: String,
+                                                          apply: @escaping () -> Void) {
+        if alwaysMirrorDifferentialPairChanges {
+            apply()
+            document?.updateChangeCount(.changeDone)
+            outlineView.reloadData()
+            onInvolvedNetsChanged?()
+            return
+        }
+        guard let window = view.window else { return }
+        let alert = NSAlert()
+        alert.messageText = "\(actionVerb) \(targetDescription) too?"
+        alert.informativeText = "\(targetDescription) looks like the other half of a differential pair."
+        alert.addButton(withTitle: "Yes")
+        alert.addButton(withTitle: "No")
+        alert.showsSuppressionButton = true
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self else { return }
+            if alert.suppressionButton?.state == .on {
+                self.alwaysMirrorDifferentialPairChanges = true
+            }
+            if response == .alertFirstButtonReturn {
+                apply()
+                self.document?.updateChangeCount(.changeDone)
+                self.outlineView.reloadData()
+                self.onInvolvedNetsChanged?()
+            }
+        }
+    }
+
+    /// Offers to mirror a just-applied "Included in Simulation" state onto the other half of a
+    /// differential pair, guessed heuristically from `netName`'s own name (see
+    /// DifferentialPairNetHeuristic). Accepting the offer persists reciprocal pair identity on the
+    /// two entries. Silently does nothing if no heuristic candidate actually exists as a real net
+    /// on the board, or if the partner's own state already matches.
+    private func offerDifferentialPairMirror(netIncluded included: Bool, netName: String) {
+        guard let sim = selectedSimulation else { return }
+        guard let partnerNetName = DifferentialPairNetHeuristic.partnerCandidates(for: netName).first(where: { candidate in
+            allFootprints.contains { $0.pins.contains { $0.netName == candidate } }
+        }) else { return }
+        let partnerIdentity = ToggleIdentity.net(partnerNetName)
+        let currentlyIncluded = matchingEntry(for: partnerIdentity) != nil
+        guard currentlyIncluded != included else { return }
+        if !included, let remainingPartner = matchingEntry(for: partnerIdentity) {
+            // The first half has already been removed. If the user keeps this half, it is now an
+            // ordinary single-ended net; if they accept the mirror it is removed moments later.
+            remainingPartner.differentialPairPartner = nil
+            remainingPartner.simulateAsDifferentialPair = false
+        }
+        confirmAndMirrorDifferentialPairChange(actionVerb: included ? "Include" : "Exclude",
+                                                targetDescription: "net \(partnerNetName)") { [self] in
+            if included {
+                let entry = sim.addInvolvedNet(with: .net)
+                entry.net = partnerNetName
+                markDifferentialPair(netName, partnerNetName)
+            } else if let index = matchingEntryIndex(for: partnerIdentity) {
+                sim.removeInvolvedNet(at: index)
+            }
+        }
+    }
+
+    /// Offers to mirror a just-applied Probe state onto the differential-pair partner pin (see
+    /// differentialPairPartnerPin) -- always defaults Absorb Signal to on when turning Probe on,
+    /// matching probeToggled()'s own single-pin default.
+    private func offerDifferentialPairMirror(pinProbed probed: Bool, footprintReference: String, netName: String,
+                                              padNumber: String) {
+        guard let sim = selectedSimulation,
+              let partner = differentialPairPartnerPin(footprintReference: footprintReference, netName: netName),
+              partner.number != padNumber
+        else { return }
+        let partnerIdentity = ToggleIdentity.pin(footprintReference: footprintReference, pin: partner.number,
+                                                  netName: partner.netName)
+        let currentlyProbed = matchingEntry(for: partnerIdentity)
+            .map { effectiveProbeState(for: $0, footprintReference: footprintReference, pin: partner.number).probed }
+            ?? false
+        guard currentlyProbed != probed else { return }
+        confirmAndMirrorDifferentialPairChange(
+            actionVerb: probed ? "Probe" : "Stop probing",
+            targetDescription: "\(footprintReference) pin \(partner.number) (\(partner.netName))") { [self] in
+            if probed {
+                guard let entry = entryAutoIncluding(partnerIdentity, in: sim) else { return }
+                entry.setPinProbed(true, absorbSignal: true, withFootprint: footprintReference, pin: partner.number)
+                markDifferentialPair(netName, partner.netName)
+                synchronizeDifferentialExcitations(netName: netName, partnerName: partner.netName)
+            } else if let entry = matchingEntry(for: partnerIdentity) {
+                entry.setPinProbed(false, absorbSignal: true, withFootprint: footprintReference, pin: partner.number)
+            }
+        }
+    }
+
+    /// Offers to mirror a just-applied Excite state onto the differential-pair partner pin (see
+    /// differentialPairPartnerPin).
+    private func offerDifferentialPairMirror(pinExcited excited: Bool, footprintReference: String, netName: String,
+                                              padNumber: String) {
+        guard let sim = selectedSimulation,
+              let partner = differentialPairPartnerPin(footprintReference: footprintReference, netName: netName),
+              partner.number != padNumber
+        else { return }
+        let partnerIdentity = ToggleIdentity.pin(footprintReference: footprintReference, pin: partner.number,
+                                                  netName: partner.netName)
+        let currentlyExcited = matchingExcitation(for: partnerIdentity) != nil
+        guard currentlyExcited != excited else { return }
+        confirmAndMirrorDifferentialPairChange(
+            actionVerb: excited ? "Excite" : "Stop exciting",
+            targetDescription: "\(footprintReference) pin \(partner.number) (\(partner.netName))") { [self] in
+            if excited {
+                guard entryAutoIncluding(partnerIdentity, in: sim) != nil else { return }
+                let excitation = sim.addExcitation(forFootprint: footprintReference, pin: partner.number)
+                // The companion leg is the odd-mode inverse of the excitation the user added.
+                if let source = matchingExcitation(for: ToggleIdentity.pin(
+                    footprintReference: footprintReference, pin: padNumber, netName: netName)) {
+                    configureDifferentialComplement(excitation, from: source)
+                }
+                markDifferentialPair(netName, partner.netName)
+            } else if let index = matchingExcitationIndex(for: partnerIdentity) {
+                sim.removeExcitation(at: index)
+            }
+        }
+    }
+
+    // Probe x Absorb together implement a 2x2 truth table, each handler reacting to the *other*
+    // checkbox's current state to decide which underlying setter applies:
+    //   Probe=on,  Absorb=on  -> setPinProbed(true, absorbSignal: true)  -- measured + terminated,
+    //                            today's long-standing default.
+    //   Probe=on,  Absorb=off -> setPinProbed(true, absorbSignal: false) -- measured, passive
+    //                            (non-loading) read point.
+    //   Probe=off, Absorb=on  -> setPinAbsorbOnly(true) -- terminated, never a named/selectable
+    //                            thing in Results (see EMSInvolvedNetBridge's own doc comment) --
+    //                            works on a GeometryOnly net too, unlike Probe.
+    //   Probe=off, Absorb=off -> no port at all for this pin.
     @objc private func probeToggled() {
         guard let node = selectedNode, case .pin(let footprintReference, let pin) = node.kind,
               let sim = selectedSimulation
         else { return }
-        if probeCheckbox.state == .on {
+        let probed = probeCheckbox.state == .on
+        if probed {
             guard let entry = entryAutoIncluding(node, in: sim) else {
                 probeCheckbox.state = .off
                 return
@@ -1534,17 +1952,36 @@ final class SourceListViewController: NSViewController {
             absorbCheckbox.state = .on
             entry.setPinProbed(true, absorbSignal: true, withFootprint: footprintReference, pin: pin.number)
         } else if let entry = matchingEntry(for: node) {
-            entry.setPinProbed(false, absorbSignal: true, withFootprint: footprintReference, pin: pin.number)
+            if absorbCheckbox.state == .on {
+                // Absorb Signal is still checked -- fall through to absorb-only rather than losing
+                // the termination this pin already had.
+                entry.setPinAbsorbOnly(true, withFootprint: footprintReference, pin: pin.number)
+            } else {
+                entry.setPinProbed(false, absorbSignal: true, withFootprint: footprintReference, pin: pin.number)
+            }
         }
         refreshAfterToggle(node)
+        offerDifferentialPairMirror(pinProbed: probed, footprintReference: footprintReference, netName: pin.netName,
+                                     padNumber: pin.number)
     }
 
     @objc private func absorbToggled() {
         guard let node = selectedNode, case .pin(let footprintReference, let pin) = node.kind,
-              let entry = matchingEntry(for: node)
+              let sim = selectedSimulation
         else { return }
-        entry.setPinProbed(true, absorbSignal: absorbCheckbox.state == .on, withFootprint: footprintReference,
-                            pin: pin.number)
+        let absorb = absorbCheckbox.state == .on
+        if probeCheckbox.state == .on {
+            guard let entry = matchingEntry(for: node) else { return }
+            entry.setPinProbed(true, absorbSignal: absorb, withFootprint: footprintReference, pin: pin.number)
+        } else if absorb {
+            guard let entry = entryAutoIncluding(node, in: sim) else {
+                absorbCheckbox.state = .off
+                return
+            }
+            entry.setPinAbsorbOnly(true, withFootprint: footprintReference, pin: pin.number)
+        } else if let entry = matchingEntry(for: node) {
+            entry.setPinAbsorbOnly(false, withFootprint: footprintReference, pin: pin.number)
+        }
         refreshAfterToggle(node)
     }
 
@@ -1552,7 +1989,6 @@ final class SourceListViewController: NSViewController {
         guard let entry = selectedNode.flatMap(matchingEntry) else { return }
         switch sender {
         case impedanceField: entry.impedance = sender.doubleValue
-        case lengthField: entry.length = sender.doubleValue
         case planeComboBox:
             if let index = resolvedPlaneIndex(from: sender.stringValue) {
                 entry.plane = index
@@ -1574,7 +2010,8 @@ final class SourceListViewController: NSViewController {
               let sim = selectedSimulation
         else { return }
 
-        if excitedCheckbox.state == .on {
+        let excited = excitedCheckbox.state == .on
+        if excited {
             // Available whether or not Probe has been checked -- auto-includes this pin's net
             // itself, exactly like probeToggled() does, since Excite always needs its net to be
             // part of the simulation regardless of this pin's own probed state.
@@ -1587,11 +2024,19 @@ final class SourceListViewController: NSViewController {
             sim.removeExcitation(at: index)
         }
         refreshAfterToggle(node)
+        offerDifferentialPairMirror(pinExcited: excited, footprintReference: footprintReference, netName: pin.netName,
+                                     padNumber: pin.number)
     }
 
     @objc private func mainExcitationToggled() {
         guard let node = selectedNode, let excitation = matchingExcitation(for: node) else { return }
         excitation.isMain = mainExcitationCheckbox.state == .on
+        if case .pin(_, let pin) = node.kind,
+           let partner = differentialPairPartnerPin(footprintReference: excitation.footprintReference,
+                                                     netName: pin.netName),
+           matchingEntry(for: node)?.simulateAsDifferentialPair == true {
+            synchronizeDifferentialExcitations(netName: pin.netName, partnerName: partner.netName)
+        }
         document?.updateChangeCount(.changeDone)
         populateExcitationFields(from: excitation)
         outlineView.reloadItem(node)
@@ -1607,6 +2052,11 @@ final class SourceListViewController: NSViewController {
         case frequencyField: excitation.frequency = NSNumber(value: sender.doubleValue)
         case amplitudeField: excitation.amplitude = NSNumber(value: sender.doubleValue)
         default: break
+        }
+        if let node = selectedNode, case .pin(let footprintReference, let pin) = node.kind,
+           let partner = differentialPairPartnerPin(footprintReference: footprintReference, netName: pin.netName),
+           matchingEntry(for: node)?.simulateAsDifferentialPair == true {
+            synchronizeDifferentialExcitations(netName: pin.netName, partnerName: partner.netName)
         }
         document?.updateChangeCount(.changeDone)
         // Involved-nets' table shows this same excitation's start time/duration/phase directly (see

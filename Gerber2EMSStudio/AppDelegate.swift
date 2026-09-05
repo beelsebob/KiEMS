@@ -54,6 +54,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fileMenu.addItem(NSMenuItem.separator())
         fileMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         fileMenu.addItem(withTitle: "Save", action: #selector(NSDocument.save(_:)), keyEquivalent: "s")
+        fileMenu.addItem(NSMenuItem.separator())
+        // No explicit target -- routed through the responder chain to the frontmost document
+        // window's own DocumentWindowController, same as Close/Save above (see
+        // DocumentWindowController.regenerateGeometry(_:)'s own doc comment for what this discards).
+        fileMenu.addItem(withTitle: "Regenerate Geometry",
+                         action: #selector(DocumentWindowController.regenerateGeometry(_:)), keyEquivalent: "")
 
         let editMenuItem = NSMenuItem()
         mainMenu.addItem(editMenuItem)

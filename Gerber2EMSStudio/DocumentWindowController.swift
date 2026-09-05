@@ -375,6 +375,10 @@ final class DocumentWindowController: NSWindowController {
                 simulationResultsVC?.invalidateCache(forSimulationIndex: index)
             }
         }
+        propertiesVC.onResultsParametersChanged = { [weak simulationResultsVC, weak self] index in
+            guard let simulations = self?.ownerDocument.config.simulations, index < simulations.count else { return }
+            simulationResultsVC?.eyeBitRateChanged(forSimulationIndex: index, bitRate: simulations[index].eyeBitRate)
+        }
         // See GeometryViewController.onRunStateChanged's doc comment -- the spinner next to a
         // simulation's "Geometry" row has no other way to know a background pipeline run started/
         // finished for it.
@@ -837,6 +841,25 @@ final class DocumentWindowController: NSWindowController {
         for index in ownerDocument.config.simulations.indices {
             geometryViewController?.invalidateCache(forSimulationIndex: index)
             simulationResultsViewController?.invalidateCache(forSimulationIndex: index)
+        }
+    }
+
+    /// File > Regenerate Geometry -- force-discards every cached pipeline stage (board slicing,
+    /// stackup import, port/lumped-component resolution, grid, results) for every simulation in
+    /// this document, so the next Geometry/Results run recomputes everything from scratch instead
+    /// of reusing anything already resolved in memory. Unlike handleLinkedKicadFilesChanged() above
+    /// (which only fires when KicadFileWatcher notices the linked .kicad_pcb itself changed on
+    /// disk), this exists for the case nothing on disk changed but the *interpretation* of it did --
+    /// e.g. a fix to how this app's own KiCad-board query helper resolves nets/footprints/pins --
+    /// which no automatic cache invalidation elsewhere in this app is designed to detect, since
+    /// EMSSimulationPipelineBridge's own ensurePrepared: only ever re-derives _paths (and therefore
+    /// re-runs exportKicadPcb/importStackup/resolveSimulationPorts) once per pipeline instance's
+    /// whole lifetime otherwise (see that method's own doc comment).
+    @objc func regenerateGeometry(_ sender: Any?) {
+        for index in ownerDocument.config.simulations.indices {
+            geometryViewController?.invalidateCache(forSimulationIndex: index)
+            simulationResultsViewController?.invalidateCache(forSimulationIndex: index)
+            fieldViewerViewController?.invalidateCache(forSimulationIndex: index)
         }
     }
 

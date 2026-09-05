@@ -5,7 +5,7 @@ import Foundation
 /// "m" (milli, 1e-3) must never be confused, unlike the unit suffix itself, which matches
 /// "Hz"/"HZ"/"hz" interchangeably.
 enum SIPrefix: CaseIterable {
-    case tera, giga, mega, kilo, milli, micro, nano, pico
+    case tera, giga, mega, kilo, milli, micro, nano, pico, femto
 
     var symbol: String {
         switch self {
@@ -17,6 +17,7 @@ enum SIPrefix: CaseIterable {
         case .micro: return "µ"
         case .nano: return "n"
         case .pico: return "p"
+        case .femto: return "f"
         }
     }
 
@@ -30,6 +31,7 @@ enum SIPrefix: CaseIterable {
         case .micro: return 1e-6
         case .nano: return 1e-9
         case .pico: return 1e-12
+        case .femto: return 1e-15
         }
     }
 
@@ -53,5 +55,15 @@ enum SIPrefix: CaseIterable {
     static func bestFit(for value: Double) -> SIPrefix? {
         let magnitude = abs(value)
         return [SIPrefix.tera, .giga, .mega, .kilo].first { magnitude >= $0.factor }
+    }
+
+    /// The mirror image of bestFit(for:), for naturally-small values below 1 (an FDTD timestep is
+    /// typically in the femtosecond-to-picosecond range) -- largest prefix that still keeps `value`'s
+    /// scaled magnitude >= 1, restricted to milli/micro/nano/pico/femto. Returns nil (display in the
+    /// base unit) for a value already >= 1, or exactly 0.
+    static func bestFitSmall(for value: Double) -> SIPrefix? {
+        let magnitude = abs(value)
+        guard magnitude > 0, magnitude < 1 else { return nil }
+        return [SIPrefix.milli, .micro, .nano, .pico, .femto].first { magnitude >= $0.factor }
     }
 }

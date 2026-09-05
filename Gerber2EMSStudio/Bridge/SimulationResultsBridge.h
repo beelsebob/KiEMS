@@ -85,10 +85,41 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, readonly) NSArray<EMSResultsProbeCurve *> *curves;
 @end
 
+/// One trace-impedance probe's own measured characteristic impedance vs. frequency (magnitude/angle,
+/// like EMSResultsImpedance) -- one instance per probe on a net with EMSInvolvedNetBridge.
+/// probeImpedance set (see gerber2ems::PortConfig::isTraceProbe()'s own doc comment), grouped under
+/// that net's own EMSResultsNetImpedance below.
+@interface EMSResultsNetImpedanceCurve : NSObject
+@property (nonatomic, copy, readonly) NSString *probeName;
+@property (nonatomic, copy, readonly) NSArray<NSNumber *> *magnitudeOhm;
+@property (nonatomic, copy, readonly) NSArray<NSNumber *> *angleDeg;
+@end
+
+/// Every trace-impedance probe placed on one net -- unlike EMSResultsImpedance (per absorbing port,
+/// derived from S11), this is a direct characteristic-impedance measurement, grouped per net rather
+/// than per port since a net can carry more than one probe (see InvolvedNetConfig::probeImpedance()'s
+/// own doc comment). A results view averages/bands `probes` itself; this just carries the raw
+/// per-probe curves.
+@interface EMSResultsNetImpedance : NSObject
+@property (nonatomic, copy, readonly) NSString *netName;
+@property (nonatomic, copy, readonly) NSArray<EMSResultsNetImpedanceCurve *> *probes;
+@end
+
 /// One single-ended trace's group delay vs. frequency.
 @interface EMSResultsTrace : NSObject
 @property (nonatomic, copy, readonly) NSString *name;
 @property (nonatomic, copy, readonly) NSArray<NSNumber *> *delayNs;
+@end
+
+/// One received PRBS7 eye. `timeUI` is the common -0.5...1.5 unit-interval axis and each nested
+/// traces array is one received two-UI segment. Differential eyes contain the mixed-mode received
+/// voltage (P minus N), never separate per-leg traces.
+@interface EMSResultsEyeDiagram : NSObject
+@property (nonatomic, copy, readonly) NSString *name;
+@property (nonatomic, readonly) double bitRateGbps;
+@property (nonatomic, readonly, getter=isDifferential) BOOL differential;
+@property (nonatomic, copy, readonly) NSArray<NSNumber *> *timeUI;
+@property (nonatomic, copy, readonly) NSArray<NSArray<NSNumber *> *> *traces;
 @end
 
 /// A renderable snapshot of one simulation's post-processed results -- everything a results view
@@ -98,10 +129,12 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, readonly) NSArray<EMSResultsPort *> *ports;
 @property (nonatomic, copy, readonly) NSArray<EMSResultsSParamSet *> *sParamSets;
 @property (nonatomic, copy, readonly) NSArray<EMSResultsImpedance *> *impedances;
+@property (nonatomic, copy, readonly) NSArray<EMSResultsNetImpedance *> *netImpedances;
 @property (nonatomic, copy, readonly) NSArray<EMSResultsSmith *> *smithCharts;
 @property (nonatomic, copy, readonly) NSArray<EMSResultsDiffPair *> *diffPairs;
 @property (nonatomic, copy, readonly) NSArray<EMSResultsTrace *> *traces;
 @property (nonatomic, copy, readonly) NSArray<EMSResultsProbe *> *probes;
+@property (nonatomic, copy, readonly) NSArray<EMSResultsEyeDiagram *> *eyeDiagrams;
 @end
 
 NS_ASSUME_NONNULL_END

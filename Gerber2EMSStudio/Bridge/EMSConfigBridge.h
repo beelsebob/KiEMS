@@ -18,6 +18,17 @@ typedef NS_ENUM(NSInteger, EMSNetSelectorKind) {
     EMSNetSelectorKindFootprintPin,
 };
 
+/// Mirrors gerber2ems::NetInclusionLevel -- the "Simulation Net" vs. "Included in Simulation"
+/// source-list checkboxes. SimulationNet is full participation (today's only behavior, pre-dating
+/// this distinction): grows the hull, gets probe/absorb/excite ports. GeometryOnly is a strict
+/// subset: the net's copper physically exists in the simulated geometry (clipped to whatever hull
+/// the SimulationNet-level entries already produced, the same way ground-net copper already is),
+/// but never grows the hull itself and is never port/probe/excitation-eligible.
+typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
+    EMSNetInclusionLevelSimulationNet,
+    EMSNetInclusionLevelGeometryOnly,
+};
+
 /// One ProbedPin entry -- a plain value snapshot (not index-forwarding like EMSInvolvedNetBridge
 /// itself), since gerber2ems::ProbedPin has no separate identity to look up by index; a fresh array
 /// of these is built from InvolvedNetConfig::probedPins() on every read of
@@ -26,6 +37,9 @@ typedef NS_ENUM(NSInteger, EMSNetSelectorKind) {
 @property (nonatomic, copy, readonly) NSString *footprintReference;
 @property (nonatomic, copy, readonly) NSString *pin;
 @property (nonatomic, readonly) BOOL absorbSignal;
+/// NO means this entry is absorb-only (see EMSInvolvedNetBridge's setPinAbsorbOnly:below): a real
+/// resistive termination, but never a named/selectable thing in Results. Defaults YES.
+@property (nonatomic, readonly) BOOL probe;
 @end
 
 /// One InvolvedNetConfig entry. Never holds a raw pointer into the parent's C++
@@ -34,6 +48,15 @@ typedef NS_ENUM(NSInteger, EMSNetSelectorKind) {
 @interface EMSInvolvedNetBridge : NSObject
 
 @property (nonatomic) EMSNetSelectorKind kind;
+/// Defaults to SimulationNet -- see EMSNetInclusionLevel's own doc comment. Every other property on
+/// this class (impedance/length/probeImpedance/differentialPairPartner/direction/etc.) is
+/// meaningless for a GeometryOnly entry, the same way footprintReference/pins are already meaningless
+/// until kind is .FootprintPin -- port_resolution.cpp simply never reaches this entry to read them,
+/// with one exception: setPinAbsorbOnly:/isPinAbsorbOnlyWithFootprint:pin: below works on a
+/// GeometryOnly entry too, specifically so one of its pins can still get a real resistive
+/// termination (see that method's own doc comment) without the net itself becoming
+/// port/probe/excitation-eligible or entering resolvedNets().
+@property (nonatomic) EMSNetInclusionLevel inclusionLevel;
 /// Populated depending on kind: netClass for .NetClass, net for .Net, footprintReference+pins for
 /// .FootprintPin. Setting the wrong one for the current kind is harmless (it's just unused until
 /// kind changes to match) -- to_json()/gerber2ems only ever reads the field matching kind.
@@ -45,6 +68,15 @@ typedef NS_ENUM(NSInteger, EMSNetSelectorKind) {
 @property (nonatomic) double impedance;
 @property (nonatomic) double length;
 @property (nonatomic) NSInteger plane;
+/// Net/NetClass-kind entries only -- when YES, auto-places a handful of non-loading, trace-anchored
+/// impedance-measurement probes along this net's own straight routed copper, independent of
+/// whatever ports its own pads resolve to via probedPins()/excludedPins(). Neither impedance nor
+/// length is read for this -- see gerber2ems::InvolvedNetConfig::probeImpedance()'s own doc comment.
+@property (nonatomic) BOOL probeImpedance;
+/// The other net when this entry was added as one half of a differential pair. Pair membership is
+/// independent of whether mixed-mode simulation is currently enabled.
+@property (nonatomic, copy, nullable) NSString *differentialPairPartner;
+@property (nonatomic) BOOL simulateAsDifferentialPair;
 /// nil means "use the board-derived default" (InvolvedNetConfig::width()'s std::optional).
 @property (nonatomic, nullable) NSNumber *width;
 @property (nonatomic, nullable) NSNumber *dBMargin;
@@ -82,6 +114,17 @@ typedef NS_ENUM(NSInteger, EMSNetSelectorKind) {
 /// it isn't a bounded list -- see InvolvedNetsViewController, the one place this is read, for why
 /// that distinction matters for a "compact summary" view).
 @property (nonatomic, readonly) NSArray<EMSProbedPinBridge *> *probedPins;
+
+/// Absorb-only: a real resistive termination port gets built for this pin (so it doesn't behave as
+/// an open, fully-reflecting stub in the FDTD field -- see gerber2ems::PortConfig::absorbSignal()'s
+/// own doc comment), but it's never shown as a measured port in Results and never becomes an
+/// excitation target on its own. Meant for a pin whose real destination (an IC input, a resistor to
+/// ground, ...) isn't itself part of this simulation, so the trace leading to it would otherwise
+/// dangle unterminated. Works on a GeometryOnly entry, unlike isPinProbedWithFootprint:pin:/
+/// setPinProbed:absorbSignal:withFootprint:pin: above, which are meaningless there. Mutually
+/// exclusive with an existing Probe selection for the same pin -- setting one clears the other.
+- (BOOL)isPinAbsorbOnlyWithFootprint:(NSString *)footprint pin:(NSString *)pin;
+- (void)setPinAbsorbOnly:(BOOL)enabled withFootprint:(NSString *)footprint pin:(NSString *)pin;
 
 /// A per-pad override for `direction`, checked first when resolving that one pad's own port --
 /// see gerber2ems::PinDirectionOverride's own doc comment for why a single net-wide `direction`
@@ -125,6 +168,9 @@ typedef NS_ENUM(NSInteger, EMSNetSelectorKind) {
 @property (nonatomic) double hullPadding;
 @property (nonatomic) double viaEdgeDistance;
 @property (nonatomic) double viaSpacing;
+/// Serial data rate used for eye-diagram synthesis. Existing configurations without an explicit
+/// value read as the document's frequency stop; assigning it persists a per-simulation override.
+@property (nonatomic) double eyeBitRate;
 
 @property (nonatomic, readonly) NSArray<EMSInvolvedNetBridge *> *involvedNets;
 - (EMSInvolvedNetBridge *)addInvolvedNetWithKind:(EMSNetSelectorKind)kind;
@@ -166,6 +212,11 @@ typedef NS_ENUM(NSInteger, EMSNetSelectorKind) {
 /// Too low a value truncates the recorded time-domain signal before it's decayed, which shows up as
 /// spurious ripple/rapid phase rotation in the post-processed S-parameters.
 @property (nonatomic) NSInteger maxSteps;
+
+/// The FDTD grid's own base target cell size (gerber2ems::Grid::optimal()), in file-unit
+/// micrometers -- the primary "how fine is the mesh" knob (diagonal/perpendicular/max cell sizes
+/// scale relative to this one). Document-level (EMSConfig), not per-simulation, same as maxSteps.
+@property (nonatomic) double gridDensity;
 
 /// Every copper layer's name, board-top to board-bottom, in the same 0-based order
 /// InvolvedNetConfig::plane()/PortConfig::plane() index into (substrate layers don't count towards
