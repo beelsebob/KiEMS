@@ -25,7 +25,7 @@
 // Forward-declare-only boundary header (see its own file comment) -- safe alongside every
 // kicad_ems header above despite those using the *installed* CSXCAD/openEMS forms and Copper's
 // own internals using the flat/source-checkout forms, for the same reason
-// geber2ems/main.cpp's own runGPUPortInProcess() can: this header never exposes a complete
+// kicad_ems/main.cpp's own runGPUPortInProcess() can: this header never exposes a complete
 // openEMS/ContinuousStructure definition itself. This is what lets the App run Copper's GPU engine
 // in-process (see runGPUPortInProcess() below) instead of posix_spawning kicad_ems_fdtd_worker as
 // a separate process -- Gerber2EMSStudio links Copper.framework directly (see the Xcode project's
@@ -116,7 +116,7 @@ std::vector<double> linspace(double start, double stop, std::int32_t num) {
 }
 
 /// The kicad_ems::FDTDPortRunner passed to kicad_ems::generateResults() so the FDTD step runs in
-/// this one process -- mirrors geber2ems/main.cpp's own runGPUPortInProcess() exactly (see its own
+/// this one process -- mirrors kicad_ems/main.cpp's own runGPUPortInProcess() exactly (see its own
 /// doc comment for why a portRunner has to do the setupFDTDOperator()/runFDTDPortOnGPU()/
 /// probe-file-write sequence itself), just without CLI-style stdout progress logging: this app
 /// reports progress through `progressHandler` instead (see EMSPipelineProgress's own doc comment).
@@ -500,8 +500,8 @@ kicadQueryHelperPath:(NSString*)helperPath
         // still empty) would otherwise keep serving that stale, grid-less snapshot forever now that
         // grid lines actually exist.
         _geometryPreviewCache = nil;
-        // Written to disk too (matching `geber2ems -g`) so a later CLI invocation against this same
-        // saved package (e.g. `geber2ems -s`) can pick up straight from here without redoing any of
+        // Written to disk too (matching `kicad_ems -g`) so a later CLI invocation against this same
+        // saved package (e.g. `kicad_ems -s`) can pick up straight from here without redoing any of
         // this work itself -- see GeometryResult::load()'s own doc comment. Unlike GeometryResult::
         // build(), nothing else along this path has created paths.geometryDir/_simulationName yet
         // (setupFDTDOperator() creates its own simulationDir subtree later, but that's a different
@@ -616,7 +616,7 @@ kicadQueryHelperPath:(NSString*)helperPath
         // use, keyed by simulation name across every simulation at once -- overkill for this
         // one-simulation-at-a-time pipeline, which already has its own Postprocessor directly).
         postprocessing.postprocessor->processData();
-        // Written to disk too, matching what `geber2ems -a` would leave behind in the saved package.
+        // Written to disk too, matching what `kicad_ems -a` would leave behind in the saved package.
         postprocessing.postprocessor->sparamToFile(_paths->simulationDir / _simulationName);
         _postprocessing.emplace(*_results, std::move(postprocessing));
     }

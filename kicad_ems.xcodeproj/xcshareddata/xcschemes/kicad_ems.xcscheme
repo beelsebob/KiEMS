@@ -15,10 +15,10 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "0D27BC0AB714B88FE14FFB28"
-               BuildableName = "libkicad_smoketest"
-               BlueprintName = "libkicad_smoketest"
-               ReferencedContainer = "container:geber2ems.xcodeproj">
+               BlueprintIdentifier = "71AD229130263515006D5847"
+               BuildableName = "kicad_ems"
+               BlueprintName = "kicad_ems"
+               ReferencedContainer = "container:kicad_ems.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -46,19 +46,39 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "0D27BC0AB714B88FE14FFB28"
-            BuildableName = "libkicad_smoketest"
-            BlueprintName = "libkicad_smoketest"
-            ReferencedContainer = "container:geber2ems.xcodeproj">
+            BlueprintIdentifier = "71AD229130263515006D5847"
+            BuildableName = "kicad_ems"
+            BlueprintName = "kicad_ems"
+            ReferencedContainer = "container:kicad_ems.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
       <CommandLineArguments>
          <CommandLineArgument
-            argument = "/Users/tdavie/Documents/Keyboard\ Hub.sim/Keyboard\ Hub.kicad_pro"
+            argument = "-p"
             isEnabled = "YES">
          </CommandLineArgument>
          <CommandLineArgument
-            argument = "/Users/tdavie/Documents/Keyboard\ Hub.sim/Keyboard\ Hub.kicad_pcb"
+            argument = "-c"
+            isEnabled = "YES">
+         </CommandLineArgument>
+         <CommandLineArgument
+            argument = "/private/var/folders/43/3rgt05lx6hj8t_rt5xmgjm5w0000gn/T/Gerber2EMSStudio-BACBB5D0-8FC0-40D2-9209-E5BEEC1F380D/simulation.json"
+            isEnabled = "YES">
+         </CommandLineArgument>
+         <CommandLineArgument
+            argument = "-i"
+            isEnabled = "YES">
+         </CommandLineArgument>
+         <CommandLineArgument
+            argument = "/private/var/folders/43/3rgt05lx6hj8t_rt5xmgjm5w0000gn/T/Gerber2EMSStudio-BACBB5D0-8FC0-40D2-9209-E5BEEC1F380D/ems/simulation/"
+            isEnabled = "YES">
+         </CommandLineArgument>
+         <CommandLineArgument
+            argument = "-o"
+            isEnabled = "YES">
+         </CommandLineArgument>
+         <CommandLineArgument
+            argument = "/private/var/folders/43/3rgt05lx6hj8t_rt5xmgjm5w0000gn/T/Gerber2EMSStudio-BACBB5D0-8FC0-40D2-9209-E5BEEC1F380D/ems/simulation/"
             isEnabled = "YES">
          </CommandLineArgument>
       </CommandLineArguments>
@@ -73,10 +93,10 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "0D27BC0AB714B88FE14FFB28"
-            BuildableName = "libkicad_smoketest"
-            BlueprintName = "libkicad_smoketest"
-            ReferencedContainer = "container:geber2ems.xcodeproj">
+            BlueprintIdentifier = "71AD229130263515006D5847"
+            BuildableName = "kicad_ems"
+            BlueprintName = "kicad_ems"
+            ReferencedContainer = "container:kicad_ems.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

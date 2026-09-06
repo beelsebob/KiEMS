@@ -29,7 +29,7 @@ enum class FDTDBackend { OpenEMSCPU, CopperGPU };
 /// see copper::CopperBoundaryKind's own doc comment). UPML stays available (openEMS's own formula,
 /// untouched) for comparison/fallback. This enum stays libkicadems-native (no Copper dependency,
 /// matching `FDTDBackend`'s own convention) -- translated to `copper::CopperBoundaryKind` only at
-/// the call sites that already link Copper (geber2ems/main.cpp, Gerber2EMSStudio's
+/// the call sites that already link Copper (kicad_ems/main.cpp, Gerber2EMSStudio's
 /// EMSSimulationPipelineBridge.mm).
 enum class PMLKind { UPML, CPML };
 

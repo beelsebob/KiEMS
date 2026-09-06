@@ -18,7 +18,7 @@
                BlueprintIdentifier = "B0B651E8085482933DC2AFFE"
                BuildableName = "liblibkicad.a"
                BlueprintName = "libkicad"
-               ReferencedContainer = "container:geber2ems.xcodeproj">
+               ReferencedContainer = "container:kicad_ems.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -54,7 +54,7 @@
             BlueprintIdentifier = "B0B651E8085482933DC2AFFE"
             BuildableName = "liblibkicad.a"
             BlueprintName = "libkicad"
-            ReferencedContainer = "container:geber2ems.xcodeproj">
+            ReferencedContainer = "container:kicad_ems.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
    </ProfileAction>

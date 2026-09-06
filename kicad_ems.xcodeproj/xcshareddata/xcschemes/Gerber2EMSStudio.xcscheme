@@ -18,7 +18,7 @@
                BlueprintIdentifier = "2971163407AC90FC988D853B"
                BuildableName = "Gerber2EMSStudio.app"
                BlueprintName = "Gerber2EMSStudio"
-               ReferencedContainer = "container:geber2ems.xcodeproj">
+               ReferencedContainer = "container:kicad_ems.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -38,7 +38,7 @@
                BlueprintIdentifier = "71AD3CDF302FAAD5006D5847"
                BuildableName = "CopperTests.xctest"
                BlueprintName = "CopperTests"
-               ReferencedContainer = "container:geber2ems.xcodeproj">
+               ReferencedContainer = "container:kicad_ems.xcodeproj">
             </BuildableReference>
          </TestableReference>
       </Testables>
@@ -62,7 +62,7 @@
             BlueprintIdentifier = "2971163407AC90FC988D853B"
             BuildableName = "Gerber2EMSStudio.app"
             BlueprintName = "Gerber2EMSStudio"
-            ReferencedContainer = "container:geber2ems.xcodeproj">
+            ReferencedContainer = "container:kicad_ems.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -79,7 +79,7 @@
             BlueprintIdentifier = "2971163407AC90FC988D853B"
             BuildableName = "Gerber2EMSStudio.app"
             BlueprintName = "Gerber2EMSStudio"
-            ReferencedContainer = "container:geber2ems.xcodeproj">
+            ReferencedContainer = "container:kicad_ems.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

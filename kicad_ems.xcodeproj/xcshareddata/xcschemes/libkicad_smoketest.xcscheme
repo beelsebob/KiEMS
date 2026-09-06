@@ -15,23 +15,23 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "2971163407AC90FC988D853B"
-               BuildableName = "Gerber2EMSStudio.app"
-               BlueprintName = "Gerber2EMSStudio"
-               ReferencedContainer = "container:geber2ems.xcodeproj">
+               BlueprintIdentifier = "0D27BC0AB714B88FE14FFB28"
+               BuildableName = "libkicad_smoketest"
+               BlueprintName = "libkicad_smoketest"
+               ReferencedContainer = "container:kicad_ems.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction
-      buildConfiguration = "Release"
+      buildConfiguration = "Debug"
       selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
       shouldUseLaunchSchemeArgsEnv = "YES"
       shouldAutocreateTestPlan = "YES">
    </TestAction>
    <LaunchAction
-      buildConfiguration = "Release"
+      buildConfiguration = "Debug"
       selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
       launchStyle = "0"
@@ -40,17 +40,28 @@
       debugDocumentVersioning = "YES"
       debugServiceExtension = "internal"
       allowLocationSimulation = "YES"
+      viewDebuggingEnabled = "No"
       queueDebuggingEnableBacktraceRecording = "Yes">
       <BuildableProductRunnable
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "2971163407AC90FC988D853B"
-            BuildableName = "Gerber2EMSStudio.app"
-            BlueprintName = "Gerber2EMSStudio"
-            ReferencedContainer = "container:geber2ems.xcodeproj">
+            BlueprintIdentifier = "0D27BC0AB714B88FE14FFB28"
+            BuildableName = "libkicad_smoketest"
+            BlueprintName = "libkicad_smoketest"
+            ReferencedContainer = "container:kicad_ems.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
+      <CommandLineArguments>
+         <CommandLineArgument
+            argument = "/Users/tdavie/Documents/Keyboard\ Hub.sim/Keyboard\ Hub.kicad_pro"
+            isEnabled = "YES">
+         </CommandLineArgument>
+         <CommandLineArgument
+            argument = "/Users/tdavie/Documents/Keyboard\ Hub.sim/Keyboard\ Hub.kicad_pcb"
+            isEnabled = "YES">
+         </CommandLineArgument>
+      </CommandLineArguments>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Release"
@@ -62,10 +73,10 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "2971163407AC90FC988D853B"
-            BuildableName = "Gerber2EMSStudio.app"
-            BlueprintName = "Gerber2EMSStudio"
-            ReferencedContainer = "container:geber2ems.xcodeproj">
+            BlueprintIdentifier = "0D27BC0AB714B88FE14FFB28"
+            BuildableName = "libkicad_smoketest"
+            BlueprintName = "libkicad_smoketest"
+            ReferencedContainer = "container:kicad_ems.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

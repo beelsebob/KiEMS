@@ -76,8 +76,8 @@ void _printFootprints(const std::vector<libkicad::FootprintInfo>& footprints) {
 // Machine-readable query mode used by port_resolution.cpp (invoked as a subprocess, exactly like
 // this project already invokes kicad-cli -- see importer.cpp's _runProcess). libkicad pulls in
 // KiCad's own wx/protobuf/abseil/OpenCASCADE dependency chain, including a *different* build of
-// Clipper2 than the one geber2ems links directly (Homebrew's, vs. KiCad's own bundled copy) --
-// linking libkicad straight into the main geber2ems executable would risk duplicate-symbol errors
+// Clipper2 than the one kicad_ems links directly (Homebrew's, vs. KiCad's own bundled copy) --
+// linking libkicad straight into the main kicad_ems executable would risk duplicate-symbol errors
 // between the two Clipper2 builds. A subprocess keeps the two dependency worlds fully separate.
 // Output on success is line-oriented plain text (tab-separated for multi-field rows); on failure,
 // an error message goes to stderr and the process exits 1. No JSON library is linked into either

@@ -15,23 +15,23 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "71AD229130263515006D5847"
-               BuildableName = "geber2ems"
-               BlueprintName = "geber2ems"
-               ReferencedContainer = "container:geber2ems.xcodeproj">
+               BlueprintIdentifier = "2971163407AC90FC988D853B"
+               BuildableName = "Gerber2EMSStudio.app"
+               BlueprintName = "Gerber2EMSStudio"
+               ReferencedContainer = "container:kicad_ems.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction
-      buildConfiguration = "Debug"
+      buildConfiguration = "Release"
       selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
       shouldUseLaunchSchemeArgsEnv = "YES"
       shouldAutocreateTestPlan = "YES">
    </TestAction>
    <LaunchAction
-      buildConfiguration = "Debug"
+      buildConfiguration = "Release"
       selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
       launchStyle = "0"
@@ -40,48 +40,17 @@
       debugDocumentVersioning = "YES"
       debugServiceExtension = "internal"
       allowLocationSimulation = "YES"
-      viewDebuggingEnabled = "No"
       queueDebuggingEnableBacktraceRecording = "Yes">
       <BuildableProductRunnable
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "71AD229130263515006D5847"
-            BuildableName = "geber2ems"
-            BlueprintName = "geber2ems"
-            ReferencedContainer = "container:geber2ems.xcodeproj">
+            BlueprintIdentifier = "2971163407AC90FC988D853B"
+            BuildableName = "Gerber2EMSStudio.app"
+            BlueprintName = "Gerber2EMSStudio"
+            ReferencedContainer = "container:kicad_ems.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
-      <CommandLineArguments>
-         <CommandLineArgument
-            argument = "-p"
-            isEnabled = "YES">
-         </CommandLineArgument>
-         <CommandLineArgument
-            argument = "-c"
-            isEnabled = "YES">
-         </CommandLineArgument>
-         <CommandLineArgument
-            argument = "/private/var/folders/43/3rgt05lx6hj8t_rt5xmgjm5w0000gn/T/Gerber2EMSStudio-BACBB5D0-8FC0-40D2-9209-E5BEEC1F380D/simulation.json"
-            isEnabled = "YES">
-         </CommandLineArgument>
-         <CommandLineArgument
-            argument = "-i"
-            isEnabled = "YES">
-         </CommandLineArgument>
-         <CommandLineArgument
-            argument = "/private/var/folders/43/3rgt05lx6hj8t_rt5xmgjm5w0000gn/T/Gerber2EMSStudio-BACBB5D0-8FC0-40D2-9209-E5BEEC1F380D/ems/simulation/"
-            isEnabled = "YES">
-         </CommandLineArgument>
-         <CommandLineArgument
-            argument = "-o"
-            isEnabled = "YES">
-         </CommandLineArgument>
-         <CommandLineArgument
-            argument = "/private/var/folders/43/3rgt05lx6hj8t_rt5xmgjm5w0000gn/T/Gerber2EMSStudio-BACBB5D0-8FC0-40D2-9209-E5BEEC1F380D/ems/simulation/"
-            isEnabled = "YES">
-         </CommandLineArgument>
-      </CommandLineArguments>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Release"
@@ -93,10 +62,10 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "71AD229130263515006D5847"
-            BuildableName = "geber2ems"
-            BlueprintName = "geber2ems"
-            ReferencedContainer = "container:geber2ems.xcodeproj">
+            BlueprintIdentifier = "2971163407AC90FC988D853B"
+            BuildableName = "Gerber2EMSStudio.app"
+            BlueprintName = "Gerber2EMSStudio"
+            ReferencedContainer = "container:kicad_ems.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

@@ -1,7 +1,7 @@
 import Foundation
 
 /// Helper-binary path resolution for the app bundle -- the Swift-side equivalent of
-/// geber2ems/main.cpp's executableDir()/resolveKicadCli(), since this app has its own bundle
+/// kicad_ems/main.cpp's executableDir()/resolveKicadCli(), since this app has its own bundle
 /// layout (Contents/MacOS/) rather than the CLI's flat BUILT_PRODUCTS_DIR.
 enum AppPaths {
     /// Bundled alongside this app's own executable by the "Embed Helper Tools" build phase --

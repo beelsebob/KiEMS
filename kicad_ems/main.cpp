@@ -1,6 +1,6 @@
 //
 //  main.cpp
-//  geber2ems
+//  kicad_ems
 //
 //  CLI entry point. Ported from kicad_ems/main.py.
 

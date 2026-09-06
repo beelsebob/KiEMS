@@ -507,7 +507,7 @@
 		6A5EBADB0222B72261C42C71 /* CSPrimUserDefined.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimUserDefined.h; sourceTree = "<group>"; };
 		6B8F4508947040AF3A200E11 /* libCSXCAD.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = libCSXCAD.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
 		715542E81090338DD43CF107 /* CSPropMetal.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropMetal.cpp; sourceTree = "<group>"; };
-		71AD229230263516006D5847 /* geber2ems */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = geber2ems; sourceTree = BUILT_PRODUCTS_DIR; };
+		71AD229230263516006D5847 /* kicad_ems */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = kicad_ems; sourceTree = BUILT_PRODUCTS_DIR; };
 		71AD3CD6302FAAD5006D5847 /* Copper.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Copper.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		71AD3CE0302FAAD5006D5847 /* CopperTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CopperTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		71B40FE53042E223002796EC /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
@@ -624,9 +624,9 @@
 			path = Copper_smoketest;
 			sourceTree = "<group>";
 		};
-		71AD229430263516006D5847 /* geber2ems */ = {
+		71AD229430263516006D5847 /* kicad_ems */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = geber2ems;
+			path = kicad_ems;
 			sourceTree = "<group>";
 		};
 		71AD3CD7302FAAD5006D5847 /* Copper */ = {
@@ -812,7 +812,7 @@
 				C0A71A000000000000000020 /* openEMS */,
 				1E051C9DFB9D9A4CF7CB1120 /* GerberCharts */,
 				B7D891E5D67D73D341733A71 /* Gerber2EMSStudio */,
-				71AD229430263516006D5847 /* geber2ems */,
+				71AD229430263516006D5847 /* kicad_ems */,
 				8290469707C87811FFCE548F /* kicad_ems_fdtd_worker */,
 				006F3A1386AFF2AD46CD89E4 /* libkicadems */,
 				1CE9917EFF9195A3FF4FC1AA /* libkicadems_smoketest */,
@@ -836,7 +836,7 @@
 			children = (
 				C0A71A000000000000000010 /* libopenEMS.dylib */,
 				5653046AD79D4C9071AF237F /* Gerber2EMSStudio.app */,
-				71AD229230263516006D5847 /* geber2ems */,
+				71AD229230263516006D5847 /* kicad_ems */,
 				A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */,
 				C6D729745136FAA65AEC601F /* libkicad_smoketest */,
 				922BA8FA4CD5D8901DCAC9DA /* liblibkicadems.a */,
@@ -1176,9 +1176,9 @@
 			productReference = CAE9E934278E88A4B6FDB4F0 /* libkicadems_smoketest */;
 			productType = "com.apple.product-type.tool";
 		};
-		71AD229130263515006D5847 /* geber2ems */ = {
+		71AD229130263515006D5847 /* kicad_ems */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 71AD229930263516006D5847 /* Build configuration list for PBXNativeTarget "geber2ems" */;
+			buildConfigurationList = 71AD229930263516006D5847 /* Build configuration list for PBXNativeTarget "kicad_ems" */;
 			buildPhases = (
 				71AD228E30263515006D5847 /* Sources */,
 				71AD228F30263515006D5847 /* Frameworks */,
@@ -1193,11 +1193,11 @@
 				8977C8A828BE3665BC518DA3 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				71AD229430263516006D5847 /* geber2ems */,
+				71AD229430263516006D5847 /* kicad_ems */,
 			);
-			name = geber2ems;
-			productName = geber2ems;
-			productReference = 71AD229230263516006D5847 /* geber2ems */;
+			name = kicad_ems;
+			productName = kicad_ems;
+			productReference = 71AD229230263516006D5847 /* kicad_ems */;
 			productType = "com.apple.product-type.tool";
 		};
 		71AD3CD5302FAAD5006D5847 /* Copper */ = {
@@ -1355,7 +1355,7 @@
 					};
 				};
 			};
-			buildConfigurationList = 71AD228D30263515006D5847 /* Build configuration list for PBXProject "geber2ems" */;
+			buildConfigurationList = 71AD228D30263515006D5847 /* Build configuration list for PBXProject "kicad_ems" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -1369,7 +1369,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				71AD229130263515006D5847 /* geber2ems */,
+				71AD229130263515006D5847 /* kicad_ems */,
 				B0B651E8085482933DC2AFFE /* libkicad */,
 				0D27BC0AB714B88FE14FFB28 /* libkicad_smoketest */,
 				0E08621C93A1CC737D3F6A93 /* libkicadems */,
@@ -3955,7 +3955,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		71AD228D30263515006D5847 /* Build configuration list for PBXProject "geber2ems" */ = {
+		71AD228D30263515006D5847 /* Build configuration list for PBXProject "kicad_ems" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				71AD229730263516006D5847 /* Debug */,
@@ -3964,7 +3964,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		71AD229930263516006D5847 /* Build configuration list for PBXNativeTarget "geber2ems" */ = {
+		71AD229930263516006D5847 /* Build configuration list for PBXNativeTarget "kicad_ems" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				71AD229A30263516006D5847 /* Debug */,

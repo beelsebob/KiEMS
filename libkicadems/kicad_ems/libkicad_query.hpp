@@ -1,7 +1,7 @@
 // Shared net/pad-identity queries against the real KiCad board, used by both port_resolution.cpp
 // and board_slicing.cpp. Delegates to the libkicad_smoketest binary as a subprocess rather than
 // linking libkicad directly: libkicad pulls in KiCad's own wx/protobuf/abseil/OpenCASCADE
-// dependency chain, including a *different* build of Clipper2 than the one geber2ems links
+// dependency chain, including a *different* build of Clipper2 than the one kicad_ems links
 // directly (Homebrew's, vs. KiCad's own bundled copy) -- linking both into one executable would
 // risk duplicate-symbol errors. A subprocess keeps the two dependency worlds fully separate, the
 // same way this project already shells out to kicad-cli (see importer.cpp's _runProcess).
