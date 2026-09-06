@@ -719,7 +719,7 @@ final class SimulationResultsViewController: NSViewController {
             }
 
         case .probes:
-            // A passive (non-absorbing) probe -- see kicad_ems::PortConfig::absorbSignal()'s own
+            // A passive (non-absorbing) probe -- see kiems::PortConfig::absorbSignal()'s own
             // doc comment -- has no S-parameter of its own (no characteristic impedance to
             // normalize against), just raw voltage/current magnitude vs. frequency, one curve per
             // excited port that reached it.

@@ -10,7 +10,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// One resolved simulation port -- mirrors kicad_ems::PortConfig's display-relevant fields.
+/// One resolved simulation port -- mirrors kiems::PortConfig's display-relevant fields.
 @interface EMSResultsPort : NSObject
 @property (nonatomic, copy, readonly) NSString *name;
 @property (nonatomic, readonly) NSInteger index;
@@ -68,7 +68,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// One passive probe's voltage or current magnitude vs. frequency, measured while `excitedPort`
 /// was driven -- mirrors EMSResultsSParamCurve's shape, but for a probe with absorbSignal()==false
-/// (see kicad_ems::PortConfig::absorbSignal()'s own doc comment), which has no S-parameter of its
+/// (see kiems::PortConfig::absorbSignal()'s own doc comment), which has no S-parameter of its
 /// own to show (no characteristic impedance to normalize against), only raw magnitude vs. frequency.
 @interface EMSResultsProbeCurve : NSObject
 @property (nonatomic, readonly) NSInteger excitedPort;
@@ -87,7 +87,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// One trace-impedance probe's own measured characteristic impedance vs. frequency (magnitude/angle,
 /// like EMSResultsImpedance) -- one instance per probe on a net with EMSInvolvedNetBridge.
-/// probeImpedance set (see kicad_ems::PortConfig::isTraceProbe()'s own doc comment), grouped under
+/// probeImpedance set (see kiems::PortConfig::isTraceProbe()'s own doc comment), grouped under
 /// that net's own EMSResultsNetImpedance below.
 @interface EMSResultsNetImpedanceCurve : NSObject
 @property (nonatomic, copy, readonly) NSString *probeName;

@@ -1923,7 +1923,7 @@ void Operator::PaintMaterialColumn(unsigned int posX, unsigned int posY, Operato
 
 		double bb[6];
 		if (!prim->GetBoundBox(bb))
-			continue; // no usable bbox to restrict a z-range against -- kicad_ems's own Box/Polygon/
+			continue; // no usable bbox to restrict a z-range against -- kiems's own Box/Polygon/
 			          // LinPoly primitives always have one in practice
 
 		// Binary-search the sorted z discLines for the index range whose *unshifted* z could fall
@@ -1932,7 +1932,7 @@ void Operator::PaintMaterialColumn(unsigned int posX, unsigned int posY, Operato
 		// produces exceeds half a cell, so this can never exclude a real match, only include a few
 		// extra (harmlessly re-tested) indices.
 		// GetBoundBox() does not guarantee bb[4] <= bb[5] -- CSPrimBox stores raw start/stop per axis
-		// unordered, and kicad_ems's own substrate layers are deliberately added with start.z >
+		// unordered, and kiems's own substrate layers are deliberately added with start.z >
 		// stop.z (offset -> offset-thickness in Simulation::addSubstrates()). Without normalizing,
 		// an inverted axis here produces zLo>zHi, the loop below never runs, and that primitive is
 		// silently never painted at all.

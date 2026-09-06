@@ -11,14 +11,14 @@
 #include <iostream>
 #include <vector>
 
-#include "kicad_ems/component_value.hpp"
-#include "kicad_ems/config.hpp"
-#include "kicad_ems/constants.hpp"
-#include "kicad_ems/eye_diagram.hpp"
+#include "kiems/component_value.hpp"
+#include "kiems/config.hpp"
+#include "kiems/constants.hpp"
+#include "kiems/eye_diagram.hpp"
 #include "logging.hpp"
-#include "kicad_ems/postprocess.hpp"
+#include "kiems/postprocess.hpp"
 
-using namespace kicad_ems;
+using namespace kiems;
 using namespace Cu;
 
 namespace {

@@ -14,33 +14,33 @@
 #include <utility>
 #include <vector>
 
-#include "kicad_ems/config.hpp"
-#include "kicad_ems/constants.hpp"
-#include "kicad_ems/importer.hpp"
-#include "kicad_ems/paths_config.hpp"
-#include "kicad_ems/port_resolution.hpp"
-#include "kicad_ems/simulation.hpp"
-#include "kicad_ems/simulation_data.hpp"
+#include "kiems/config.hpp"
+#include "kiems/constants.hpp"
+#include "kiems/importer.hpp"
+#include "kiems/paths_config.hpp"
+#include "kiems/port_resolution.hpp"
+#include "kiems/simulation.hpp"
+#include "kiems/simulation_data.hpp"
 
 // Forward-declare-only boundary header (see its own file comment) -- safe alongside every
-// kicad_ems header above despite those using the *installed* CSXCAD/openEMS forms and Copper's
+// kiems header above despite those using the *installed* CSXCAD/openEMS forms and Copper's
 // own internals using the flat/source-checkout forms, for the same reason
-// kicad_ems/main.cpp's own runGPUPortInProcess() can: this header never exposes a complete
+// kiems/main.cpp's own runGPUPortInProcess() can: this header never exposes a complete
 // openEMS/ContinuousStructure definition itself. This is what lets the App run Copper's GPU engine
-// in-process (see runGPUPortInProcess() below) instead of posix_spawning kicad_ems_fdtd_worker as
+// in-process (see runGPUPortInProcess() below) instead of posix_spawning kiems_fdtd_worker as
 // a separate process -- KiEMS links Copper.framework directly (see the Xcode project's
 // own build settings), while libkiems itself still never does.
 #include "CopperFDTDRunner.h"
 
-using kicad_ems::EMSConfig;
-using kicad_ems::FDTDBackend;
-using kicad_ems::PathsConfig;
-using kicad_ems::Postprocessor;
-using kicad_ems::RunOptions;
-using kicad_ems::Simulation;
-using kicad_ems::SimulationConfig;
-using kicad_ems::SimulationData;
-using kicad_ems::SimulationStage;
+using kiems::EMSConfig;
+using kiems::FDTDBackend;
+using kiems::PathsConfig;
+using kiems::Postprocessor;
+using kiems::RunOptions;
+using kiems::Simulation;
+using kiems::SimulationConfig;
+using kiems::SimulationData;
+using kiems::SimulationStage;
 
 @implementation EMSPipelineProgress
 - (instancetype)initWithPhase:(EMSPipelineProgressPhase)phase
@@ -115,8 +115,8 @@ std::vector<double> linspace(double start, double stop, std::int32_t num) {
     return result;
 }
 
-/// The kicad_ems::FDTDPortRunner passed to kicad_ems::generateResults() so the FDTD step runs in
-/// this one process -- mirrors kicad_ems/main.cpp's own runGPUPortInProcess() exactly (see its own
+/// The kiems::FDTDPortRunner passed to kiems::generateResults() so the FDTD step runs in
+/// this one process -- mirrors kiems/main.cpp's own runGPUPortInProcess() exactly (see its own
 /// doc comment for why a portRunner has to do the setupFDTDOperator()/runFDTDPortOnGPU()/
 /// probe-file-write sequence itself), just without CLI-style stdout progress logging: this app
 /// reports progress through `progressHandler` instead (see EMSPipelineProgress's own doc comment).
@@ -179,7 +179,7 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     }
     const std::filesystem::path probeDir = *probeDirResult;
     // Boundary kind left at runFDTDPortOnGPU()'s own default (real CPML -- see
-    // Internal/CopperCPML.hpp) -- no app-side toggle for kicad_ems::PMLKind yet (plain UPML,
+    // Internal/CopperCPML.hpp) -- no app-side toggle for kiems::PMLKind yet (plain UPML,
     // openEMS's own original formulation, is reachable via `--pml upml` on the CLI for
     // comparison/fallback -- see PMLKind's own doc comment). alphaMax is *not* left at
     // runFDTDPortOnGPU()'s own generic 100MHz-based default -- see copper::cpmlAlphaMaxForFrequency()'s
@@ -188,7 +188,7 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     // own value instead, or late-time energy from the under-damped gap between the two frequencies
     // persists and visibly grows over a long run.
     //
-    // pmlDepthCells passed explicitly (matching kicad_ems::constants::pmlDepthCells, the same value
+    // pmlDepthCells passed explicitly (matching kiems::constants::pmlDepthCells, the same value
     // Simulation::setBoundaryConditions() used -- or, for a CPML run, deliberately did *not* pass to
     // openEMS's own Set_BC_PML() -- see that function's own comment) rather than relying on
     // runFDTDPortOnGPU()'s own default staying in sync with it.
@@ -233,7 +233,7 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     // ever reading the rest of the series.
     const copper::CopperFDTDRunResult gpuResult = copper::runFDTDPortOnGPU(
         sim.fdtdEngine(), sim.csx(), onCopperProgress, copper::CopperBoundaryKind::CPML, cpmlAlphaMax,
-        kicad_ems::constants::pmlDepthCells, [&] { return cancelRequested.load(); }, fieldSeries);
+        kiems::constants::pmlDepthCells, [&] { return cancelRequested.load(); }, fieldSeries);
     // Best-effort restore -- `cwd` no longer existing shouldn't discard an otherwise-successful run's
     // own results (unlike currentPathOrError()'s other two call sites above, both load-bearing).
     std::error_code restoreEc;
@@ -390,15 +390,15 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     PathsConfig paths = PathsConfig::forConfigFile(std::filesystem::path(packageDir.UTF8String) / "simulation.json",
                                                     kicadCliPath.UTF8String, helperPath.UTF8String, "");
 
-    if (auto result = kicad_ems::exportKicadPcb(paths, *trimmedConfig.kicadPcbPath()); !result) {
+    if (auto result = kiems::exportKicadPcb(paths, *trimmedConfig.kicadPcbPath()); !result) {
         if (error) *error = makeError(result.error());
         return NO;
     }
-    if (auto result = kicad_ems::importStackup(paths, trimmedConfig); !result) {
+    if (auto result = kiems::importStackup(paths, trimmedConfig); !result) {
         if (error) *error = makeError(result.error());
         return NO;
     }
-    if (auto result = kicad_ems::resolveSimulationPorts(trimmedConfig, paths); !result) {
+    if (auto result = kiems::resolveSimulationPorts(trimmedConfig, paths); !result) {
         if (error) *error = makeError(result.error());
         return NO;
     }
@@ -442,7 +442,7 @@ kicadQueryHelperPath:(NSString*)helperPath
     }
 
     // Geometry phase: only two real checkpoints exist (board-slicing and grid-placement each have
-    // no finer-grained progress of their own to report -- see kicad_ems::GeometryPhase, which
+    // no finer-grained progress of their own to report -- see kiems::GeometryPhase, which
     // GeometryResult::build()'s own onProgress bracketing mirrors identically), so this reports
     // 0.0 -> 0.5 -> 1.0 rather than a continuously-advancing fraction. Reported even when only
     // EMSPipelineStageGeometry/Grid was actually requested, not just on the way to Results -- a
@@ -465,7 +465,7 @@ kicadQueryHelperPath:(NSString*)helperPath
             return NO;
         }
         reportGeometryProgress(0.0);
-        auto geometryResult = kicad_ems::generateGeometry(*_configured, *_scaledConfig, *_paths);
+        auto geometryResult = kiems::generateGeometry(*_configured, *_scaledConfig, *_paths);
         if (!geometryResult) {
             if (error) *error = makeError(geometryResult.error());
             return NO;
@@ -479,7 +479,7 @@ kicadQueryHelperPath:(NSString*)helperPath
 
     // EMSPipelineStageGrid, or an unavoidable step on the way to EMSPipelineStageResults (Grid,
     // Results, and Postprocessing have no meaningful intermediate UI state between them once a real
-    // FDTD run is wanted -- see kicad_ems::generateResults()'s own doc comment -- so those three
+    // FDTD run is wanted -- see kiems::generateResults()'s own doc comment -- so those three
     // still run straight through together below).
     RunOptions options;
     options.backend = FDTDBackend::CopperGPU;
@@ -494,14 +494,14 @@ kicadQueryHelperPath:(NSString*)helperPath
         // earlier ensureStage: call -- either way, grid placement is genuinely the second half of
         // this call's own remaining geometry-phase work.
         reportGeometryProgress(0.5);
-        auto grid = kicad_ems::generateGrid(*_geometry, *_scaledConfig, options, *_paths);
+        auto grid = kiems::generateGrid(*_geometry, *_scaledConfig, options, *_paths);
         _grid.emplace(*_geometry, std::move(grid));
         // A cached -geometryPreview built while only EMSPipelineStageGeometry had run (gridLines
         // still empty) would otherwise keep serving that stale, grid-less snapshot forever now that
         // grid lines actually exist.
         _geometryPreviewCache = nil;
-        // Written to disk too (matching `kicad_ems -g`) so a later CLI invocation against this same
-        // saved package (e.g. `kicad_ems -s`) can pick up straight from here without redoing any of
+        // Written to disk too (matching `kiems -g`) so a later CLI invocation against this same
+        // saved package (e.g. `kiems -s`) can pick up straight from here without redoing any of
         // this work itself -- see GeometryResult::load()'s own doc comment. Unlike GeometryResult::
         // build(), nothing else along this path has created paths.geometryDir/_simulationName yet
         // (setupFDTDOperator() creates its own simulationDir subtree later, but that's a different
@@ -515,8 +515,8 @@ kicadQueryHelperPath:(NSString*)helperPath
             }
             return NO;
         }
-        if (auto result = kicad_ems::saveSimulationData(
-                *_grid, kicad_ems::simulationDataFile(*_paths, _simulationName));
+        if (auto result = kiems::saveSimulationData(
+                *_grid, kiems::simulationDataFile(*_paths, _simulationName));
             !result) {
             if (error) *error = makeError(result.error());
             return NO;
@@ -532,7 +532,7 @@ kicadQueryHelperPath:(NSString*)helperPath
     }
 
     std::vector<double> frequencies =
-        linspace(_scaledConfig->frequency().start(), _scaledConfig->frequency().stop(), kicad_ems::constants::frequencySampleCount);
+        linspace(_scaledConfig->frequency().start(), _scaledConfig->frequency().stop(), kiems::constants::frequencySampleCount);
 
     if (!_results.has_value()) {
         std::size_t totalExcitedPorts = 0;
@@ -550,7 +550,7 @@ kicadQueryHelperPath:(NSString*)helperPath
             boardThickness += substrate.thickness();
         }
         constexpr double kSimUnitsToMeters =
-            kicad_ems::constants::baseUnit / static_cast<double>(kicad_ems::constants::unitMultiplier);
+            kiems::constants::baseUnit / static_cast<double>(kiems::constants::unitMultiplier);
         const double boardZMinMeters = -boardThickness * kSimUnitsToMeters;
         // Alternate files: the viewer may still have the preceding generation open while a rerun
         // begins, so truncating one fixed path is unsafe. Two slots avoid that collision without
@@ -588,7 +588,7 @@ kicadQueryHelperPath:(NSString*)helperPath
             return result;
         };
         auto resultsResult =
-            kicad_ems::generateResults(*_grid, *_scaledConfig, options, *_paths, frequencies, portRunner);
+            kiems::generateResults(*_grid, *_scaledConfig, options, *_paths, frequencies, portRunner);
         if (!resultsResult) {
             // generateResults() only ever sees "cancelled" as a plain error string bubbled up from
             // portRunner (runGPUPortInProcess) -- it has no concept of cancellation itself -- so it
@@ -607,7 +607,7 @@ kicadQueryHelperPath:(NSString*)helperPath
     }
 
     if (!_postprocessing.has_value()) {
-        auto postprocessing = kicad_ems::generatePostprocessing(*_results, frequencies);
+        auto postprocessing = kiems::generatePostprocessing(*_results, frequencies);
         // calculateSparams() (inside generatePostprocessing()) alone isn't enough for this app's own
         // charts -- impedance/diff-pair/trace-delay data additionally needs processData() (see
         // Postprocessor::processData()'s own doc comment: "Should be called after
@@ -616,7 +616,7 @@ kicadQueryHelperPath:(NSString*)helperPath
         // use, keyed by simulation name across every simulation at once -- overkill for this
         // one-simulation-at-a-time pipeline, which already has its own Postprocessor directly).
         postprocessing.postprocessor->processData();
-        // Written to disk too, matching what `kicad_ems -a` would leave behind in the saved package.
+        // Written to disk too, matching what `kiems -a` would leave behind in the saved package.
         postprocessing.postprocessor->sparamToFile(_paths->simulationDir / _simulationName);
         _postprocessing.emplace(*_results, std::move(postprocessing));
     }
@@ -630,7 +630,7 @@ kicadQueryHelperPath:(NSString*)helperPath
     if (_geometryPreviewCache) {
         return _geometryPreviewCache;
     }
-    const kicad_ems::ComputedGridLines* gridLines = _grid.has_value() ? &_grid->grid().gridLines : nullptr;
+    const kiems::ComputedGridLines* gridLines = _grid.has_value() ? &_grid->grid().gridLines : nullptr;
     _geometryPreviewCache =
         buildGeometryPreview(_geometry->geometry().slicedBoard, *_simConfig, *_scaledConfig, *_paths, gridLines);
     return _geometryPreviewCache;

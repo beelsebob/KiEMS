@@ -37,7 +37,7 @@
 			<string>Owner</string>
 			<key>LSItemContentTypes</key>
 			<array>
-				<string>com.tomdavie.kicadems.simulation</string>
+				<string>com.tomdavie.kiems.simulation</string>
 			</array>
 			<key>NSDocumentClass</key>
 			<string>$(PRODUCT_MODULE_NAME).Document</string>
@@ -47,7 +47,7 @@
 	<array>
 		<dict>
 			<key>UTTypeIdentifier</key>
-			<string>com.tomdavie.kicadems.simulation</string>
+			<string>com.tomdavie.kiems.simulation</string>
 			<key>UTTypeConformsTo</key>
 			<array>
 				<string>com.apple.package</string>

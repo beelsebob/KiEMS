@@ -15,41 +15,41 @@
 #include <utility>
 #include <vector>
 
-#include "kicad_ems/board_slicing.hpp"
-#include "kicad_ems/config.hpp"
-#include "kicad_ems/constants.hpp"
-#include "kicad_ems/importer.hpp"
-#include "kicad_ems/libkicad_query.hpp"
+#include "kiems/board_slicing.hpp"
+#include "kiems/config.hpp"
+#include "kiems/constants.hpp"
+#include "kiems/importer.hpp"
+#include "kiems/libkicad_query.hpp"
 #include "logging.hpp"
-#include "kicad_ems/paths_config.hpp"
+#include "kiems/paths_config.hpp"
 
-using kicad_ems::EMSConfig;
+using kiems::EMSConfig;
 using namespace Cu;
-using kicad_ems::PathsConfig;
-using kicad_ems::SimulationConfig;
-using kicad_ems::SlicedBoard;
+using kiems::PathsConfig;
+using kiems::SimulationConfig;
+using kiems::SlicedBoard;
 
 namespace {
 
-CGPoint toCGPoint(const kicad_ems::Position& position) {
+CGPoint toCGPoint(const kiems::Position& position) {
     return CGPointMake(position.x(), position.y());
 }
 
-// Matches port_resolution.cpp's own (private) _mmToSimUnits exactly -- kicad_ems::libkicad_query's
+// Matches port_resolution.cpp's own (private) _mmToSimUnits exactly -- kiems::libkicad_query's
 // results (like every other libkicad_query position) come back in millimetres, board-auxiliary-
 // origin-relative; this pipeline's own native frame is simulation units, further re-origined to the
 // board's Edge_Cuts bounding box (see getVias()'s own doc comment) -- the bounding-box shift still
 // needs applying by the caller, this just handles the unit conversion.
-double mmToSimUnits(double mm) { return mm / 1000.0 / kicad_ems::constants::baseUnit * kicad_ems::constants::unitMultiplier; }
+double mmToSimUnits(double mm) { return mm / 1000.0 / kiems::constants::baseUnit * kiems::constants::unitMultiplier; }
 
 std::expected<std::pair<double, double>, std::string> boardOrigin(const PathsConfig& paths) {
-    auto geometry = kicad_ems::libkicad_query::boardGeometry(paths, "Loading board outline for geometry preview");
+    auto geometry = kiems::libkicad_query::boardGeometry(paths, "Loading board outline for geometry preview");
     if (!geometry) {
         return std::unexpected(std::move(geometry).error());
     }
     double xMin = std::numeric_limits<double>::infinity();
     double yMin = std::numeric_limits<double>::infinity();
-    for (const kicad_ems::libkicad_query::PolygonLoop& loop : geometry->outline) {
+    for (const kiems::libkicad_query::PolygonLoop& loop : geometry->outline) {
         for (const auto& [xMm, yMm] : loop.pointsMm) {
             xMin = std::min(xMin, mmToSimUnits(xMm));
             yMin = std::min(yMin, mmToSimUnits(yMm));
@@ -88,14 +88,14 @@ struct RealHoleSize {
 };
 
 // Queries the board's real through-holes (vias and through-hole footprint pads alike -- see
-// kicad_ems::libkicad_query::ThroughHole's own doc comment) once per geometry build, converting
+// kiems::libkicad_query::ThroughHole's own doc comment) once per geometry build, converting
 // each into this preview's frame. Best-effort: an empty result (query failure, or just an older
 // libkicad_smoketest that doesn't support the command yet) leaves every via falling back to
 // kPreviewViaAnnularRingMarginSimUnits instead, not a hard error -- the ring is a cosmetic preview
 // detail, never worth failing the whole geometry step over.
-std::vector<RealHoleSize> buildRealHoleSizes(const kicad_ems::PathsConfig& paths, double originX, double originY) {
+std::vector<RealHoleSize> buildRealHoleSizes(const kiems::PathsConfig& paths, double originX, double originY) {
     std::vector<RealHoleSize> sizes;
-    auto holesResult = kicad_ems::libkicad_query::throughHoles(paths, "Reading real via/pad sizes");
+    auto holesResult = kiems::libkicad_query::throughHoles(paths, "Reading real via/pad sizes");
     if (!holesResult) {
         return sizes;
     }
@@ -183,11 +183,11 @@ std::pair<CGPoint, CGPoint> ringCapsuleForRealPad(CGPoint holePos1, CGPoint hole
 // Same disc-vs-polygon overlap test as simulation.cpp's own (file-local) _viaIntersectsOutline --
 // a real via whose center has been sliced away can still have copper straddling the cutout
 // boundary, so this preview needs to keep the same vias Simulation::addVias() actually keeps.
-bool pointInPolygon(double x, double y, const std::vector<kicad_ems::Position>& polygon) {
+bool pointInPolygon(double x, double y, const std::vector<kiems::Position>& polygon) {
     bool inside = false;
     for (std::size_t i = 0, j = polygon.size() - 1; i < polygon.size(); j = i++) {
-        const kicad_ems::Position& pi = polygon[i];
-        const kicad_ems::Position& pj = polygon[j];
+        const kiems::Position& pi = polygon[i];
+        const kiems::Position& pj = polygon[j];
         const bool crosses = (pi.y() > y) != (pj.y() > y);
         if (crosses) {
             const double xIntersect = pj.x() + (y - pj.y()) * (pi.x() - pj.x()) / (pi.y() - pj.y());
@@ -199,11 +199,11 @@ bool pointInPolygon(double x, double y, const std::vector<kicad_ems::Position>& 
     return inside;
 }
 
-double distanceToPolygonBoundary(double x, double y, const std::vector<kicad_ems::Position>& polygon) {
+double distanceToPolygonBoundary(double x, double y, const std::vector<kiems::Position>& polygon) {
     double best = std::numeric_limits<double>::infinity();
     for (std::size_t i = 0, j = polygon.size() - 1; i < polygon.size(); j = i++) {
-        const kicad_ems::Position& a = polygon[j];
-        const kicad_ems::Position& b = polygon[i];
+        const kiems::Position& a = polygon[j];
+        const kiems::Position& b = polygon[i];
         const double abx = b.x() - a.x();
         const double aby = b.y() - a.y();
         const double lenSq = abx * abx + aby * aby;
@@ -219,7 +219,7 @@ double distanceToPolygonBoundary(double x, double y, const std::vector<kicad_ems
     return best;
 }
 
-bool viaIntersectsOutline(double x, double y, double diameter, const std::vector<kicad_ems::Position>& outline) {
+bool viaIntersectsOutline(double x, double y, double diameter, const std::vector<kiems::Position>& outline) {
     if (pointInPolygon(x, y, outline)) {
         return true;
     }
@@ -229,7 +229,7 @@ bool viaIntersectsOutline(double x, double y, double diameter, const std::vector
 // ---- Component 3D model preview (debug aid -- see EMSGeometryComponentTriangle's own doc comment) ----
 
 // Every footprint auto-discovered as a lumped R/L/C component (see
-// kicad_ems::LumpedComponentConfig's own doc comment) -- deliberately NOT every footprint with a
+// kiems::LumpedComponentConfig's own doc comment) -- deliberately NOT every footprint with a
 // resolved port/probe pin too (an earlier version of this function unioned both): a port/probe pin
 // commonly sits on an IC or connector, not just a passive, and rendering those alongside the
 // passives made this debug view's actual point -- eyeballing which physical *passive* got
@@ -248,15 +248,15 @@ std::vector<std::string> includedFootprintReferences(const SimulationConfig& sim
 }
 
 // Result of exportComponentTriangles(): the real, colored mesh plus every diagnostic KiCad's own
-// exporter reported building it (see kicad_ems::libkicad_query::ComponentModelExportResult's own
+// exporter reported building it (see kiems::libkicad_query::ComponentModelExportResult's own
 // doc comment) -- surfaced to the caller so "the mesh is missing/wrong" is distinguishable from
 // "this specific component's 3D model file couldn't be resolved," rather than both collapsing to a
 // silent empty result.
 struct ComponentExportOutcome {
-    std::vector<kicad_ems::libkicad_query::ComponentTriangle> triangles;
+    std::vector<kiems::libkicad_query::ComponentTriangle> triangles;
     std::vector<std::string> messages;
     // The board's real top-copper mounting surface Z, in the same mm frame `triangles`' own
-    // vertices are in -- see kicad_ems::libkicad_query::ComponentModelExportResult::topCopperZMm's
+    // vertices are in -- see kiems::libkicad_query::ComponentModelExportResult::topCopperZMm's
     // own doc comment. 0 (a no-op offset) whenever `triangles` is empty too, so a caller doesn't
     // need to separately guard against using a meaningless default.
     double topCopperZMm = 0;
@@ -288,7 +288,7 @@ ComponentExportOutcome exportComponentTriangles(const PathsConfig& paths, const 
     // comment) -- not read back here, the colored mesh comes straight from the query's own result.
     const std::filesystem::path outPath = paths.fabDir / "geometry_preview_components.stl";
     logInfo("GeometryPreview: exporting component models for [" + refsCsv + "]");
-    auto exportResult = kicad_ems::libkicad_query::exportComponentModels(paths, refsCsv, outPath.string(),
+    auto exportResult = kiems::libkicad_query::exportComponentModels(paths, refsCsv, outPath.string(),
                                                                              "Rendering component 3D models");
     if (!exportResult) {
         logWarning("GeometryPreview: exportComponentModels failed: " + exportResult.error());
@@ -700,7 +700,7 @@ private:
         return color;
     }
 
-    std::vector<kicad_ems::LayerConfig> _substrates;
+    std::vector<kiems::LayerConfig> _substrates;
     std::unordered_set<std::string> _seen;
     std::vector<std::pair<std::string, PackedGridColor>> _legend;
 };
@@ -715,13 +715,13 @@ std::size_t midpointLineIndex(const std::vector<double>& lines) {
     return std::abs(lines[upper] - midpoint) < std::abs(lines[upper - 1] - midpoint) ? upper : upper - 1;
 }
 
-bool isInPML(const kicad_ems::ComputedGridLines& grid, double x, double y, double z) {
+bool isInPML(const kiems::ComputedGridLines& grid, double x, double y, double z) {
     return x < grid.pmlInnerXMin || x > grid.pmlInnerXMax || y < grid.pmlInnerYMin || y > grid.pmlInnerYMax ||
            z < grid.pmlInnerZMin || z > grid.pmlInnerZMax;
 }
 
 template <typename Place>
-EMSGeometryGridPlane* buildMaterialPlane(ContinuousStructure& csx, const kicad_ems::ComputedGridLines& grid,
+EMSGeometryGridPlane* buildMaterialPlane(ContinuousStructure& csx, const kiems::ComputedGridLines& grid,
                                          const std::vector<double>& valuesA, const std::vector<double>& valuesB,
                                          double fixedC, Place place, GridMaterialColors& colors) {
     if (valuesA.empty() || valuesB.empty()) return nil;
@@ -756,7 +756,7 @@ EMSGeometryGridPlane* buildMaterialPlane(ContinuousStructure& csx, const kicad_e
 }
 
 template <typename Place>
-NSData* buildMaterialEdgeColors(ContinuousStructure& csx, const kicad_ems::ComputedGridLines& grid,
+NSData* buildMaterialEdgeColors(ContinuousStructure& csx, const kiems::ComputedGridLines& grid,
                                 const std::vector<double>& valuesA, const std::vector<double>& valuesB,
                                 double fixedC, Place place, GridMaterialColors& colors) {
     std::vector<PackedGridColor> edgeColors;
@@ -781,12 +781,12 @@ NSData* buildMaterialEdgeColors(ContinuousStructure& csx, const kicad_ems::Compu
 
 MaterialGridBuffers buildMaterialGrid(const SlicedBoard& sliced, const SimulationConfig& simConfig,
                                       const EMSConfig& config, const PathsConfig& paths,
-                                      const kicad_ems::ComputedGridLines& grid) {
+                                      const kiems::ComputedGridLines& grid) {
     if (grid.x.empty() || grid.y.empty() || grid.z.empty()) return {};
     SimulationConfig configCopy = simConfig;
-    kicad_ems::RunOptions options;
-    options.backend = kicad_ems::FDTDBackend::CopperGPU;
-    kicad_ems::Simulation simulation(configCopy, config, options, paths);
+    kiems::RunOptions options;
+    options.backend = kiems::FDTDBackend::CopperGPU;
+    kiems::Simulation simulation(configCopy, config, options, paths);
     simulation.adoptSlicedBoard(sliced);
     simulation.adoptGridLines(grid);
     if (auto result = simulation.populateGeometry(); !result) {
@@ -796,7 +796,7 @@ MaterialGridBuffers buildMaterialGrid(const SlicedBoard& sliced, const Simulatio
     ContinuousStructure& csx = simulation.csx();
     csx.Update();
 
-    kicad_ems::ComputedGridLines displayGrid = grid;
+    kiems::ComputedGridLines displayGrid = grid;
     // GridGenerator keeps these diagnostic X/Y bounds local to the sliced-board origin, whereas
     // its real grid lines and all CSXCAD geometry are absolute in that frame.
     displayGrid.pmlInnerXMin += sliced.xMin;
@@ -818,11 +818,11 @@ MaterialGridBuffers buildMaterialGrid(const SlicedBoard& sliced, const Simulatio
     NSMutableArray<EMSGeometryGridLayer*>* selectableLayers = [NSMutableArray array];
     double z = 0;
     for (const auto& layer : config.layers()) {
-        if (layer.kind() == kicad_ems::LayerKind::Substrate) {
+        if (layer.kind() == kiems::LayerKind::Substrate) {
             z -= layer.thickness();
             continue;
         }
-        if (layer.kind() != kicad_ems::LayerKind::Metal) continue;
+        if (layer.kind() != kiems::LayerKind::Metal) continue;
         NSData* edgeColors = buildMaterialEdgeColors(csx, displayGrid, grid.x, grid.y, z,
             [](double x, double y, double fixedZ) { return std::array<double, 3>{x, y, fixedZ}; }, colors);
         [selectableLayers addObject:[[EMSGeometryGridLayer alloc] initWithName:@(layer.name().c_str())
@@ -838,13 +838,13 @@ MaterialGridBuffers buildMaterialGrid(const SlicedBoard& sliced, const Simulatio
 
 EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const SimulationConfig& simConfig,
                                           const EMSConfig& scaledConfig, const PathsConfig& paths,
-                                          const kicad_ems::ComputedGridLines* gridLines) {
+                                          const kiems::ComputedGridLines* gridLines) {
     // Best-effort: the board's own KiCad color theme, if readable (see layerColors's own doc
     // comment for what "readable" means outside a full GUI session) -- a lookup failure here isn't
     // fatal to the geometry step itself, it just leaves every layer's hexColor nil, which callers
     // fall back to their own default palette for.
     std::unordered_map<std::string, std::string> colorsByLayerName;
-    if (auto colorsResult = kicad_ems::libkicad_query::layerColors(paths, "Reading layer colors"); colorsResult) {
+    if (auto colorsResult = kiems::libkicad_query::layerColors(paths, "Reading layer colors"); colorsResult) {
         for (const auto& layerColor : *colorsResult) {
             colorsByLayerName.emplace(layerColor.name, layerColor.hex);
         }
@@ -852,7 +852,7 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
 
     const auto metals = scaledConfig.getMetals();
     // One entry per metal layer, in the same stackup order as `metals`/sliced.previewLayerTriangles
-    // -- exactly mirrors kicad_ems::Simulation::addGerbers()/getMetalLayerOffset()'s own walk of the
+    // -- exactly mirrors kiems::Simulation::addGerbers()/getMetalLayerOffset()'s own walk of the
     // full interleaved layer list, so a copper layer here ends up at the identical Z the real FDTD
     // geometry places it at (board top always 0, cumulative substrate thickness subtracted going
     // down) -- not an even-spacing approximation across the board's own extent. Uses
@@ -863,9 +863,9 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
     {
         double offset = 0;
         for (const auto& layer : scaledConfig.layers()) {
-            if (layer.kind() == kicad_ems::LayerKind::Substrate) {
+            if (layer.kind() == kiems::LayerKind::Substrate) {
                 offset -= layer.thickness();
-            } else if (layer.kind() == kicad_ems::LayerKind::Metal) {
+            } else if (layer.kind() == kiems::LayerKind::Metal) {
                 metalOffsets.push_back(offset);
             }
         }
@@ -934,7 +934,7 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
         // Queried once, up front, rather than per-via -- see buildRealHoleSizes()'s own comment.
         const std::vector<RealHoleSize> realHoleSizes =
             buildRealHoleSizes(paths, originResult->first, originResult->second);
-        if (auto realVias = kicad_ems::getVias(paths, originResult->first, originResult->second); realVias) {
+        if (auto realVias = kiems::getVias(paths, originResult->first, originResult->second); realVias) {
             for (const auto& via : *realVias) {
                 // Tested against both ends of the via's own centerline -- for a plain round via
                 // (x2==x, y2==y) this is just the same point twice; for an elongated one (see
@@ -1090,21 +1090,21 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
     // Solder mask -- see EMSGeometryPreview.topSolderMask/bottomSolderMask's own doc comment for why
     // this reuses EMSGeometryLayer (a flat 2D shape at one shared Z) rather than the 3D
     // EMSGeometryComponentTriangle mesh type vias/components use. z is the mask's own *outer* face
-    // (offset from copper's own Z, not coincident with it), matching kicad_ems::Simulation::
+    // (offset from copper's own Z, not coincident with it), matching kiems::Simulation::
     // addSolderMask()'s own real placement -- top mask above F.Cu (Z=0), bottom mask below the last
     // copper layer (sum of every substrate's own thickness, the same computation metalOffsets above
     // already performs one layer at a time).
     double totalSubstrateThickness = 0;
     for (const auto& layer : scaledConfig.layers()) {
-        if (layer.kind() == kicad_ems::LayerKind::Substrate) {
+        if (layer.kind() == kiems::LayerKind::Substrate) {
             totalSubstrateThickness += layer.thickness();
         }
     }
     EMSGeometryLayer* topSolderMask = nil;
     EMSGeometryLayer* bottomSolderMask = nil;
     for (const auto& mask : scaledConfig.getSolderMasks()) {
-        const bool isTop = mask.kind() == kicad_ems::LayerKind::SolderMaskTop;
-        const std::vector<kicad_ems::Triangle>& maskTriangles =
+        const bool isTop = mask.kind() == kiems::LayerKind::SolderMaskTop;
+        const std::vector<kiems::Triangle>& maskTriangles =
             isTop ? sliced.topMaskTriangles : sliced.bottomMaskTriangles;
         if (maskTriangles.empty()) {
             continue;

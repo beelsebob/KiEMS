@@ -5,7 +5,7 @@
 namespace copper {
 
 inline os_log_t fieldFrameSignpostLog() {
-    static os_log_t log = os_log_create("com.tdavie.kicad_ems", "FieldFrames");
+    static os_log_t log = os_log_create("com.tdavie.kiems", "FieldFrames");
     return log;
 }
 

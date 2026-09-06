@@ -94,9 +94,9 @@ struct CopperProbeResult {
     /// Formats this probe's samples in openEMS's own ASCII probe-file shape: a couple of
     /// `%`-prefixed header lines, then one `time\tvalue` row per sample, taken as-is (no further
     /// weighting -- see this struct's own doc comment on why `samples` is already final). Writing
-    /// the returned string to a file named `name` is what lets kicad_ems's existing on-disk
+    /// the returned string to a file named `name` is what lets kiems's existing on-disk
     /// S-parameter pipeline (which reads these files back -- see
-    /// libkiems/kicad_ems/ports.cpp's `_loadUiFile`) keep working unmodified against a
+    /// libkiems/kiems/ports.cpp's `_loadUiFile`) keep working unmodified against a
     /// runFDTDPortOnGPU() result -- a caller that doesn't need a file at all (e.g. a live-plotting
     /// GUI) can just read `samples` directly instead of calling this.
     std::string data() const;
@@ -144,7 +144,7 @@ struct CopperFieldSnapshot {
 /// (voltage and current), each carrying every timestep's sample in memory rather than on disk (see
 /// runFDTDPortOnGPU's own doc comment for why runFDTDPortOnGPU itself no longer writes files: it's
 /// a pure compute function now, and persisting the result -- if a caller needs to at all, e.g. to
-/// keep kicad_ems's existing on-disk S-parameter pipeline working unmodified -- is an explicit,
+/// keep kiems's existing on-disk S-parameter pipeline working unmodified -- is an explicit,
 /// visible step in that caller's own code, via CopperProbeResult::data() above, not an implicit
 /// side effect buried in here). Field captures are likewise only meaningful when `success`: they
 /// are either available through `fieldFrameSeriesPath` when disk persistence was requested, or as
@@ -167,18 +167,18 @@ struct CopperFDTDRunResult {
 
 /// Which major stage of runFDTDPortOnGPU a CopperFDTDProgress report describes. `Setup` covers
 /// everything before the timestep loop starts, including the *caller's* own
-/// kicad_ems::Simulation::setupFDTDOperator() (openEMS's own SetupFDTD()/CalcECOperator(), which
+/// kiems::Simulation::setupFDTDOperator() (openEMS's own SetupFDTD()/CalcECOperator(), which
 /// dominates setup cost -- confirmed in practice to take ~300s on a real board -- but is a single
 /// opaque call with no intermediate progress to report, hence Setup only ever reports
 /// currentStep 0 then 1 of 1, not finer sub-steps that would just be fabricated precision).
 /// `Postprocessing` is never reported by runFDTDPortOnGPU itself (S-parameter computation happens
-/// entirely outside Copper, in kicad_ems's own Postprocessor) -- it exists here purely so a host
+/// entirely outside Copper, in kiems's own Postprocessor) -- it exists here purely so a host
 /// process orchestrating the whole setup->FDTD->postprocess sequence (see copper_fdtd_worker's own
 /// sibling, an in-process caller) can report all three phases through this one shared type.
 enum class CopperFDTDPhase { Setup, FDTDRun, Postprocessing };
 
 /// One progress update. `currentStep`/`totalSteps` are the FDTDRun phase's actual timestep count
-/// (from kicad_ems::Simulation's own EMSConfig::maxSteps()) -- 0/1 for Setup and Postprocessing,
+/// (from kiems::Simulation's own EMSConfig::maxSteps()) -- 0/1 for Setup and Postprocessing,
 /// which have no comparable step count. `energyChangeDB`/`targetEnergyChangeDB` mirror
 /// CopperFDTDRunner.cpp's own energy-decay end criteria (see its own comment for where `1e-6`/60dB
 /// comes from) -- both 0 outside the FDTDRun phase, where there's nothing to report yet.
@@ -208,7 +208,7 @@ using CopperFDTDProgressCallback = std::function<void(const CopperFDTDProgress&)
 /// a pure computation, no disk I/O of its own (see CopperProbeResult::data() above for a caller that
 /// wants openEMS-format file content, matching what the real CPU `openEMS::RunFDTD()` would have
 /// produced). `fdtd` must already have had `openEMS::SetupFDTD()` run on it (see
-/// kicad_ems::Simulation::setupFDTDOperator()) -- this never calls SetupFDTD() itself, and never
+/// kiems::Simulation::setupFDTDOperator()) -- this never calls SetupFDTD() itself, and never
 /// touches the process's current working directory.
 ///
 /// `onProgress`, if given, is invoked with a CopperFDTDProgress once entering Setup, once leaving
@@ -231,8 +231,8 @@ using CopperFDTDProgressCallback = std::function<void(const CopperFDTDProgress&)
 /// CPML -- see Internal/CopperCPML.hpp's own top comment for why a CPML run must never have called
 /// openEMS's own Set_BC_PML() (the caller is responsible for that; this is just told the depth it
 /// would otherwise have passed there, in cells, uniform on all 6 faces) and instead computes its own
-/// shell geometry directly from this value. Defaults to 16, matching kicad_ems::constants::
-/// pmlDepthCells -- a caller linking kicad_ems should pass that constant explicitly rather than rely
+/// shell geometry directly from this value. Defaults to 16, matching kiems::constants::
+/// pmlDepthCells -- a caller linking kiems should pass that constant explicitly rather than rely
 /// on this default staying in sync with it.
 ///
 /// `isCancelled`, if given, is checked once per timestep (the same per-step sampler callback the

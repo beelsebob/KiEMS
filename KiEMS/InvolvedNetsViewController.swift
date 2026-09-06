@@ -34,7 +34,7 @@ private final class InvolvedNetsNode: NSObject {
 /// with its own start time/duration/phase (impedance/reference-plane and start time/duration/phase
 /// are mutually exclusive per row -- a net row shows the former blank the latter, a pin row the
 /// reverse -- see viewFor tableColumn). net_class/footprint+pin InvolvedNetConfig entries resolve
-/// down to individual net names, the same semantics as kicad_ems::libkicad_query::
+/// down to individual net names, the same semantics as kiems::libkicad_query::
 /// resolveInvolvedNetNames on the C++ side, just recomputed here in Swift from data this app already
 /// has a query for (KicadBoardBridge.footprints(), which carries each pin's net name) rather than
 /// adding a new bridge round trip purely for this.
@@ -268,7 +268,7 @@ final class InvolvedNetsViewController: NSViewController {
         // InvolvedNetSnapshot/ExcitationSnapshot's doc comments.
         let sim = document.config.simulations[selectedIndex]
         // GeometryOnly entries ("Included in Simulation", as opposed to full "Simulation Net"
-        // participation -- see kicad_ems::NetInclusionLevel's own doc comment) are structurally
+        // participation -- see kiems::NetInclusionLevel's own doc comment) are structurally
         // never port/probe/excitation-eligible, so they'd show up here with an impedance/reference
         // plane that means nothing and never gain excited/probed children -- this summary is
         // specifically about what's actively simulated, not raw geometry, so they're excluded here

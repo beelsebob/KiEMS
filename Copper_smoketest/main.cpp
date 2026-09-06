@@ -6,7 +6,7 @@
 // Operator, that CopperYeeGrid/CopperExcitation's own extraction exactly reproduces values read
 // directly from that same Operator/Excitation, and that CopperEngine's GPU leapfrog reproduces the
 // real CPU openEMS Engine's field values (to float-rounding tolerance) on an identical grid -- no
-// kicad_ems/libkiems involvement at all, matching the plan's intent to keep this fixture
+// kiems/libkiems involvement at all, matching the plan's intent to keep this fixture
 // independent of the rest of the pipeline for phases 0-3.
 //
 // Plain assert-and-print-PASS/FAIL, matching this repo's existing libkiems_smoketest/
@@ -60,7 +60,7 @@ void fail(const char* what) {
 }
 
 /// A trivial 11x11x3-line vacuum grid (1mm cells, PEC on every side), with a single soft E-field
-/// (excitation type 0, matching kicad_ems's own ports.cpp -- see CopperExcitation.hpp) excitation
+/// (excitation type 0, matching kiems's own ports.cpp -- see CopperExcitation.hpp) excitation
 /// box in the middle of the domain, oriented along z like a real MSLPort's excitation. No material
 /// boxes at all otherwise -- a bare vacuum cell already has well-defined, checkable vv/vi/ii/iv
 /// coefficients, and this is intentionally the simplest geometry that still exercises the full
@@ -70,7 +70,7 @@ void fail(const char* what) {
 /// it's given -- its own destructor (via Reset()) unconditionally `delete`s it. Handing it a
 /// pointer to anything not obtained from `new` (a stack local, or a temporary that's since been
 /// destroyed) crashes at `fdtd`'s own destruction with "pointer being freed was not allocated".
-/// (`kicad_ems::Simulation::_csx` is a raw, non-owning pointer for exactly this reason -- see
+/// (`kiems::Simulation::_csx` is a raw, non-owning pointer for exactly this reason -- see
 /// its own doc comment.)
 ContinuousStructure* buildTinyVacuumGrid() {
     auto* csx = new ContinuousStructure();
@@ -238,7 +238,7 @@ ContinuousStructure* buildCpmlCavityNoExcitation() {
 }
 
 /// buildTinyVacuumGrid()'s same domain/excitation, plus a voltage probe and a current probe laid
-/// out the same way LumpedPort::LumpedPort (libkiems/kicad_ems/ports.cpp) lays its own real
+/// out the same way LumpedPort::LumpedPort (libkiems/kiems/ports.cpp) lays its own real
 /// u/i probes relative to a port box -- a voltage probe spanning the excitation direction at the
 /// port's center point, and a current probe forming a loop around the port's footprint at its
 /// midpoint along that same direction. Used for Phase 4b's probe discovery/sampling check.
@@ -297,7 +297,7 @@ ContinuousStructure* buildProbeFixture() {
     return csx;
 }
 
-/// A minimal ad-hoc reimplementation of libkiems/kicad_ems/ports.cpp's own `_loadUiFile`
+/// A minimal ad-hoc reimplementation of libkiems/kiems/ports.cpp's own `_loadUiFile`
 /// parsing rule (skip blank/`%`-prefixed lines, take the first 2 whitespace-separated tokens of
 /// every other line as time/value) -- used to confirm CopperProbeWriter's actual file output
 /// round-trips through *that exact* rule, not just a rule this file assumes is equivalent.
@@ -488,7 +488,7 @@ int main() {
     // nonzero state from apply_excitation_e injecting the real Gaussian-pulse signal each step, the
     // same way Engine_Ext_Excitation::Apply2VoltagesImpl does on the CPU side. This fixture's
     // excitation is soft-E-field-only (Curr_Count==0, see buildTinyVacuumGrid()'s own doc comment),
-    // so this exercises apply_excitation_e but not apply_excitation_h -- the real kicad_ems port
+    // so this exercises apply_excitation_e but not apply_excitation_h -- the real kiems port
     // excitation is the same soft-E-field type, so that's the path that actually matters.
     {
         Engine* cpuEngine = fdtd.GetEngineForCPU();
@@ -855,13 +855,13 @@ int main() {
     // fields -- this isolates CopperProbes' own indexing/sign logic from FDTD field parity, which
     // Phase 2/3/4a already cover; (b) CopperProbeWriter's actual file output, read back through a
     // reimplementation of ports.cpp's own `_loadUiFile` parsing rule, confirming the file Copper
-    // writes is the file kicad_ems's existing reader already expects, unmodified.
+    // writes is the file kiems's existing reader already expects, unmodified.
     {
         ContinuousStructure* probeCsx = buildProbeFixture();
         copper::CopperOpenEMS probeFdtd;
         probeFdtd.SetCSX(probeCsx); // ownership transfers to probeFdtd -- probeCsx stays valid and
                                      // usable (non-owning) until probeFdtd is destroyed, same pattern
-                                     // as kicad_ems::Simulation::_csx
+                                     // as kiems::Simulation::_csx
         probeFdtd.SetGaussExcite(2.5e9, 2.5e9);
         for (int side = 0; side < 6; ++side) {
             probeFdtd.Set_BC_Type(side, 0);

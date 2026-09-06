@@ -1,5 +1,5 @@
-// Objective-C interface over one simulation's own kicad_ems::SimulationData<Stage> pipeline (see
-// libkiems/kicad_ems/simulation_data.hpp) -- Swift-visible; never exposes a C++ type.
+// Objective-C interface over one simulation's own kiems::SimulationData<Stage> pipeline (see
+// libkiems/kiems/simulation_data.hpp) -- Swift-visible; never exposes a C++ type.
 #import <Foundation/Foundation.h>
 
 #import "EMSConfigBridge.h"
@@ -14,7 +14,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// Geometry screen's own "show grid" overlay (GeometryViewController) -- the only caller that ever
 /// needs grid-line placement without also wanting a full FDTD run. ensureStage:Results still
 /// computes Grid internally too, as an unavoidable step on the way to a real FDTD run (see
-/// kicad_ems::generateGrid()'s own doc comment); either caller reuses the same cached result, so
+/// kiems::generateGrid()'s own doc comment); either caller reuses the same cached result, so
 /// whichever of the two runs first is the one that actually pays for it.
 typedef NS_ENUM(NSInteger, EMSPipelineStage) {
     EMSPipelineStageGeometry = 0,
@@ -25,9 +25,9 @@ typedef NS_ENUM(NSInteger, EMSPipelineStage) {
 /// Which part of the overall ensureStage: run a given EMSPipelineProgress report describes --
 /// mirrors the Geometry/Simulation Results row split in the source list (SimulationListViewController),
 /// so a caller driving those rows' own progress indicators knows which one to update. Geometry
-/// covers board-slicing + grid placement (kicad_ems::GeometryPhase, reported only at each phase's
+/// covers board-slicing + grid placement (kiems::GeometryPhase, reported only at each phase's
 /// own start/end -- there's no finer-grained progress available for those); SettingUp covers
-/// kicad_ems::Simulation::setupFDTDOperator() (openEMS's own SetupFDTD()/CalcECOperator(), which
+/// kiems::Simulation::setupFDTDOperator() (openEMS's own SetupFDTD()/CalcECOperator(), which
 /// dominates a real board's total setup cost -- confirmed in practice to take minutes, not seconds --
 /// but is a single opaque call openEMS gives no progress hooks into at all, hence this only ever
 /// reports once, at the very start, with no fraction of any kind -- a caller should show an

@@ -43,7 +43,7 @@ struct StackupLayer {
 /// position/orientation for port placement, and which copper layer it sits on. Position is in
 /// millimetres, relative to the board's auxiliary origin (BOARD_DESIGN_SETTINGS::GetAuxOrigin()) --
 /// the same frame kicad-cli's --use-drill-file-origin exports (Gerbers, drill file, pick&place CSV)
-/// use, i.e. kicad_ems's own native frame, needing no further conversion by callers.
+/// use, i.e. kiems's own native frame, needing no further conversion by callers.
 struct PadPosition {
     std::string footprintRef;
     std::string padNumber;
@@ -102,7 +102,7 @@ struct LayerColor {
 /// One plated through-hole feature on the board -- either a plain KiCad via (PCB_VIA, not tied to
 /// any footprint) or a through-hole pad on a footprint (PAD_ATTRIB::PTH, e.g. a connector's SHIELD
 /// pin). Non-plated holes (PAD_ATTRIB::NPTH) are never included -- those have no copper at all, a
-/// fundamentally different feature (see kicad_ems::NPTHHole). Position is in millimetres, relative
+/// fundamentally different feature (see kiems::NPTHHole). Position is in millimetres, relative
 /// to the board's auxiliary origin, the same convention PadPosition uses. padWidthMm/padHeightMm is
 /// the actual copper (a via's own annular ring, or a pad's real size) and drillWidthMm/
 /// drillHeightMm the actual hole -- each pair is equal for a round shape (every via; most pads) and
@@ -152,7 +152,7 @@ struct ZoneInfo {
 
 /// One polygon contour from KiCad geometry. Holes are kept explicit so the subprocess wire format
 /// does not depend on winding conventions changing when KiCad's Y-down coordinates are converted
-/// to kicad_ems's Y-up frame.
+/// to kiems's Y-up frame.
 struct PolygonLoop {
     bool hole = false;
     std::vector<std::pair<double, double>> pointsMm;
@@ -314,7 +314,7 @@ RawTracksOnNetResult tracksOnNetRaw(const std::string& projectPath, const std::s
 
 /// Every pad on the board regardless of net (PadPosition::netName is still populated per pad) --
 /// unlike looping allNets()+padsOnNet() per net, this is one single board load, not one per net. See
-/// kicad_ems::LumpedComponentConfig's own doc comment on the diagonal-part cardinal-bridge
+/// kiems::LumpedComponentConfig's own doc comment on the diagonal-part cardinal-bridge
 /// interference check for why that matters: a real board can have on the order of a hundred nets,
 /// and each libkicad_query call is its own subprocess that reloads and reparses the whole board from
 /// scratch.

@@ -6,10 +6,10 @@
 // crosses an Objective-C interface boundary, which Swift can't see at all.
 #import "GeometryPreviewBridge.h"
 
-#include "kicad_ems/board_slicing.hpp"
-#include "kicad_ems/config.hpp"
-#include "kicad_ems/paths_config.hpp"
-#include "kicad_ems/simulation.hpp"
+#include "kiems/board_slicing.hpp"
+#include "kiems/config.hpp"
+#include "kiems/paths_config.hpp"
+#include "kiems/simulation.hpp"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -24,10 +24,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// gracefully rather than failing the whole preview). `gridLines` is null until the caller's own
 /// Grid pipeline stage has run (see EMSPipelineStageGrid) -- the resulting preview's own
 /// gridLinesX/Y just come back empty in that case, not an error.
-EMSGeometryPreview* buildGeometryPreview(const kicad_ems::SlicedBoard& sliced,
-                                          const kicad_ems::SimulationConfig& simConfig,
-                                          const kicad_ems::EMSConfig& scaledConfig,
-                                          const kicad_ems::PathsConfig& paths,
-                                          const kicad_ems::ComputedGridLines* gridLines);
+EMSGeometryPreview* buildGeometryPreview(const kiems::SlicedBoard& sliced,
+                                          const kiems::SimulationConfig& simConfig,
+                                          const kiems::EMSConfig& scaledConfig,
+                                          const kiems::PathsConfig& paths,
+                                          const kiems::ComputedGridLines* gridLines);
 
 NS_ASSUME_NONNULL_END

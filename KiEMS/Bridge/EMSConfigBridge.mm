@@ -3,14 +3,14 @@
 
 #include <algorithm>
 
-using kicad_ems::EMSConfig;
-using kicad_ems::ExcitationConfig;
-using kicad_ems::GroundSelectorKind;
-using kicad_ems::InvolvedNetConfig;
-using kicad_ems::NetInclusionLevel;
-using kicad_ems::NetSelectorKind;
-using kicad_ems::ProbedPin;
-using kicad_ems::SimulationConfig;
+using kiems::EMSConfig;
+using kiems::ExcitationConfig;
+using kiems::GroundSelectorKind;
+using kiems::InvolvedNetConfig;
+using kiems::NetInclusionLevel;
+using kiems::NetSelectorKind;
+using kiems::ProbedPin;
+using kiems::SimulationConfig;
 
 NSErrorDomain const EMSConfigErrorDomain = @"EMSConfigErrorDomain";
 
@@ -251,12 +251,12 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
     if (self.cxxNet.isPinExcluded(footprint.UTF8String, pin.UTF8String)) {
         return;
     }
-    self.cxxNet.excludedPins().push_back(kicad_ems::ExcludedPin{footprint.UTF8String, pin.UTF8String});
+    self.cxxNet.excludedPins().push_back(kiems::ExcludedPin{footprint.UTF8String, pin.UTF8String});
 }
 - (void)includePinWithFootprint:(NSString*)footprint pin:(NSString*)pin {
     auto& excluded = self.cxxNet.excludedPins();
     excluded.erase(std::remove(excluded.begin(), excluded.end(),
-                                 kicad_ems::ExcludedPin{footprint.UTF8String, pin.UTF8String}),
+                                 kiems::ExcludedPin{footprint.UTF8String, pin.UTF8String}),
                     excluded.end());
 }
 
@@ -589,8 +589,8 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
 
 - (NSArray<NSString*>*)metalLayerNames {
     NSMutableArray<NSString*>* names = [NSMutableArray array];
-    for (const kicad_ems::LayerConfig& layer : _config.layers()) {
-        if (layer.kind() == kicad_ems::LayerKind::Metal) {
+    for (const kiems::LayerConfig& layer : _config.layers()) {
+        if (layer.kind() == kiems::LayerKind::Metal) {
             [names addObject:@(layer.name().c_str())];
         }
     }
@@ -604,7 +604,7 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
     _config.via().setFillingEpsilon(value);
 }
 
-// kicad_ems::Frequency has no in-place setters on EMSConfig::frequency()'s own reference (it
+// kiems::Frequency has no in-place setters on EMSConfig::frequency()'s own reference (it
 // returns by value on the const accessor, and there's no mutable frequency() overload) -- so each
 // setter here round-trips through a local copy, same shape as the Via ones would need if Via didn't
 // happen to expose a mutable via() reference.
@@ -612,7 +612,7 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
     return _config.frequency().start();
 }
 - (void)setFrequencyStart:(double)value {
-    kicad_ems::Frequency frequency = _config.frequency();
+    kiems::Frequency frequency = _config.frequency();
     frequency.setStart(value);
     _config.setFrequency(frequency);
 }
@@ -620,7 +620,7 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
     return _config.frequency().stop();
 }
 - (void)setFrequencyStop:(double)value {
-    kicad_ems::Frequency frequency = _config.frequency();
+    kiems::Frequency frequency = _config.frequency();
     frequency.setStop(value);
     _config.setFrequency(frequency);
 }

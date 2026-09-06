@@ -46,7 +46,7 @@ struct Grading {
 /// directly from `pmlDepthCells` and `op`'s own line counts rather than from an actual
 /// Operator_Ext_UPML extension's m_BC/m_Size (see CopperCPML.hpp's own top comment for why no such
 /// extension exists for a CPML run at all). `pmlDepthCells` is uniform across all 6 faces, matching
-/// the single value kicad_ems would otherwise pass to Set_BC_PML() for every face.
+/// the single value kiems would otherwise pass to Set_BC_PML() for every face.
 struct BaseGrading {
     bool inPML = false;
     bool lower = false;
@@ -164,7 +164,7 @@ std::vector<CopperCPMLShell> buildCPMLShells(Operator& op, double alphaMax, std:
     const auto domainNx = static_cast<std::uint32_t>(op.GetNumberOfLines(0, true));
     const auto domainNy = static_cast<std::uint32_t>(op.GetNumberOfLines(1, true));
     const auto domainNz = static_cast<std::uint32_t>(op.GetNumberOfLines(2, true));
-    // kicad_ems's own grid generation (grid_gen.cpp's _extendPMLBand()/GridGeneratorAxis::
+    // kiems's own grid generation (grid_gen.cpp's _extendPMLBand()/GridGeneratorAxis::
     // compileGrid()) always reserves at least pmlDepthCells dedicated cells on every face -- this
     // should never actually trigger, but a shell narrower than the domain it claims to span would
     // silently produce nonsense geometry below, so fail loudly instead.

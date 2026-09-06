@@ -493,7 +493,7 @@ RawPadsOnNetResult padsOnNetRaw(const std::string& projectPath, const std::strin
     RawPadsOnNetResult result;
     result.ok = true;
     const wxString wxNetName = wxString::FromUTF8(netName);
-    // kicad_ems's whole pipeline (Gerbers, drill file, pick&place CSV) is exported via kicad-cli
+    // kiems's whole pipeline (Gerbers, drill file, pick&place CSV) is exported via kicad-cli
     // with --use-drill-file-origin, i.e. every coordinate it consumes is relative to the board's
     // configured auxiliary origin, not KiCad's absolute canvas origin. Subtract it here (in integer
     // KiCad internal units, before the mm conversion, to avoid floating-point precision loss) so
@@ -979,7 +979,7 @@ RawThroughHolesResult throughHolesRaw(const std::string& projectPath, const std:
     // Through-hole pads (PAD_ATTRIB::PTH) -- e.g. a connector's SHIELD pin -- which can be oblong
     // (GetSizeX()/GetSizeY() and GetDrillSizeX()/GetDrillSizeY() genuinely differ), unlike a via.
     // NPTH pads are deliberately excluded: those have no copper at all (see ThroughHole's own doc
-    // comment), a different feature entirely (kicad_ems::NPTHHole/getNPTHHoles()).
+    // comment), a different feature entirely (kiems::NPTHHole/getNPTHHoles()).
     for (FOOTPRINT* footprint : board->Footprints()) {
         for (PAD* pad : footprint->Pads()) {
             if (pad->GetAttribute() != PAD_ATTRIB::PTH) {

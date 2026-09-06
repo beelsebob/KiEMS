@@ -1,0 +1,4078 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXAggregateTarget section */
+		D621ED7A33B5BA1305450055 /* openEMS */ = {
+			isa = PBXAggregateTarget;
+			buildConfigurationList = 92F3FD48841987F0EA491F78 /* Build configuration list for PBXAggregateTarget "openEMS" */;
+			buildPhases = (
+				CB27AEC541EBD226F206B0B7 /* Build openEMS fork against local CSXCAD */,
+			);
+			dependencies = (
+				24ED90D28ED207331A6B57D2 /* PBXTargetDependency */,
+				5345A0C5C4E9BCAEEF03D0DC /* PBXTargetDependency */,
+			);
+			name = openEMS;
+			productName = openEMS;
+		};
+		E71870C603134ADA6EEEA950 /* HDF5 */ = {
+			isa = PBXAggregateTarget;
+			buildConfigurationList = 9250B0C181758E24075EC5AC /* Build configuration list for PBXAggregateTarget "HDF5" */;
+			buildPhases = (
+				A1CABB0ACBF6B549B0D6ED9C /* Build vendor/hdf5 */,
+			);
+			dependencies = (
+			);
+			name = HDF5;
+			productName = HDF5;
+		};
+/* End PBXAggregateTarget section */
+
+/* Begin PBXBuildFile section */
+		08091C43255C7E607DB3203F /* liblibkiems.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 922BA8FA4CD5D8901DCAC9DA /* liblibkiems.a */; };
+		0A4F8D836CCEAB4E92E50750 /* CSPrimPoint.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 8BAEFA9E1EC092E0D890A14C /* CSPrimPoint.cpp */; };
+		0EB3189D8E8C0E15ECDFCF07 /* CSPrimCylindricalShell.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C092FF8B6A375F76FC193A6E /* CSPrimCylindricalShell.cpp */; };
+		10DDAA48B5EFB9E602CA51F7 /* liblibkiems.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 922BA8FA4CD5D8901DCAC9DA /* liblibkiems.a */; };
+		129F2601A59B1AD3E6FA08D6 /* CSFunctionParser.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 54E688D3F9B73BD698459772 /* CSFunctionParser.cpp */; };
+		274621ADB58BCF83FF1AE33F /* CSUseful.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 4197F5CF683313F51CB45776 /* CSUseful.cpp */; };
+		2FBF45CFAE9FD71F5566E5AA /* kiems_fdtd_worker in Embed Helper Tools */ = {isa = PBXBuildFile; fileRef = 1730AB8B76054706EB2AB0BA /* kiems_fdtd_worker */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		3094727E7CECFEFF14791831 /* liblibkiems.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 922BA8FA4CD5D8901DCAC9DA /* liblibkiems.a */; };
+		385F960D3D19DB08177FB31F /* ContinuousStructure.cpp in Sources */ = {isa = PBXBuildFile; fileRef = DF70F1F0AB9C1CF89E638C1F /* ContinuousStructure.cpp */; };
+		3D4617AE4F349584B8319E2C /* ParameterObjects.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 11729C6743D6F1A9497C445B /* ParameterObjects.cpp */; };
+		3E2C21D20252B9D126B9A44A /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CE532C213E2D6E98AA310B22 /* Cocoa.framework */; };
+		3E7CD25FB948F81DEEC897B3 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CE532C213E2D6E98AA310B22 /* Cocoa.framework */; };
+		479136241E9A85AC3E2BFC9B /* RememberRemember.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DEC747CBEC864D957296A740 /* RememberRemember.framework */; };
+		4988C919C7B2E11A4E12652C /* liblibkiems.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 922BA8FA4CD5D8901DCAC9DA /* liblibkiems.a */; };
+		4F06D46154832B47F0D33F0A /* CSPropDispersiveMaterial.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 564EAC5B883C1FA7CDC120CD /* CSPropDispersiveMaterial.cpp */; };
+		508397439B5850BD443922F8 /* CSPrimLinPoly.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 4D286C901431D80EB83D11FA /* CSPrimLinPoly.cpp */; };
+		551DBC88F190FAAEE5F0F4C6 /* CSPrimPolyhedronReader.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 209195789FA2546983D9F7CC /* CSPrimPolyhedronReader.cpp */; };
+		555290A9A7D4BBFD75394630 /* CSPropDiscMaterial.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A8447DF78DE4C1811054DD72 /* CSPropDiscMaterial.cpp */; };
+		56EDE8D10A5333B5213EC614 /* libkicad_smoketest in Embed Helper Tools */ = {isa = PBXBuildFile; fileRef = C6D729745136FAA65AEC601F /* libkicad_smoketest */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		5BFB8526C3E1D7DF9AD2AA50 /* Copper.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71AD3CD6302FAAD5006D5847 /* Copper.framework */; };
+		5FE243961E65671FE35C65E0 /* libkicad_api.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0F1EB3900F88445339BD6FB8 /* libkicad_api.cpp */; settings = {COMPILER_FLAGS = "-std=c++23"; }; };
+		5FEE70EE235A62413F9E6A97 /* Copper.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71AD3CD6302FAAD5006D5847 /* Copper.framework */; };
+		60786B377ADD3E8611BC7012 /* CSProperties.cpp in Sources */ = {isa = PBXBuildFile; fileRef = B9149635453B7D7A78725892 /* CSProperties.cpp */; };
+		69F7D28352E6A5F8C1B62188 /* CSPrimCurve.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A36A6800BA0DDAA54F339258 /* CSPrimCurve.cpp */; };
+		6E968C6C0FD2A336AFC5F4B3 /* CSPrimPolyhedron.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 132063B9B19C2431D301FD53 /* CSPrimPolyhedron.cpp */; };
+		71AD3CE1302FAAD5006D5847 /* Copper.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71AD3CD6302FAAD5006D5847 /* Copper.framework */; };
+		71AD3CEB302FAAD5006D5847 /* Copper.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71AD3CD6302FAAD5006D5847 /* Copper.framework */; };
+		71AD3CEC302FAAD5006D5847 /* Copper.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 71AD3CD6302FAAD5006D5847 /* Copper.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		71B40FE33042E1ED002796EC /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B8F4508947040AF3A200E11 /* libCSXCAD.dylib */; };
+		71B40FE43042E1F3002796EC /* libCopperUtils.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 71B4EE8E304224C5002796EC /* libCopperUtils.a */; };
+		71B40FE63042E223002796EC /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71B40FE53042E223002796EC /* Metal.framework */; };
+		71B40FE83042E24F002796EC /* Accelerate.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71B40FE73042E24F002796EC /* Accelerate.framework */; };
+		71B40FE93042E264002796EC /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B8F4508947040AF3A200E11 /* libCSXCAD.dylib */; };
+		71B40FEA3042E2B5002796EC /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B8F4508947040AF3A200E11 /* libCSXCAD.dylib */; };
+		71B4EE9B304224FD002796EC /* libCopperUtils.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 71B4EE8E304224C5002796EC /* libCopperUtils.a */; };
+		7927928D62C83DD9538C10AF /* CSPrimWire.cpp in Sources */ = {isa = PBXBuildFile; fileRef = DFB34E1830D6A43D7D93419D /* CSPrimWire.cpp */; };
+		7A76B8DB5C0FDE31D6F72BB1 /* CSPrimUserDefined.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A25590547D328A76A372C1BC /* CSPrimUserDefined.cpp */; };
+		828DBB24BCE54FE076A3D616 /* CSPrimPolygon.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 30A0506109278583137803EB /* CSPrimPolygon.cpp */; };
+		846A32C3BB81E3C29B621792 /* libhdf5.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 30877432D1026706D7E805DA /* libhdf5.dylib */; };
+		888CB706001C0A6703D7A727 /* liblibkicad.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */; };
+		8958C50381BAEB4BAD69FC88 /* CSBackgroundMaterial.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E71F417BE3BD7729F8FEFB2A /* CSBackgroundMaterial.cpp */; };
+		8979779CA20D12908A2A7A0E /* Copper.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71AD3CD6302FAAD5006D5847 /* Copper.framework */; };
+		8B10C2000B105C2000000001 /* libblosc2.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 8B10C2000B105C2000000002 /* libblosc2.a */; };
+		95774DCF0FD168F325B94432 /* CSPropExcitation.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 4FF84FE99AC0D432168071A2 /* CSPropExcitation.cpp */; };
+		95D69C1BA0DEEF1883C61841 /* CSPrimBox.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C139A80CEF80445CE007CF3F /* CSPrimBox.cpp */; };
+		980D7708FC6E8DCF73829C69 /* CSPropLumpedElement.cpp in Sources */ = {isa = PBXBuildFile; fileRef = B6C786F74AABEF635C528E85 /* CSPropLumpedElement.cpp */; };
+		984F4A8883D41F611D912AE3 /* CSPropDebyeMaterial.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C4226023679CEE1592511C1C /* CSPropDebyeMaterial.cpp */; };
+		9B20606B726FBDE39620FC66 /* CSPrimMultiBox.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C259DFC8925FEF6254736BAF /* CSPrimMultiBox.cpp */; };
+		9D2BD21EC2BFD175F4722C5B /* CSPrimRotPoly.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2E0A6B0B01BDA7784504DBD7 /* CSPrimRotPoly.cpp */; };
+		A159533DC4B4AE5B52C87829 /* CSPropResBox.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 33049C004A0AD9DE5FF7DB67 /* CSPropResBox.cpp */; };
+		A3D47B497AA3BE4FD9D35D2B /* CSTransform.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F4C290FF15D9A8C440B0E624 /* CSTransform.cpp */; };
+		ACF6C5FED62B1B1C2D682CA2 /* CSPrimCylinder.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 4424E561CBCC53DE77BA9D68 /* CSPrimCylinder.cpp */; };
+		BB5902830D5CD46321F04EF3 /* CSSpatialIndex.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 041FC8C8C4A04AC1ACFCC824 /* CSSpatialIndex.cpp */; };
+		BBF529C0A0F0B66C143A7204 /* CSPropMaterial.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 93F643A55E335E590610AF0B /* CSPropMaterial.cpp */; };
+		BD20F3B01E8F3B160B1E3302 /* CSPrimitives.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 4E54CA0C8800E5C1A813CF8C /* CSPrimitives.cpp */; };
+		BE0F1C78843BBDA09DFB1E8C /* CSModeData.cpp in Sources */ = {isa = PBXBuildFile; fileRef = BBE93FDB8DF79DA6F0A50C94 /* CSModeData.cpp */; };
+		C0A71A000000000000000001 /* libCopperUtils.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 71B4EE8E304224C5002796EC /* libCopperUtils.a */; };
+		C0A71A000000000000000011 /* libopenEMS.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = C0A71A000000000000000010 /* libopenEMS.dylib */; };
+		C0A71A000000000000000012 /* libopenEMS.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = C0A71A000000000000000010 /* libopenEMS.dylib */; };
+		C0A71A000000000000000013 /* libopenEMS.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = C0A71A000000000000000010 /* libopenEMS.dylib */; };
+		C0A71A000000000000000014 /* libopenEMS.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = C0A71A000000000000000010 /* libopenEMS.dylib */; };
+		C0A71A000000000000000015 /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B8F4508947040AF3A200E11 /* libCSXCAD.dylib */; };
+		C1FE7C82D3B6D6DF1E6CAFAC /* CSPrimSphericalShell.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 4CCA7271B4E816E2DE044E5C /* CSPrimSphericalShell.cpp */; };
+		D1A3596A45AFCC1D666CCAD9 /* CSPrimSphere.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A4ABB3E67FA995DFC15350A7 /* CSPrimSphere.cpp */; };
+		D1B97BD0204C249DCB935BE0 /* ParameterCoord.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 801882DFF924DC3D075A3E2A /* ParameterCoord.cpp */; };
+		D7029AAE6D897E2CEFA449EA /* CSPropProbeBox.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 9AF572E25404972E098B5061 /* CSPropProbeBox.cpp */; };
+		DA4474D89CE93A26181A5247 /* CSPropMetal.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 715542E81090338DD43CF107 /* CSPropMetal.cpp */; };
+		DE25C90063BF270CF1451F8E /* CSRectGrid.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E4A3E2850B8B91F4C4639095 /* CSRectGrid.cpp */; };
+		E225E6C98F3F2C0B194070BD /* liblibkiems.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 922BA8FA4CD5D8901DCAC9DA /* liblibkiems.a */; };
+		E3E6CD8CCCF551CEE7E0567F /* CSPropDumpBox.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 099AD36F929C43F1AEBF30DB /* CSPropDumpBox.cpp */; };
+		F00AF324060C66AF5DC286A2 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CE532C213E2D6E98AA310B22 /* Cocoa.framework */; };
+		F2862B1D74D949EF3B725175 /* CSPropLorentzMaterial.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 9C3C863D5F2E9AA39D61A4A7 /* CSPropLorentzMaterial.cpp */; };
+		F5069170BAB8A6A35EB326DE /* CSPropAbsorbingBC.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 335167B1A5FB2AF84C42F74A /* CSPropAbsorbingBC.cpp */; };
+		F61D45C729E10F8A998D6D1D /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CE532C213E2D6E98AA310B22 /* Cocoa.framework */; };
+		F8763B10C08160DB7FC51D4C /* CSPropConductingSheet.cpp in Sources */ = {isa = PBXBuildFile; fileRef = DA441A58C5946D25FA484EEE /* CSPropConductingSheet.cpp */; };
+		FC1671EFEBFEF5FCCCA74E90 /* RememberRemember.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = DEC747CBEC864D957296A740 /* RememberRemember.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		FFCF4BE80D907ADEDD013454 /* CSPropUnknown.cpp in Sources */ = {isa = PBXBuildFile; fileRef = FCFBB6854442AF9145607687 /* CSPropUnknown.cpp */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		12C26B4D5230D3ADF886CE6B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E71870C603134ADA6EEEA950;
+			remoteInfo = HDF5;
+		};
+		1540871D4E58EBEB434F4E6A /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5034717F4A638C8CC653DE57;
+			remoteInfo = kiems_fdtd_worker;
+		};
+		195ED6A1B4F28D02DF92D867 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 71AD3CD5302FAAD5006D5847;
+			remoteInfo = Copper;
+		};
+		2A075E9DC0149148EA251C93 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B0B651E8085482933DC2AFFE;
+			remoteInfo = libkicad;
+		};
+		2B6AC32E5A944169FDB85409 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 0E08621C93A1CC737D3F6A93;
+			remoteInfo = libkiems;
+		};
+		2F85542E6133A475C254BB55 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 71AD3CD5302FAAD5006D5847;
+			remoteInfo = Copper;
+		};
+		303AD32ECC634AA5F44FE1BB /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 917B3FABD7921813B7A8BF98;
+			remoteInfo = CSXCAD;
+		};
+		3250708244CB3AA5A33DE2B6 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 917B3FABD7921813B7A8BF98;
+			remoteInfo = CSXCAD;
+		};
+		3429B0B7F4066519273A0A7D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 0D27BC0AB714B88FE14FFB28;
+			remoteInfo = libkicad_smoketest;
+		};
+		3B80DAE327433B66EF5C7314 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 917B3FABD7921813B7A8BF98;
+			remoteInfo = CSXCAD;
+		};
+		3D192F465DDCAB752F966D95 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D621ED7A33B5BA1305450055;
+			remoteInfo = openEMS;
+		};
+		4464D3AC076D7403CF948471 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D621ED7A33B5BA1305450055;
+			remoteInfo = openEMS;
+		};
+		49D003A5FFBE2D2B612428AB /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 917B3FABD7921813B7A8BF98;
+			remoteInfo = CSXCAD;
+		};
+		4A26F5AB0BDDD56E51069B55 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 07086D1AD104CA5BBA5AF140;
+			remoteInfo = RememberRemember;
+		};
+		6446391B4ED77176B8F180CF /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D621ED7A33B5BA1305450055;
+			remoteInfo = openEMS;
+		};
+		65FD078A16B4F1A0DC4B78BF /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 917B3FABD7921813B7A8BF98;
+			remoteInfo = CSXCAD;
+		};
+		68230F1D42F0B9E29C659103 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 0E08621C93A1CC737D3F6A93;
+			remoteInfo = libkiems;
+		};
+		6A55C2C50DBC001D4E3D6AD6 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D621ED7A33B5BA1305450055;
+			remoteInfo = openEMS;
+		};
+		6AB0217B99B3D11D9F96EA44 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D621ED7A33B5BA1305450055;
+			remoteInfo = openEMS;
+		};
+		6ACED3D13EDE40BDF3DD1890 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D621ED7A33B5BA1305450055;
+			remoteInfo = openEMS;
+		};
+		71AD3CE2302FAAD5006D5847 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 71AD3CD5302FAAD5006D5847;
+			remoteInfo = Copper;
+		};
+		71AD3CE4302FAAD5006D5847 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 2971163407AC90FC988D853B;
+			remoteInfo = KiEMS;
+		};
+		71AD3CE9302FAAD5006D5847 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 71AD3CD5302FAAD5006D5847;
+			remoteInfo = Copper;
+		};
+		71B4EE9C304224FD002796EC /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 71B4EE8D304224C5002796EC;
+			remoteInfo = CopperUtils;
+		};
+		73C8EB5BB682575EC87A171A /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E71870C603134ADA6EEEA950;
+			remoteInfo = HDF5;
+		};
+		748C85D85BC5D0AE4750DF0C /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 917B3FABD7921813B7A8BF98;
+			remoteInfo = CSXCAD;
+		};
+		7723B54E7BD6FF81C173293B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 917B3FABD7921813B7A8BF98;
+			remoteInfo = CSXCAD;
+		};
+		7E56F2D164F6B98CEEAA9805 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D621ED7A33B5BA1305450055;
+			remoteInfo = openEMS;
+		};
+		7F0606D12D7446556C7E5509 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 0E08621C93A1CC737D3F6A93;
+			remoteInfo = libkiems;
+		};
+		896EB885155C4FA6E502D81D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 71AD3CD5302FAAD5006D5847;
+			remoteInfo = Copper;
+		};
+		8D3D6A97ED03CCE0E7C3E1CD /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 917B3FABD7921813B7A8BF98;
+			remoteInfo = CSXCAD;
+		};
+		9FB684FC971FB3FBC8A28035 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D621ED7A33B5BA1305450055;
+			remoteInfo = openEMS;
+		};
+		A2DDA9F4D5001D550A2722DC /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D621ED7A33B5BA1305450055;
+			remoteInfo = openEMS;
+		};
+		A782DEBD122590F0E29B10BE /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 917B3FABD7921813B7A8BF98;
+			remoteInfo = CSXCAD;
+		};
+		B8F896C59FEA2EF0C5CB5610 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 917B3FABD7921813B7A8BF98;
+			remoteInfo = CSXCAD;
+		};
+		BACB4CAE18E04FC816AC3BC0 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 0E08621C93A1CC737D3F6A93;
+			remoteInfo = libkiems;
+		};
+		C0A71A000000000000000002 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 71B4EE8D304224C5002796EC;
+			remoteInfo = CopperUtils;
+		};
+		C25B69A7C2B8350D4E0C6BCC /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 917B3FABD7921813B7A8BF98;
+			remoteInfo = CSXCAD;
+		};
+		D5998D2318CDD72E77F94AEF /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 917B3FABD7921813B7A8BF98;
+			remoteInfo = CSXCAD;
+		};
+		DAC5AD369DD2CE174B16867B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D621ED7A33B5BA1305450055;
+			remoteInfo = openEMS;
+		};
+		E265956CE831DA75AB03CECD /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D621ED7A33B5BA1305450055;
+			remoteInfo = openEMS;
+		};
+		F3408D4F5D7B73F098E7D0C2 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 917B3FABD7921813B7A8BF98;
+			remoteInfo = CSXCAD;
+		};
+		F6D14B893FB9FA97F9ECAC1F /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D621ED7A33B5BA1305450055;
+			remoteInfo = openEMS;
+		};
+		F90E814A552714159096AAF7 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 0E08621C93A1CC737D3F6A93;
+			remoteInfo = libkiems;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		4EA49CEE0296035538A93916 /* Embed Helper Tools */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 6;
+			files = (
+				56EDE8D10A5333B5213EC614 /* libkicad_smoketest in Embed Helper Tools */,
+				2FBF45CFAE9FD71F5566E5AA /* kiems_fdtd_worker in Embed Helper Tools */,
+			);
+			name = "Embed Helper Tools";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		71AD229030263515006D5847 /* CopyFiles */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = /usr/share/man/man1/;
+			dstSubfolderSpec = 0;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 1;
+		};
+		F585E6E5DED45F393177F068 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				FC1671EFEBFEF5FCCCA74E90 /* RememberRemember.framework in Embed Frameworks */,
+				71AD3CEC302FAAD5006D5847 /* Copper.framework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		041AB224FEAA3879BCE70995 /* ParameterCoord.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = ParameterCoord.h; sourceTree = "<group>"; };
+		041FC8C8C4A04AC1ACFCC824 /* CSSpatialIndex.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSSpatialIndex.cpp; sourceTree = "<group>"; };
+		099AD36F929C43F1AEBF30DB /* CSPropDumpBox.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropDumpBox.cpp; sourceTree = "<group>"; };
+		0F1EB3900F88445339BD6FB8 /* libkicad_api.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = libkicad_api.cpp; sourceTree = "<group>"; };
+		11729C6743D6F1A9497C445B /* ParameterObjects.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = ParameterObjects.cpp; sourceTree = "<group>"; };
+		120F4DE57504AC7BB881B2C1 /* CSRectGrid.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSRectGrid.h; sourceTree = "<group>"; };
+		132063B9B19C2431D301FD53 /* CSPrimPolyhedron.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimPolyhedron.cpp; sourceTree = "<group>"; };
+		149266ED327B91C86E0B2697 /* CSPrimitives.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimitives.h; sourceTree = "<group>"; };
+		1730AB8B76054706EB2AB0BA /* kiems_fdtd_worker */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = kiems_fdtd_worker; sourceTree = BUILT_PRODUCTS_DIR; };
+		18823D244969BA56BEE17B07 /* CSTransform.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSTransform.h; sourceTree = "<group>"; };
+		18CC0BD80AA794FDDDF804C2 /* CSPrimWire.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimWire.h; sourceTree = "<group>"; };
+		1B8D9E3DF90F623540FB2550 /* CSFunctionParser.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSFunctionParser.h; sourceTree = "<group>"; };
+		1F03765A93276A9FA8F28E47 /* CSPropAbsorbingBC.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropAbsorbingBC.h; sourceTree = "<group>"; };
+		209195789FA2546983D9F7CC /* CSPrimPolyhedronReader.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimPolyhedronReader.cpp; sourceTree = "<group>"; };
+		232FA4E2D037A1BD03BAEC5C /* CSPropDiscMaterial.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropDiscMaterial.h; sourceTree = "<group>"; };
+		252340AF2DF277394293A777 /* CSPrimPolyhedronReader.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimPolyhedronReader.h; sourceTree = "<group>"; };
+		26BECA8A0D515EF0EB787386 /* CSPropLorentzMaterial.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropLorentzMaterial.h; sourceTree = "<group>"; };
+		2E0A6B0B01BDA7784504DBD7 /* CSPrimRotPoly.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimRotPoly.cpp; sourceTree = "<group>"; };
+		30877432D1026706D7E805DA /* libhdf5.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = libhdf5.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
+		30A0506109278583137803EB /* CSPrimPolygon.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimPolygon.cpp; sourceTree = "<group>"; };
+		33049C004A0AD9DE5FF7DB67 /* CSPropResBox.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropResBox.cpp; sourceTree = "<group>"; };
+		335167B1A5FB2AF84C42F74A /* CSPropAbsorbingBC.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropAbsorbingBC.cpp; sourceTree = "<group>"; };
+		3AA6586FDBD4762ACBBC2949 /* CSPropDispersiveMaterial.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropDispersiveMaterial.h; sourceTree = "<group>"; };
+		3E4C03285D1BDDD8282A6ECE /* Copper_smoketest */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = Copper_smoketest; sourceTree = BUILT_PRODUCTS_DIR; };
+		40BBB44AC18D0563DA007F2E /* CSPrimPolyhedron_p.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimPolyhedron_p.h; sourceTree = "<group>"; };
+		4197F5CF683313F51CB45776 /* CSUseful.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSUseful.cpp; sourceTree = "<group>"; };
+		4424E561CBCC53DE77BA9D68 /* CSPrimCylinder.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimCylinder.cpp; sourceTree = "<group>"; };
+		46F7EE12182CFA425BB001B4 /* CSSpatialIndex.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSSpatialIndex.h; sourceTree = "<group>"; };
+		47611C745FA02E5BA7871B3D /* copper_fdtd_worker */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = copper_fdtd_worker; sourceTree = BUILT_PRODUCTS_DIR; };
+		49968BF478B20F3263293D05 /* CSPrimCylindricalShell.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimCylindricalShell.h; sourceTree = "<group>"; };
+		4CCA7271B4E816E2DE044E5C /* CSPrimSphericalShell.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimSphericalShell.cpp; sourceTree = "<group>"; };
+		4D286C901431D80EB83D11FA /* CSPrimLinPoly.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimLinPoly.cpp; sourceTree = "<group>"; };
+		4E54CA0C8800E5C1A813CF8C /* CSPrimitives.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimitives.cpp; sourceTree = "<group>"; };
+		4FF84FE99AC0D432168071A2 /* CSPropExcitation.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropExcitation.cpp; sourceTree = "<group>"; };
+		54E688D3F9B73BD698459772 /* CSFunctionParser.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSFunctionParser.cpp; sourceTree = "<group>"; };
+		564EAC5B883C1FA7CDC120CD /* CSPropDispersiveMaterial.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropDispersiveMaterial.cpp; sourceTree = "<group>"; };
+		5653046AD79D4C9071AF237F /* KiEMS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = KiEMS.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		56AEB40FAFFC12CA37FD9255 /* CSPropProbeBox.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropProbeBox.h; sourceTree = "<group>"; };
+		579C466E4A9BD7706C6BD2F1 /* CSPropLumpedElement.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropLumpedElement.h; sourceTree = "<group>"; };
+		57F8D8A9619B96ECBFC35313 /* CSPrimSphericalShell.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimSphericalShell.h; sourceTree = "<group>"; };
+		5E843D29B509B643EBE62A36 /* CSPrimBox.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimBox.h; sourceTree = "<group>"; };
+		612C72C2DC1C9B2EE7D5AA88 /* CSPrimPoint.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimPoint.h; sourceTree = "<group>"; };
+		664C768E4664D6EBBC64F995 /* CSModeData.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSModeData.h; sourceTree = "<group>"; };
+		6A5EBADB0222B72261C42C71 /* CSPrimUserDefined.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimUserDefined.h; sourceTree = "<group>"; };
+		6B8F4508947040AF3A200E11 /* libCSXCAD.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = libCSXCAD.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
+		715542E81090338DD43CF107 /* CSPropMetal.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropMetal.cpp; sourceTree = "<group>"; };
+		71AD229230263516006D5847 /* kiems */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = kiems; sourceTree = BUILT_PRODUCTS_DIR; };
+		71AD3CD6302FAAD5006D5847 /* Copper.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Copper.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		71AD3CE0302FAAD5006D5847 /* CopperTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CopperTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		71B40FE53042E223002796EC /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
+		71B40FE73042E24F002796EC /* Accelerate.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Accelerate.framework; path = System/Library/Frameworks/Accelerate.framework; sourceTree = SDKROOT; };
+		71B4EE8E304224C5002796EC /* libCopperUtils.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libCopperUtils.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		75CCDDE91C9BDCBDD295551F /* CSPrimLinPoly.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimLinPoly.h; sourceTree = "<group>"; };
+		765CAE4AC6ACCB6AC9F626BC /* CSPrimPolyhedron.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimPolyhedron.h; sourceTree = "<group>"; };
+		7A9D6B5C429B30F4A76B69E9 /* CSPrimPolygon.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimPolygon.h; sourceTree = "<group>"; };
+		7D20DA97F11E5FD1E45B1BEC /* CSPropDumpBox.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropDumpBox.h; sourceTree = "<group>"; };
+		801882DFF924DC3D075A3E2A /* ParameterCoord.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = ParameterCoord.cpp; sourceTree = "<group>"; };
+		8B10C2000B105C2000000002 /* libblosc2.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libblosc2.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		8BAEFA9E1EC092E0D890A14C /* CSPrimPoint.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimPoint.cpp; sourceTree = "<group>"; };
+		903517FF02E224D68957B03E /* CSPropMetal.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropMetal.h; sourceTree = "<group>"; };
+		91339221556288FDC08080CD /* CSPropExcitation.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropExcitation.h; sourceTree = "<group>"; };
+		922BA8FA4CD5D8901DCAC9DA /* liblibkiems.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = liblibkiems.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		93C908C23364F0587B435E92 /* CSXCAD_Global.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSXCAD_Global.h; sourceTree = "<group>"; };
+		93F643A55E335E590610AF0B /* CSPropMaterial.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropMaterial.cpp; sourceTree = "<group>"; };
+		94EA74D34C63EBD62E0DBD0E /* CSPrimRotPoly.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimRotPoly.h; sourceTree = "<group>"; };
+		995868D7C79B1262AB1B006E /* CSUseful.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSUseful.h; sourceTree = "<group>"; };
+		9AE69B0E636DC4B8E5DCB7D5 /* CSPropResBox.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropResBox.h; sourceTree = "<group>"; };
+		9AF572E25404972E098B5061 /* CSPropProbeBox.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropProbeBox.cpp; sourceTree = "<group>"; };
+		9C3C863D5F2E9AA39D61A4A7 /* CSPropLorentzMaterial.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropLorentzMaterial.cpp; sourceTree = "<group>"; };
+		9F5C7796A88E159A659A04A4 /* CSPropDebyeMaterial.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropDebyeMaterial.h; sourceTree = "<group>"; };
+		A25590547D328A76A372C1BC /* CSPrimUserDefined.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimUserDefined.cpp; sourceTree = "<group>"; };
+		A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = liblibkicad.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		A2F2AA630AA9C76D66283C1E /* ContinuousStructure.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = ContinuousStructure.h; sourceTree = "<group>"; };
+		A36A6800BA0DDAA54F339258 /* CSPrimCurve.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimCurve.cpp; sourceTree = "<group>"; };
+		A4ABB3E67FA995DFC15350A7 /* CSPrimSphere.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimSphere.cpp; sourceTree = "<group>"; };
+		A69FB58384D7BE33ED45D36F /* CSProperties.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSProperties.h; sourceTree = "<group>"; };
+		A8447DF78DE4C1811054DD72 /* CSPropDiscMaterial.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropDiscMaterial.cpp; sourceTree = "<group>"; };
+		B2B764A36173797DFEFA22A0 /* CSPrimCylinder.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimCylinder.h; sourceTree = "<group>"; };
+		B3B2B74A864500628F27FBC4 /* CSPropConductingSheet.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropConductingSheet.h; sourceTree = "<group>"; };
+		B6C786F74AABEF635C528E85 /* CSPropLumpedElement.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropLumpedElement.cpp; sourceTree = "<group>"; };
+		B9149635453B7D7A78725892 /* CSProperties.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSProperties.cpp; sourceTree = "<group>"; };
+		B9EEAA74EC592385260923B1 /* CSPropMaterial.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropMaterial.h; sourceTree = "<group>"; };
+		BBE93FDB8DF79DA6F0A50C94 /* CSModeData.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSModeData.cpp; sourceTree = "<group>"; };
+		C092FF8B6A375F76FC193A6E /* CSPrimCylindricalShell.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimCylindricalShell.cpp; sourceTree = "<group>"; };
+		C0A71A000000000000000010 /* libopenEMS.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = libopenEMS.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
+		C139A80CEF80445CE007CF3F /* CSPrimBox.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimBox.cpp; sourceTree = "<group>"; };
+		C259DFC8925FEF6254736BAF /* CSPrimMultiBox.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimMultiBox.cpp; sourceTree = "<group>"; };
+		C4226023679CEE1592511C1C /* CSPropDebyeMaterial.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropDebyeMaterial.cpp; sourceTree = "<group>"; };
+		C6D729745136FAA65AEC601F /* libkicad_smoketest */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = libkicad_smoketest; sourceTree = BUILT_PRODUCTS_DIR; };
+		C940B300A12AD0F6894E3F31 /* CSBackgroundMaterial.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSBackgroundMaterial.h; sourceTree = "<group>"; };
+		CAE9E934278E88A4B6FDB4F0 /* libkiems_smoketest */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = libkiems_smoketest; sourceTree = BUILT_PRODUCTS_DIR; };
+		CE532C213E2D6E98AA310B22 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
+		D60EAE79927D1544B382EBB3 /* CSPrimCurve.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimCurve.h; sourceTree = "<group>"; };
+		DA441A58C5946D25FA484EEE /* CSPropConductingSheet.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropConductingSheet.cpp; sourceTree = "<group>"; };
+		DC07EEE0458A1F47D32AD7E8 /* CSPropUnknown.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropUnknown.h; sourceTree = "<group>"; };
+		DEC747CBEC864D957296A740 /* RememberRemember.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = RememberRemember.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		DF70F1F0AB9C1CF89E638C1F /* ContinuousStructure.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = ContinuousStructure.cpp; sourceTree = "<group>"; };
+		DFB34E1830D6A43D7D93419D /* CSPrimWire.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimWire.cpp; sourceTree = "<group>"; };
+		E4A3E2850B8B91F4C4639095 /* CSRectGrid.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSRectGrid.cpp; sourceTree = "<group>"; };
+		E5D2464D7986C167BDE74199 /* CSPrimSphere.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimSphere.h; sourceTree = "<group>"; };
+		E71F417BE3BD7729F8FEFB2A /* CSBackgroundMaterial.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSBackgroundMaterial.cpp; sourceTree = "<group>"; };
+		F4C290FF15D9A8C440B0E624 /* CSTransform.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSTransform.cpp; sourceTree = "<group>"; };
+		F9A1657931A824D0FB61FEA6 /* CSPrimMultiBox.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimMultiBox.h; sourceTree = "<group>"; };
+		FCFBB6854442AF9145607687 /* CSPropUnknown.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropUnknown.cpp; sourceTree = "<group>"; };
+		FDE3476E04DBF2031C2CCF48 /* ParameterObjects.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = ParameterObjects.h; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		71AD3CED302FAAD5006D5847 /* Exceptions for "Copper" folder in "Copper" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			publicHeaders = (
+				Copper.h,
+			);
+			target = 71AD3CD5302FAAD5006D5847 /* Copper */;
+		};
+		71B4EE99304224FD002796EC /* Exceptions for "CopperUtils" folder in "libkiems" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				logging.cpp,
+				logging.swift,
+			);
+			target = 0E08621C93A1CC737D3F6A93 /* libkiems */;
+		};
+		71B4EE9A304224FD002796EC /* Exceptions for "CopperUtils" folder in "CopperUtils" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			publicHeaders = (
+				logging.hpp,
+			);
+			target = 71B4EE8D304224C5002796EC /* CopperUtils */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		006F3A1386AFF2AD46CD89E4 /* libkiems */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = libkiems;
+			sourceTree = "<group>";
+		};
+		0BA7820838B85822C655B32A /* libkicad_smoketest */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = libkicad_smoketest;
+			sourceTree = "<group>";
+		};
+		1CE9917EFF9195A3FF4FC1AA /* libkiems_smoketest */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = libkiems_smoketest;
+			sourceTree = "<group>";
+		};
+		1E051C9DFB9D9A4CF7CB1120 /* RememberRemember */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = RememberRemember;
+			sourceTree = "<group>";
+		};
+		429F16897495224E3C8CB5A0 /* libkicad */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = libkicad;
+			sourceTree = "<group>";
+		};
+		4E2D6DA9B78D9652EE4FC096 /* Copper_smoketest */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Copper_smoketest;
+			sourceTree = "<group>";
+		};
+		71AD229430263516006D5847 /* kiems */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "kiems-cli";
+			sourceTree = "<group>";
+		};
+		71AD3CD7302FAAD5006D5847 /* Copper */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				71AD3CED302FAAD5006D5847 /* Exceptions for "Copper" folder in "Copper" target */,
+			);
+			path = Copper;
+			sourceTree = "<group>";
+		};
+		71AD3CE6302FAAD5006D5847 /* CopperTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = CopperTests;
+			sourceTree = "<group>";
+		};
+		71B4EE8F304224C5002796EC /* CopperUtils */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				71B4EE99304224FD002796EC /* Exceptions for "CopperUtils" folder in "libkiems" target */,
+				71B4EE9A304224FD002796EC /* Exceptions for "CopperUtils" folder in "CopperUtils" target */,
+			);
+			path = CopperUtils;
+			sourceTree = "<group>";
+		};
+		8290469707C87811FFCE548F /* kiems_fdtd_worker */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = kiems_fdtd_worker;
+			sourceTree = "<group>";
+		};
+		B7D891E5D67D73D341733A71 /* KiEMS */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = KiEMS;
+			sourceTree = "<group>";
+		};
+		C0A71A000000000000000020 /* openEMS */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = openEMS;
+			sourceTree = "<group>";
+		};
+		E331D08A3BF5F110095DBF0C /* copper_fdtd_worker */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = copper_fdtd_worker;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		06B06A59AFBBBB9D2975D2AE /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		0C4E4DE5C99212D3ADE4108A /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				3E7CD25FB948F81DEEC897B3 /* Cocoa.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		384CD7E84819873C73A27B6E /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F00AF324060C66AF5DC286A2 /* Cocoa.framework in Frameworks */,
+				71B4EE9B304224FD002796EC /* libCopperUtils.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		47D0366908946873BADB59D9 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		626F031D915714BD531C01FA /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C0A71A000000000000000013 /* libopenEMS.dylib in Frameworks */,
+				71B40FE93042E264002796EC /* libCSXCAD.dylib in Frameworks */,
+				479136241E9A85AC3E2BFC9B /* RememberRemember.framework in Frameworks */,
+				71AD3CEB302FAAD5006D5847 /* Copper.framework in Frameworks */,
+				C0A71A000000000000000001 /* libCopperUtils.a in Frameworks */,
+				4988C919C7B2E11A4E12652C /* liblibkiems.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		6B100B101B97A1E2DFE83EFA /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				888CB706001C0A6703D7A727 /* liblibkicad.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		6C6A64E387A7D31EB2A99F34 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				10DDAA48B5EFB9E602CA51F7 /* liblibkiems.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		71AD228F30263515006D5847 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8979779CA20D12908A2A7A0E /* Copper.framework in Frameworks */,
+				E225E6C98F3F2C0B194070BD /* liblibkiems.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		71AD3CD3302FAAD5006D5847 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C0A71A000000000000000011 /* libopenEMS.dylib in Frameworks */,
+				846A32C3BB81E3C29B621792 /* libhdf5.dylib in Frameworks */,
+				8B10C2000B105C2000000001 /* libblosc2.a in Frameworks */,
+				71B40FE83042E24F002796EC /* Accelerate.framework in Frameworks */,
+				71B40FE63042E223002796EC /* Metal.framework in Frameworks */,
+				71B40FE43042E1F3002796EC /* libCopperUtils.a in Frameworks */,
+				71B40FE33042E1ED002796EC /* libCSXCAD.dylib in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		71AD3CDD302FAAD5006D5847 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				71AD3CE1302FAAD5006D5847 /* Copper.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		71B4EE8C304224C5002796EC /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		945E3586B3A2D0D928F0F7AC /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C0A71A000000000000000014 /* libopenEMS.dylib in Frameworks */,
+				71B40FEA3042E2B5002796EC /* libCSXCAD.dylib in Frameworks */,
+				3094727E7CECFEFF14791831 /* liblibkiems.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A8ADA0D709C4B39295731A99 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C0A71A000000000000000012 /* libopenEMS.dylib in Frameworks */,
+				C0A71A000000000000000015 /* libCSXCAD.dylib in Frameworks */,
+				F61D45C729E10F8A998D6D1D /* Cocoa.framework in Frameworks */,
+				5BFB8526C3E1D7DF9AD2AA50 /* Copper.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D4544132277BC95BC209FE23 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				3E2C21D20252B9D126B9A44A /* Cocoa.framework in Frameworks */,
+				5FEE70EE235A62413F9E6A97 /* Copper.framework in Frameworks */,
+				08091C43255C7E607DB3203F /* liblibkiems.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		71AD228930263515006D5847 = {
+			isa = PBXGroup;
+			children = (
+				C0A71A000000000000000020 /* openEMS */,
+				1E051C9DFB9D9A4CF7CB1120 /* RememberRemember */,
+				B7D891E5D67D73D341733A71 /* KiEMS */,
+				71AD229430263516006D5847 /* kiems */,
+				8290469707C87811FFCE548F /* kiems_fdtd_worker */,
+				006F3A1386AFF2AD46CD89E4 /* libkiems */,
+				1CE9917EFF9195A3FF4FC1AA /* libkiems_smoketest */,
+				429F16897495224E3C8CB5A0 /* libkicad */,
+				9D2EF3F131A05169F6A8F5B8 /* libkicad_api */,
+				0BA7820838B85822C655B32A /* libkicad_smoketest */,
+				71AD3CD7302FAAD5006D5847 /* Copper */,
+				71AD3CE6302FAAD5006D5847 /* CopperTests */,
+				71B4EE8F304224C5002796EC /* CopperUtils */,
+				71AD229330263516006D5847 /* Products */,
+				77AE1A0D84F974CC1EDDD9F6 /* Frameworks */,
+				4E2D6DA9B78D9652EE4FC096 /* Copper_smoketest */,
+				E331D08A3BF5F110095DBF0C /* copper_fdtd_worker */,
+				ECADA86A6A99C5289CA01658 /* CSXCAD */,
+				71BD2E653044E2D900663022 /* Recovered References */,
+			);
+			sourceTree = "<group>";
+		};
+		71AD229330263516006D5847 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				C0A71A000000000000000010 /* libopenEMS.dylib */,
+				5653046AD79D4C9071AF237F /* KiEMS.app */,
+				71AD229230263516006D5847 /* kiems */,
+				A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */,
+				C6D729745136FAA65AEC601F /* libkicad_smoketest */,
+				922BA8FA4CD5D8901DCAC9DA /* liblibkiems.a */,
+				CAE9E934278E88A4B6FDB4F0 /* libkiems_smoketest */,
+				1730AB8B76054706EB2AB0BA /* kiems_fdtd_worker */,
+				DEC747CBEC864D957296A740 /* RememberRemember.framework */,
+				71AD3CD6302FAAD5006D5847 /* Copper.framework */,
+				71AD3CE0302FAAD5006D5847 /* CopperTests.xctest */,
+				3E4C03285D1BDDD8282A6ECE /* Copper_smoketest */,
+				47611C745FA02E5BA7871B3D /* copper_fdtd_worker */,
+				6B8F4508947040AF3A200E11 /* libCSXCAD.dylib */,
+				71B4EE8E304224C5002796EC /* libCopperUtils.a */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		71BD2E653044E2D900663022 /* Recovered References */ = {
+			isa = PBXGroup;
+			children = (
+				30877432D1026706D7E805DA /* libhdf5.dylib */,
+				8B10C2000B105C2000000002 /* libblosc2.a */,
+			);
+			name = "Recovered References";
+			sourceTree = "<group>";
+		};
+		77AE1A0D84F974CC1EDDD9F6 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				71B40FE73042E24F002796EC /* Accelerate.framework */,
+				71B40FE53042E223002796EC /* Metal.framework */,
+				E45C2AB06E543A05FCB6DCC8 /* OS X */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		9D2EF3F131A05169F6A8F5B8 /* libkicad_api */ = {
+			isa = PBXGroup;
+			children = (
+				0F1EB3900F88445339BD6FB8 /* libkicad_api.cpp */,
+			);
+			path = libkicad_api;
+			sourceTree = "<group>";
+		};
+		E45C2AB06E543A05FCB6DCC8 /* OS X */ = {
+			isa = PBXGroup;
+			children = (
+				CE532C213E2D6E98AA310B22 /* Cocoa.framework */,
+			);
+			name = "OS X";
+			sourceTree = "<group>";
+		};
+		ECADA86A6A99C5289CA01658 /* CSXCAD */ = {
+			isa = PBXGroup;
+			children = (
+				E71F417BE3BD7729F8FEFB2A /* CSBackgroundMaterial.cpp */,
+				C940B300A12AD0F6894E3F31 /* CSBackgroundMaterial.h */,
+				54E688D3F9B73BD698459772 /* CSFunctionParser.cpp */,
+				1B8D9E3DF90F623540FB2550 /* CSFunctionParser.h */,
+				BBE93FDB8DF79DA6F0A50C94 /* CSModeData.cpp */,
+				664C768E4664D6EBBC64F995 /* CSModeData.h */,
+				C139A80CEF80445CE007CF3F /* CSPrimBox.cpp */,
+				5E843D29B509B643EBE62A36 /* CSPrimBox.h */,
+				A36A6800BA0DDAA54F339258 /* CSPrimCurve.cpp */,
+				D60EAE79927D1544B382EBB3 /* CSPrimCurve.h */,
+				4424E561CBCC53DE77BA9D68 /* CSPrimCylinder.cpp */,
+				B2B764A36173797DFEFA22A0 /* CSPrimCylinder.h */,
+				C092FF8B6A375F76FC193A6E /* CSPrimCylindricalShell.cpp */,
+				49968BF478B20F3263293D05 /* CSPrimCylindricalShell.h */,
+				4D286C901431D80EB83D11FA /* CSPrimLinPoly.cpp */,
+				75CCDDE91C9BDCBDD295551F /* CSPrimLinPoly.h */,
+				C259DFC8925FEF6254736BAF /* CSPrimMultiBox.cpp */,
+				F9A1657931A824D0FB61FEA6 /* CSPrimMultiBox.h */,
+				8BAEFA9E1EC092E0D890A14C /* CSPrimPoint.cpp */,
+				612C72C2DC1C9B2EE7D5AA88 /* CSPrimPoint.h */,
+				30A0506109278583137803EB /* CSPrimPolygon.cpp */,
+				7A9D6B5C429B30F4A76B69E9 /* CSPrimPolygon.h */,
+				132063B9B19C2431D301FD53 /* CSPrimPolyhedron.cpp */,
+				765CAE4AC6ACCB6AC9F626BC /* CSPrimPolyhedron.h */,
+				209195789FA2546983D9F7CC /* CSPrimPolyhedronReader.cpp */,
+				252340AF2DF277394293A777 /* CSPrimPolyhedronReader.h */,
+				40BBB44AC18D0563DA007F2E /* CSPrimPolyhedron_p.h */,
+				2E0A6B0B01BDA7784504DBD7 /* CSPrimRotPoly.cpp */,
+				94EA74D34C63EBD62E0DBD0E /* CSPrimRotPoly.h */,
+				A4ABB3E67FA995DFC15350A7 /* CSPrimSphere.cpp */,
+				E5D2464D7986C167BDE74199 /* CSPrimSphere.h */,
+				4CCA7271B4E816E2DE044E5C /* CSPrimSphericalShell.cpp */,
+				57F8D8A9619B96ECBFC35313 /* CSPrimSphericalShell.h */,
+				A25590547D328A76A372C1BC /* CSPrimUserDefined.cpp */,
+				6A5EBADB0222B72261C42C71 /* CSPrimUserDefined.h */,
+				DFB34E1830D6A43D7D93419D /* CSPrimWire.cpp */,
+				18CC0BD80AA794FDDDF804C2 /* CSPrimWire.h */,
+				4E54CA0C8800E5C1A813CF8C /* CSPrimitives.cpp */,
+				149266ED327B91C86E0B2697 /* CSPrimitives.h */,
+				335167B1A5FB2AF84C42F74A /* CSPropAbsorbingBC.cpp */,
+				1F03765A93276A9FA8F28E47 /* CSPropAbsorbingBC.h */,
+				DA441A58C5946D25FA484EEE /* CSPropConductingSheet.cpp */,
+				B3B2B74A864500628F27FBC4 /* CSPropConductingSheet.h */,
+				C4226023679CEE1592511C1C /* CSPropDebyeMaterial.cpp */,
+				9F5C7796A88E159A659A04A4 /* CSPropDebyeMaterial.h */,
+				A8447DF78DE4C1811054DD72 /* CSPropDiscMaterial.cpp */,
+				232FA4E2D037A1BD03BAEC5C /* CSPropDiscMaterial.h */,
+				564EAC5B883C1FA7CDC120CD /* CSPropDispersiveMaterial.cpp */,
+				3AA6586FDBD4762ACBBC2949 /* CSPropDispersiveMaterial.h */,
+				099AD36F929C43F1AEBF30DB /* CSPropDumpBox.cpp */,
+				7D20DA97F11E5FD1E45B1BEC /* CSPropDumpBox.h */,
+				4FF84FE99AC0D432168071A2 /* CSPropExcitation.cpp */,
+				91339221556288FDC08080CD /* CSPropExcitation.h */,
+				9C3C863D5F2E9AA39D61A4A7 /* CSPropLorentzMaterial.cpp */,
+				26BECA8A0D515EF0EB787386 /* CSPropLorentzMaterial.h */,
+				B6C786F74AABEF635C528E85 /* CSPropLumpedElement.cpp */,
+				579C466E4A9BD7706C6BD2F1 /* CSPropLumpedElement.h */,
+				93F643A55E335E590610AF0B /* CSPropMaterial.cpp */,
+				B9EEAA74EC592385260923B1 /* CSPropMaterial.h */,
+				715542E81090338DD43CF107 /* CSPropMetal.cpp */,
+				903517FF02E224D68957B03E /* CSPropMetal.h */,
+				9AF572E25404972E098B5061 /* CSPropProbeBox.cpp */,
+				56AEB40FAFFC12CA37FD9255 /* CSPropProbeBox.h */,
+				33049C004A0AD9DE5FF7DB67 /* CSPropResBox.cpp */,
+				9AE69B0E636DC4B8E5DCB7D5 /* CSPropResBox.h */,
+				FCFBB6854442AF9145607687 /* CSPropUnknown.cpp */,
+				DC07EEE0458A1F47D32AD7E8 /* CSPropUnknown.h */,
+				B9149635453B7D7A78725892 /* CSProperties.cpp */,
+				A69FB58384D7BE33ED45D36F /* CSProperties.h */,
+				E4A3E2850B8B91F4C4639095 /* CSRectGrid.cpp */,
+				120F4DE57504AC7BB881B2C1 /* CSRectGrid.h */,
+				F4C290FF15D9A8C440B0E624 /* CSTransform.cpp */,
+				18823D244969BA56BEE17B07 /* CSTransform.h */,
+				4197F5CF683313F51CB45776 /* CSUseful.cpp */,
+				995868D7C79B1262AB1B006E /* CSUseful.h */,
+				93C908C23364F0587B435E92 /* CSXCAD_Global.h */,
+				DF70F1F0AB9C1CF89E638C1F /* ContinuousStructure.cpp */,
+				A2F2AA630AA9C76D66283C1E /* ContinuousStructure.h */,
+				801882DFF924DC3D075A3E2A /* ParameterCoord.cpp */,
+				041AB224FEAA3879BCE70995 /* ParameterCoord.h */,
+				11729C6743D6F1A9497C445B /* ParameterObjects.cpp */,
+				FDE3476E04DBF2031C2CCF48 /* ParameterObjects.h */,
+				46F7EE12182CFA425BB001B4 /* CSSpatialIndex.h */,
+				041FC8C8C4A04AC1ACFCC824 /* CSSpatialIndex.cpp */,
+			);
+			name = CSXCAD;
+			path = CSXCAD/CSXCAD;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXHeadersBuildPhase section */
+		6E25381F11BAD2D163E84C46 /* Headers */ = {
+			isa = PBXHeadersBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		71AD3CD1302FAAD5006D5847 /* Headers */ = {
+			isa = PBXHeadersBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		71B4EE8A304224C5002796EC /* Headers */ = {
+			isa = PBXHeadersBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B729BAF527C6CE60A457BB41 /* Headers */ = {
+			isa = PBXHeadersBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXHeadersBuildPhase section */
+
+/* Begin PBXNativeTarget section */
+		07086D1AD104CA5BBA5AF140 /* RememberRemember */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A7A05BDB98C84DE3CA4A2188 /* Build configuration list for PBXNativeTarget "RememberRemember" */;
+			buildPhases = (
+				B729BAF527C6CE60A457BB41 /* Headers */,
+				53AC52A1D605A6E26AFDD388 /* Sources */,
+				0C4E4DE5C99212D3ADE4108A /* Frameworks */,
+				B459FA9D725A1F82A1F56D0A /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				C60105A162FBA5BFFAF43ADC /* PBXTargetDependency */,
+				5B4B3AF2BB045C901603F92B /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				1E051C9DFB9D9A4CF7CB1120 /* RememberRemember */,
+			);
+			name = RememberRemember;
+			productName = RememberRemember;
+			productReference = DEC747CBEC864D957296A740 /* RememberRemember.framework */;
+			productType = "com.apple.product-type.framework";
+		};
+		0D27BC0AB714B88FE14FFB28 /* libkicad_smoketest */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E96D43EDF887036033933493 /* Build configuration list for PBXNativeTarget "libkicad_smoketest" */;
+			buildPhases = (
+				23C3702A6642F13886B1BF43 /* Sources */,
+				6B100B101B97A1E2DFE83EFA /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				7B143B2514242142CF40DD14 /* PBXTargetDependency */,
+				6ECADCE2F5737E51C0EC6277 /* PBXTargetDependency */,
+				1C8514F9B87E50E64DC2676C /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				0BA7820838B85822C655B32A /* libkicad_smoketest */,
+			);
+			name = libkicad_smoketest;
+			productName = libkicad_smoketest;
+			productReference = C6D729745136FAA65AEC601F /* libkicad_smoketest */;
+			productType = "com.apple.product-type.tool";
+		};
+		0E08621C93A1CC737D3F6A93 /* libkiems */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 34A1F94838F1003CDA9ED1F2 /* Build configuration list for PBXNativeTarget "libkiems" */;
+			buildPhases = (
+				24C0C7D84B42BCB562805074 /* Sources */,
+				47D0366908946873BADB59D9 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				58561B8FA81A09A6147E61E6 /* PBXTargetDependency */,
+				B1CDF6FC0A4952695A9B54F8 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				006F3A1386AFF2AD46CD89E4 /* libkiems */,
+			);
+			name = libkiems;
+			productName = libkiems;
+			productReference = 922BA8FA4CD5D8901DCAC9DA /* liblibkiems.a */;
+			productType = "com.apple.product-type.library.static";
+		};
+		2971163407AC90FC988D853B /* KiEMS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 2A93D0CB58D10C728E7CE9F2 /* Build configuration list for PBXNativeTarget "KiEMS" */;
+			buildPhases = (
+				0A4BFFE015AA0DAC88C73F59 /* Sources */,
+				626F031D915714BD531C01FA /* Frameworks */,
+				4EA49CEE0296035538A93916 /* Embed Helper Tools */,
+				F585E6E5DED45F393177F068 /* Embed Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				0E303C6421A10D82B635ADEB /* PBXTargetDependency */,
+				3E33A9C8EE26B6F26DDDE2A8 /* PBXTargetDependency */,
+				EDFF827E7F22C9DA08D011AC /* PBXTargetDependency */,
+				585312645C254E539E00095D /* PBXTargetDependency */,
+				71AD3CEA302FAAD5006D5847 /* PBXTargetDependency */,
+				ADB23F7664E43D447492A2D0 /* PBXTargetDependency */,
+				3244795FCE9561424CF78C2B /* PBXTargetDependency */,
+				C0A71A000000000000000003 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				B7D891E5D67D73D341733A71 /* KiEMS */,
+			);
+			name = KiEMS;
+			productName = KiEMS;
+			productReference = 5653046AD79D4C9071AF237F /* KiEMS.app */;
+			productType = "com.apple.product-type.application";
+		};
+		3B7712DA527497624F2DFB43 /* copper_fdtd_worker */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 01510616A2540A2EA37CB56A /* Build configuration list for PBXNativeTarget "copper_fdtd_worker" */;
+			buildPhases = (
+				482BAB6A7C580D0546DBA899 /* Sources */,
+				D4544132277BC95BC209FE23 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				932AF7FD89493397A9367F15 /* PBXTargetDependency */,
+				319AF793C61DEDB7DE1FEEE6 /* PBXTargetDependency */,
+				8DE0A57267DFF4C0D725E131 /* PBXTargetDependency */,
+				02B19B327A0288537CDF8EB6 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				E331D08A3BF5F110095DBF0C /* copper_fdtd_worker */,
+			);
+			name = copper_fdtd_worker;
+			productName = copper_fdtd_worker;
+			productReference = 47611C745FA02E5BA7871B3D /* copper_fdtd_worker */;
+			productType = "com.apple.product-type.tool";
+		};
+		5034717F4A638C8CC653DE57 /* kiems_fdtd_worker */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 34B3E31BCC3EA6AFAC9A4F16 /* Build configuration list for PBXNativeTarget "kiems_fdtd_worker" */;
+			buildPhases = (
+				EB32E30B8D408F92256E1749 /* Sources */,
+				945E3586B3A2D0D928F0F7AC /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				3C409D0A5C4DBB5CF700353B /* PBXTargetDependency */,
+				E454C46B412251B0E98F9587 /* PBXTargetDependency */,
+				D13B427235532B3778A56070 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				8290469707C87811FFCE548F /* kiems_fdtd_worker */,
+			);
+			name = kiems_fdtd_worker;
+			productName = kiems_fdtd_worker;
+			productReference = 1730AB8B76054706EB2AB0BA /* kiems_fdtd_worker */;
+			productType = "com.apple.product-type.tool";
+		};
+		5BC0C98C152C9B66E02544CD /* libkiems_smoketest */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A1979A925EE6A25050650435 /* Build configuration list for PBXNativeTarget "libkiems_smoketest" */;
+			buildPhases = (
+				43F05313B402BB6A5924A70C /* Sources */,
+				6C6A64E387A7D31EB2A99F34 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				FD8F50719794D9B81C996635 /* PBXTargetDependency */,
+				549320B3B0900CE17BC3FE68 /* PBXTargetDependency */,
+				5E6774144345CB1A84DA0E1D /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				1CE9917EFF9195A3FF4FC1AA /* libkiems_smoketest */,
+			);
+			name = libkiems_smoketest;
+			productName = libkiems_smoketest;
+			productReference = CAE9E934278E88A4B6FDB4F0 /* libkiems_smoketest */;
+			productType = "com.apple.product-type.tool";
+		};
+		71AD229130263515006D5847 /* kiems */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 71AD229930263516006D5847 /* Build configuration list for PBXNativeTarget "kiems" */;
+			buildPhases = (
+				71AD228E30263515006D5847 /* Sources */,
+				71AD228F30263515006D5847 /* Frameworks */,
+				71AD229030263515006D5847 /* CopyFiles */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				C3F4DC29303EF0123F35E8D7 /* PBXTargetDependency */,
+				81A43D489AC76EB27962E954 /* PBXTargetDependency */,
+				45D270673764BFEAB850DEA6 /* PBXTargetDependency */,
+				8977C8A828BE3665BC518DA3 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				71AD229430263516006D5847 /* kiems */,
+			);
+			name = kiems;
+			productName = kiems;
+			productReference = 71AD229230263516006D5847 /* kiems */;
+			productType = "com.apple.product-type.tool";
+		};
+		71AD3CD5302FAAD5006D5847 /* Copper */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 71AD3CEE302FAAD5006D5847 /* Build configuration list for PBXNativeTarget "Copper" */;
+			buildPhases = (
+				71AD3CD1302FAAD5006D5847 /* Headers */,
+				71AD3CD2302FAAD5006D5847 /* Sources */,
+				71AD3CD3302FAAD5006D5847 /* Frameworks */,
+				71AD3CD4302FAAD5006D5847 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				00D38236B762AE5D5D6823F0 /* PBXTargetDependency */,
+				BEBA09E76AE1E48919E8DCC4 /* PBXTargetDependency */,
+				C826A6FCE48478DCB74F2134 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				71AD3CD7302FAAD5006D5847 /* Copper */,
+			);
+			name = Copper;
+			productName = Copper;
+			productReference = 71AD3CD6302FAAD5006D5847 /* Copper.framework */;
+			productType = "com.apple.product-type.framework";
+		};
+		71AD3CDF302FAAD5006D5847 /* CopperTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 71AD3CF1302FAAD5006D5847 /* Build configuration list for PBXNativeTarget "CopperTests" */;
+			buildPhases = (
+				71AD3CDC302FAAD5006D5847 /* Sources */,
+				71AD3CDD302FAAD5006D5847 /* Frameworks */,
+				71AD3CDE302FAAD5006D5847 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				71AD3CE3302FAAD5006D5847 /* PBXTargetDependency */,
+				71AD3CE5302FAAD5006D5847 /* PBXTargetDependency */,
+				3270E36383980EDA455F1809 /* PBXTargetDependency */,
+				0FC7394107974A42A0CEAB15 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				71AD3CE6302FAAD5006D5847 /* CopperTests */,
+			);
+			name = CopperTests;
+			productName = CopperTests;
+			productReference = 71AD3CE0302FAAD5006D5847 /* CopperTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		71B4EE8D304224C5002796EC /* CopperUtils */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 71B4EE98304224C5002796EC /* Build configuration list for PBXNativeTarget "CopperUtils" */;
+			buildPhases = (
+				71B4EE8A304224C5002796EC /* Headers */,
+				71B4EE8B304224C5002796EC /* Sources */,
+				71B4EE8C304224C5002796EC /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				71B4EE8F304224C5002796EC /* CopperUtils */,
+			);
+			name = CopperUtils;
+			packageProductDependencies = (
+			);
+			productName = CopperUtils;
+			productReference = 71B4EE8E304224C5002796EC /* libCopperUtils.a */;
+			productType = "com.apple.product-type.library.static";
+		};
+		917B3FABD7921813B7A8BF98 /* CSXCAD */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 83F7CD830B23815D67023A0D /* Build configuration list for PBXNativeTarget "CSXCAD" */;
+			buildPhases = (
+				6E25381F11BAD2D163E84C46 /* Headers */,
+				A069B85F1F662A9053C1EB33 /* Sources */,
+				384CD7E84819873C73A27B6E /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				71B4EE9D304224FD002796EC /* PBXTargetDependency */,
+			);
+			name = CSXCAD;
+			productName = CSXCAD;
+			productReference = 6B8F4508947040AF3A200E11 /* libCSXCAD.dylib */;
+			productType = "com.apple.product-type.library.dynamic";
+		};
+		B0B651E8085482933DC2AFFE /* libkicad */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B050EDB0D4061B47871B7A91 /* Build configuration list for PBXNativeTarget "libkicad" */;
+			buildPhases = (
+				74729A7DCB82C518D0125B51 /* Sources */,
+				06B06A59AFBBBB9D2975D2AE /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				6BEDFC509040342363238CF3 /* PBXTargetDependency */,
+				783FE031489ED587C7A4C475 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				429F16897495224E3C8CB5A0 /* libkicad */,
+			);
+			name = libkicad;
+			productName = libkicad;
+			productReference = A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */;
+			productType = "com.apple.product-type.library.static";
+		};
+		B35E2A665EE704DAF2769F32 /* Copper_smoketest */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E77C2E68C5646102016CEDEE /* Build configuration list for PBXNativeTarget "Copper_smoketest" */;
+			buildPhases = (
+				A7AAC849458D91E2FEEACCCD /* Sources */,
+				A8ADA0D709C4B39295731A99 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				B70C5A8302D9AAB9739472A8 /* PBXTargetDependency */,
+				F20D3A93C41E65474395766B /* PBXTargetDependency */,
+				0EAB114765FD0755201016A4 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				4E2D6DA9B78D9652EE4FC096 /* Copper_smoketest */,
+			);
+			name = Copper_smoketest;
+			productName = Copper_smoketest;
+			productReference = 3E4C03285D1BDDD8282A6ECE /* Copper_smoketest */;
+			productType = "com.apple.product-type.tool";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		71AD228A30263515006D5847 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastUpgradeCheck = 2660;
+				TargetAttributes = {
+					71AD229130263515006D5847 = {
+						CreatedOnToolsVersion = 26.6;
+					};
+					71AD3CD5302FAAD5006D5847 = {
+						CreatedOnToolsVersion = 26.6;
+					};
+					71AD3CDF302FAAD5006D5847 = {
+						CreatedOnToolsVersion = 26.6;
+						TestTargetID = 2971163407AC90FC988D853B;
+					};
+					71B4EE8D304224C5002796EC = {
+						CreatedOnToolsVersion = 26.6;
+					};
+				};
+			};
+			buildConfigurationList = 71AD228D30263515006D5847 /* Build configuration list for PBXProject "kiems" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 71AD228930263515006D5847;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 71AD229330263516006D5847 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				71AD229130263515006D5847 /* kiems */,
+				B0B651E8085482933DC2AFFE /* libkicad */,
+				0D27BC0AB714B88FE14FFB28 /* libkicad_smoketest */,
+				0E08621C93A1CC737D3F6A93 /* libkiems */,
+				5BC0C98C152C9B66E02544CD /* libkiems_smoketest */,
+				5034717F4A638C8CC653DE57 /* kiems_fdtd_worker */,
+				2971163407AC90FC988D853B /* KiEMS */,
+				07086D1AD104CA5BBA5AF140 /* RememberRemember */,
+				71AD3CD5302FAAD5006D5847 /* Copper */,
+				71AD3CDF302FAAD5006D5847 /* CopperTests */,
+				B35E2A665EE704DAF2769F32 /* Copper_smoketest */,
+				3B7712DA527497624F2DFB43 /* copper_fdtd_worker */,
+				917B3FABD7921813B7A8BF98 /* CSXCAD */,
+				E71870C603134ADA6EEEA950 /* HDF5 */,
+				D621ED7A33B5BA1305450055 /* openEMS */,
+				71B4EE8D304224C5002796EC /* CopperUtils */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		71AD3CD4302FAAD5006D5847 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		71AD3CDE302FAAD5006D5847 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B459FA9D725A1F82A1F56D0A /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		A1CABB0ACBF6B549B0D6ED9C /* Build vendor/hdf5 */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Build vendor/hdf5";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/libhdf5.dylib",
+				"$(BUILT_PRODUCTS_DIR)/libhdf5_hl.dylib",
+				"$(BUILT_PRODUCTS_DIR)/libblosc2.a",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\n\"$SRCROOT/Scripts/build_hdf5.sh\"\n";
+		};
+		CB27AEC541EBD226F206B0B7 /* Build openEMS fork against local CSXCAD */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/libCSXCAD.dylib",
+				"$(BUILT_PRODUCTS_DIR)/libhdf5.dylib",
+				"$(BUILT_PRODUCTS_DIR)/libhdf5_hl.dylib",
+			);
+			name = "Build openEMS fork against local CSXCAD";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/libopenEMS.dylib",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\n\"$SRCROOT/Scripts/build_openEMS.sh\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		0A4BFFE015AA0DAC88C73F59 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		23C3702A6642F13886B1BF43 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		24C0C7D84B42BCB562805074 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		43F05313B402BB6A5924A70C /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		482BAB6A7C580D0546DBA899 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		53AC52A1D605A6E26AFDD388 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		71AD228E30263515006D5847 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		71AD3CD2302FAAD5006D5847 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		71AD3CDC302FAAD5006D5847 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		71B4EE8B304224C5002796EC /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		74729A7DCB82C518D0125B51 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5FE243961E65671FE35C65E0 /* libkicad_api.cpp in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A069B85F1F662A9053C1EB33 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8958C50381BAEB4BAD69FC88 /* CSBackgroundMaterial.cpp in Sources */,
+				129F2601A59B1AD3E6FA08D6 /* CSFunctionParser.cpp in Sources */,
+				BE0F1C78843BBDA09DFB1E8C /* CSModeData.cpp in Sources */,
+				95D69C1BA0DEEF1883C61841 /* CSPrimBox.cpp in Sources */,
+				69F7D28352E6A5F8C1B62188 /* CSPrimCurve.cpp in Sources */,
+				ACF6C5FED62B1B1C2D682CA2 /* CSPrimCylinder.cpp in Sources */,
+				0EB3189D8E8C0E15ECDFCF07 /* CSPrimCylindricalShell.cpp in Sources */,
+				508397439B5850BD443922F8 /* CSPrimLinPoly.cpp in Sources */,
+				9B20606B726FBDE39620FC66 /* CSPrimMultiBox.cpp in Sources */,
+				0A4F8D836CCEAB4E92E50750 /* CSPrimPoint.cpp in Sources */,
+				828DBB24BCE54FE076A3D616 /* CSPrimPolygon.cpp in Sources */,
+				6E968C6C0FD2A336AFC5F4B3 /* CSPrimPolyhedron.cpp in Sources */,
+				551DBC88F190FAAEE5F0F4C6 /* CSPrimPolyhedronReader.cpp in Sources */,
+				9D2BD21EC2BFD175F4722C5B /* CSPrimRotPoly.cpp in Sources */,
+				D1A3596A45AFCC1D666CCAD9 /* CSPrimSphere.cpp in Sources */,
+				C1FE7C82D3B6D6DF1E6CAFAC /* CSPrimSphericalShell.cpp in Sources */,
+				7A76B8DB5C0FDE31D6F72BB1 /* CSPrimUserDefined.cpp in Sources */,
+				7927928D62C83DD9538C10AF /* CSPrimWire.cpp in Sources */,
+				BD20F3B01E8F3B160B1E3302 /* CSPrimitives.cpp in Sources */,
+				F5069170BAB8A6A35EB326DE /* CSPropAbsorbingBC.cpp in Sources */,
+				F8763B10C08160DB7FC51D4C /* CSPropConductingSheet.cpp in Sources */,
+				984F4A8883D41F611D912AE3 /* CSPropDebyeMaterial.cpp in Sources */,
+				555290A9A7D4BBFD75394630 /* CSPropDiscMaterial.cpp in Sources */,
+				4F06D46154832B47F0D33F0A /* CSPropDispersiveMaterial.cpp in Sources */,
+				E3E6CD8CCCF551CEE7E0567F /* CSPropDumpBox.cpp in Sources */,
+				95774DCF0FD168F325B94432 /* CSPropExcitation.cpp in Sources */,
+				F2862B1D74D949EF3B725175 /* CSPropLorentzMaterial.cpp in Sources */,
+				980D7708FC6E8DCF73829C69 /* CSPropLumpedElement.cpp in Sources */,
+				BBF529C0A0F0B66C143A7204 /* CSPropMaterial.cpp in Sources */,
+				DA4474D89CE93A26181A5247 /* CSPropMetal.cpp in Sources */,
+				D7029AAE6D897E2CEFA449EA /* CSPropProbeBox.cpp in Sources */,
+				A159533DC4B4AE5B52C87829 /* CSPropResBox.cpp in Sources */,
+				FFCF4BE80D907ADEDD013454 /* CSPropUnknown.cpp in Sources */,
+				60786B377ADD3E8611BC7012 /* CSProperties.cpp in Sources */,
+				DE25C90063BF270CF1451F8E /* CSRectGrid.cpp in Sources */,
+				A3D47B497AA3BE4FD9D35D2B /* CSTransform.cpp in Sources */,
+				274621ADB58BCF83FF1AE33F /* CSUseful.cpp in Sources */,
+				385F960D3D19DB08177FB31F /* ContinuousStructure.cpp in Sources */,
+				D1B97BD0204C249DCB935BE0 /* ParameterCoord.cpp in Sources */,
+				3D4617AE4F349584B8319E2C /* ParameterObjects.cpp in Sources */,
+				BB5902830D5CD46321F04EF3 /* CSSpatialIndex.cpp in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A7AAC849458D91E2FEEACCCD /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		EB32E30B8D408F92256E1749 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		00D38236B762AE5D5D6823F0 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = CSXCAD;
+			target = 917B3FABD7921813B7A8BF98 /* CSXCAD */;
+			targetProxy = 303AD32ECC634AA5F44FE1BB /* PBXContainerItemProxy */;
+		};
+		02B19B327A0288537CDF8EB6 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = openEMS;
+			target = D621ED7A33B5BA1305450055 /* openEMS */;
+			targetProxy = 6ACED3D13EDE40BDF3DD1890 /* PBXContainerItemProxy */;
+		};
+		0E303C6421A10D82B635ADEB /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 0E08621C93A1CC737D3F6A93 /* libkiems */;
+			targetProxy = 68230F1D42F0B9E29C659103 /* PBXContainerItemProxy */;
+		};
+		0EAB114765FD0755201016A4 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = openEMS;
+			target = D621ED7A33B5BA1305450055 /* openEMS */;
+			targetProxy = 6AB0217B99B3D11D9F96EA44 /* PBXContainerItemProxy */;
+		};
+		0FC7394107974A42A0CEAB15 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = openEMS;
+			target = D621ED7A33B5BA1305450055 /* openEMS */;
+			targetProxy = 6A55C2C50DBC001D4E3D6AD6 /* PBXContainerItemProxy */;
+		};
+		1C8514F9B87E50E64DC2676C /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = openEMS;
+			target = D621ED7A33B5BA1305450055 /* openEMS */;
+			targetProxy = A2DDA9F4D5001D550A2722DC /* PBXContainerItemProxy */;
+		};
+		24ED90D28ED207331A6B57D2 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = CSXCAD;
+			target = 917B3FABD7921813B7A8BF98 /* CSXCAD */;
+			targetProxy = 65FD078A16B4F1A0DC4B78BF /* PBXContainerItemProxy */;
+		};
+		319AF793C61DEDB7DE1FEEE6 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = Copper;
+			target = 71AD3CD5302FAAD5006D5847 /* Copper */;
+			targetProxy = 195ED6A1B4F28D02DF92D867 /* PBXContainerItemProxy */;
+		};
+		3244795FCE9561424CF78C2B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = openEMS;
+			target = D621ED7A33B5BA1305450055 /* openEMS */;
+			targetProxy = DAC5AD369DD2CE174B16867B /* PBXContainerItemProxy */;
+		};
+		3270E36383980EDA455F1809 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = CSXCAD;
+			target = 917B3FABD7921813B7A8BF98 /* CSXCAD */;
+			targetProxy = D5998D2318CDD72E77F94AEF /* PBXContainerItemProxy */;
+		};
+		3C409D0A5C4DBB5CF700353B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 0E08621C93A1CC737D3F6A93 /* libkiems */;
+			targetProxy = F90E814A552714159096AAF7 /* PBXContainerItemProxy */;
+		};
+		3E33A9C8EE26B6F26DDDE2A8 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 0D27BC0AB714B88FE14FFB28 /* libkicad_smoketest */;
+			targetProxy = 3429B0B7F4066519273A0A7D /* PBXContainerItemProxy */;
+		};
+		45D270673764BFEAB850DEA6 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = CSXCAD;
+			target = 917B3FABD7921813B7A8BF98 /* CSXCAD */;
+			targetProxy = F3408D4F5D7B73F098E7D0C2 /* PBXContainerItemProxy */;
+		};
+		5345A0C5C4E9BCAEEF03D0DC /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = HDF5;
+			target = E71870C603134ADA6EEEA950 /* HDF5 */;
+			targetProxy = 12C26B4D5230D3ADF886CE6B /* PBXContainerItemProxy */;
+		};
+		549320B3B0900CE17BC3FE68 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = CSXCAD;
+			target = 917B3FABD7921813B7A8BF98 /* CSXCAD */;
+			targetProxy = A782DEBD122590F0E29B10BE /* PBXContainerItemProxy */;
+		};
+		585312645C254E539E00095D /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = RememberRemember;
+			target = 07086D1AD104CA5BBA5AF140 /* RememberRemember */;
+			targetProxy = 4A26F5AB0BDDD56E51069B55 /* PBXContainerItemProxy */;
+		};
+		58561B8FA81A09A6147E61E6 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = CSXCAD;
+			target = 917B3FABD7921813B7A8BF98 /* CSXCAD */;
+			targetProxy = 3B80DAE327433B66EF5C7314 /* PBXContainerItemProxy */;
+		};
+		5B4B3AF2BB045C901603F92B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = openEMS;
+			target = D621ED7A33B5BA1305450055 /* openEMS */;
+			targetProxy = 9FB684FC971FB3FBC8A28035 /* PBXContainerItemProxy */;
+		};
+		5E6774144345CB1A84DA0E1D /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = openEMS;
+			target = D621ED7A33B5BA1305450055 /* openEMS */;
+			targetProxy = 3D192F465DDCAB752F966D95 /* PBXContainerItemProxy */;
+		};
+		6BEDFC509040342363238CF3 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = CSXCAD;
+			target = 917B3FABD7921813B7A8BF98 /* CSXCAD */;
+			targetProxy = 748C85D85BC5D0AE4750DF0C /* PBXContainerItemProxy */;
+		};
+		6ECADCE2F5737E51C0EC6277 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = CSXCAD;
+			target = 917B3FABD7921813B7A8BF98 /* CSXCAD */;
+			targetProxy = 3250708244CB3AA5A33DE2B6 /* PBXContainerItemProxy */;
+		};
+		71AD3CE3302FAAD5006D5847 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 71AD3CD5302FAAD5006D5847 /* Copper */;
+			targetProxy = 71AD3CE2302FAAD5006D5847 /* PBXContainerItemProxy */;
+		};
+		71AD3CE5302FAAD5006D5847 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 2971163407AC90FC988D853B /* KiEMS */;
+			targetProxy = 71AD3CE4302FAAD5006D5847 /* PBXContainerItemProxy */;
+		};
+		71AD3CEA302FAAD5006D5847 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 71AD3CD5302FAAD5006D5847 /* Copper */;
+			targetProxy = 71AD3CE9302FAAD5006D5847 /* PBXContainerItemProxy */;
+		};
+		71B4EE9D304224FD002796EC /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 71B4EE8D304224C5002796EC /* CopperUtils */;
+			targetProxy = 71B4EE9C304224FD002796EC /* PBXContainerItemProxy */;
+		};
+		783FE031489ED587C7A4C475 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = openEMS;
+			target = D621ED7A33B5BA1305450055 /* openEMS */;
+			targetProxy = 4464D3AC076D7403CF948471 /* PBXContainerItemProxy */;
+		};
+		7B143B2514242142CF40DD14 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B0B651E8085482933DC2AFFE /* libkicad */;
+			targetProxy = 2A075E9DC0149148EA251C93 /* PBXContainerItemProxy */;
+		};
+		81A43D489AC76EB27962E954 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = Copper;
+			target = 71AD3CD5302FAAD5006D5847 /* Copper */;
+			targetProxy = 2F85542E6133A475C254BB55 /* PBXContainerItemProxy */;
+		};
+		8977C8A828BE3665BC518DA3 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = openEMS;
+			target = D621ED7A33B5BA1305450055 /* openEMS */;
+			targetProxy = E265956CE831DA75AB03CECD /* PBXContainerItemProxy */;
+		};
+		8DE0A57267DFF4C0D725E131 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = CSXCAD;
+			target = 917B3FABD7921813B7A8BF98 /* CSXCAD */;
+			targetProxy = 49D003A5FFBE2D2B612428AB /* PBXContainerItemProxy */;
+		};
+		932AF7FD89493397A9367F15 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = libkiems;
+			target = 0E08621C93A1CC737D3F6A93 /* libkiems */;
+			targetProxy = BACB4CAE18E04FC816AC3BC0 /* PBXContainerItemProxy */;
+		};
+		ADB23F7664E43D447492A2D0 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = CSXCAD;
+			target = 917B3FABD7921813B7A8BF98 /* CSXCAD */;
+			targetProxy = C25B69A7C2B8350D4E0C6BCC /* PBXContainerItemProxy */;
+		};
+		B1CDF6FC0A4952695A9B54F8 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = openEMS;
+			target = D621ED7A33B5BA1305450055 /* openEMS */;
+			targetProxy = F6D14B893FB9FA97F9ECAC1F /* PBXContainerItemProxy */;
+		};
+		B70C5A8302D9AAB9739472A8 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = Copper;
+			target = 71AD3CD5302FAAD5006D5847 /* Copper */;
+			targetProxy = 896EB885155C4FA6E502D81D /* PBXContainerItemProxy */;
+		};
+		BEBA09E76AE1E48919E8DCC4 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = openEMS;
+			target = D621ED7A33B5BA1305450055 /* openEMS */;
+			targetProxy = 6446391B4ED77176B8F180CF /* PBXContainerItemProxy */;
+		};
+		C0A71A000000000000000003 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 71B4EE8D304224C5002796EC /* CopperUtils */;
+			targetProxy = C0A71A000000000000000002 /* PBXContainerItemProxy */;
+		};
+		C3F4DC29303EF0123F35E8D7 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 0E08621C93A1CC737D3F6A93 /* libkiems */;
+			targetProxy = 2B6AC32E5A944169FDB85409 /* PBXContainerItemProxy */;
+		};
+		C60105A162FBA5BFFAF43ADC /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = CSXCAD;
+			target = 917B3FABD7921813B7A8BF98 /* CSXCAD */;
+			targetProxy = B8F896C59FEA2EF0C5CB5610 /* PBXContainerItemProxy */;
+		};
+		C826A6FCE48478DCB74F2134 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = HDF5;
+			target = E71870C603134ADA6EEEA950 /* HDF5 */;
+			targetProxy = 73C8EB5BB682575EC87A171A /* PBXContainerItemProxy */;
+		};
+		D13B427235532B3778A56070 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = openEMS;
+			target = D621ED7A33B5BA1305450055 /* openEMS */;
+			targetProxy = 7E56F2D164F6B98CEEAA9805 /* PBXContainerItemProxy */;
+		};
+		E454C46B412251B0E98F9587 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = CSXCAD;
+			target = 917B3FABD7921813B7A8BF98 /* CSXCAD */;
+			targetProxy = 7723B54E7BD6FF81C173293B /* PBXContainerItemProxy */;
+		};
+		EDFF827E7F22C9DA08D011AC /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5034717F4A638C8CC653DE57 /* kiems_fdtd_worker */;
+			targetProxy = 1540871D4E58EBEB434F4E6A /* PBXContainerItemProxy */;
+		};
+		F20D3A93C41E65474395766B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = CSXCAD;
+			target = 917B3FABD7921813B7A8BF98 /* CSXCAD */;
+			targetProxy = 8D3D6A97ED03CCE0E7C3E1CD /* PBXContainerItemProxy */;
+		};
+		FD8F50719794D9B81C996635 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 0E08621C93A1CC737D3F6A93 /* libkiems */;
+			targetProxy = 7F0606D12D7446556C7E5509 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		1399001CAAB5D03AD37A9A17 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				PRODUCT_NAME = HDF5;
+			};
+			name = Debug;
+		};
+		20964BB945CB5768EF92486D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				GENERATE_INFOPLIST_FILE = YES;
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.tomdavie.remember-remember";
+				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				VERSIONING_SYSTEM = "apple-generic";
+				VERSION_INFO_PREFIX = "";
+			};
+			name = Debug;
+		};
+		26BF06E54C44F2408EBAEC10 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/libkiems",
+					"$(SRCROOT)/Copper",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@loader_path",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)",
+				);
+				OTHER_LDFLAGS = "$(inherited)";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		2C2EBF8FC2F3ECDD99E41EF9 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_CXX_LANGUAGE_STANDARD = "c++23";
+				CODE_SIGN_STYLE = Automatic;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/Copper";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@loader_path",
+				);
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SYSTEM_HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/openEMS",
+					"$(SRCROOT)/CSXCAD/CSXCAD",
+					"$(BUILT_PRODUCTS_DIR)/hdf5-local-prefix/include",
+				);
+			};
+			name = Debug;
+		};
+		3B3A8740FB964FE7CE721A59 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				OTHER_LDFLAGS = (
+					"-lmatplot",
+					"-lpng16",
+					"-lz",
+					"-lClipper2",
+				);
+				PRODUCT_NAME = openEMS;
+			};
+			name = Release;
+		};
+		54329134C4B1132CA2C1E347 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				GENERATE_INFOPLIST_FILE = YES;
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.tomdavie.remember-remember";
+				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				VERSIONING_SYSTEM = "apple-generic";
+				VERSION_INFO_PREFIX = "";
+			};
+			name = Release;
+		};
+		5B9776B955F328B8143534B4 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_CXX_LANGUAGE_STANDARD = "c++23";
+				CODE_SIGN_STYLE = Automatic;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/Copper";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@loader_path",
+				);
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SYSTEM_HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/openEMS",
+					"$(SRCROOT)/CSXCAD/CSXCAD",
+					"$(BUILT_PRODUCTS_DIR)/hdf5-local-prefix/include",
+				);
+			};
+			name = Release;
+		};
+		5F377DF0AD36807A9154C726 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/libkiems",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)",
+				);
+				OTHER_LDFLAGS = "$(inherited)";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = Debug;
+		};
+		62807348053ECB7AA6437231 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/libkiems",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)",
+				);
+				OTHER_LDFLAGS = "$(inherited)";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = Release;
+		};
+		6A59402640FC101257497CAC /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_CXX_LANGUAGE_STANDARD = "c++20";
+				CLANG_WARN_DOCUMENTATION_COMMENTS = NO;
+				CLANG_WARN_FLOAT_CONVERSION = NO;
+				CLANG_WARN_IMPLICIT_SIGN_CONVERSION = NO;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = NO;
+				CLANG_WARN_SUSPICIOUS_IMPLICIT_CONVERSION = NO;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = NO;
+				CODE_SIGN_STYLE = Automatic;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					BOOST_ATOMIC_DYN_LINK,
+					BOOST_ATOMIC_NO_LIB,
+					BOOST_CHARCONV_DYN_LINK,
+					BOOST_CHARCONV_NO_LIB,
+					BOOST_CHRONO_DYN_LINK,
+					BOOST_CHRONO_NO_LIB,
+					BOOST_CONTAINER_DYN_LINK,
+					BOOST_CONTAINER_NO_LIB,
+					BOOST_DATE_TIME_DYN_LINK,
+					BOOST_DATE_TIME_NO_LIB,
+					BOOST_LOCALE_DYN_LINK,
+					BOOST_LOCALE_NO_LIB,
+					BOOST_THREAD_DYN_LINK,
+					BOOST_THREAD_NO_LIB,
+					"BS_THREAD_POOL_NATIVE_EXTENSIONS=1",
+					GLM_FORCE_CTOR_INIT,
+					"GL_SILENCE_DEPRECATION=1",
+					HAVE_STDINT_H,
+					"JSON_HAS_FILESYSTEM=0",
+					"KIAPI_IMPORTEXPORT=APIIMPORT",
+					KICAD_BUILD_ARCH_ARM,
+					"KICAD_CONFIG_DIR=kicad",
+					KICAD_SIGNAL_INTEGRITY,
+					KICAD_UPDATE_CHECK,
+					NANODBC_ENABLE_UNICODE,
+					PCBNEW,
+					PROTOBUF_USE_DLLS,
+					USINGZ,
+					WXUSINGDLL,
+					"_FILE_OFFSET_BITS=64",
+					__WXMAC__,
+					__WXOSX_COCOA__,
+					__WXOSX__,
+					"wxDEBUG_LEVEL=0",
+					NDEBUG,
+				);
+				GCC_TREAT_WARNINGS_AS_ERRORS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = NO;
+				GCC_WARN_ABOUT_MISSING_PROTOTYPES = NO;
+				GCC_WARN_PEDANTIC = NO;
+				GCC_WARN_SHADOW = NO;
+				GCC_WARN_UNINITIALIZED_AUTOS = NO;
+				OTHER_CPLUSPLUSFLAGS = (
+					"$(inherited)",
+					"-fstandalone-debug",
+					"-Wall",
+					"-Wsuggest-override",
+					"-Winconsistent-missing-override",
+					"-Werror=vla",
+					"-Wimplicit-fallthrough",
+					"-Werror=return-type",
+					"-Wshadow",
+					"-Wsign-compare",
+					"-Wmissing-field-initializers",
+					"-Wempty-body",
+					"-Wreorder",
+					"-Wmismatched-tags",
+					"-Wpessimizing-move",
+					"-Wredundant-move",
+					"-Wno-psabi",
+					"-fPIC",
+					"-fvisibility=hidden",
+					"-fvisibility-inlines-hidden",
+					"-ftrivial-auto-var-init=zero",
+					"-include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/api/../include/import_export.h",
+				);
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SYSTEM_HEADER_SEARCH_PATHS = (
+					/opt/homebrew/include,
+					/opt/homebrew/include/cairo,
+					"/opt/homebrew/include/pixman-1",
+					/Library/Frameworks/Mono.framework/Headers,
+					/opt/homebrew/include/freetype2,
+					/opt/homebrew/Cellar/harfbuzz/14.3.0/include/harfbuzz,
+					/opt/homebrew/opt/opencascade/include/opencascade,
+					"/opt/homebrew/lib/wx/include/osx_cocoa-unicode-3.2",
+					"/opt/homebrew/include/wx-3.2",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/nanodbc",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/eigen",
+					"/Users/tdavie/Documents/Simulation/kicad-11/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/.",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./dialogs",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./autorouter",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./generators",
+					"/Users/tdavie/Documents/Simulation/kicad-11/3d-viewer",
+					"/Users/tdavie/Documents/Simulation/kicad-11/3d-viewer/dialogs",
+					"/Users/tdavie/Documents/Simulation/kicad-11/common",
+					"/Users/tdavie/Documents/Simulation/kicad-11/common/dialogs",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./exporters",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./importers",
+					"/Users/tdavie/Documents/Simulation/kicad-11/utils/idftools",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./specctra_import_export",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/pcbnew",
+					"/Users/tdavie/Documents/Simulation/kicad-11/common/.",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/argparse/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/api/./cpp",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/api/./cpp/api",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/pegtl",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/magic_enum/magic_enum",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/libcontext",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/kimath/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/core/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/clipper2/Clipper2Lib/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/rtree",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/kinng/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/kiplatform/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/nlohmann_json",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/snap/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/dynamic_bitset",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/libpopcnt",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/expected/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/picosha2",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/json_schema_validator",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/common",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/fast_float/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/fmt/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/rapidcsv",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/sexpr/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/glad/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/thread-pool",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/include/gal/shaders",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/nanosvg",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/dxflib_qcad",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/tinyspline_lib",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/compoundfilereader",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/rectpack2d",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/gzip-hpp",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/nanoflann",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/planegcs",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/pcb_io/altium",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/3dxware_sdk/inc",
+					"$(inherited)",
+				);
+			};
+			name = Debug;
+		};
+		71AD229730263516006D5847 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ARCHS = arm64;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "c++23";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_ASSIGN_ENUM = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_FLOAT_CONVERSION = YES_ERROR;
+				CLANG_WARN_IMPLICIT_SIGN_CONVERSION = YES_ERROR;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_SEMICOLON_BEFORE_METHOD_BODY = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_IMPLICIT_CONVERSION = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = c23;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_TREAT_WARNINGS_AS_ERRORS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_MISSING_FIELD_INITIALIZERS = YES;
+				GCC_WARN_ABOUT_MISSING_NEWLINE = YES;
+				GCC_WARN_ABOUT_MISSING_PROTOTYPES = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_PEDANTIC = YES;
+				GCC_WARN_SHADOW = YES;
+				GCC_WARN_SIGN_COMPARE = YES;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					/opt/homebrew/lib,
+					"$(BUILT_PRODUCTS_DIR)",
+					"@loader_path",
+					"@executable_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					/opt/homebrew/lib,
+					"$(BUILT_PRODUCTS_DIR)",
+				);
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				OTHER_LDFLAGS = "";
+				SDKROOT = macosx;
+				SYSTEM_HEADER_SEARCH_PATHS = (
+					/opt/homebrew/include,
+					"$(SRCROOT)/CSXCAD",
+					"$(SRCROOT)/vendor",
+				);
+			};
+			name = Debug;
+		};
+		71AD229830263516006D5847 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ARCHS = arm64;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "c++23";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_ASSIGN_ENUM = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_FLOAT_CONVERSION = YES_ERROR;
+				CLANG_WARN_IMPLICIT_SIGN_CONVERSION = YES_ERROR;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_SEMICOLON_BEFORE_METHOD_BODY = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_IMPLICIT_CONVERSION = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = c23;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"NDEBUG=1",
+				);
+				GCC_TREAT_WARNINGS_AS_ERRORS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_MISSING_FIELD_INITIALIZERS = YES;
+				GCC_WARN_ABOUT_MISSING_NEWLINE = YES;
+				GCC_WARN_ABOUT_MISSING_PROTOTYPES = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_PEDANTIC = YES;
+				GCC_WARN_SHADOW = YES;
+				GCC_WARN_SIGN_COMPARE = YES;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					/opt/homebrew/lib,
+					"$(BUILT_PRODUCTS_DIR)",
+					"@loader_path",
+					"@executable_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					/opt/homebrew/lib,
+					"$(BUILT_PRODUCTS_DIR)",
+				);
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				OTHER_LDFLAGS = "";
+				SDKROOT = macosx;
+				SYSTEM_HEADER_SEARCH_PATHS = (
+					/opt/homebrew/include,
+					"$(SRCROOT)/CSXCAD",
+					"$(SRCROOT)/vendor",
+				);
+			};
+			name = Release;
+		};
+		71AD229A30263516006D5847 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/libkiems",
+					"$(SRCROOT)/Copper",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@loader_path",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)",
+				);
+				OTHER_LDFLAGS = "$(inherited)";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = Debug;
+		};
+		71AD229B30263516006D5847 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/libkiems",
+					"$(SRCROOT)/Copper",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@loader_path",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)",
+				);
+				OTHER_LDFLAGS = "$(inherited)";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = Release;
+		};
+		71AD3CEF302FAAD5006D5847 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_CXX_LANGUAGE_STANDARD = "c++23";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_MODULE_VERIFIER = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
+				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 c++23";
+				OTHER_LDFLAGS = "$(inherited)";
+				PRODUCT_BUNDLE_IDENTIFIER = com.tomdavie.Copper;
+				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SYSTEM_HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/openEMS",
+					"$(SRCROOT)/CSXCAD/CSXCAD",
+					"$(BUILT_PRODUCTS_DIR)/hdf5-local-prefix/include",
+					"$(BUILT_PRODUCTS_DIR)/blosc2-local-prefix/include",
+				);
+				VERSIONING_SYSTEM = "apple-generic";
+				VERSION_INFO_PREFIX = "";
+			};
+			name = Debug;
+		};
+		71AD3CF0302FAAD5006D5847 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_CXX_LANGUAGE_STANDARD = "c++23";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_MODULE_VERIFIER = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
+				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 c++23";
+				OTHER_LDFLAGS = "$(inherited)";
+				PRODUCT_BUNDLE_IDENTIFIER = com.tomdavie.Copper;
+				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SYSTEM_HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/openEMS",
+					"$(SRCROOT)/CSXCAD/CSXCAD",
+					"$(BUILT_PRODUCTS_DIR)/hdf5-local-prefix/include",
+					"$(BUILT_PRODUCTS_DIR)/blosc2-local-prefix/include",
+				);
+				VERSIONING_SYSTEM = "apple-generic";
+				VERSION_INFO_PREFIX = "";
+			};
+			name = Release;
+		};
+		71AD3CF2302FAAD5006D5847 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tomdavie.CopperTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/KiEMS.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/KiEMS";
+			};
+			name = Debug;
+		};
+		71AD3CF3302FAAD5006D5847 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tomdavie.CopperTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/KiEMS.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/KiEMS";
+			};
+			name = Release;
+		};
+		71B4EE96304224C5002796EC /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CODE_SIGN_STYLE = Automatic;
+				DEFINES_MODULE = YES;
+				EXECUTABLE_PREFIX = lib;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_ENABLE_CPP_EXCEPTIONS = YES;
+				GCC_ENABLE_CPP_RTTI = YES;
+				OTHER_LDFLAGS = "";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		71B4EE97304224C5002796EC /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CODE_SIGN_STYLE = Automatic;
+				DEFINES_MODULE = YES;
+				EXECUTABLE_PREFIX = lib;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_ENABLE_CPP_EXCEPTIONS = YES;
+				GCC_ENABLE_CPP_RTTI = YES;
+				OTHER_LDFLAGS = "";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		76CF780F59412846FB761B04 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)",
+					"$(SRCROOT)/libkiems",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lClipper2",
+					"-lmatplot",
+				);
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = Release;
+		};
+		9DC9E0D3568EB7DF36EC7116 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)",
+					"$(SRCROOT)/libkiems",
+				);
+				INFOPLIST_FILE = KiEMS/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lClipper2",
+					"-lmatplot",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.tomdavie.kiems-studio";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "KiEMS/Bridge/KiEMS-Bridging-Header.h";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		9F5AE20F03C71D682E6316EB /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				OTHER_LDFLAGS = (
+					"-lmatplot",
+					"-lpng16",
+					"-lz",
+					"-lClipper2",
+				);
+				PRODUCT_NAME = openEMS;
+			};
+			name = Debug;
+		};
+		A79FE867634EFFF25821E2AA /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_CXX_LANGUAGE_STANDARD = "c++20";
+				CLANG_WARN_DOCUMENTATION_COMMENTS = NO;
+				CLANG_WARN_FLOAT_CONVERSION = NO;
+				CLANG_WARN_IMPLICIT_SIGN_CONVERSION = NO;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = NO;
+				CLANG_WARN_SUSPICIOUS_IMPLICIT_CONVERSION = NO;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = NO;
+				CODE_SIGN_STYLE = Automatic;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					BOOST_ATOMIC_DYN_LINK,
+					BOOST_ATOMIC_NO_LIB,
+					BOOST_CHARCONV_DYN_LINK,
+					BOOST_CHARCONV_NO_LIB,
+					BOOST_CHRONO_DYN_LINK,
+					BOOST_CHRONO_NO_LIB,
+					BOOST_CONTAINER_DYN_LINK,
+					BOOST_CONTAINER_NO_LIB,
+					BOOST_DATE_TIME_DYN_LINK,
+					BOOST_DATE_TIME_NO_LIB,
+					BOOST_LOCALE_DYN_LINK,
+					BOOST_LOCALE_NO_LIB,
+					BOOST_THREAD_DYN_LINK,
+					BOOST_THREAD_NO_LIB,
+					"BS_THREAD_POOL_NATIVE_EXTENSIONS=1",
+					GLM_FORCE_CTOR_INIT,
+					"GL_SILENCE_DEPRECATION=1",
+					HAVE_STDINT_H,
+					"JSON_HAS_FILESYSTEM=0",
+					"KIAPI_IMPORTEXPORT=APIIMPORT",
+					KICAD_BUILD_ARCH_ARM,
+					"KICAD_CONFIG_DIR=kicad",
+					KICAD_SIGNAL_INTEGRITY,
+					KICAD_UPDATE_CHECK,
+					NANODBC_ENABLE_UNICODE,
+					PCBNEW,
+					PROTOBUF_USE_DLLS,
+					USINGZ,
+					WXUSINGDLL,
+					"_FILE_OFFSET_BITS=64",
+					__WXMAC__,
+					__WXOSX_COCOA__,
+					__WXOSX__,
+					"wxDEBUG_LEVEL=0",
+					NDEBUG,
+				);
+				GCC_TREAT_WARNINGS_AS_ERRORS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = NO;
+				GCC_WARN_ABOUT_MISSING_PROTOTYPES = NO;
+				GCC_WARN_PEDANTIC = NO;
+				GCC_WARN_SHADOW = NO;
+				GCC_WARN_UNINITIALIZED_AUTOS = NO;
+				OTHER_CPLUSPLUSFLAGS = (
+					"$(inherited)",
+					"-fstandalone-debug",
+					"-Wall",
+					"-Wsuggest-override",
+					"-Winconsistent-missing-override",
+					"-Werror=vla",
+					"-Wimplicit-fallthrough",
+					"-Werror=return-type",
+					"-Wshadow",
+					"-Wsign-compare",
+					"-Wmissing-field-initializers",
+					"-Wempty-body",
+					"-Wreorder",
+					"-Wmismatched-tags",
+					"-Wpessimizing-move",
+					"-Wredundant-move",
+					"-Wno-psabi",
+					"-fPIC",
+					"-fvisibility=hidden",
+					"-fvisibility-inlines-hidden",
+					"-ftrivial-auto-var-init=zero",
+					"-include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/api/../include/import_export.h",
+				);
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SYSTEM_HEADER_SEARCH_PATHS = (
+					/opt/homebrew/include,
+					/opt/homebrew/include/cairo,
+					"/opt/homebrew/include/pixman-1",
+					/Library/Frameworks/Mono.framework/Headers,
+					/opt/homebrew/include/freetype2,
+					/opt/homebrew/Cellar/harfbuzz/14.3.0/include/harfbuzz,
+					/opt/homebrew/opt/opencascade/include/opencascade,
+					"/opt/homebrew/lib/wx/include/osx_cocoa-unicode-3.2",
+					"/opt/homebrew/include/wx-3.2",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/nanodbc",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/eigen",
+					"/Users/tdavie/Documents/Simulation/kicad-11/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/.",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./dialogs",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./autorouter",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./generators",
+					"/Users/tdavie/Documents/Simulation/kicad-11/3d-viewer",
+					"/Users/tdavie/Documents/Simulation/kicad-11/3d-viewer/dialogs",
+					"/Users/tdavie/Documents/Simulation/kicad-11/common",
+					"/Users/tdavie/Documents/Simulation/kicad-11/common/dialogs",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./exporters",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./importers",
+					"/Users/tdavie/Documents/Simulation/kicad-11/utils/idftools",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./specctra_import_export",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/pcbnew",
+					"/Users/tdavie/Documents/Simulation/kicad-11/common/.",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/argparse/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/api/./cpp",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/api/./cpp/api",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/pegtl",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/magic_enum/magic_enum",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/libcontext",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/kimath/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/core/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/clipper2/Clipper2Lib/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/rtree",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/kinng/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/kiplatform/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/nlohmann_json",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/snap/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/dynamic_bitset",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/libpopcnt",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/expected/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/picosha2",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/json_schema_validator",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/common",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/fast_float/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/fmt/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/rapidcsv",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/sexpr/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/glad/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/thread-pool",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/include/gal/shaders",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/nanosvg",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/dxflib_qcad",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/tinyspline_lib",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/compoundfilereader",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/rectpack2d",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/gzip-hpp",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/nanoflann",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/planegcs",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/pcb_io/altium",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/3dxware_sdk/inc",
+					"$(inherited)",
+				);
+			};
+			name = Release;
+		};
+		B0289571CC81A8F7D6745CC9 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_CXX_LANGUAGE_STANDARD = "c++23";
+				CLANG_WARN_DOCUMENTATION_COMMENTS = NO;
+				CLANG_WARN_FLOAT_CONVERSION = NO;
+				CLANG_WARN_IMPLICIT_SIGN_CONVERSION = NO;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = NO;
+				CLANG_WARN_SUSPICIOUS_IMPLICIT_CONVERSION = NO;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = NO;
+				CODE_SIGN_STYLE = Automatic;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					BOOST_ATOMIC_DYN_LINK,
+					BOOST_ATOMIC_NO_LIB,
+					BOOST_CHARCONV_DYN_LINK,
+					BOOST_CHARCONV_NO_LIB,
+					BOOST_CHRONO_DYN_LINK,
+					BOOST_CHRONO_NO_LIB,
+					BOOST_CONTAINER_DYN_LINK,
+					BOOST_CONTAINER_NO_LIB,
+					BOOST_DATE_TIME_DYN_LINK,
+					BOOST_DATE_TIME_NO_LIB,
+					BOOST_LOCALE_DYN_LINK,
+					BOOST_LOCALE_NO_LIB,
+					BOOST_THREAD_DYN_LINK,
+					BOOST_THREAD_NO_LIB,
+					"BS_THREAD_POOL_NATIVE_EXTENSIONS=1",
+					GLM_FORCE_CTOR_INIT,
+					"GL_SILENCE_DEPRECATION=1",
+					HAVE_STDINT_H,
+					"JSON_HAS_FILESYSTEM=0",
+					"KIAPI_IMPORTEXPORT=APIIMPORT",
+					KICAD_BUILD_ARCH_ARM,
+					"KICAD_CONFIG_DIR=kicad",
+					KICAD_SIGNAL_INTEGRITY,
+					KICAD_UPDATE_CHECK,
+					NANODBC_ENABLE_UNICODE,
+					PCBNEW,
+					PROTOBUF_USE_DLLS,
+					USINGZ,
+					WXUSINGDLL,
+					"_FILE_OFFSET_BITS=64",
+					__WXMAC__,
+					__WXOSX_COCOA__,
+					__WXOSX__,
+					"wxDEBUG_LEVEL=0",
+					NDEBUG,
+				);
+				GCC_TREAT_WARNINGS_AS_ERRORS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = NO;
+				GCC_WARN_ABOUT_MISSING_PROTOTYPES = NO;
+				GCC_WARN_PEDANTIC = NO;
+				GCC_WARN_SHADOW = NO;
+				GCC_WARN_UNINITIALIZED_AUTOS = NO;
+				HEADER_SEARCH_PATHS = (
+					"/Users/tdavie/Documents/Simulation/kicad-11/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/.",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./dialogs",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./autorouter",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./generators",
+					"/Users/tdavie/Documents/Simulation/kicad-11/3d-viewer",
+					"/Users/tdavie/Documents/Simulation/kicad-11/3d-viewer/dialogs",
+					"/Users/tdavie/Documents/Simulation/kicad-11/common",
+					"/Users/tdavie/Documents/Simulation/kicad-11/common/dialogs",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./exporters",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./importers",
+					"/Users/tdavie/Documents/Simulation/kicad-11/utils/idftools",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./specctra_import_export",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/pcbnew",
+					"/Users/tdavie/Documents/Simulation/kicad-11/common/.",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/argparse/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/api/./cpp",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/api/./cpp/api",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/pegtl",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/magic_enum/magic_enum",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/libcontext",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/kimath/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/core/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/clipper2/Clipper2Lib/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/rtree",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/kinng/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/kiplatform/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/nlohmann_json",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/snap/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/dynamic_bitset",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/libpopcnt",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/expected/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/picosha2",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/json_schema_validator",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/common",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/fast_float/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/fmt/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/rapidcsv",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/sexpr/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/glad/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/thread-pool",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/include/gal/shaders",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/nanosvg",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/dxflib_qcad",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/tinyspline_lib",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/compoundfilereader",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/rectpack2d",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/gzip-hpp",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/nanoflann",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/planegcs",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/pcb_io/altium",
+					"/opt/homebrew/include/wx-3.2",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/3dxware_sdk/inc",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/3dxware_sdk/inc",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)",
+				);
+				OTHER_CPLUSPLUSFLAGS = (
+					"$(inherited)",
+					"-fstandalone-debug",
+					"-Wall",
+					"-Wsuggest-override",
+					"-Winconsistent-missing-override",
+					"-Werror=vla",
+					"-Wimplicit-fallthrough",
+					"-Werror=return-type",
+					"-Wshadow",
+					"-Wsign-compare",
+					"-Wmissing-field-initializers",
+					"-Wempty-body",
+					"-Wreorder",
+					"-Wmismatched-tags",
+					"-Wpessimizing-move",
+					"-Wredundant-move",
+					"-Wno-psabi",
+					"-fPIC",
+					"-fvisibility=hidden",
+					"-fvisibility-inlines-hidden",
+					"-ftrivial-auto-var-init=zero",
+					"-include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/api/../include/import_export.h",
+				);
+				OTHER_LDFLAGS = (
+					"-Wl,-undefined,dynamic_lookup",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/pcbnew/CMakeFiles/pcbnew_kiface_objects.dir/api/api_handler_pcb.cpp.o",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/pcbnew/CMakeFiles/pcbnew_kiface_objects.dir/api/api_handler_board.cpp.o",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/pcbnew/CMakeFiles/pcbnew_kiface_objects.dir/api/headless_pcb_context.cpp.o",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/pcbnew/CMakeFiles/pcbnew_kiface_objects.dir/api/pcb_context.cpp.o",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/common/libpcbcommon.a",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/libs/kiplatform/libkiplatform.a",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/common/libcommon.a",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/libs/core/libcore.a",
+					"-L/opt/homebrew/lib",
+					"-framework",
+					IOKit,
+					"-framework",
+					Carbon,
+					"-framework",
+					Cocoa,
+					"-framework",
+					QuartzCore,
+					"-framework",
+					AudioToolbox,
+					"-framework",
+					System,
+					"-framework",
+					OpenGL,
+					"-lwx_osx_cocoau_gl-3.2",
+					"-lwx_osx_cocoau_aui-3.2",
+					"-lwx_osx_cocoau_html-3.2",
+					"-lwx_osx_cocoau_core-3.2",
+					"-lwx_baseu_net-3.2",
+					"-lwx_baseu-3.2",
+					"-lwx_osx_cocoau_propgrid-3.2",
+					"-lwx_baseu_xml-3.2",
+					"-lwx_osx_cocoau_stc-3.2",
+					"-lwx_osx_cocoau_richtext-3.2",
+					"-lwx_osx_cocoau_webview-3.2",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/thirdparty/planegcs/libplanegcs.a",
+					/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib/libz.tbd,
+					/opt/homebrew/lib/libTKBinL.dylib,
+					/opt/homebrew/lib/libTKBin.dylib,
+					/opt/homebrew/lib/libTKBinTObj.dylib,
+					/opt/homebrew/lib/libTKBinXCAF.dylib,
+					/opt/homebrew/lib/libTKBool.dylib,
+					/opt/homebrew/lib/libTKBO.dylib,
+					/opt/homebrew/lib/libTKBRep.dylib,
+					/opt/homebrew/lib/libTKCAF.dylib,
+					/opt/homebrew/lib/libTKCDF.dylib,
+					/opt/homebrew/lib/libTKernel.dylib,
+					/opt/homebrew/lib/libTKFeat.dylib,
+					/opt/homebrew/lib/libTKFillet.dylib,
+					/opt/homebrew/lib/libTKG2d.dylib,
+					/opt/homebrew/lib/libTKG3d.dylib,
+					/opt/homebrew/lib/libTKGeomAlgo.dylib,
+					/opt/homebrew/lib/libTKGeomBase.dylib,
+					/opt/homebrew/lib/libTKHLR.dylib,
+					/opt/homebrew/lib/libTKLCAF.dylib,
+					/opt/homebrew/lib/libTKMath.dylib,
+					/opt/homebrew/lib/libTKMesh.dylib,
+					/opt/homebrew/lib/libTKOffset.dylib,
+					/opt/homebrew/lib/libTKPrim.dylib,
+					/opt/homebrew/lib/libTKRWMesh.dylib,
+					/opt/homebrew/lib/libTKService.dylib,
+					/opt/homebrew/lib/libTKShHealing.dylib,
+					/opt/homebrew/lib/libTKTObj.dylib,
+					/opt/homebrew/lib/libTKTopAlgo.dylib,
+					/opt/homebrew/lib/libTKV3d.dylib,
+					/opt/homebrew/lib/libTKXCAF.dylib,
+					/opt/homebrew/lib/libTKXMesh.dylib,
+					/opt/homebrew/lib/libTKXmlL.dylib,
+					/opt/homebrew/lib/libTKXml.dylib,
+					/opt/homebrew/lib/libTKXmlTObj.dylib,
+					/opt/homebrew/lib/libTKXmlXCAF.dylib,
+					/opt/homebrew/lib/libTKXSBase.dylib,
+					/opt/homebrew/lib/libTKDEIGES.dylib,
+					/opt/homebrew/lib/libTKDEGLTF.dylib,
+					/opt/homebrew/lib/libTKDESTEP.dylib,
+					/opt/homebrew/lib/libTKDESTL.dylib,
+					/opt/homebrew/lib/libTKDEVRML.dylib,
+					/opt/homebrew/lib/libTKDEPLY.dylib,
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/kicad/KiCad.app/Contents/Frameworks/libkigal.10.99.0.dylib",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/kicad/KiCad.app/Contents/Frameworks/libkicommon.10.99.0.dylib",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/kicad/KiCad.app/Contents/Frameworks/libkiapi.10.99.0.dylib",
+					/opt/homebrew/lib/libprotobuf.35.1.0.dylib,
+					/opt/homebrew/lib/libabsl_log_internal_check_op.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_die_if_null.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_internal_conditions.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_internal_message.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_internal_nullguard.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_examine_stack.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_internal_format.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_internal_structured_proto.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_internal_log_sink_set.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_sink.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_entry.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_internal_proto.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_flags_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_flags_marshalling.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_flags_reflection.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_flags_config.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_flags_program_name.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_flags_private_handle_accessor.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_flags_commandlineflag.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_flags_commandlineflag_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_initialize.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_internal_globals.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_globals.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_vlog_config_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_internal_fnmatch.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_raw_hash_set.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_hashtablez_sampler.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_random_distributions.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_random_seed_sequences.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_random_internal_entropy_pool.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_random_internal_randen.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_random_internal_randen_hwaes.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_random_internal_randen_hwaes_impl.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_random_internal_randen_slow.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_random_internal_platform.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_random_internal_seed_material.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_random_seed_gen_exception.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_statusor.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_status.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_cord.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_cordz_info.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_cord_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_cordz_functions.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_exponential_biased.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_cordz_handle.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_crc_cord_state.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_crc32c.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_crc_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_crc_cpu_detect.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_leak_check.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_strerror.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_str_format_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_synchronization.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_stacktrace.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_borrowed_fixup_buffer.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_hash.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_city.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_symbolize.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_debugging_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_demangle_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_demangle_rust.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_decode_rust_punycode.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_utf8_for_code_point.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_graphcycles_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_kernel_timeout_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_malloc_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_tracing_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_time.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_civil_time.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_time_zone.2601.0.0.dylib,
+					"-Wl,-framework,CoreFoundation",
+					/opt/homebrew/lib/libutf8_validity.35.1.0.dylib,
+					/opt/homebrew/lib/libabsl_strings.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_int128.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_strings_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_base.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_spinlock_wait.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_throw_delegate.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_raw_logging_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_severity.2601.0.0.dylib,
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/thirdparty/json_schema_validator/libnlohmann_json_schema_validator.a",
+					/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib/libcurl.tbd,
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/libs/sexpr/libsexpr.a",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/thirdparty/glad/libglad.a",
+					/opt/homebrew/lib/libzstd.dylib,
+					/opt/homebrew/Cellar/libgit2/1.9.6/lib/libgit2.dylib,
+					/opt/homebrew/Cellar/cairo/1.18.4/lib/libcairo.dylib,
+					"/opt/homebrew/Cellar/pixman/0.46.4/lib/libpixman-1.dylib",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/libs/kinng/libkinng.a",
+					/opt/homebrew/lib/libnng.dylib,
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/thirdparty/fmt/libfmt.a",
+					/opt/homebrew/lib/libfreetype.dylib,
+					/opt/homebrew/Cellar/harfbuzz/14.3.0/lib/libharfbuzz.dylib,
+					/opt/homebrew/lib/libfontconfig.dylib,
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/thirdparty/libcontext/liblibcontext.a",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/libs/snap/libsnap.a",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/thirdparty/nanosvg/libnanosvg.a",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/thirdparty/dxflib_qcad/libdxflib_qcad.a",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/thirdparty/tinyspline_lib/libtinyspline_lib.a",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/thirdparty/nanodbc/libnanodbc.a",
+					"-lodbc",
+					"-L/opt/homebrew/Cellar/unixodbc/2.3.14/lib",
+					/opt/homebrew/lib/libboost_locale.dylib,
+					/opt/homebrew/lib/libboost_charconv.dylib,
+					/opt/homebrew/lib/libboost_thread.dylib,
+					/opt/homebrew/lib/libboost_atomic.dylib,
+					/opt/homebrew/lib/libboost_chrono.dylib,
+					/opt/homebrew/lib/libboost_container.dylib,
+					/opt/homebrew/lib/libboost_date_time.dylib,
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/thirdparty/delaunator/libdelaunator.a",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/thirdparty/zint/libzint.a",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/libs/kimath/libkimath.a",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/thirdparty/clipper2/libclipper2.a",
+					"-lm",
+					"-framework",
+					AppKit,
+					"-framework",
+					CoreData,
+					"-framework",
+					Foundation,
+					"-framework",
+					PDFKit,
+					"-framework",
+					WebKit,
+					"-framework",
+					CFNetwork,
+					"-framework",
+					CoreFoundation,
+					"-framework",
+					Security,
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/thirdparty/3dxware_sdk/libTDxNavlib.a",
+					"-Wl,-rpath,/Users/tdavie/Documents/Simulation/kicad-11/build/kicad/KiCad.app/Contents/Frameworks",
+					"-Wl,-rpath,/opt/homebrew/Cellar/libgit2/1.9.6/lib",
+					"-Wl,-rpath,/opt/homebrew/Cellar/cairo/1.18.4/lib",
+					"-Wl,-rpath,/opt/homebrew/Cellar/pixman/0.46.4/lib",
+					"-Wl,-rpath,/opt/homebrew/Cellar/harfbuzz/14.3.0/lib",
+					"-Wl,-rpath,/opt/homebrew/Cellar/unixodbc/2.3.14/lib",
+				);
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SYSTEM_HEADER_SEARCH_PATHS = (
+					/opt/homebrew/include,
+					/opt/homebrew/include/cairo,
+					"/opt/homebrew/include/pixman-1",
+					/Library/Frameworks/Mono.framework/Headers,
+					/opt/homebrew/include/freetype2,
+					/opt/homebrew/Cellar/harfbuzz/14.3.0/include/harfbuzz,
+					/opt/homebrew/opt/opencascade/include/opencascade,
+					"/opt/homebrew/lib/wx/include/osx_cocoa-unicode-3.2",
+					"/opt/homebrew/include/wx-3.2",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/nanodbc",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/eigen",
+					"/Users/tdavie/Documents/Simulation/kicad-11/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/.",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./dialogs",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./autorouter",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./generators",
+					"/Users/tdavie/Documents/Simulation/kicad-11/3d-viewer",
+					"/Users/tdavie/Documents/Simulation/kicad-11/3d-viewer/dialogs",
+					"/Users/tdavie/Documents/Simulation/kicad-11/common",
+					"/Users/tdavie/Documents/Simulation/kicad-11/common/dialogs",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./exporters",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./importers",
+					"/Users/tdavie/Documents/Simulation/kicad-11/utils/idftools",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./specctra_import_export",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/pcbnew",
+					"/Users/tdavie/Documents/Simulation/kicad-11/common/.",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/argparse/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/api/./cpp",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/api/./cpp/api",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/pegtl",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/magic_enum/magic_enum",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/libcontext",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/kimath/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/core/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/clipper2/Clipper2Lib/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/rtree",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/kinng/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/kiplatform/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/nlohmann_json",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/snap/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/dynamic_bitset",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/libpopcnt",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/expected/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/picosha2",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/json_schema_validator",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/common",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/fast_float/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/fmt/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/rapidcsv",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/sexpr/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/glad/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/thread-pool",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/include/gal/shaders",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/nanosvg",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/dxflib_qcad",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/tinyspline_lib",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/compoundfilereader",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/rectpack2d",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/gzip-hpp",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/nanoflann",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/planegcs",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/pcb_io/altium",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/3dxware_sdk/inc",
+					"$(inherited)",
+				);
+			};
+			name = Debug;
+		};
+		C674A4B6897CD58CA339D0D9 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)",
+					"$(SRCROOT)/libkiems",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lClipper2",
+					"-lmatplot",
+				);
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = Debug;
+		};
+		CB79A2CB4F47AF8A3E194FC4 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				SYSTEM_HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)",
+				);
+			};
+			name = Release;
+		};
+		CC28A0BE6C7D349F5B768BF0 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				SYSTEM_HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)",
+				);
+			};
+			name = Debug;
+		};
+		D6ACEBA0EED715AFA5287BAE /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/libkiems",
+					"$(SRCROOT)/Copper",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@loader_path",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)",
+				);
+				OTHER_LDFLAGS = "$(inherited)";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		E8F2CC8C444E342D1757FF48 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_CXX_LANGUAGE_STANDARD = "c++20";
+				CLANG_WARN_EVERYTHING = NO;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				EXECUTABLE_PREFIX = lib;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"GIT_VERSION=\\\"vendored\\\"",
+					BUILD_CSXCAD_LIB,
+					TIXML_USE_STL,
+					H5_USE_16_API,
+				);
+				GCC_TREAT_WARNINGS_AS_ERRORS = NO;
+				HEADER_SEARCH_PATHS = (
+					/Users/tdavie/opt/openEMS/include,
+					/opt/homebrew/include,
+					"/opt/homebrew/include/vtk-9.6",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					/Users/tdavie/opt/openEMS/lib,
+					/opt/homebrew/opt/hdf5/lib,
+					/opt/homebrew/opt/gmp/lib,
+					/opt/homebrew/opt/mpfr/lib,
+					/opt/homebrew/opt/vtk/lib,
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				OTHER_CPLUSPLUSFLAGS = (
+					"$(inherited)",
+					"-frounding-math",
+				);
+				OTHER_LDFLAGS = (
+					"-lfparser",
+					"-ltinyxml",
+					"-lhdf5",
+					"-lhdf5_hl",
+					"-lgmp",
+					"-lgmpxx",
+					"-lmpfr",
+					"-lvtkIOGeometry-9.6",
+					"-lvtkIOPLY-9.6",
+					"-lvtkIOLegacy-9.6",
+					"-lvtkIOCellGrid-9.6",
+					"-lvtkFiltersCellGrid-9.6",
+					"-lvtkIOCore-9.6",
+					"-lvtkCommonExecutionModel-9.6",
+					"-lvtkCommonDataModel-9.6",
+					"-lvtkCommonTransforms-9.6",
+					"-lvtkCommonMath-9.6",
+					"-lvtkCommonCore-9.6",
+					"-lvtkfmt-9.6",
+					"-lvtkscn-9.6",
+					"-lvtktoken-9.6",
+					"-lvtksys-9.6",
+					"-lvtkkissfft-9.6",
+				);
+				PRODUCT_NAME = CSXCAD;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				WARNING_CFLAGS = "-w";
+			};
+			name = Debug;
+		};
+		EEA49829DD57398072E0E08B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)",
+					"$(SRCROOT)/libkiems",
+				);
+				INFOPLIST_FILE = KiEMS/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lClipper2",
+					"-lmatplot",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.tomdavie.kiems-studio";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "KiEMS/Bridge/KiEMS-Bridging-Header.h";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		F066C43374702408CFB59B5D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_CXX_LANGUAGE_STANDARD = "c++23";
+				CLANG_WARN_DOCUMENTATION_COMMENTS = NO;
+				CLANG_WARN_FLOAT_CONVERSION = NO;
+				CLANG_WARN_IMPLICIT_SIGN_CONVERSION = NO;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = NO;
+				CLANG_WARN_SUSPICIOUS_IMPLICIT_CONVERSION = NO;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = NO;
+				CODE_SIGN_STYLE = Automatic;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					BOOST_ATOMIC_DYN_LINK,
+					BOOST_ATOMIC_NO_LIB,
+					BOOST_CHARCONV_DYN_LINK,
+					BOOST_CHARCONV_NO_LIB,
+					BOOST_CHRONO_DYN_LINK,
+					BOOST_CHRONO_NO_LIB,
+					BOOST_CONTAINER_DYN_LINK,
+					BOOST_CONTAINER_NO_LIB,
+					BOOST_DATE_TIME_DYN_LINK,
+					BOOST_DATE_TIME_NO_LIB,
+					BOOST_LOCALE_DYN_LINK,
+					BOOST_LOCALE_NO_LIB,
+					BOOST_THREAD_DYN_LINK,
+					BOOST_THREAD_NO_LIB,
+					"BS_THREAD_POOL_NATIVE_EXTENSIONS=1",
+					GLM_FORCE_CTOR_INIT,
+					"GL_SILENCE_DEPRECATION=1",
+					HAVE_STDINT_H,
+					"JSON_HAS_FILESYSTEM=0",
+					"KIAPI_IMPORTEXPORT=APIIMPORT",
+					KICAD_BUILD_ARCH_ARM,
+					"KICAD_CONFIG_DIR=kicad",
+					KICAD_SIGNAL_INTEGRITY,
+					KICAD_UPDATE_CHECK,
+					NANODBC_ENABLE_UNICODE,
+					PCBNEW,
+					PROTOBUF_USE_DLLS,
+					USINGZ,
+					WXUSINGDLL,
+					"_FILE_OFFSET_BITS=64",
+					__WXMAC__,
+					__WXOSX_COCOA__,
+					__WXOSX__,
+					"wxDEBUG_LEVEL=0",
+					NDEBUG,
+				);
+				GCC_TREAT_WARNINGS_AS_ERRORS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = NO;
+				GCC_WARN_ABOUT_MISSING_PROTOTYPES = NO;
+				GCC_WARN_PEDANTIC = NO;
+				GCC_WARN_SHADOW = NO;
+				GCC_WARN_UNINITIALIZED_AUTOS = NO;
+				HEADER_SEARCH_PATHS = (
+					"/Users/tdavie/Documents/Simulation/kicad-11/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/.",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./dialogs",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./autorouter",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./generators",
+					"/Users/tdavie/Documents/Simulation/kicad-11/3d-viewer",
+					"/Users/tdavie/Documents/Simulation/kicad-11/3d-viewer/dialogs",
+					"/Users/tdavie/Documents/Simulation/kicad-11/common",
+					"/Users/tdavie/Documents/Simulation/kicad-11/common/dialogs",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./exporters",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./importers",
+					"/Users/tdavie/Documents/Simulation/kicad-11/utils/idftools",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./specctra_import_export",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/pcbnew",
+					"/Users/tdavie/Documents/Simulation/kicad-11/common/.",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/argparse/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/api/./cpp",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/api/./cpp/api",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/pegtl",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/magic_enum/magic_enum",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/libcontext",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/kimath/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/core/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/clipper2/Clipper2Lib/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/rtree",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/kinng/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/kiplatform/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/nlohmann_json",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/snap/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/dynamic_bitset",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/libpopcnt",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/expected/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/picosha2",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/json_schema_validator",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/common",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/fast_float/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/fmt/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/rapidcsv",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/sexpr/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/glad/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/thread-pool",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/include/gal/shaders",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/nanosvg",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/dxflib_qcad",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/tinyspline_lib",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/compoundfilereader",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/rectpack2d",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/gzip-hpp",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/nanoflann",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/planegcs",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/pcb_io/altium",
+					"/opt/homebrew/include/wx-3.2",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/3dxware_sdk/inc",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/3dxware_sdk/inc",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)",
+				);
+				OTHER_CPLUSPLUSFLAGS = (
+					"$(inherited)",
+					"-fstandalone-debug",
+					"-Wall",
+					"-Wsuggest-override",
+					"-Winconsistent-missing-override",
+					"-Werror=vla",
+					"-Wimplicit-fallthrough",
+					"-Werror=return-type",
+					"-Wshadow",
+					"-Wsign-compare",
+					"-Wmissing-field-initializers",
+					"-Wempty-body",
+					"-Wreorder",
+					"-Wmismatched-tags",
+					"-Wpessimizing-move",
+					"-Wredundant-move",
+					"-Wno-psabi",
+					"-fPIC",
+					"-fvisibility=hidden",
+					"-fvisibility-inlines-hidden",
+					"-ftrivial-auto-var-init=zero",
+					"-include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/api/../include/import_export.h",
+				);
+				OTHER_LDFLAGS = (
+					"-Wl,-undefined,dynamic_lookup",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/pcbnew/CMakeFiles/pcbnew_kiface_objects.dir/api/api_handler_pcb.cpp.o",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/pcbnew/CMakeFiles/pcbnew_kiface_objects.dir/api/api_handler_board.cpp.o",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/pcbnew/CMakeFiles/pcbnew_kiface_objects.dir/api/headless_pcb_context.cpp.o",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/pcbnew/CMakeFiles/pcbnew_kiface_objects.dir/api/pcb_context.cpp.o",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/common/libpcbcommon.a",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/libs/kiplatform/libkiplatform.a",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/common/libcommon.a",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/libs/core/libcore.a",
+					"-L/opt/homebrew/lib",
+					"-framework",
+					IOKit,
+					"-framework",
+					Carbon,
+					"-framework",
+					Cocoa,
+					"-framework",
+					QuartzCore,
+					"-framework",
+					AudioToolbox,
+					"-framework",
+					System,
+					"-framework",
+					OpenGL,
+					"-lwx_osx_cocoau_gl-3.2",
+					"-lwx_osx_cocoau_aui-3.2",
+					"-lwx_osx_cocoau_html-3.2",
+					"-lwx_osx_cocoau_core-3.2",
+					"-lwx_baseu_net-3.2",
+					"-lwx_baseu-3.2",
+					"-lwx_osx_cocoau_propgrid-3.2",
+					"-lwx_baseu_xml-3.2",
+					"-lwx_osx_cocoau_stc-3.2",
+					"-lwx_osx_cocoau_richtext-3.2",
+					"-lwx_osx_cocoau_webview-3.2",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/thirdparty/planegcs/libplanegcs.a",
+					/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib/libz.tbd,
+					/opt/homebrew/lib/libTKBinL.dylib,
+					/opt/homebrew/lib/libTKBin.dylib,
+					/opt/homebrew/lib/libTKBinTObj.dylib,
+					/opt/homebrew/lib/libTKBinXCAF.dylib,
+					/opt/homebrew/lib/libTKBool.dylib,
+					/opt/homebrew/lib/libTKBO.dylib,
+					/opt/homebrew/lib/libTKBRep.dylib,
+					/opt/homebrew/lib/libTKCAF.dylib,
+					/opt/homebrew/lib/libTKCDF.dylib,
+					/opt/homebrew/lib/libTKernel.dylib,
+					/opt/homebrew/lib/libTKFeat.dylib,
+					/opt/homebrew/lib/libTKFillet.dylib,
+					/opt/homebrew/lib/libTKG2d.dylib,
+					/opt/homebrew/lib/libTKG3d.dylib,
+					/opt/homebrew/lib/libTKGeomAlgo.dylib,
+					/opt/homebrew/lib/libTKGeomBase.dylib,
+					/opt/homebrew/lib/libTKHLR.dylib,
+					/opt/homebrew/lib/libTKLCAF.dylib,
+					/opt/homebrew/lib/libTKMath.dylib,
+					/opt/homebrew/lib/libTKMesh.dylib,
+					/opt/homebrew/lib/libTKOffset.dylib,
+					/opt/homebrew/lib/libTKPrim.dylib,
+					/opt/homebrew/lib/libTKRWMesh.dylib,
+					/opt/homebrew/lib/libTKService.dylib,
+					/opt/homebrew/lib/libTKShHealing.dylib,
+					/opt/homebrew/lib/libTKTObj.dylib,
+					/opt/homebrew/lib/libTKTopAlgo.dylib,
+					/opt/homebrew/lib/libTKV3d.dylib,
+					/opt/homebrew/lib/libTKXCAF.dylib,
+					/opt/homebrew/lib/libTKXMesh.dylib,
+					/opt/homebrew/lib/libTKXmlL.dylib,
+					/opt/homebrew/lib/libTKXml.dylib,
+					/opt/homebrew/lib/libTKXmlTObj.dylib,
+					/opt/homebrew/lib/libTKXmlXCAF.dylib,
+					/opt/homebrew/lib/libTKXSBase.dylib,
+					/opt/homebrew/lib/libTKDEIGES.dylib,
+					/opt/homebrew/lib/libTKDEGLTF.dylib,
+					/opt/homebrew/lib/libTKDESTEP.dylib,
+					/opt/homebrew/lib/libTKDESTL.dylib,
+					/opt/homebrew/lib/libTKDEVRML.dylib,
+					/opt/homebrew/lib/libTKDEPLY.dylib,
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/kicad/KiCad.app/Contents/Frameworks/libkigal.10.99.0.dylib",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/kicad/KiCad.app/Contents/Frameworks/libkicommon.10.99.0.dylib",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/kicad/KiCad.app/Contents/Frameworks/libkiapi.10.99.0.dylib",
+					/opt/homebrew/lib/libprotobuf.35.1.0.dylib,
+					/opt/homebrew/lib/libabsl_log_internal_check_op.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_die_if_null.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_internal_conditions.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_internal_message.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_internal_nullguard.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_examine_stack.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_internal_format.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_internal_structured_proto.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_internal_log_sink_set.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_sink.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_entry.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_internal_proto.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_flags_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_flags_marshalling.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_flags_reflection.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_flags_config.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_flags_program_name.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_flags_private_handle_accessor.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_flags_commandlineflag.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_flags_commandlineflag_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_initialize.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_internal_globals.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_globals.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_vlog_config_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_internal_fnmatch.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_raw_hash_set.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_hashtablez_sampler.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_random_distributions.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_random_seed_sequences.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_random_internal_entropy_pool.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_random_internal_randen.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_random_internal_randen_hwaes.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_random_internal_randen_hwaes_impl.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_random_internal_randen_slow.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_random_internal_platform.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_random_internal_seed_material.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_random_seed_gen_exception.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_statusor.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_status.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_cord.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_cordz_info.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_cord_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_cordz_functions.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_exponential_biased.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_cordz_handle.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_crc_cord_state.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_crc32c.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_crc_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_crc_cpu_detect.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_leak_check.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_strerror.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_str_format_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_synchronization.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_stacktrace.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_borrowed_fixup_buffer.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_hash.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_city.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_symbolize.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_debugging_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_demangle_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_demangle_rust.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_decode_rust_punycode.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_utf8_for_code_point.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_graphcycles_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_kernel_timeout_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_malloc_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_tracing_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_time.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_civil_time.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_time_zone.2601.0.0.dylib,
+					"-Wl,-framework,CoreFoundation",
+					/opt/homebrew/lib/libutf8_validity.35.1.0.dylib,
+					/opt/homebrew/lib/libabsl_strings.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_int128.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_strings_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_base.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_spinlock_wait.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_throw_delegate.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_raw_logging_internal.2601.0.0.dylib,
+					/opt/homebrew/lib/libabsl_log_severity.2601.0.0.dylib,
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/thirdparty/json_schema_validator/libnlohmann_json_schema_validator.a",
+					/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib/libcurl.tbd,
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/libs/sexpr/libsexpr.a",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/thirdparty/glad/libglad.a",
+					/opt/homebrew/lib/libzstd.dylib,
+					/opt/homebrew/Cellar/libgit2/1.9.6/lib/libgit2.dylib,
+					/opt/homebrew/Cellar/cairo/1.18.4/lib/libcairo.dylib,
+					"/opt/homebrew/Cellar/pixman/0.46.4/lib/libpixman-1.dylib",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/libs/kinng/libkinng.a",
+					/opt/homebrew/lib/libnng.dylib,
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/thirdparty/fmt/libfmt.a",
+					/opt/homebrew/lib/libfreetype.dylib,
+					/opt/homebrew/Cellar/harfbuzz/14.3.0/lib/libharfbuzz.dylib,
+					/opt/homebrew/lib/libfontconfig.dylib,
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/thirdparty/libcontext/liblibcontext.a",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/libs/snap/libsnap.a",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/thirdparty/nanosvg/libnanosvg.a",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/thirdparty/dxflib_qcad/libdxflib_qcad.a",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/thirdparty/tinyspline_lib/libtinyspline_lib.a",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/thirdparty/nanodbc/libnanodbc.a",
+					"-lodbc",
+					"-L/opt/homebrew/Cellar/unixodbc/2.3.14/lib",
+					/opt/homebrew/lib/libboost_locale.dylib,
+					/opt/homebrew/lib/libboost_charconv.dylib,
+					/opt/homebrew/lib/libboost_thread.dylib,
+					/opt/homebrew/lib/libboost_atomic.dylib,
+					/opt/homebrew/lib/libboost_chrono.dylib,
+					/opt/homebrew/lib/libboost_container.dylib,
+					/opt/homebrew/lib/libboost_date_time.dylib,
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/thirdparty/delaunator/libdelaunator.a",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/thirdparty/zint/libzint.a",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/libs/kimath/libkimath.a",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/thirdparty/clipper2/libclipper2.a",
+					"-lm",
+					"-framework",
+					AppKit,
+					"-framework",
+					CoreData,
+					"-framework",
+					Foundation,
+					"-framework",
+					PDFKit,
+					"-framework",
+					WebKit,
+					"-framework",
+					CFNetwork,
+					"-framework",
+					CoreFoundation,
+					"-framework",
+					Security,
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/thirdparty/3dxware_sdk/libTDxNavlib.a",
+					"-Wl,-rpath,/Users/tdavie/Documents/Simulation/kicad-11/build/kicad/KiCad.app/Contents/Frameworks",
+					"-Wl,-rpath,/opt/homebrew/Cellar/libgit2/1.9.6/lib",
+					"-Wl,-rpath,/opt/homebrew/Cellar/cairo/1.18.4/lib",
+					"-Wl,-rpath,/opt/homebrew/Cellar/pixman/0.46.4/lib",
+					"-Wl,-rpath,/opt/homebrew/Cellar/harfbuzz/14.3.0/lib",
+					"-Wl,-rpath,/opt/homebrew/Cellar/unixodbc/2.3.14/lib",
+				);
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SYSTEM_HEADER_SEARCH_PATHS = (
+					/opt/homebrew/include,
+					/opt/homebrew/include/cairo,
+					"/opt/homebrew/include/pixman-1",
+					/Library/Frameworks/Mono.framework/Headers,
+					/opt/homebrew/include/freetype2,
+					/opt/homebrew/Cellar/harfbuzz/14.3.0/include/harfbuzz,
+					/opt/homebrew/opt/opencascade/include/opencascade,
+					"/opt/homebrew/lib/wx/include/osx_cocoa-unicode-3.2",
+					"/opt/homebrew/include/wx-3.2",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/nanodbc",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/eigen",
+					"/Users/tdavie/Documents/Simulation/kicad-11/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/.",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./dialogs",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./autorouter",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./generators",
+					"/Users/tdavie/Documents/Simulation/kicad-11/3d-viewer",
+					"/Users/tdavie/Documents/Simulation/kicad-11/3d-viewer/dialogs",
+					"/Users/tdavie/Documents/Simulation/kicad-11/common",
+					"/Users/tdavie/Documents/Simulation/kicad-11/common/dialogs",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./exporters",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./importers",
+					"/Users/tdavie/Documents/Simulation/kicad-11/utils/idftools",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/./specctra_import_export",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/pcbnew",
+					"/Users/tdavie/Documents/Simulation/kicad-11/common/.",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/argparse/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/api/./cpp",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/api/./cpp/api",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/pegtl",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/magic_enum/magic_enum",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/libcontext",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/kimath/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/core/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/clipper2/Clipper2Lib/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/rtree",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/kinng/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/kiplatform/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/nlohmann_json",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/snap/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/dynamic_bitset",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/libpopcnt",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/expected/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/picosha2",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/json_schema_validator",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/common",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/fast_float/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/fmt/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/rapidcsv",
+					"/Users/tdavie/Documents/Simulation/kicad-11/libs/sexpr/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/glad/include",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/thread-pool",
+					"/Users/tdavie/Documents/Simulation/kicad-11/build/include/gal/shaders",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/nanosvg",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/dxflib_qcad",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/tinyspline_lib",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/compoundfilereader",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/rectpack2d",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/gzip-hpp",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/nanoflann",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/planegcs",
+					"/Users/tdavie/Documents/Simulation/kicad-11/pcbnew/pcb_io/altium",
+					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/3dxware_sdk/inc",
+					"$(inherited)",
+				);
+			};
+			name = Release;
+		};
+		F0DB0CEBD31AAD1C559F1161 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				PRODUCT_NAME = HDF5;
+			};
+			name = Release;
+		};
+		FAE19E40AD8BF110541D31FE /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_CXX_LANGUAGE_STANDARD = "c++20";
+				CLANG_WARN_EVERYTHING = NO;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				EXECUTABLE_PREFIX = lib;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"GIT_VERSION=\\\"vendored\\\"",
+					BUILD_CSXCAD_LIB,
+					TIXML_USE_STL,
+					H5_USE_16_API,
+				);
+				GCC_TREAT_WARNINGS_AS_ERRORS = NO;
+				HEADER_SEARCH_PATHS = (
+					/Users/tdavie/opt/openEMS/include,
+					/opt/homebrew/include,
+					"/opt/homebrew/include/vtk-9.6",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					/Users/tdavie/opt/openEMS/lib,
+					/opt/homebrew/opt/hdf5/lib,
+					/opt/homebrew/opt/gmp/lib,
+					/opt/homebrew/opt/mpfr/lib,
+					/opt/homebrew/opt/vtk/lib,
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				OTHER_CPLUSPLUSFLAGS = (
+					"$(inherited)",
+					"-frounding-math",
+				);
+				OTHER_LDFLAGS = (
+					"-lfparser",
+					"-ltinyxml",
+					"-lhdf5",
+					"-lhdf5_hl",
+					"-lgmp",
+					"-lgmpxx",
+					"-lmpfr",
+					"-lvtkIOGeometry-9.6",
+					"-lvtkIOPLY-9.6",
+					"-lvtkIOLegacy-9.6",
+					"-lvtkIOCellGrid-9.6",
+					"-lvtkFiltersCellGrid-9.6",
+					"-lvtkIOCore-9.6",
+					"-lvtkCommonExecutionModel-9.6",
+					"-lvtkCommonDataModel-9.6",
+					"-lvtkCommonTransforms-9.6",
+					"-lvtkCommonMath-9.6",
+					"-lvtkCommonCore-9.6",
+					"-lvtkfmt-9.6",
+					"-lvtkscn-9.6",
+					"-lvtktoken-9.6",
+					"-lvtksys-9.6",
+					"-lvtkkissfft-9.6",
+				);
+				PRODUCT_NAME = CSXCAD;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				WARNING_CFLAGS = "-w";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		01510616A2540A2EA37CB56A /* Build configuration list for PBXNativeTarget "copper_fdtd_worker" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D6ACEBA0EED715AFA5287BAE /* Release */,
+				26BF06E54C44F2408EBAEC10 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		2A93D0CB58D10C728E7CE9F2 /* Build configuration list for PBXNativeTarget "KiEMS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				9DC9E0D3568EB7DF36EC7116 /* Debug */,
+				EEA49829DD57398072E0E08B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		34A1F94838F1003CDA9ED1F2 /* Build configuration list for PBXNativeTarget "libkiems" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CC28A0BE6C7D349F5B768BF0 /* Debug */,
+				CB79A2CB4F47AF8A3E194FC4 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		34B3E31BCC3EA6AFAC9A4F16 /* Build configuration list for PBXNativeTarget "kiems_fdtd_worker" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C674A4B6897CD58CA339D0D9 /* Debug */,
+				76CF780F59412846FB761B04 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		71AD228D30263515006D5847 /* Build configuration list for PBXProject "kiems" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				71AD229730263516006D5847 /* Debug */,
+				71AD229830263516006D5847 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		71AD229930263516006D5847 /* Build configuration list for PBXNativeTarget "kiems" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				71AD229A30263516006D5847 /* Debug */,
+				71AD229B30263516006D5847 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		71AD3CEE302FAAD5006D5847 /* Build configuration list for PBXNativeTarget "Copper" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				71AD3CEF302FAAD5006D5847 /* Debug */,
+				71AD3CF0302FAAD5006D5847 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		71AD3CF1302FAAD5006D5847 /* Build configuration list for PBXNativeTarget "CopperTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				71AD3CF2302FAAD5006D5847 /* Debug */,
+				71AD3CF3302FAAD5006D5847 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		71B4EE98304224C5002796EC /* Build configuration list for PBXNativeTarget "CopperUtils" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				71B4EE96304224C5002796EC /* Debug */,
+				71B4EE97304224C5002796EC /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		83F7CD830B23815D67023A0D /* Build configuration list for PBXNativeTarget "CSXCAD" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FAE19E40AD8BF110541D31FE /* Release */,
+				E8F2CC8C444E342D1757FF48 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		9250B0C181758E24075EC5AC /* Build configuration list for PBXAggregateTarget "HDF5" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F0DB0CEBD31AAD1C559F1161 /* Release */,
+				1399001CAAB5D03AD37A9A17 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		92F3FD48841987F0EA491F78 /* Build configuration list for PBXAggregateTarget "openEMS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3B3A8740FB964FE7CE721A59 /* Release */,
+				9F5AE20F03C71D682E6316EB /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A1979A925EE6A25050650435 /* Build configuration list for PBXNativeTarget "libkiems_smoketest" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5F377DF0AD36807A9154C726 /* Debug */,
+				62807348053ECB7AA6437231 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A7A05BDB98C84DE3CA4A2188 /* Build configuration list for PBXNativeTarget "RememberRemember" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				54329134C4B1132CA2C1E347 /* Release */,
+				20964BB945CB5768EF92486D /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B050EDB0D4061B47871B7A91 /* Build configuration list for PBXNativeTarget "libkicad" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				6A59402640FC101257497CAC /* Debug */,
+				A79FE867634EFFF25821E2AA /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E77C2E68C5646102016CEDEE /* Build configuration list for PBXNativeTarget "Copper_smoketest" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5B9776B955F328B8143534B4 /* Release */,
+				2C2EBF8FC2F3ECDD99E41EF9 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E96D43EDF887036033933493 /* Build configuration list for PBXNativeTarget "libkicad_smoketest" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B0289571CC81A8F7D6745CC9 /* Debug */,
+				F066C43374702408CFB59B5D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 71AD228A30263515006D5847 /* Project object */;
+}

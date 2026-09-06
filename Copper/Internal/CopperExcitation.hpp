@@ -36,7 +36,7 @@ struct CopperExcitation {
                                        // half a timestep after voltageSignal, already baked in by
                                        // openEMS itself (see CalcGaussianPulsExcitation)
     double signalPeriodSeconds = 0.0; // Excitation::GetSignalPeriod() -- 0 for a one-shot pulse
-                                       // (kicad_ems's only excitation type today), nonzero only
+                                       // (kiems's only excitation type today), nonzero only
                                        // for a periodic/CW excitation this pipeline doesn't use.
 
     std::vector<CopperExcitationCell> voltageCells;
