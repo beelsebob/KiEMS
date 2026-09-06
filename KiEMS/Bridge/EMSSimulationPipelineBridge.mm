@@ -28,7 +28,7 @@
 // kicad_ems/main.cpp's own runGPUPortInProcess() can: this header never exposes a complete
 // openEMS/ContinuousStructure definition itself. This is what lets the App run Copper's GPU engine
 // in-process (see runGPUPortInProcess() below) instead of posix_spawning kicad_ems_fdtd_worker as
-// a separate process -- Gerber2EMSStudio links Copper.framework directly (see the Xcode project's
+// a separate process -- KiEMS links Copper.framework directly (see the Xcode project's
 // own build settings), while libkicadems itself still never does.
 #include "CopperFDTDRunner.h"
 

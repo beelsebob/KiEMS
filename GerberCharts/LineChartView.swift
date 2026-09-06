@@ -51,7 +51,7 @@ public struct ChartBand {
 /// dependency. Built specifically to replace DGCharts (a third-party charting library), which was
 /// confirmed, through careful bisection, to corrupt this app's window layout under real use; this
 /// is deliberately minimal -- no pan/zoom, no animation, no chart types beyond a line plot -- since
-/// that's all Gerber2EMSStudio's results view actually needs, and every added feature is more
+/// that's all KiEMS's results view actually needs, and every added feature is more
 /// surface area for the same class of bug to hide in again.
 public final class LineChartView: NSView {
     private var xValues: [Double] = []

@@ -39,7 +39,7 @@ std::string _normalizeLayerName(std::string name) {
 
 // KiCad reserves a bare "/" as its hierarchical-sheet path separator within a net name, so a net
 // actually named with a literal slash in it comes back from libkicad already escaped as "{slash}"
-// (see Gerber2EMSStudio/NetNameFormatting.swift's own doc comment for the fuller picture, including
+// (see KiEMS/NetNameFormatting.swift's own doc comment for the fuller picture, including
 // the other markup tokens KiCad net names can carry -- this is deliberately just the one token that
 // renders wrong as plain, unformatted text, which is all a std::string error/log message ever is).
 // Every net name this file interpolates into a human-facing message should be passed through this
@@ -317,7 +317,7 @@ std::string _letterPrefix(const std::string& reference) {
 }
 
 // Exact match only (not a prefix match) -- "RN"/"RT"/"RV"/"CN"/"CR"/etc. are deliberately excluded,
-// matching Gerber2EMSStudio/ComponentCategory.swift's effective behavior for these three single-
+// matching KiEMS/ComponentCategory.swift's effective behavior for these three single-
 // letter designators, without porting its whole IEEE-315 category table.
 std::optional<std::pair<LumpedComponentType, char>> _lumpedComponentKind(const std::string& letterPrefix) {
     if (letterPrefix == "R") {

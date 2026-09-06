@@ -16,8 +16,8 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "2971163407AC90FC988D853B"
-               BuildableName = "Gerber2EMSStudio.app"
-               BlueprintName = "Gerber2EMSStudio"
+               BuildableName = "KiEMS.app"
+               BlueprintName = "KiEMS"
                ReferencedContainer = "container:kicad_ems.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
@@ -46,8 +46,8 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "2971163407AC90FC988D853B"
-            BuildableName = "Gerber2EMSStudio.app"
-            BlueprintName = "Gerber2EMSStudio"
+            BuildableName = "KiEMS.app"
+            BlueprintName = "KiEMS"
             ReferencedContainer = "container:kicad_ems.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
@@ -63,8 +63,8 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "2971163407AC90FC988D853B"
-            BuildableName = "Gerber2EMSStudio.app"
-            BlueprintName = "Gerber2EMSStudio"
+            BuildableName = "KiEMS.app"
+            BlueprintName = "KiEMS"
             ReferencedContainer = "container:kicad_ems.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>

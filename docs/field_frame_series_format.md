@@ -16,10 +16,10 @@ These are both real mistakes that already happened once elsewhere in this codeba
 explicitly here so a future reader/writer never reintroduces either:
 
 1. **`line_x`/`line_y`/`line_z` are E-field *sample positions*, one per cell along that axis
-   (`count == nx`/`ny`/`nz`), not `nx+1` cell *boundaries*.** `Gerber2EMSStudio/Bridge/
+   (`count == nx`/`ny`/`nz`), not `nx+1` cell *boundaries*.** `KiEMS/Bridge/
    FieldSnapshotBridge.h`'s own doc comment currently claims the `nx+1`-boundary convention for the
    in-memory `EMSFieldSnapshot.lineX` while the actual data has always been the `nx`-sample-point
-   convention — `Gerber2EMSStudio/FieldView.swift` had to work around the mismatch after it silently
+   convention — `KiEMS/FieldView.swift` had to work around the mismatch after it silently
    broke rendering. This format uses the sample-point convention throughout, matching what
    `copper::CopperFieldSnapshot::lineX/Y/Z` (`Copper/CopperFDTDRunner.h`) actually produces.
 2. **Units are meters**, matching `CopperFieldSnapshot::lineX/Y/Z` — not `kicad_ems::

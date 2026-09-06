@@ -266,7 +266,7 @@
 			containerPortal = 71AD228A30263515006D5847 /* Project object */;
 			proxyType = 1;
 			remoteGlobalIDString = 2971163407AC90FC988D853B;
-			remoteInfo = Gerber2EMSStudio;
+			remoteInfo = KiEMS;
 		};
 		71AD3CE9302FAAD5006D5847 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -497,7 +497,7 @@
 		4FF84FE99AC0D432168071A2 /* CSPropExcitation.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropExcitation.cpp; sourceTree = "<group>"; };
 		54E688D3F9B73BD698459772 /* CSFunctionParser.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSFunctionParser.cpp; sourceTree = "<group>"; };
 		564EAC5B883C1FA7CDC120CD /* CSPropDispersiveMaterial.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropDispersiveMaterial.cpp; sourceTree = "<group>"; };
-		5653046AD79D4C9071AF237F /* Gerber2EMSStudio.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Gerber2EMSStudio.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		5653046AD79D4C9071AF237F /* KiEMS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = KiEMS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		56AEB40FAFFC12CA37FD9255 /* CSPropProbeBox.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropProbeBox.h; sourceTree = "<group>"; };
 		579C466E4A9BD7706C6BD2F1 /* CSPropLumpedElement.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropLumpedElement.h; sourceTree = "<group>"; };
 		57F8D8A9619B96ECBFC35313 /* CSPrimSphericalShell.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimSphericalShell.h; sourceTree = "<group>"; };
@@ -656,9 +656,9 @@
 			path = kicad_ems_fdtd_worker;
 			sourceTree = "<group>";
 		};
-		B7D891E5D67D73D341733A71 /* Gerber2EMSStudio */ = {
+		B7D891E5D67D73D341733A71 /* KiEMS */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = Gerber2EMSStudio;
+			path = KiEMS;
 			sourceTree = "<group>";
 		};
 		C0A71A000000000000000020 /* openEMS */ = {
@@ -811,7 +811,7 @@
 			children = (
 				C0A71A000000000000000020 /* openEMS */,
 				1E051C9DFB9D9A4CF7CB1120 /* GerberCharts */,
-				B7D891E5D67D73D341733A71 /* Gerber2EMSStudio */,
+				B7D891E5D67D73D341733A71 /* KiEMS */,
 				71AD229430263516006D5847 /* kicad_ems */,
 				8290469707C87811FFCE548F /* kicad_ems_fdtd_worker */,
 				006F3A1386AFF2AD46CD89E4 /* libkicadems */,
@@ -835,7 +835,7 @@
 			isa = PBXGroup;
 			children = (
 				C0A71A000000000000000010 /* libopenEMS.dylib */,
-				5653046AD79D4C9071AF237F /* Gerber2EMSStudio.app */,
+				5653046AD79D4C9071AF237F /* KiEMS.app */,
 				71AD229230263516006D5847 /* kicad_ems */,
 				A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */,
 				C6D729745136FAA65AEC601F /* libkicad_smoketest */,
@@ -1080,9 +1080,9 @@
 			productReference = 922BA8FA4CD5D8901DCAC9DA /* liblibkicadems.a */;
 			productType = "com.apple.product-type.library.static";
 		};
-		2971163407AC90FC988D853B /* Gerber2EMSStudio */ = {
+		2971163407AC90FC988D853B /* KiEMS */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 2A93D0CB58D10C728E7CE9F2 /* Build configuration list for PBXNativeTarget "Gerber2EMSStudio" */;
+			buildConfigurationList = 2A93D0CB58D10C728E7CE9F2 /* Build configuration list for PBXNativeTarget "KiEMS" */;
 			buildPhases = (
 				0A4BFFE015AA0DAC88C73F59 /* Sources */,
 				626F031D915714BD531C01FA /* Frameworks */,
@@ -1102,11 +1102,11 @@
 				C0A71A000000000000000003 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				B7D891E5D67D73D341733A71 /* Gerber2EMSStudio */,
+				B7D891E5D67D73D341733A71 /* KiEMS */,
 			);
-			name = Gerber2EMSStudio;
-			productName = Gerber2EMSStudio;
-			productReference = 5653046AD79D4C9071AF237F /* Gerber2EMSStudio.app */;
+			name = KiEMS;
+			productName = KiEMS;
+			productReference = 5653046AD79D4C9071AF237F /* KiEMS.app */;
 			productType = "com.apple.product-type.application";
 		};
 		3B7712DA527497624F2DFB43 /* copper_fdtd_worker */ = {
@@ -1375,7 +1375,7 @@
 				0E08621C93A1CC737D3F6A93 /* libkicadems */,
 				5BC0C98C152C9B66E02544CD /* libkicadems_smoketest */,
 				5034717F4A638C8CC653DE57 /* kicad_ems_fdtd_worker */,
-				2971163407AC90FC988D853B /* Gerber2EMSStudio */,
+				2971163407AC90FC988D853B /* KiEMS */,
 				07086D1AD104CA5BBA5AF140 /* GerberCharts */,
 				71AD3CD5302FAAD5006D5847 /* Copper */,
 				71AD3CDF302FAAD5006D5847 /* CopperTests */,
@@ -1735,7 +1735,7 @@
 		};
 		71AD3CE5302FAAD5006D5847 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = 2971163407AC90FC988D853B /* Gerber2EMSStudio */;
+			target = 2971163407AC90FC988D853B /* KiEMS */;
 			targetProxy = 71AD3CE4302FAAD5006D5847 /* PBXContainerItemProxy */;
 		};
 		71AD3CEA302FAAD5006D5847 /* PBXTargetDependency */ = {
@@ -2513,7 +2513,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
 				SWIFT_EMIT_LOC_STRINGS = NO;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Gerber2EMSStudio.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Gerber2EMSStudio";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/KiEMS.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/KiEMS";
 			};
 			name = Debug;
 		};
@@ -2530,7 +2530,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
 				SWIFT_EMIT_LOC_STRINGS = NO;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Gerber2EMSStudio.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Gerber2EMSStudio";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/KiEMS.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/KiEMS";
 			};
 			name = Release;
 		};
@@ -2603,7 +2603,7 @@
 					"$(SRCROOT)",
 					"$(SRCROOT)/libkicadems",
 				);
-				INFOPLIST_FILE = Gerber2EMSStudio/Info.plist;
+				INFOPLIST_FILE = KiEMS/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -2621,7 +2621,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.tomdavie.kicadems-studio";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "Gerber2EMSStudio/Bridge/Gerber2EMSStudio-Bridging-Header.h";
+				SWIFT_OBJC_BRIDGING_HEADER = "KiEMS/Bridge/KiEMS-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 			};
 			name = Debug;
@@ -3381,7 +3381,7 @@
 					"$(SRCROOT)",
 					"$(SRCROOT)/libkicadems",
 				);
-				INFOPLIST_FILE = Gerber2EMSStudio/Info.plist;
+				INFOPLIST_FILE = KiEMS/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -3399,7 +3399,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.tomdavie.kicadems-studio";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "Gerber2EMSStudio/Bridge/Gerber2EMSStudio-Bridging-Header.h";
+				SWIFT_OBJC_BRIDGING_HEADER = "KiEMS/Bridge/KiEMS-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 			};
 			name = Release;
@@ -3928,7 +3928,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		2A93D0CB58D10C728E7CE9F2 /* Build configuration list for PBXNativeTarget "Gerber2EMSStudio" */ = {
+		2A93D0CB58D10C728E7CE9F2 /* Build configuration list for PBXNativeTarget "KiEMS" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				9DC9E0D3568EB7DF36EC7116 /* Debug */,

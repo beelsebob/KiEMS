@@ -1,6 +1,6 @@
 // Parses a KiCad footprint's "Value" field text (e.g. "10k", "4k7", "100nF", "4u7", "0R1") into a
 // plain SI-unit double -- ohms/henries/farads depending on the component. No library elsewhere in
-// kicad_ems does this (confirmed by search); the closest existing thing, Gerber2EMSStudio's
+// kicad_ems does this (confirmed by search); the closest existing thing, KiEMS's
 // UnitSuffixValueFormatter.swift, is Swift-only and doesn't handle KiCad's decimal-substitution
 // shorthand ("4k7" == 4.7k) anyway.
 #pragma once

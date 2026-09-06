@@ -62,7 +62,7 @@
             isEnabled = "YES">
          </CommandLineArgument>
          <CommandLineArgument
-            argument = "/private/var/folders/43/3rgt05lx6hj8t_rt5xmgjm5w0000gn/T/Gerber2EMSStudio-BACBB5D0-8FC0-40D2-9209-E5BEEC1F380D/simulation.json"
+            argument = "/private/var/folders/43/3rgt05lx6hj8t_rt5xmgjm5w0000gn/T/KiEMS-BACBB5D0-8FC0-40D2-9209-E5BEEC1F380D/simulation.json"
             isEnabled = "YES">
          </CommandLineArgument>
          <CommandLineArgument
@@ -70,7 +70,7 @@
             isEnabled = "YES">
          </CommandLineArgument>
          <CommandLineArgument
-            argument = "/private/var/folders/43/3rgt05lx6hj8t_rt5xmgjm5w0000gn/T/Gerber2EMSStudio-BACBB5D0-8FC0-40D2-9209-E5BEEC1F380D/ems/simulation/"
+            argument = "/private/var/folders/43/3rgt05lx6hj8t_rt5xmgjm5w0000gn/T/KiEMS-BACBB5D0-8FC0-40D2-9209-E5BEEC1F380D/ems/simulation/"
             isEnabled = "YES">
          </CommandLineArgument>
          <CommandLineArgument
@@ -78,7 +78,7 @@
             isEnabled = "YES">
          </CommandLineArgument>
          <CommandLineArgument
-            argument = "/private/var/folders/43/3rgt05lx6hj8t_rt5xmgjm5w0000gn/T/Gerber2EMSStudio-BACBB5D0-8FC0-40D2-9209-E5BEEC1F380D/ems/simulation/"
+            argument = "/private/var/folders/43/3rgt05lx6hj8t_rt5xmgjm5w0000gn/T/KiEMS-BACBB5D0-8FC0-40D2-9209-E5BEEC1F380D/ems/simulation/"
             isEnabled = "YES">
          </CommandLineArgument>
       </CommandLineArguments>

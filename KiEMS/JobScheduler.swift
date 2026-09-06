@@ -424,7 +424,7 @@ final class JobScheduler {
                     self.finishExecution(job, error: nil)
                 } else {
                     self.finishExecution(job, error: NSError(
-                        domain: "Gerber2EMSStudio", code: 1,
+                        domain: "KiEMS", code: 1,
                         userInfo: [NSLocalizedDescriptionKey: "No field data available -- run Simulation first."]))
                 }
             }

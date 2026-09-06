@@ -23,10 +23,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(appMenuItem)
         let appMenu = NSMenu()
         appMenuItem.submenu = appMenu
-        appMenu.addItem(withTitle: "About Gerber2EMS Studio",
+        appMenu.addItem(withTitle: "About KiEMS",
                          action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         appMenu.addItem(NSMenuItem.separator())
-        appMenu.addItem(withTitle: "Quit Gerber2EMS Studio", action: #selector(NSApplication.terminate(_:)),
+        appMenu.addItem(withTitle: "Quit KiEMS", action: #selector(NSApplication.terminate(_:)),
                          keyEquivalent: "q")
 
         let fileMenuItem = NSMenuItem()

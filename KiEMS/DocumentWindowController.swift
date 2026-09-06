@@ -44,7 +44,7 @@ final class DocumentWindowController: NSWindowController {
             backing: .buffered,
             defer: false
         )
-        window.title = "Gerber2EMS Simulation"
+        window.title = "KiEMS Simulation"
         window.center()
         super.init(window: window)
         buildUI()

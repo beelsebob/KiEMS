@@ -52,7 +52,7 @@ final class Document: NSDocument {
         var isDirectory: ObjCBool = false
         let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
         guard exists, isDirectory.boolValue else {
-            throw Self.error("\"\(url.lastPathComponent)\" isn't a Gerber2EMS Simulation package.")
+            throw Self.error("\"\(url.lastPathComponent)\" isn't a KiEMS Simulation package.")
         }
         let configURL = url.appendingPathComponent("simulation.json")
         config = try EMSConfigBridge.config(withContentsOfFile: configURL.path)
@@ -85,7 +85,7 @@ final class Document: NSDocument {
             return scratchDirectory
         }
         let scratch = FileManager.default.temporaryDirectory
-            .appendingPathComponent("Gerber2EMSStudio-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("KiEMS-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
         scratchDirectory = scratch
         return scratch
@@ -133,6 +133,6 @@ final class Document: NSDocument {
     }
 
     private static func error(_ message: String) -> NSError {
-        NSError(domain: "Gerber2EMSStudio", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+        NSError(domain: "KiEMS", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
     }
 }

@@ -1,6 +1,6 @@
 // Streaming encoder for the field frame-series format -- see docs/field_frame_series_format.md for
 // the full on-disk schema this writes. Public (not Internal/) because both this framework's own
-// CopperFDTDRunner.cpp (the producer) and Gerber2EMSStudio (the eventual consumer, which already
+// CopperFDTDRunner.cpp (the producer) and KiEMS (the eventual consumer, which already
 // links Copper.framework) need it -- see this repo's own implementation plan for why a whole new
 // Xcode target wasn't worth the risk just to share this one file pair.
 //

@@ -263,7 +263,7 @@ bool checkScaledToSimulationUnitsIsAPureCopy() {
     return ok;
 }
 
-// Exercises the raw numeric accessors Gerber2EMSStudio's results GUI drives directly (frequencies,
+// Exercises the raw numeric accessors KiEMS's results GUI drives directly (frequencies,
 // getDelay, getDiffPairSdd, getDiffPairImpedance) -- there's no existing Postprocessor coverage
 // here at all otherwise. Builds S-parameters by hand via setSParam() (the same "already have the
 // data" path SimulationResult itself uses, see postprocess_result.cpp), rather than a real FDTD
