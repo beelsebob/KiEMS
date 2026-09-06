@@ -38,7 +38,7 @@ public:
     /// later `-p`-only invocation in a separate process can resume from this run's output.
     ///
     /// `portRunner`, if given, replaces the default `sim.run(excitedPortNumber)` (posix_spawn'd
-    /// worker) call for every excited port -- letting a caller outside libgerber2ems (which must
+    /// worker) call for every excited port -- letting a caller outside libkicadems (which must
     /// never depend on Copper.framework -- see CopperFDTDRunner.h's own file comment) substitute an
     /// in-process GPU run instead, without this function needing to know Copper exists. The
     /// Simulation passed to it has already had adoptSlicedBoard()/adoptGridLines()/

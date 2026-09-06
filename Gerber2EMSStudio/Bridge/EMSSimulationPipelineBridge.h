@@ -1,5 +1,5 @@
 // Objective-C interface over one simulation's own gerber2ems::SimulationData<Stage> pipeline (see
-// libgerber2ems/gerber2ems/simulation_data.hpp) -- Swift-visible; never exposes a C++ type.
+// libkicadems/gerber2ems/simulation_data.hpp) -- Swift-visible; never exposes a C++ type.
 #import <Foundation/Foundation.h>
 
 #import "EMSConfigBridge.h"

@@ -9,7 +9,7 @@
 // inheritance *when Copper constructs its own `openEMS` object as `CopperOpenEMS` from the start*
 // (every Copper_smoketest fixture does exactly this). `copper_fdtd_worker/main.cpp` is a different
 // situation: it reaches a `Simulation::fdtdEngine()`-returned `openEMS&` -- an object
-// libgerber2ems itself constructed as plain `openEMS`, with no idea Copper exists -- via
+// libkicadems itself constructed as plain `openEMS`, with no idea Copper exists -- via
 // `static_cast<CopperOpenEMS&>`, which *is* a downcast of an object never actually constructed as
 // that derived type. Same accepted, documented risk category as CopperUPMLAccess/
 // CopperExcitationAccess below (identical layout, no new data members, no vtable change), not a new

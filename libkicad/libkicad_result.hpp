@@ -165,7 +165,7 @@ struct CopperPolygon {
     PolygonLoop loop;
 };
 
-/// Geometry needed by libgerber2ems, extracted from the loaded BOARD without plotting Gerbers.
+/// Geometry needed by libkicadems, extracted from the loaded BOARD without plotting Gerbers.
 struct BoardGeometry {
     std::vector<PolygonLoop> outline;
     std::vector<CopperPolygon> copper;

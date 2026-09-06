@@ -23,7 +23,7 @@ explicitly here so a future reader/writer never reintroduces either:
    broke rendering. This format uses the sample-point convention throughout, matching what
    `copper::CopperFieldSnapshot::lineX/Y/Z` (`Copper/CopperFDTDRunner.h`) actually produces.
 2. **Units are meters**, matching `CopperFieldSnapshot::lineX/Y/Z` — not `gerber2ems::
-   ComputedGridLines`' simulation-unit doubles (`libgerber2ems/gerber2ems/simulation.hpp`), which are
+   ComputedGridLines`' simulation-unit doubles (`libkicadems/gerber2ems/simulation.hpp`), which are
    a different frame (scaled, and re-origined to the board's own Edge_Cuts bounding box) entirely.
    Don't mix the two without an explicit, documented conversion.
 

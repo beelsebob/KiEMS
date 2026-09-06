@@ -1,5 +1,5 @@
 // Discovers SERIES CSPropLumpedElement primitives (auto-placed by gerber2ems::Simulation::
-// addLumpedComponents(), see libgerber2ems/gerber2ems/simulation.cpp) and computes the same
+// addLumpedComponents(), see libkicadems/gerber2ems/simulation.cpp) and computes the same
 // per-cell ADE coefficients openEMS's own Engine_Ext_LumpedRLC would -- but as a clean-room
 // reimplementation of just the SERIES branch of Operator_Ext_LumpedRLC::BuildExtension()
 // (openEMS/FDTD/extensions/operator_ext_lumpedRLC.cpp), using only public Operator/

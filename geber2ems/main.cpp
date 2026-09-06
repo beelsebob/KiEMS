@@ -39,7 +39,7 @@
 // definition itself. This is what lets the CLI run Copper's GPU engine in-process (see
 // runGPUPortInProcess() below) instead of posix_spawning copper_fdtd_worker as a separate process --
 // the CLI links Copper.framework directly (see the Xcode project's own build settings), while
-// libgerber2ems itself still never does.
+// libkicadems itself still never does.
 #include "CopperFDTDRunner.h"
 
 using namespace gerber2ems;
@@ -101,7 +101,7 @@ void printUsage() {
 }
 
 /// CLI-only diagnostic knobs for --dump-early-frames/--dump-detailed-trace -- deliberately not part
-/// of Arguments/RunOptions (config.hpp is shared with the GUI app and libgerber2ems; these are
+/// of Arguments/RunOptions (config.hpp is shared with the GUI app and libkicadems; these are
 /// one-off debugging aids that have no business in either).
 struct DumpOptions {
     std::optional<std::filesystem::path> dir;
@@ -289,7 +289,7 @@ void setupLogging(const Arguments& args) {
 
 // macOS's KiCad.app doesn't symlink kicad-cli anywhere on a typical PATH -- it ships only inside
 // the app bundle. Only the CLI is allowed to do this kind of PATH-scanning/fallback-guessing (a
-// sandboxed GUI can't, and libgerber2ems itself never does -- see importer.hpp); it's a convenience
+// sandboxed GUI can't, and libkicadems itself never does -- see importer.hpp); it's a convenience
 // specific to this unsandboxed developer tool.
 std::filesystem::path resolveKicadCli() {
     const char* pathEnv = std::getenv("PATH");
@@ -623,7 +623,7 @@ int main(int argc, char** argv) {
             geometryResult = std::move(*loaded);
         }
         // Copper's GPU backend runs directly in this process (see runGPUPortInProcess()'s own doc
-        // comment for why, and why libgerber2ems itself still never depends on Copper) rather than
+        // comment for why, and why libkicadems itself still never depends on Copper) rather than
         // posix_spawning copper_fdtd_worker -- the whole point being live progress reporting through
         // this process's own stdout, not a separate process's.
         const PMLKind pmlKind = options.pmlKind;

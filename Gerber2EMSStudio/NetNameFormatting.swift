@@ -136,11 +136,11 @@ enum NetNameFormatting {
         flushRun(endingAt: startX)
     }
 
-    /// Renders `message` (a full English sentence libgerber2ems built, e.g. a pipeline error) mostly
+    /// Renders `message` (a full English sentence libkicadems built, e.g. a pipeline error) mostly
     /// as plain text, except substrings the message itself double-quotes -- every C++ site that
     /// interpolates a net name, footprint reference, or layer name into a message wraps it in literal
     /// `"..."` this way, consistently, so quote-splitting is a reliable way to find embedded
-    /// identifiers in an otherwise-opaque prose string without libgerber2ems having to mark them up
+    /// identifiers in an otherwise-opaque prose string without libkicadems having to mark them up
     /// any more explicitly than it already does. Each quoted substring is run through
     /// segments(for:font:), so a net name's own sub/superscript/negation markup (e.g. "GND_{1}" or
     /// "~{RESET}") renders correctly wherever it happens to appear inside a full message, not just in

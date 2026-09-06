@@ -231,7 +231,7 @@ std::expected<FieldFrameSeriesWriter, std::string> FieldFrameSeriesWriter::creat
     const std::uint64_t maxFramesPerChunk = std::max<std::uint64_t>(kMaxChunkBytes / frameBytes, 1);
     chunkFrames = static_cast<std::uint32_t>(std::min<std::uint64_t>(chunkFrames, maxFramesPerChunk));
     // Plain stdout fprintf, matching CopperFDTDRunner.cpp's own progress-reporting convention --
-    // Copper.framework doesn't link libgerber2ems, so gerber2ems's own Cu::logInfo isn't reachable
+    // Copper.framework doesn't link libkicadems, so gerber2ems's own Cu::logInfo isn't reachable
     // here. One line per series (only at create() time, not per-frame), giving the grid size and
     // per-frame/per-chunk byte counts that actually determine whether the size clamp above engages --
     // the real board sizes that trigger it are much larger than the smoketest's tiny synthetic grid,

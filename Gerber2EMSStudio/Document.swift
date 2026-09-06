@@ -7,7 +7,7 @@ import Cocoa
 ///
 /// This manages `fileURL` as a real on-disk directory via the URL-based read/write overrides
 /// (`read(from:ofType:)`/`write(to:ofType:)`), not the Data-based ones NSDocument defaults to --
-/// libgerber2ems does its own filesystem I/O (a future FDTD-worker subprocess writing into `ems/`
+/// libkicadems does its own filesystem I/O (a future FDTD-worker subprocess writing into `ems/`
 /// directly), which can't be represented as an in-memory `NSFileWrapper` tree that only gets
 /// flushed to disk on save.
 final class Document: NSDocument {

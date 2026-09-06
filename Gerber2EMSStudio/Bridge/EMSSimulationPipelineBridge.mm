@@ -29,7 +29,7 @@
 // openEMS/ContinuousStructure definition itself. This is what lets the App run Copper's GPU engine
 // in-process (see runGPUPortInProcess() below) instead of posix_spawning gerber2ems_fdtd_worker as
 // a separate process -- Gerber2EMSStudio links Copper.framework directly (see the Xcode project's
-// own build settings), while libgerber2ems itself still never does.
+// own build settings), while libkicadems itself still never does.
 #include "CopperFDTDRunner.h"
 
 using gerber2ems::EMSConfig;
@@ -99,7 +99,7 @@ NSError* makeCancelledError() {
                             userInfo:@{NSLocalizedDescriptionKey : @(kCancelledMessage)}];
 }
 
-// Evenly-spaced frequency samples between start/stop -- matches libgerber2ems's own (private)
+// Evenly-spaced frequency samples between start/stop -- matches libkicadems's own (private)
 // linspace() in simulation_result.cpp exactly; not worth sharing across a library boundary for
 // something this small (every other C++/ObjC++ bridge file in this app duplicates its own similarly
 // tiny helpers -- e.g. makeError() above -- rather than growing a shared-utilities header for them).

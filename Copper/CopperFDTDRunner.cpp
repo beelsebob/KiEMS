@@ -44,7 +44,7 @@ namespace {
 // 4 seconds of wall time, not every N steps, so the two backends' progress output reads at a
 // comparable rate regardless of how many steps/second either one is actually managing. Kept
 // intentionally lightweight (plain fprintf) rather than piped through gerber2ems's own logging.hpp,
-// since Copper.framework doesn't link libgerber2ems (see the Copper implementation plan's "no
+// since Copper.framework doesn't link libkicadems (see the Copper implementation plan's "no
 // dependency on Copper" rule, which cuts both ways).
 class PhaseTimer {
 public:

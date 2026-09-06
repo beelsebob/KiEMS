@@ -3,7 +3,7 @@
 // used to be resolved implicitly (kicad-cli via $PATH/a hardcoded install location,
 // kicad_query_helper via "sibling of the running executable"). A GUI embedding this library runs
 // on its own working directory and bundles its own copies of the helper tools, so nothing in
-// libgerber2ems may assume a shared process CWD or a fixed on-disk layout relative to itself --
+// libkicadems may assume a shared process CWD or a fixed on-disk layout relative to itself --
 // every path a caller cares about is supplied here instead.
 #pragma once
 
