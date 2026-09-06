@@ -1,5 +1,5 @@
 // Discovers SERIES CSPropLumpedElement primitives (auto-placed by kicad_ems::Simulation::
-// addLumpedComponents(), see libkicadems/kicad_ems/simulation.cpp) and computes the same
+// addLumpedComponents(), see libkiems/kicad_ems/simulation.cpp) and computes the same
 // per-cell ADE coefficients openEMS's own Engine_Ext_LumpedRLC would -- but as a clean-room
 // reimplementation of just the SERIES branch of Operator_Ext_LumpedRLC::BuildExtension()
 // (openEMS/FDTD/extensions/operator_ext_lumpedRLC.cpp), using only public Operator/

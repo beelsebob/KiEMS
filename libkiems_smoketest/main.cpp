@@ -1,4 +1,4 @@
-// Minimal compile/link/behavior smoke test for libkicadems, mirroring libkicad_smoketest's
+// Minimal compile/link/behavior smoke test for libkiems, mirroring libkicad_smoketest's
 // role: a small executable that links the library from outside its own target, so signature
 // churn in later refactor phases fails here at compile time rather than only being caught by a
 // full CLI re-run. Not a test framework -- plain asserts, pass/fail printed to stdout.
@@ -78,7 +78,7 @@ bool checkConfigParseFailsCleanly() {
     // EMSConfig::parse() against a path that can't exist should come back as a clean
     // std::expected failure, not a thrown exception or a crash -- exercises the library's
     // std::expected-based error boundary from outside its own target.
-    auto result = EMSConfig::parse("/nonexistent/libkicadems_smoketest/simulation.json", false);
+    auto result = EMSConfig::parse("/nonexistent/libkiems_smoketest/simulation.json", false);
     if (result.has_value()) {
         std::cerr << "FAIL: EMSConfig::parse() should have failed for a nonexistent path\n";
         return false;
@@ -94,7 +94,7 @@ bool checkConfigMutateSaveRoundTrip() {
     const EMSConfig original = makeSyntheticConfig();
 
     const std::filesystem::path tmpPath =
-            std::filesystem::temp_directory_path() / "libkicadems_smoketest_roundtrip.json";
+            std::filesystem::temp_directory_path() / "libkiems_smoketest_roundtrip.json";
     auto saveResult = original.save(tmpPath);
     if (!saveResult) {
         std::cerr << "FAIL: EMSConfig::save() failed: " << saveResult.error() << "\n";
@@ -441,7 +441,7 @@ bool checkLogging() {
     logInfo() << "this should be suppressed at Error level";
     const int actual = 5;
     const int expected = 23;
-    logError() << "libkicadems_smoketest: x was " << actual << " when it should have been " << expected;
+    logError() << "libkiems_smoketest: x was " << actual << " when it should have been " << expected;
     CU_ASSERT(actual == 5) << "x was " << actual << " when it should have been 5";
     return true;
 }
@@ -461,9 +461,9 @@ int main() {
     ok &= checkLogging();
 
     if (ok) {
-        std::cout << "libkicadems_smoketest: PASS\n";
+        std::cout << "libkiems_smoketest: PASS\n";
         return EXIT_SUCCESS;
     }
-    std::cout << "libkicadems_smoketest: FAIL\n";
+    std::cout << "libkiems_smoketest: FAIL\n";
     return EXIT_FAILURE;
 }

@@ -1,5 +1,5 @@
 // Objective-C interface over one simulation's own kicad_ems::SimulationData<Stage> pipeline (see
-// libkicadems/kicad_ems/simulation_data.hpp) -- Swift-visible; never exposes a C++ type.
+// libkiems/kicad_ems/simulation_data.hpp) -- Swift-visible; never exposes a C++ type.
 #import <Foundation/Foundation.h>
 
 #import "EMSConfigBridge.h"

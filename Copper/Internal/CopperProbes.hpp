@@ -2,7 +2,7 @@
 // them to the mesh, samples Copper's own field arrays with the exact same formulas openEMS's own
 // Engine_Interface_FDTD::CalcVoltageIntegral / ProcessCurrent::CalcIntegral use, and writes them out
 // in openEMS's own ASCII probe-file format -- so kicad_ems's existing reader
-// (libkicadems/kicad_ems/ports.cpp's `_loadUiFile`) can consume Copper's output completely
+// (libkiems/kicad_ems/ports.cpp's `_loadUiFile`) can consume Copper's output completely
 // unmodified, exactly like the plan's Phase 4 requires.
 //
 // Snapping is intentionally NOT a single generic "snap this box to the mesh" call, even though

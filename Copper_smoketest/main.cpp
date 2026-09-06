@@ -6,10 +6,10 @@
 // Operator, that CopperYeeGrid/CopperExcitation's own extraction exactly reproduces values read
 // directly from that same Operator/Excitation, and that CopperEngine's GPU leapfrog reproduces the
 // real CPU openEMS Engine's field values (to float-rounding tolerance) on an identical grid -- no
-// kicad_ems/libkicadems involvement at all, matching the plan's intent to keep this fixture
+// kicad_ems/libkiems involvement at all, matching the plan's intent to keep this fixture
 // independent of the rest of the pipeline for phases 0-3.
 //
-// Plain assert-and-print-PASS/FAIL, matching this repo's existing libkicadems_smoketest/
+// Plain assert-and-print-PASS/FAIL, matching this repo's existing libkiems_smoketest/
 // libkicad_smoketest convention -- not XCTest.
 
 #include <algorithm>
@@ -70,7 +70,7 @@ void fail(const char* what) {
 /// it's given -- its own destructor (via Reset()) unconditionally `delete`s it. Handing it a
 /// pointer to anything not obtained from `new` (a stack local, or a temporary that's since been
 /// destroyed) crashes at `fdtd`'s own destruction with "pointer being freed was not allocated".
-/// (`libkicadems::Simulation::_csx` is a raw, non-owning pointer for exactly this reason -- see
+/// (`kicad_ems::Simulation::_csx` is a raw, non-owning pointer for exactly this reason -- see
 /// its own doc comment.)
 ContinuousStructure* buildTinyVacuumGrid() {
     auto* csx = new ContinuousStructure();
@@ -238,7 +238,7 @@ ContinuousStructure* buildCpmlCavityNoExcitation() {
 }
 
 /// buildTinyVacuumGrid()'s same domain/excitation, plus a voltage probe and a current probe laid
-/// out the same way LumpedPort::LumpedPort (libkicadems/kicad_ems/ports.cpp) lays its own real
+/// out the same way LumpedPort::LumpedPort (libkiems/kicad_ems/ports.cpp) lays its own real
 /// u/i probes relative to a port box -- a voltage probe spanning the excitation direction at the
 /// port's center point, and a current probe forming a loop around the port's footprint at its
 /// midpoint along that same direction. Used for Phase 4b's probe discovery/sampling check.
@@ -297,7 +297,7 @@ ContinuousStructure* buildProbeFixture() {
     return csx;
 }
 
-/// A minimal ad-hoc reimplementation of libkicadems/kicad_ems/ports.cpp's own `_loadUiFile`
+/// A minimal ad-hoc reimplementation of libkiems/kicad_ems/ports.cpp's own `_loadUiFile`
 /// parsing rule (skip blank/`%`-prefixed lines, take the first 2 whitespace-separated tokens of
 /// every other line as time/value) -- used to confirm CopperProbeWriter's actual file output
 /// round-trips through *that exact* rule, not just a rule this file assumes is equivalent.
@@ -861,7 +861,7 @@ int main() {
         copper::CopperOpenEMS probeFdtd;
         probeFdtd.SetCSX(probeCsx); // ownership transfers to probeFdtd -- probeCsx stays valid and
                                      // usable (non-owning) until probeFdtd is destroyed, same pattern
-                                     // as libkicadems::Simulation::_csx
+                                     // as kicad_ems::Simulation::_csx
         probeFdtd.SetGaussExcite(2.5e9, 2.5e9);
         for (int side = 0; side < 6; ++side) {
             probeFdtd.Set_BC_Type(side, 0);

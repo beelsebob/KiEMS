@@ -13,7 +13,7 @@
 // Deliberately forward-declared, not #included -- this header must be includable from a
 // translation unit that already has the *installed* (`<openEMS/openems.h>`,
 // `<CSXCAD/ContinuousStructure.h>`) header forms in scope (e.g. copper_fdtd_worker/main.cpp, via
-// libkicadems's own simulation.hpp), while runFDTDPortOnGPU's own *implementation*
+// libkiems's own simulation.hpp), while runFDTDPortOnGPU's own *implementation*
 // (CopperFDTDRunner.cpp) uses the flat/source-checkout forms every other Copper/Internal/ header
 // does (see Copper/Internal/CopperOpenEMSAccess.hpp's file comment for why the two forms can never
 // appear together in one translation unit). A forward declaration is compatible with both sides,
@@ -96,7 +96,7 @@ struct CopperProbeResult {
     /// weighting -- see this struct's own doc comment on why `samples` is already final). Writing
     /// the returned string to a file named `name` is what lets kicad_ems's existing on-disk
     /// S-parameter pipeline (which reads these files back -- see
-    /// libkicadems/kicad_ems/ports.cpp's `_loadUiFile`) keep working unmodified against a
+    /// libkiems/kicad_ems/ports.cpp's `_loadUiFile`) keep working unmodified against a
     /// runFDTDPortOnGPU() result -- a caller that doesn't need a file at all (e.g. a live-plotting
     /// GUI) can just read `samples` directly instead of calling this.
     std::string data() const;

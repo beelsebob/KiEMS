@@ -32,7 +32,7 @@ class Simulation;
 
 /// Runs one excited port's FDTD pass on an already-geometry-populated/setExcitation()'d/
 /// setupPorts()'d Simulation, writing its probe files wherever that backend's own convention puts
-/// them -- the extension point that lets a caller outside libkicadems (which must never depend
+/// them -- the extension point that lets a caller outside libkiems (which must never depend
 /// on Copper.framework -- see CopperFDTDRunner.h's own file comment) substitute an in-process GPU
 /// run for the default posix_spawn'd CPU worker (Simulation::run()). Declared here (rather than
 /// nested in SimulationResult, where it originally lived) so simulation_data.hpp's
