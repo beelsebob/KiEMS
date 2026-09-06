@@ -1,6 +1,6 @@
 import Cocoa
 import CopperUtils
-import GerberCharts
+import RememberRemember
 
 /// NSScrollView positions a flipped document view from its top edge when its content is shorter
 /// than the viewport. The charts retain their own native (non-flipped) drawing coordinates; only
@@ -770,7 +770,7 @@ final class SimulationResultsViewController: NSViewController {
     /// Elementwise average and min/max band across `curves` (one array per probe, all sharing the
     /// same `count`-length frequency axis) -- ignores non-finite entries at each frequency index
     /// rather than letting one bad probe poison the whole column. A frequency index with no finite
-    /// values at all reports 0 for every statistic (matches GerberCharts' own non-finite handling:
+    /// values at all reports 0 for every statistic (matches RememberRemember' own non-finite handling:
     /// nothing to plot there, not a crash).
     private static func averageAndBand(of curves: [[Double]], count: Int) -> (average: [Double], band: (low: [Double], high: [Double])) {
         var average = [Double](repeating: 0, count: count)

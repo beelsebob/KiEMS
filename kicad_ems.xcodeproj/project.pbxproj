@@ -46,7 +46,7 @@
 		3D4617AE4F349584B8319E2C /* ParameterObjects.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 11729C6743D6F1A9497C445B /* ParameterObjects.cpp */; };
 		3E2C21D20252B9D126B9A44A /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CE532C213E2D6E98AA310B22 /* Cocoa.framework */; };
 		3E7CD25FB948F81DEEC897B3 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CE532C213E2D6E98AA310B22 /* Cocoa.framework */; };
-		479136241E9A85AC3E2BFC9B /* GerberCharts.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DEC747CBEC864D957296A740 /* GerberCharts.framework */; };
+		479136241E9A85AC3E2BFC9B /* RememberRemember.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DEC747CBEC864D957296A740 /* RememberRemember.framework */; };
 		4988C919C7B2E11A4E12652C /* liblibkicadems.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 922BA8FA4CD5D8901DCAC9DA /* liblibkicadems.a */; };
 		4F06D46154832B47F0D33F0A /* CSPropDispersiveMaterial.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 564EAC5B883C1FA7CDC120CD /* CSPropDispersiveMaterial.cpp */; };
 		508397439B5850BD443922F8 /* CSPrimLinPoly.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 4D286C901431D80EB83D11FA /* CSPrimLinPoly.cpp */; };
@@ -109,7 +109,7 @@
 		F5069170BAB8A6A35EB326DE /* CSPropAbsorbingBC.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 335167B1A5FB2AF84C42F74A /* CSPropAbsorbingBC.cpp */; };
 		F61D45C729E10F8A998D6D1D /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CE532C213E2D6E98AA310B22 /* Cocoa.framework */; };
 		F8763B10C08160DB7FC51D4C /* CSPropConductingSheet.cpp in Sources */ = {isa = PBXBuildFile; fileRef = DA441A58C5946D25FA484EEE /* CSPropConductingSheet.cpp */; };
-		FC1671EFEBFEF5FCCCA74E90 /* GerberCharts.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = DEC747CBEC864D957296A740 /* GerberCharts.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		FC1671EFEBFEF5FCCCA74E90 /* RememberRemember.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = DEC747CBEC864D957296A740 /* RememberRemember.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		FFCF4BE80D907ADEDD013454 /* CSPropUnknown.cpp in Sources */ = {isa = PBXBuildFile; fileRef = FCFBB6854442AF9145607687 /* CSPropUnknown.cpp */; };
 /* End PBXBuildFile section */
 
@@ -210,7 +210,7 @@
 			containerPortal = 71AD228A30263515006D5847 /* Project object */;
 			proxyType = 1;
 			remoteGlobalIDString = 07086D1AD104CA5BBA5AF140;
-			remoteInfo = GerberCharts;
+			remoteInfo = RememberRemember;
 		};
 		6446391B4ED77176B8F180CF /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -452,7 +452,7 @@
 			dstPath = "";
 			dstSubfolderSpec = 10;
 			files = (
-				FC1671EFEBFEF5FCCCA74E90 /* GerberCharts.framework in Embed Frameworks */,
+				FC1671EFEBFEF5FCCCA74E90 /* RememberRemember.framework in Embed Frameworks */,
 				71AD3CEC302FAAD5006D5847 /* Copper.framework in Embed Frameworks */,
 			);
 			name = "Embed Frameworks";
@@ -556,7 +556,7 @@
 		D60EAE79927D1544B382EBB3 /* CSPrimCurve.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimCurve.h; sourceTree = "<group>"; };
 		DA441A58C5946D25FA484EEE /* CSPropConductingSheet.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropConductingSheet.cpp; sourceTree = "<group>"; };
 		DC07EEE0458A1F47D32AD7E8 /* CSPropUnknown.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropUnknown.h; sourceTree = "<group>"; };
-		DEC747CBEC864D957296A740 /* GerberCharts.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = GerberCharts.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		DEC747CBEC864D957296A740 /* RememberRemember.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = RememberRemember.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		DF70F1F0AB9C1CF89E638C1F /* ContinuousStructure.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = ContinuousStructure.cpp; sourceTree = "<group>"; };
 		DFB34E1830D6A43D7D93419D /* CSPrimWire.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimWire.cpp; sourceTree = "<group>"; };
 		E4A3E2850B8B91F4C4639095 /* CSRectGrid.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSRectGrid.cpp; sourceTree = "<group>"; };
@@ -609,9 +609,9 @@
 			path = libkicadems_smoketest;
 			sourceTree = "<group>";
 		};
-		1E051C9DFB9D9A4CF7CB1120 /* GerberCharts */ = {
+		1E051C9DFB9D9A4CF7CB1120 /* RememberRemember */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = GerberCharts;
+			path = RememberRemember;
 			sourceTree = "<group>";
 		};
 		429F16897495224E3C8CB5A0 /* libkicad */ = {
@@ -711,7 +711,7 @@
 			files = (
 				C0A71A000000000000000013 /* libopenEMS.dylib in Frameworks */,
 				71B40FE93042E264002796EC /* libCSXCAD.dylib in Frameworks */,
-				479136241E9A85AC3E2BFC9B /* GerberCharts.framework in Frameworks */,
+				479136241E9A85AC3E2BFC9B /* RememberRemember.framework in Frameworks */,
 				71AD3CEB302FAAD5006D5847 /* Copper.framework in Frameworks */,
 				C0A71A000000000000000001 /* libCopperUtils.a in Frameworks */,
 				4988C919C7B2E11A4E12652C /* liblibkicadems.a in Frameworks */,
@@ -810,7 +810,7 @@
 			isa = PBXGroup;
 			children = (
 				C0A71A000000000000000020 /* openEMS */,
-				1E051C9DFB9D9A4CF7CB1120 /* GerberCharts */,
+				1E051C9DFB9D9A4CF7CB1120 /* RememberRemember */,
 				B7D891E5D67D73D341733A71 /* KiEMS */,
 				71AD229430263516006D5847 /* kicad_ems */,
 				8290469707C87811FFCE548F /* kicad_ems_fdtd_worker */,
@@ -842,7 +842,7 @@
 				922BA8FA4CD5D8901DCAC9DA /* liblibkicadems.a */,
 				CAE9E934278E88A4B6FDB4F0 /* libkicadems_smoketest */,
 				1730AB8B76054706EB2AB0BA /* kicad_ems_fdtd_worker */,
-				DEC747CBEC864D957296A740 /* GerberCharts.framework */,
+				DEC747CBEC864D957296A740 /* RememberRemember.framework */,
 				71AD3CD6302FAAD5006D5847 /* Copper.framework */,
 				71AD3CE0302FAAD5006D5847 /* CopperTests.xctest */,
 				3E4C03285D1BDDD8282A6ECE /* Copper_smoketest */,
@@ -1014,9 +1014,9 @@
 /* End PBXHeadersBuildPhase section */
 
 /* Begin PBXNativeTarget section */
-		07086D1AD104CA5BBA5AF140 /* GerberCharts */ = {
+		07086D1AD104CA5BBA5AF140 /* RememberRemember */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = A7A05BDB98C84DE3CA4A2188 /* Build configuration list for PBXNativeTarget "GerberCharts" */;
+			buildConfigurationList = A7A05BDB98C84DE3CA4A2188 /* Build configuration list for PBXNativeTarget "RememberRemember" */;
 			buildPhases = (
 				B729BAF527C6CE60A457BB41 /* Headers */,
 				53AC52A1D605A6E26AFDD388 /* Sources */,
@@ -1030,11 +1030,11 @@
 				5B4B3AF2BB045C901603F92B /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				1E051C9DFB9D9A4CF7CB1120 /* GerberCharts */,
+				1E051C9DFB9D9A4CF7CB1120 /* RememberRemember */,
 			);
-			name = GerberCharts;
-			productName = GerberCharts;
-			productReference = DEC747CBEC864D957296A740 /* GerberCharts.framework */;
+			name = RememberRemember;
+			productName = RememberRemember;
+			productReference = DEC747CBEC864D957296A740 /* RememberRemember.framework */;
 			productType = "com.apple.product-type.framework";
 		};
 		0D27BC0AB714B88FE14FFB28 /* libkicad_smoketest */ = {
@@ -1376,7 +1376,7 @@
 				5BC0C98C152C9B66E02544CD /* libkicadems_smoketest */,
 				5034717F4A638C8CC653DE57 /* kicad_ems_fdtd_worker */,
 				2971163407AC90FC988D853B /* KiEMS */,
-				07086D1AD104CA5BBA5AF140 /* GerberCharts */,
+				07086D1AD104CA5BBA5AF140 /* RememberRemember */,
 				71AD3CD5302FAAD5006D5847 /* Copper */,
 				71AD3CDF302FAAD5006D5847 /* CopperTests */,
 				B35E2A665EE704DAF2769F32 /* Copper_smoketest */,
@@ -1694,8 +1694,8 @@
 		};
 		585312645C254E539E00095D /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			name = GerberCharts;
-			target = 07086D1AD104CA5BBA5AF140 /* GerberCharts */;
+			name = RememberRemember;
+			target = 07086D1AD104CA5BBA5AF140 /* RememberRemember */;
 			targetProxy = 4A26F5AB0BDDD56E51069B55 /* PBXContainerItemProxy */;
 		};
 		58561B8FA81A09A6147E61E6 /* PBXTargetDependency */ = {
@@ -1887,7 +1887,7 @@
 				);
 				MACOSX_DEPLOYMENT_TARGET = 26.5;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.tomdavie.gerber-charts";
+				PRODUCT_BUNDLE_IDENTIFIER = "com.tomdavie.remember-remember";
 				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
@@ -1976,7 +1976,7 @@
 				);
 				MACOSX_DEPLOYMENT_TARGET = 26.5;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.tomdavie.gerber-charts";
+				PRODUCT_BUNDLE_IDENTIFIER = "com.tomdavie.remember-remember";
 				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
@@ -4036,7 +4036,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		A7A05BDB98C84DE3CA4A2188 /* Build configuration list for PBXNativeTarget "GerberCharts" */ = {
+		A7A05BDB98C84DE3CA4A2188 /* Build configuration list for PBXNativeTarget "RememberRemember" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				54329134C4B1132CA2C1E347 /* Release */,

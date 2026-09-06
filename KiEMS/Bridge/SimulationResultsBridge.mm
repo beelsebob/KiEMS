@@ -26,7 +26,7 @@ namespace {
 // Non-finite values are a real possibility in this data, not just a theoretical edge case: an
 // S-parameter magnitude of exactly 0 makes 20*log10(...) equal to -Infinity, and impedance
 // (Z = Z0*(1+S)/(1-S)) diverges toward Infinity as S approaches 1 -- a physically meaningful case
-// for a badly-matched or open port, not a computation bug. GerberCharts' own Core Graphics drawing
+// for a badly-matched or open port, not a computation bug. RememberRemember' own Core Graphics drawing
 // doesn't degrade gracefully on NaN/Infinite coordinates -- matplot++'s gnuplot backend (the CLI's
 // own PNG renderer, same underlying formulas) evidently tolerates it, but nothing here can assume
 // that. Clamped to a bound far outside any value these units (dB/Ohm/degrees/ns) could legitimately
