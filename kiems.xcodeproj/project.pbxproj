@@ -213,13 +213,6 @@
 			remoteGlobalIDString = 07086D1AD104CA5BBA5AF140;
 			remoteInfo = RememberRemember;
 		};
-		5190B1C09E043761E92826A0 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 71AD228A30263515006D5847 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 917B3FABD7921813B7A8BF98;
-			remoteInfo = CSXCAD;
-		};
 		6446391B4ED77176B8F180CF /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 71AD228A30263515006D5847 /* Project object */;
@@ -324,13 +317,6 @@
 			proxyType = 1;
 			remoteGlobalIDString = 0E08621C93A1CC737D3F6A93;
 			remoteInfo = libkiems;
-		};
-		8796A5C4EFC7A0BBD6F6F647 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 71AD228A30263515006D5847 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = D621ED7A33B5BA1305450055;
-			remoteInfo = openEMS;
 		};
 		896EB885155C4FA6E502D81D /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -500,7 +486,7 @@
 		232FA4E2D037A1BD03BAEC5C /* CSPropDiscMaterial.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropDiscMaterial.h; sourceTree = "<group>"; };
 		252340AF2DF277394293A777 /* CSPrimPolyhedronReader.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimPolyhedronReader.h; sourceTree = "<group>"; };
 		26BECA8A0D515EF0EB787386 /* CSPropLorentzMaterial.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropLorentzMaterial.h; sourceTree = "<group>"; };
-		27FC500F5EC82E42F046FEF3 /* libkiems_tests */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = libkiems_tests; sourceTree = BUILT_PRODUCTS_DIR; };
+		27FC500F5EC82E42F046FEF3 /* libkiems_tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = libkiems_tests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		2E0A6B0B01BDA7784504DBD7 /* CSPrimRotPoly.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimRotPoly.cpp; sourceTree = "<group>"; };
 		30877432D1026706D7E805DA /* libhdf5.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = libhdf5.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
 		30A0506109278583137803EB /* CSPrimPolygon.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimPolygon.cpp; sourceTree = "<group>"; };
@@ -886,7 +872,7 @@
 				47611C745FA02E5BA7871B3D /* copper_fdtd_worker */,
 				6B8F4508947040AF3A200E11 /* libCSXCAD.dylib */,
 				71B4EE8E304224C5002796EC /* libCopperUtils.a */,
-				27FC500F5EC82E42F046FEF3 /* libkiems_tests */,
+				27FC500F5EC82E42F046FEF3 /* libkiems_tests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -1319,16 +1305,14 @@
 			);
 			dependencies = (
 				EA0A86660359852DE27A849C /* PBXTargetDependency */,
-				3CEC7F037011193018670516 /* PBXTargetDependency */,
-				402A78CD55C79FE5BE360E30 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				87EBBDF2469E60AF87C97EB2 /* libkiems_tests */,
 			);
 			name = libkiems_tests;
 			productName = libkiems_tests;
-			productReference = 27FC500F5EC82E42F046FEF3 /* libkiems_tests */;
-			productType = "com.apple.product-type.tool";
+			productReference = 27FC500F5EC82E42F046FEF3 /* libkiems_tests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
 		};
 		917B3FABD7921813B7A8BF98 /* CSXCAD */ = {
 			isa = PBXNativeTarget;
@@ -1737,22 +1721,10 @@
 			target = 0E08621C93A1CC737D3F6A93 /* libkiems */;
 			targetProxy = F90E814A552714159096AAF7 /* PBXContainerItemProxy */;
 		};
-		3CEC7F037011193018670516 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			name = CSXCAD;
-			target = 917B3FABD7921813B7A8BF98 /* CSXCAD */;
-			targetProxy = 5190B1C09E043761E92826A0 /* PBXContainerItemProxy */;
-		};
 		3E33A9C8EE26B6F26DDDE2A8 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 0D27BC0AB714B88FE14FFB28 /* libkicad_smoketest */;
 			targetProxy = 3429B0B7F4066519273A0A7D /* PBXContainerItemProxy */;
-		};
-		402A78CD55C79FE5BE360E30 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			name = openEMS;
-			target = D621ED7A33B5BA1305450055 /* openEMS */;
-			targetProxy = 8796A5C4EFC7A0BBD6F6F647 /* PBXContainerItemProxy */;
 		};
 		45D270673764BFEAB850DEA6 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
@@ -1987,6 +1959,9 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CLANG_CXX_LANGUAGE_STANDARD = "c++23";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/libkiems",
@@ -1995,9 +1970,12 @@
 					"$(inherited)",
 					"$(BUILT_PRODUCTS_DIR)",
 				);
+				MARKETING_VERSION = 1.0;
 				OTHER_LDFLAGS = "$(inherited)";
+				PRODUCT_BUNDLE_IDENTIFIER = "com.tomdavie.libkiems-tests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
 			};
 			name = Release;
 		};
@@ -2301,6 +2279,9 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CLANG_CXX_LANGUAGE_STANDARD = "c++23";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/libkiems",
@@ -2309,9 +2290,12 @@
 					"$(inherited)",
 					"$(BUILT_PRODUCTS_DIR)",
 				);
+				MARKETING_VERSION = 1.0;
 				OTHER_LDFLAGS = "$(inherited)";
+				PRODUCT_BUNDLE_IDENTIFIER = "com.tomdavie.libkiems-tests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
 			};
 			name = Debug;
 		};
