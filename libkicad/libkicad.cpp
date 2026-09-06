@@ -28,8 +28,10 @@
 #include <footprint.h>
 #include <pad.h>
 #include <padstack.h>
+#include <pcb_shape.h>
 #include <pcb_track.h>
 #include <zone.h>
+#include <convert_shape_list_to_polygon.h>
 #include <geometry/shape_poly_set.h>
 #include <geometry/shape_line_chain.h>
 #include <netinfo.h>
@@ -678,7 +680,30 @@ RawBoardGeometryResult boardGeometryRaw(const std::string& projectPath, const st
 
     SHAPE_POLY_SET boardOutline;
     if (!board->GetBoardPolygonOutlines(boardOutline, false, nullptr, false, false)) {
-        return _failBoardGeometry("Board Edge.Cuts do not form valid closed polygons");
+        // KiCad's Gerber plotter permits open Edge.Cuts graphics, and footprints sometimes carry
+        // such graphics for board-edge markings or mechanical guidance.  Unfortunately,
+        // GetBoardPolygonOutlines() rejects the entire board when even one of those footprint
+        // graphics is open, despite a valid closed board-owned outline being present.  Retry with
+        // the board drawings alone in that case.  This retains KiCad's own curve tessellation,
+        // chaining tolerance, contour nesting, and cutout handling without inventing a bounding
+        // box or accepting an actually open main outline.
+        std::vector<PCB_SHAPE*> boardEdgeShapes;
+        for (BOARD_ITEM* drawing : board->Drawings()) {
+            if (!PCB_SHAPE::ClassOf(drawing)) {
+                continue;
+            }
+            PCB_SHAPE* shape = static_cast<PCB_SHAPE*>(drawing);
+            if (shape->GetLayer() == Edge_Cuts) {
+                boardEdgeShapes.push_back(shape);
+            }
+        }
+
+        boardOutline.RemoveAllContours();
+        if (boardEdgeShapes.empty() ||
+            !ConvertOutlineToPolygon(boardEdgeShapes, boardOutline, maxError, board->GetOutlinesChainingEpsilon(),
+                                     true, nullptr, false)) {
+            return _failBoardGeometry("Board Edge.Cuts do not form valid closed polygons");
+        }
     }
     _forEachPolygonLoop(boardOutline, auxOrigin,
                         [&](PolygonLoop loop) { result.geometry.outline.push_back(std::move(loop)); });
