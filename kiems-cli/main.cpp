@@ -20,6 +20,8 @@
 #include <mach-o/dyld.h>
 #endif
 
+#include "arguments.hpp"
+
 #include "kiems/config.hpp"
 #include "kiems/constants.hpp"
 #include "kiems/excitation_postprocess.hpp"
@@ -101,8 +103,8 @@ void printUsage() {
 }
 
 /// CLI-only diagnostic knobs for --dump-early-frames/--dump-detailed-trace -- deliberately not part
-/// of Arguments/RunOptions (config.hpp is shared with the GUI app and libkiems; these are
-/// one-off debugging aids that have no business in either).
+/// of Arguments/RunOptions (Arguments belongs to this CLI; these are still separate one-off
+/// debugging aids that do not belong in its normal command-line state).
 struct DumpOptions {
     std::optional<std::filesystem::path> dir;
     bool detailedTrace = false;

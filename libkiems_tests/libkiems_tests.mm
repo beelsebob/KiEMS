@@ -4,7 +4,6 @@
 #include <cmath>
 #include <complex>
 #include <limits>
-#include <optional>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -75,28 +74,6 @@
     const nlohmann::json json = escaped;
     XCTAssertTrue(json == escaped.raw());
     XCTAssertTrue(json.get<kiems::NetName>().raw() == escaped.raw());
-}
-
-- (void)testArgumentDefaultsAndMutation {
-    kiems::Arguments arguments;
-    XCTAssertEqual(arguments.oversampling(), 4);
-    XCTAssertTrue(arguments.backend() == kiems::FDTDBackend::OpenEMSCPU);
-    XCTAssertTrue(arguments.pmlKind() == kiems::PMLKind::CPML);
-    XCTAssertFalse(arguments.geometry());
-    XCTAssertFalse(arguments.simulate());
-    XCTAssertFalse(arguments.postprocess());
-    XCTAssertFalse(arguments.all());
-
-    arguments.setGeometry(true);
-    arguments.setOversampling(8);
-    arguments.setBackend(kiems::FDTDBackend::CopperGPU);
-    arguments.setPmlKind(kiems::PMLKind::UPML);
-    arguments.setConfigPath("board.json");
-    XCTAssertTrue(arguments.geometry());
-    XCTAssertEqual(arguments.oversampling(), 8);
-    XCTAssertTrue(arguments.backend() == kiems::FDTDBackend::CopperGPU);
-    XCTAssertTrue(arguments.pmlKind() == kiems::PMLKind::UPML);
-    XCTAssertTrue(arguments.configPath() == std::optional<std::string>("board.json"));
 }
 
 - (void)testWaveformSynthesis {
