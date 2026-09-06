@@ -36,10 +36,10 @@ CopperProbe discoverVoltageProbe(Operator& op, CSPropProbeBox& pb, CSPrimBox& bo
 /// SnapMethod=1, dualMesh=true -- matching ProcessCurrent's constructor/openEMS's own
 /// SetDualMesh(true) for ProbeType==1) followed by ProcessCurrent::DefineStartStopCoord's own
 /// padding of whichever in-plane axis (not the normal direction) came in as a single point, so the
-/// Ampere loop actually encloses an area. gerber2ems's own ports.cpp always sets an explicit normal
+/// Ampere loop actually encloses an area. kicad_ems's own ports.cpp always sets an explicit normal
 /// direction (see csx_helpers.cpp's addProbe), so only that branch is ported here -- the
 /// auto-infer-from-a-2D-box branch openEMS falls back to when no normal direction is given isn't
-/// something gerber2ems's own probe construction ever exercises.
+/// something kicad_ems's own probe construction ever exercises.
 CopperProbe discoverCurrentProbe(Operator& op, CSPropProbeBox& pb, CSPrimBox& box) {
     double dstart[3], dstop[3];
     for (int n = 0; n < 3; ++n) {

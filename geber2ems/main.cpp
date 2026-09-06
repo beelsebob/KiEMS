@@ -2,7 +2,7 @@
 //  main.cpp
 //  geber2ems
 //
-//  CLI entry point. Ported from gerber2ems/main.py.
+//  CLI entry point. Ported from kicad_ems/main.py.
 
 #include <algorithm>
 #include <array>
@@ -20,20 +20,20 @@
 #include <mach-o/dyld.h>
 #endif
 
-#include "gerber2ems/config.hpp"
-#include "gerber2ems/constants.hpp"
-#include "gerber2ems/excitation_postprocess.hpp"
-#include "gerber2ems/geometry_result.hpp"
-#include "gerber2ems/importer.hpp"
+#include "kicad_ems/config.hpp"
+#include "kicad_ems/constants.hpp"
+#include "kicad_ems/excitation_postprocess.hpp"
+#include "kicad_ems/geometry_result.hpp"
+#include "kicad_ems/importer.hpp"
 #include "logging.hpp"
-#include "gerber2ems/paths_config.hpp"
-#include "gerber2ems/port_resolution.hpp"
-#include "gerber2ems/postprocess_result.hpp"
-#include "gerber2ems/simulation.hpp"
-#include "gerber2ems/simulation_result.hpp"
+#include "kicad_ems/paths_config.hpp"
+#include "kicad_ems/port_resolution.hpp"
+#include "kicad_ems/postprocess_result.hpp"
+#include "kicad_ems/simulation.hpp"
+#include "kicad_ems/simulation_result.hpp"
 
 // Forward-declare-only boundary header (see its own file comment) -- safe to include alongside
-// every gerber2ems header above despite those using the *installed* CSXCAD/openEMS forms and
+// every kicad_ems header above despite those using the *installed* CSXCAD/openEMS forms and
 // Copper's own internals using the flat/source-checkout forms, for exactly the same reason
 // copper_fdtd_worker/main.cpp can: this header never exposes a complete openEMS/ContinuousStructure
 // definition itself. This is what lets the CLI run Copper's GPU engine in-process (see
@@ -42,7 +42,7 @@
 // libkicadems itself still never does.
 #include "CopperFDTDRunner.h"
 
-using namespace gerber2ems;
+using namespace kicad_ems;
 using namespace Cu;
 
 namespace {
@@ -536,7 +536,7 @@ int main(int argc, char** argv) {
 
     const PathsConfig paths =
         PathsConfig::forConfigFile(cfgPath, resolveKicadCli(), executableDir() / "libkicad_smoketest",
-                                    executableDir() / "gerber2ems_fdtd_worker",
+                                    executableDir() / "kicad_ems_fdtd_worker",
                                     executableDir() / "copper_fdtd_worker");
 
     if (args.input().extension() == ".kicad_pcb") {

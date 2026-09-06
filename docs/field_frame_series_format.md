@@ -22,8 +22,8 @@ explicitly here so a future reader/writer never reintroduces either:
    convention — `Gerber2EMSStudio/FieldView.swift` had to work around the mismatch after it silently
    broke rendering. This format uses the sample-point convention throughout, matching what
    `copper::CopperFieldSnapshot::lineX/Y/Z` (`Copper/CopperFDTDRunner.h`) actually produces.
-2. **Units are meters**, matching `CopperFieldSnapshot::lineX/Y/Z` — not `gerber2ems::
-   ComputedGridLines`' simulation-unit doubles (`libkicadems/gerber2ems/simulation.hpp`), which are
+2. **Units are meters**, matching `CopperFieldSnapshot::lineX/Y/Z` — not `kicad_ems::
+   ComputedGridLines`' simulation-unit doubles (`libkicadems/kicad_ems/simulation.hpp`), which are
    a different frame (scaled, and re-origined to the board's own Edge_Cuts bounding box) entirely.
    Don't mix the two without an explicit, documented conversion.
 
@@ -140,7 +140,7 @@ external interchange contract.
 
 ## Performance signposts
 
-The `com.tdavie.gerber2ems` / `FieldFrames` Instruments log exposes interval signposts for:
+The `com.tdavie.kicad_ems` / `FieldFrames` Instruments log exposes interval signposts for:
 
 - generating one 16-frame block (or the final partial block);
 - generating each individual frame within that block;

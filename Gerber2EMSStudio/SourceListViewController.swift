@@ -175,7 +175,7 @@ final class SourceListViewController: NSViewController {
     // Mutually exclusive with geometryOnlyCheckbox below (both ultimately just read/write the same
     // underlying EMSInvolvedNetBridge.inclusionLevel -- see includedToggled()/geometryOnlyToggled()).
     private let includedCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
-    // Titled "Included in Simulation" -- the narrower tier (gerber2ems::NetInclusionLevel::
+    // Titled "Included in Simulation" -- the narrower tier (kicad_ems::NetInclusionLevel::
     // GeometryOnly): the net's own copper physically exists in the simulated geometry/mesh (clipped
     // to whatever hull the Simulation Net-level nets already produced, and densified the same
     // edge-aware way -- see grid_gen.cpp), but never grows the hull itself and is never eligible for
@@ -185,7 +185,7 @@ final class SourceListViewController: NSViewController {
     // Shown only for a .net/.netClass selection, directly under includedCheckbox, and only once
     // it's checked (see updateValueFieldsVisibility()) -- a net-level, auto-placed, non-loading
     // impedance-measurement probe, independent of whatever ports this net's own pins resolve to.
-    // See gerber2ems::InvolvedNetConfig::probeImpedance()'s own doc comment.
+    // See kicad_ems::InvolvedNetConfig::probeImpedance()'s own doc comment.
     private let probeImpedanceCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let simulateAsDifferentialPairCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     // Shown only for a .pin selection. Independent of excitedCheckbox (see its own declaration
@@ -205,7 +205,7 @@ final class SourceListViewController: NSViewController {
     // Only meaningful (and only ever shown) for a .pin node -- a per-pad escape hatch on top of
     // directionPopUp/customDirectionField's own net-wide value, for when opposite ends of a routed
     // net depart their own pads in different cardinal directions and one net-wide value can't be
-    // right for both. See gerber2ems::PinDirectionOverride's own doc comment.
+    // right for both. See kicad_ems::PinDirectionOverride's own doc comment.
     private let pinDirectionOverridePopUp = NSPopUpButton()
     private let pinDirectionOverrideCustomField = NSTextField(string: "")
     private var pinDirectionOverrideRow: NSView!
@@ -255,7 +255,7 @@ final class SourceListViewController: NSViewController {
     private var valueFieldRows: [NSView] = []
 
     // Excitation editor -- only ever shown for a pin-level selection (ExcitationConfig is
-    // inherently per footprint+pin, not per net/net-class; see gerber2ems::ExcitationConfig).
+    // inherently per footprint+pin, not per net/net-class; see kicad_ems::ExcitationConfig).
     // Independent of probeCheckbox -- available whether or not Probe is checked; checking it always
     // yields the same full absorbing-port structure Probe+Absorb Signal does, regardless of this
     // pin's own probe/absorb state (see PortConfig::absorbSignal()'s own doc comment).
@@ -1337,7 +1337,7 @@ final class SourceListViewController: NSViewController {
         absorbRow.isHidden = !isPinNode
 
         let entry = matchingEntry(for: node)
-        // GeometryOnly nets never get ports -- see gerber2ems::NetInclusionLevel's own doc comment
+        // GeometryOnly nets never get ports -- see kicad_ems::NetInclusionLevel's own doc comment
         // -- so every field below that's meaningless without one (impedance/plane/direction rows are
         // hidden entirely by updateValueFieldsVisibility() for exactly this reason; probe/absorb/
         // excite are pin-level and gated right here, since they aren't covered by that method).
@@ -1472,7 +1472,7 @@ final class SourceListViewController: NSViewController {
     private func updateValueFieldsVisibility() {
         // Requires SimulationNet specifically, not just "an entry exists at all" -- these are all
         // port/probe-oriented fields, meaningless for a GeometryOnly entry (see
-        // gerber2ems::NetInclusionLevel's own doc comment).
+        // kicad_ems::NetInclusionLevel's own doc comment).
         let included = selectedNode.flatMap(matchingEntry)?.inclusionLevel == .simulationNet
         probeImpedanceCheckbox.isEnabled = included
         simulateAsDifferentialPairCheckbox.isEnabled = included
@@ -1648,7 +1648,7 @@ final class SourceListViewController: NSViewController {
         refreshAfterToggle(node)
     }
 
-    /// The "Included in Simulation" checkbox -- gerber2ems::NetInclusionLevel::GeometryOnly, the
+    /// The "Included in Simulation" checkbox -- kicad_ems::NetInclusionLevel::GeometryOnly, the
     /// narrower tier that gets an involved-nets entry's copper into the simulated geometry/mesh
     /// without hull growth or port/probe/excitation eligibility (see that enum's own doc comment).
     /// Checking this while includedCheckbox (Simulation Net) is already on downgrades that same

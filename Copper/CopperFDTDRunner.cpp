@@ -43,7 +43,7 @@ namespace {
 // openEMS's own reporter uses -- `t_diff>4` (openems.cpp's RunFDTD loop): print at most once every
 // 4 seconds of wall time, not every N steps, so the two backends' progress output reads at a
 // comparable rate regardless of how many steps/second either one is actually managing. Kept
-// intentionally lightweight (plain fprintf) rather than piped through gerber2ems's own logging.hpp,
+// intentionally lightweight (plain fprintf) rather than piped through kicad_ems's own logging.hpp,
 // since Copper.framework doesn't link libkicadems (see the Copper implementation plan's "no
 // dependency on Copper" rule, which cuts both ways).
 class PhaseTimer {
@@ -273,7 +273,7 @@ CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
         }
 
         // Downcast of an object never actually constructed as CopperOpenEMS -- `fdtd` came from
-        // gerber2ems::Simulation, which knows nothing about Copper (see
+        // kicad_ems::Simulation, which knows nothing about Copper (see
         // CopperOpenEMSAccess.hpp's own file comment for why this specific downcast is accepted:
         // identical layout, no new data members, no vtable change).
         auto& copperFdtd = static_cast<CopperOpenEMS&>(fdtd);
@@ -323,7 +323,7 @@ CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
                 "and mesh placement";
             return result;
         }
-        // Auto-discovered lumped RLC components (gerber2ems::Simulation::addLumpedComponents(), see
+        // Auto-discovered lumped RLC components (kicad_ems::Simulation::addLumpedComponents(), see
         // CopperLumpedRLC.hpp's own top comment) -- discovered once up front like `excitation`, but
         // corrected every timestep below via a rolling ADE state this run owns directly (mirrors
         // Engine_Ext_LumpedRLC's own Vdn/Jn ring buffers, since nothing here is a real openEMS

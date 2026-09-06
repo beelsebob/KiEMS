@@ -10,16 +10,16 @@
 #include <string>
 #include <vector>
 
-#include "gerber2ems/config.hpp"
-#include "gerber2ems/postprocess.hpp"
-#include "gerber2ems/eye_diagram.hpp"
+#include "kicad_ems/config.hpp"
+#include "kicad_ems/postprocess.hpp"
+#include "kicad_ems/eye_diagram.hpp"
 
-using gerber2ems::Postprocessor;
-using gerber2ems::SimulationConfig;
-using gerber2ems::DifferentialPairConfig;
-using gerber2ems::ExcitationConfig;
-using gerber2ems::Frequency;
-using gerber2ems::PortConfig;
+using kicad_ems::Postprocessor;
+using kicad_ems::SimulationConfig;
+using kicad_ems::DifferentialPairConfig;
+using kicad_ems::ExcitationConfig;
+using kicad_ems::Frequency;
+using kicad_ems::PortConfig;
 
 namespace {
 
@@ -53,7 +53,7 @@ NSArray<NSNumber*>* toNSArray(const std::vector<double>& values, double scale = 
 // this app's results view can't assume that, and the underlying port names (see port_resolution.cpp)
 // already carry exactly the identifying information (footprint + pin) needed to name a curve by
 // what it physically measures instead.
-NSString* responseLabel(const gerber2ems::PortConfig& measuredPort) {
+NSString* responseLabel(const kicad_ems::PortConfig& measuredPort) {
     return [NSString stringWithFormat:@"Response at %s pin %s", measuredPort.footprintRef().c_str(),
                                         measuredPort.padNumber().c_str()];
 }
@@ -314,7 +314,7 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
             for (std::size_t f = 0; f < sParam->size(); ++f) {
                 magDb[f] = 20 * std::log10(std::abs((*sParam)[f]));
             }
-            const std::vector<double> phaseDeg = gerber2ems::unwrapPhaseDegrees(*sParam);
+            const std::vector<double> phaseDeg = kicad_ems::unwrapPhaseDegrees(*sParam);
             [curves addObject:[[EMSResultsSParamCurve alloc]
                                    initWithOutputPort:j
                                                  label:responseLabel(simConfig.ports()[static_cast<std::size_t>(j)])
@@ -524,7 +524,7 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
 
     const auto appendEye = [&](NSString* name, bool differential,
                                const std::vector<std::complex<double>>& transfer) {
-        const auto eye = gerber2ems::computeEyeDiagram(postprocessor.frequencies(), transfer, eyeBitRate);
+        const auto eye = kicad_ems::computeEyeDiagram(postprocessor.frequencies(), transfer, eyeBitRate);
         if (!eye.has_value()) {
             return;
         }

@@ -1,6 +1,6 @@
-// Objective-C interface over gerber2ems::EMSConfig. This header is Swift-visible (via the
+// Objective-C interface over kicad_ems::EMSConfig. This header is Swift-visible (via the
 // bridging header) and must never expose a C++ type -- see EMSConfigBridge.mm for how it holds
-// the actual gerber2ems::EMSConfig.
+// the actual kicad_ems::EMSConfig.
 #import <Foundation/Foundation.h>
 
 NS_ASSUME_NONNULL_BEGIN
@@ -18,7 +18,7 @@ typedef NS_ENUM(NSInteger, EMSNetSelectorKind) {
     EMSNetSelectorKindFootprintPin,
 };
 
-/// Mirrors gerber2ems::NetInclusionLevel -- the "Simulation Net" vs. "Included in Simulation"
+/// Mirrors kicad_ems::NetInclusionLevel -- the "Simulation Net" vs. "Included in Simulation"
 /// source-list checkboxes. SimulationNet is full participation (today's only behavior, pre-dating
 /// this distinction): grows the hull, gets probe/absorb/excite ports. GeometryOnly is a strict
 /// subset: the net's copper physically exists in the simulated geometry (clipped to whatever hull
@@ -30,7 +30,7 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 };
 
 /// One ProbedPin entry -- a plain value snapshot (not index-forwarding like EMSInvolvedNetBridge
-/// itself), since gerber2ems::ProbedPin has no separate identity to look up by index; a fresh array
+/// itself), since kicad_ems::ProbedPin has no separate identity to look up by index; a fresh array
 /// of these is built from InvolvedNetConfig::probedPins() on every read of
 /// EMSInvolvedNetBridge.probedPins.
 @interface EMSProbedPinBridge : NSObject
@@ -59,7 +59,7 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 @property (nonatomic) EMSNetInclusionLevel inclusionLevel;
 /// Populated depending on kind: netClass for .NetClass, net for .Net, footprintReference+pins for
 /// .FootprintPin. Setting the wrong one for the current kind is harmless (it's just unused until
-/// kind changes to match) -- to_json()/gerber2ems only ever reads the field matching kind.
+/// kind changes to match) -- to_json()/kicad_ems only ever reads the field matching kind.
 @property (nonatomic, copy, nullable) NSString *netClass;
 @property (nonatomic, copy, nullable) NSString *net;
 @property (nonatomic, copy, nullable) NSString *footprintReference;
@@ -71,7 +71,7 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 /// Net/NetClass-kind entries only -- when YES, auto-places a handful of non-loading, trace-anchored
 /// impedance-measurement probes along this net's own straight routed copper, independent of
 /// whatever ports its own pads resolve to via probedPins()/excludedPins(). Neither impedance nor
-/// length is read for this -- see gerber2ems::InvolvedNetConfig::probeImpedance()'s own doc comment.
+/// length is read for this -- see kicad_ems::InvolvedNetConfig::probeImpedance()'s own doc comment.
 @property (nonatomic) BOOL probeImpedance;
 /// The other net when this entry was added as one half of a differential pair. Pair membership is
 /// independent of whether mixed-mode simulation is currently enabled.
@@ -82,24 +82,24 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 @property (nonatomic, nullable) NSNumber *dBMargin;
 
 /// The MSLPort propagation direction, in degrees (0 = +X, 90 = +Y, ...) -- nil means "derive it
-/// automatically from the routed copper departing the pad" (see gerber2ems::_deriveDirection in
+/// automatically from the routed copper departing the pad" (see kicad_ems::_deriveDirection in
 /// port_resolution.cpp). Any value is accepted, not just the four cardinal directions -- the app's
 /// own direction popup snaps North/South/East/West to 90/270/0/180, but a "Custom" angle can be
 /// anything the port_resolution.cpp escape hatch supports.
 @property (nonatomic, nullable) NSNumber *direction;
 
-/// Legacy opt-*out* mechanism -- only ever consulted (by gerber2ems's own resolution logic) while
+/// Legacy opt-*out* mechanism -- only ever consulted (by kicad_ems's own resolution logic) while
 /// hasExplicitPinSelections is NO; superseded by isPinProbed/setPinProbed below for anything edited
 /// under the current source-list UI. Kept only so a pre-existing simulation.json keeps resolving
 /// exactly as it always did until its pins are first touched under the new UI -- see
-/// gerber2ems::InvolvedNetConfig's own doc comment.
+/// kicad_ems::InvolvedNetConfig's own doc comment.
 - (BOOL)isPinExcludedWithFootprint:(NSString *)footprint pin:(NSString *)pin;
 - (void)excludePinWithFootprint:(NSString *)footprint pin:(NSString *)pin;
 - (void)includePinWithFootprint:(NSString *)footprint pin:(NSString *)pin;
 
 /// True once any pin under this net has ever been edited via setPinProbed: below -- switches
 /// pin-selection resolution from the legacy excludedPins()-based mode to strict, explicit opt-in
-/// (see gerber2ems::InvolvedNetConfig's own doc comment). Never goes back to NO.
+/// (see kicad_ems::InvolvedNetConfig's own doc comment). Never goes back to NO.
 @property (nonatomic, readonly) BOOL hasExplicitPinSelections;
 /// Only meaningful once hasExplicitPinSelections is YES.
 - (BOOL)isPinProbedWithFootprint:(NSString *)footprint pin:(NSString *)pin;
@@ -116,7 +116,7 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 @property (nonatomic, readonly) NSArray<EMSProbedPinBridge *> *probedPins;
 
 /// Absorb-only: a real resistive termination port gets built for this pin (so it doesn't behave as
-/// an open, fully-reflecting stub in the FDTD field -- see gerber2ems::PortConfig::absorbSignal()'s
+/// an open, fully-reflecting stub in the FDTD field -- see kicad_ems::PortConfig::absorbSignal()'s
 /// own doc comment), but it's never shown as a measured port in Results and never becomes an
 /// excitation target on its own. Meant for a pin whose real destination (an IC input, a resistor to
 /// ground, ...) isn't itself part of this simulation, so the trace leading to it would otherwise
@@ -127,7 +127,7 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 - (void)setPinAbsorbOnly:(BOOL)enabled withFootprint:(NSString *)footprint pin:(NSString *)pin;
 
 /// A per-pad override for `direction`, checked first when resolving that one pad's own port --
-/// see gerber2ems::PinDirectionOverride's own doc comment for why a single net-wide `direction`
+/// see kicad_ems::PinDirectionOverride's own doc comment for why a single net-wide `direction`
 /// isn't always enough (opposite ends of a routed net often depart their own pads in different
 /// cardinal directions). nil means "no override for this specific pad" -- falls through to
 /// `direction`, then auto-derivation, same as before this existed.
@@ -137,7 +137,7 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 @end
 
 /// One ExcitationConfig entry -- purely a postprocessing input for the pin it's attached to (see
-/// gerber2ems::ExcitationConfig's doc comment; it plays no role in the FDTD sweep itself). Same
+/// kicad_ems::ExcitationConfig's doc comment; it plays no role in the FDTD sweep itself). Same
 /// index-forwarding note as EMSInvolvedNetBridge.
 @interface EMSExcitationBridge : NSObject
 
@@ -183,7 +183,7 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 @end
 
 /// A simulation.json document's in-memory model. Always in file units (mm etc.) -- see
-/// gerber2ems::EMSConfig::scaledToSimulationUnits()'s doc comment; this bridge never scales
+/// kicad_ems::EMSConfig::scaledToSimulationUnits()'s doc comment; this bridge never scales
 /// anything, it just edits/saves exactly what's in the file.
 @interface EMSConfigBridge : NSObject
 
@@ -192,7 +192,7 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 - (BOOL)saveToFile:(NSString *)path error:(NSError **)error;
 
 /// The .kicad_pcb this document is linked to -- nil until the board picker sets it. See
-/// gerber2ems::EMSConfig::kicadPcbPath()'s doc comment for why this is a stored path rather than a
+/// kicad_ems::EMSConfig::kicadPcbPath()'s doc comment for why this is a stored path rather than a
 /// copied file.
 @property (nonatomic, copy, nullable) NSString *kicadPcbPath;
 
@@ -213,7 +213,7 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 /// spurious ripple/rapid phase rotation in the post-processed S-parameters.
 @property (nonatomic) NSInteger maxSteps;
 
-/// The FDTD grid's own base target cell size (gerber2ems::Grid::optimal()), in file-unit
+/// The FDTD grid's own base target cell size (kicad_ems::Grid::optimal()), in file-unit
 /// micrometers -- the primary "how fine is the mesh" knob (diagonal/perpendicular/max cell sizes
 /// scale relative to this one). Document-level (EMSConfig), not per-simulation, same as maxSteps.
 @property (nonatomic) double gridDensity;
@@ -221,7 +221,7 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 /// Every copper layer's name, board-top to board-bottom, in the same 0-based order
 /// InvolvedNetConfig::plane()/PortConfig::plane() index into (substrate layers don't count towards
 /// that index, so they're excluded here too) -- empty until a board's been linked and its stackup
-/// imported (see gerber2ems::EMSConfig::loadStackup()).
+/// imported (see kicad_ems::EMSConfig::loadStackup()).
 @property (nonatomic, readonly) NSArray<NSString *> *metalLayerNames;
 
 @property (nonatomic, readonly) NSArray<EMSSimulationBridge *> *simulations;

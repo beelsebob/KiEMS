@@ -7,7 +7,7 @@
 #include <optional>
 
 #include "FieldFrameSeriesReader.hpp"
-#include "gerber2ems/constants.hpp"
+#include "kicad_ems/constants.hpp"
 #include "CopperUtils/logging.hpp"
 
 @interface EMSFieldFrameDataSource : NSObject {
@@ -166,7 +166,7 @@ namespace {
 // once, here, rather than every caller needing to know it exists). Same derivation as
 // GeometryPreviewBridge.mm's own mmToSimUnits().
 constexpr double kMetersToSimUnits =
-    static_cast<double>(gerber2ems::constants::unitMultiplier) / gerber2ems::constants::baseUnit;
+    static_cast<double>(kicad_ems::constants::unitMultiplier) / kicad_ems::constants::baseUnit;
 
 NSArray<NSNumber*>* convertLine(const std::vector<double>& metres) {
     NSMutableArray<NSNumber*>* out = [NSMutableArray arrayWithCapacity:metres.size()];

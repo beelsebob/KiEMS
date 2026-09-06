@@ -1,7 +1,7 @@
 import Cocoa
 
 /// A Formatter for NSTextField fields whose underlying model value is always in micrometers --
-/// gerber2ems::constants::baseUnit is 1e-6 ("Length units used in the whole script are microns"),
+/// kicad_ems::constants::baseUnit is 1e-6 ("Length units used in the whole script are microns"),
 /// and every length-like field in the saved JSON (hull_padding, via_edge_distance, via_spacing,
 /// plating thickness, an involved net's length/width, ...) is stored in that same unit, not
 /// millimeters. Displays -- and accepts typed input in -- whatever unit the user last typed (mm,

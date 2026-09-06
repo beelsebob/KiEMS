@@ -11,14 +11,14 @@
 #include <iostream>
 #include <vector>
 
-#include "gerber2ems/component_value.hpp"
-#include "gerber2ems/config.hpp"
-#include "gerber2ems/constants.hpp"
-#include "gerber2ems/eye_diagram.hpp"
+#include "kicad_ems/component_value.hpp"
+#include "kicad_ems/config.hpp"
+#include "kicad_ems/constants.hpp"
+#include "kicad_ems/eye_diagram.hpp"
 #include "logging.hpp"
-#include "gerber2ems/postprocess.hpp"
+#include "kicad_ems/postprocess.hpp"
 
-using namespace gerber2ems;
+using namespace kicad_ems;
 using namespace Cu;
 
 namespace {

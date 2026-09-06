@@ -1,8 +1,8 @@
 // Discovers openEMS voltage/current probe boxes (CSPropProbeBox) from a ContinuousStructure, snaps
 // them to the mesh, samples Copper's own field arrays with the exact same formulas openEMS's own
 // Engine_Interface_FDTD::CalcVoltageIntegral / ProcessCurrent::CalcIntegral use, and writes them out
-// in openEMS's own ASCII probe-file format -- so gerber2ems's existing reader
-// (libkicadems/gerber2ems/ports.cpp's `_loadUiFile`) can consume Copper's output completely
+// in openEMS's own ASCII probe-file format -- so kicad_ems's existing reader
+// (libkicadems/kicad_ems/ports.cpp's `_loadUiFile`) can consume Copper's output completely
 // unmodified, exactly like the plan's Phase 4 requires.
 //
 // Snapping is intentionally NOT a single generic "snap this box to the mesh" call, even though
@@ -45,7 +45,7 @@ struct CopperProbe {
 };
 
 /// Walks every CSPropProbeBox in `csx` with ProbeType 0 (voltage) or 1 (current) -- the only two
-/// types gerber2ems's own ports.cpp ever creates (see csx_helpers.cpp's `addProbe`) -- and snaps
+/// types kicad_ems's own ports.cpp ever creates (see csx_helpers.cpp's `addProbe`) -- and snaps
 /// each one's primitive box to `op`'s mesh. `op` must already be fully set up
 /// (openEMS::SetupFDTD() already run).
 std::vector<CopperProbe> discoverProbes(ContinuousStructure& csx, Operator& op);
@@ -166,7 +166,7 @@ double sampleCurrentProbe(const CopperProbe& probe, FieldAccessor&& field) {
 
 /// Opens `directory/probe.name` (no extension, matching openEMS's own naming -- see
 /// ProcessIntegral::InitProcess) and writes openEMS's own ASCII probe-file shape: a few `%`-prefixed
-/// header lines (content is cosmetic -- gerber2ems's own reader only checks the leading `%`, see
+/// header lines (content is cosmetic -- kicad_ems's own reader only checks the leading `%`, see
 /// _loadUiFile), then one `time\tvalue` row per sample() call, value already multiplied by
 /// `probe.weight` (matching ProcessIntegral::Process's own `m_Results[n] * m_weight`). Throws
 /// std::runtime_error if the file can't be opened.

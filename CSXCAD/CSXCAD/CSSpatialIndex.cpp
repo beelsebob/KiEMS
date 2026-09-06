@@ -98,7 +98,7 @@ void CSSpatialIndex::Build(const std::vector<CSProperties*>& properties, double 
 
 			// GetBoundBox() does not guarantee bb[2d] <= bb[2d+1] -- e.g. CSPrimBox::GetBoundBox()
 			// stores its raw start/stop coordinates per axis unordered, and consumers legitimately
-			// construct boxes with start > stop on an axis (gerber2ems's own substrate layers do
+			// construct boxes with start > stop on an axis (kicad_ems's own substrate layers do
 			// this for Z). Normalize per-axis before using these as a min/max pair, or an inverted
 			// axis silently produces an empty (lo>hi) cell range below and the primitive never gets
 			// indexed at all.

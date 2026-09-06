@@ -2,7 +2,7 @@
 // C++ type. Actually running the geometry-building pipeline stage that produces this data is
 // EMSSimulationPipelineBridge's job now (see EMSSimulationPipelineBridge.h) -- see
 // GeometryPreviewBridge+Private.h's buildGeometryPreview() for how that bridge turns an
-// already-sliced gerber2ems::SlicedBoard into one of these.
+// already-sliced kicad_ems::SlicedBoard into one of these.
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <simd/simd.h>
@@ -25,12 +25,12 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, readonly) NSString *name;
 @property (nonatomic, copy, readonly) NSArray<EMSGeometryTriangle *> *triangles;
 /// "#RRGGBB"/"#RRGGBBAA", from the board's active KiCad color theme (see
-/// gerber2ems::libkicad_query::layerColors) -- nil if that lookup failed or had no entry for this
+/// kicad_ems::libkicad_query::layerColors) -- nil if that lookup failed or had no entry for this
 /// layer, in which case the caller should fall back to its own default palette.
 @property (nonatomic, copy, readonly, nullable) NSString *hexColor;
 /// This layer's own real Z position, in the same board-top-at-0 frame as gridLinesZ -- the
 /// cumulative substrate thickness above it, exactly matching where the real FDTD simulation places
-/// this layer's own copper (see gerber2ems::Simulation::addGerbers()/getMetalLayerOffset(), which
+/// this layer's own copper (see kicad_ems::Simulation::addGerbers()/getMetalLayerOffset(), which
 /// this mirrors). A position, not a thickness: copper itself has no Z *extent* in the FDTD model
 /// (a metal layer is an infinitesimally thin PEC sheet, not a 3D volume) -- a 3D renderer wanting
 /// to lay layers out by real board thickness (rather than approximating with even spacing across
@@ -40,7 +40,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// One via -- either a real board via (from the board's own Excellon drill file, kept only where it
 /// still overlaps this simulation's sliced outline) or a stitching via board-slicing invented
-/// itself to close a cutout edge (see gerber2ems::SlicedBoard's own doc comment). `position`/
+/// itself to close a cutout edge (see kicad_ems::SlicedBoard's own doc comment). `position`/
 /// `position2` + `diameter` are the drilled hole's own capsule/stadium centerline+width; `ringPosition`/
 /// `ringPosition2` + `annularRingDiameter` are the copper pad/ring's own, *independently* sized and
 /// positioned capsule -- not necessarily sharing the hole's centerline length at all. They're only
@@ -67,7 +67,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) double width;
 @property (nonatomic, readonly) double length;
 /// NO for any non-loading measurement point (a pin-level passive probe or a net-level trace-
-/// impedance probe alike -- see gerber2ems::PortConfig::absorbSignal()'s own doc comment); YES for
+/// impedance probe alike -- see kicad_ems::PortConfig::absorbSignal()'s own doc comment); YES for
 /// a real, terminating lumped port. GeometryView colors these two cases differently.
 @property (nonatomic, readonly) BOOL absorbSignal;
 @end
@@ -79,7 +79,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// single-Z board layer), still in the same simulation-unit/Edge-Cuts-origin frame as everything
 /// else here. See buildGeometryPreview()'s own comment on where these come from and the coordinate
 /// transform applied. `color` is the model's own real STEP color (straight from
-/// gerber2ems::libkicad_query::ComponentTriangle, itself from XCAFDoc_ColorTool -- the same source
+/// kicad_ems::libkicad_query::ComponentTriangle, itself from XCAFDoc_ColorTool -- the same source
 /// WriteSTEP/WriteGLTF preserve), (1,1,1,1) if the model carries none -- shared by all three
 /// vertices (one real material per triangle, not interpolated per-vertex).
 @interface EMSGeometryComponentTriangle : NSObject
@@ -121,7 +121,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// EMSGeometryLayer) when absent, e.g. no F_Mask.gbr/B_Mask.gbr was exported. Reuses
 /// EMSGeometryLayer's own shape (flat 2D triangles at one shared Z) since the mask, like a copper
 /// layer, is naturally a flat sheet at a fixed Z from this preview's point of view -- its real
-/// thickness only matters to the FDTD simulation's own extrusion (gerber2ems::Simulation::
+/// thickness only matters to the FDTD simulation's own extrusion (kicad_ems::Simulation::
 /// addSolderMask()), not to this flat-shaded preview. `z` is the mask's own *outer* face (top
 /// mask: +thickness above F.Cu; bottom mask: -thickness below the last copper layer), not the
 /// copper-facing side, so it renders visibly above/below copper rather than z-fighting it.
@@ -131,7 +131,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, readonly) NSArray<NSValue *> *outline; // NSValue-wrapped CGPoint
 @property (nonatomic, copy, readonly) NSArray<EMSGeometryVia *> *vias;
 /// Stitching-via candidate positions board-slicing considered but rejected (no ground copper there,
-/// or too close to another via) -- see gerber2ems::SlicedBoard::failedStitchingViaAttempts's own
+/// or too close to another via) -- see kicad_ems::SlicedBoard::failedStitchingViaAttempts's own
 /// doc comment. NSValue-wrapped CGPoint, same convention as `outline`.
 @property (nonatomic, copy, readonly) NSArray<NSValue *> *failedViaAttempts;
 @property (nonatomic, copy, readonly) NSArray<EMSGeometryPort *> *ports;
@@ -162,12 +162,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// Every diagnostic KiCad's own exporter reported while building renderedComponentReferences' shapes
 /// -- most commonly "Could not add 3D model for <ref>." / "File not found: <path>" pairs, for a
 /// component whose linked 3D model can't be resolved (see
-/// gerber2ems::libkicad_query::ComponentModelExportResult's own doc comment). Non-fatal: the rest of
+/// kicad_ems::libkicad_query::ComponentModelExportResult's own doc comment). Non-fatal: the rest of
 /// componentMeshTriangles is still populated for every other requested component. Empty if every
 /// requested component's model resolved cleanly, or if the export itself failed outright (in which
 /// case componentMeshTriangles is empty too, not populated-minus-one).
 @property (nonatomic, copy, readonly) NSArray<NSString *> *componentModelExportMessages;
-/// Grid line positions GridGenerator placed along the X/Y/Z axes (see gerber2ems::ComputedGridLines),
+/// Grid line positions GridGenerator placed along the X/Y/Z axes (see kicad_ems::ComputedGridLines),
 /// in the same board-relative simulation-unit frame as everything else here -- empty (not nil)
 /// until the Grid pipeline stage has actually run (see EMSPipelineStageGrid), which the Geometry
 /// stage alone doesn't do. gridLinesZ is absolute (board top at 0, same convention as everywhere
@@ -187,14 +187,14 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, readonly) NSArray<EMSGeometryGridLayer *> *gridLayers;
 /// The core mesh's own extent on X/Y -- everywhere *inside* these bounds is the regular densified
 /// mesh; everywhere outside is the PML band GridGenerator appends beyond it (see
-/// gerber2ems::ComputedGridLines's own doc comment). All 0 alongside empty gridLinesX/Y, before the
+/// kicad_ems::ComputedGridLines's own doc comment). All 0 alongside empty gridLinesX/Y, before the
 /// Grid stage has run.
 @property (nonatomic, readonly) double pmlInnerXMin;
 @property (nonatomic, readonly) double pmlInnerXMax;
 @property (nonatomic, readonly) double pmlInnerYMin;
 @property (nonatomic, readonly) double pmlInnerYMax;
 /// Same idea, for Z -- the substrate stack's own top/bottom extent (board top always 0), before
-/// GridGenerator's graded PML/margin cells at either end (see gerber2ems::GridGenerator::
+/// GridGenerator's graded PML/margin cells at either end (see kicad_ems::GridGenerator::
 /// pmlInnerZMin()'s own doc comment). Unlike X/Y, no offset re-basing is needed here (Z has no
 /// separate per-axis local origin), so buildGeometryPreview() passes these straight through.
 @property (nonatomic, readonly) double pmlInnerZMin;

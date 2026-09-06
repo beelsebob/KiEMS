@@ -26,15 +26,15 @@
 // its own shell geometry from an actual Operator_Ext_UPML extension at all. Set_BC_PML() causes
 // openEMS's own Operator::CalcECOperator() to unconditionally call BuildExtension() on every extension
 // it creates (operator.cpp's own CalcECOperator(), regardless of which boundary algorithm the *caller*
-// ultimately wants) -- so if gerber2ems ever called Set_BC_PML() before a CPML run, grid.vv/vi/ii/iv at
+// ultimately wants) -- so if kicad_ems ever called Set_BC_PML() before a CPML run, grid.vv/vi/ii/iv at
 // PML cells would already be UPML's own graded, absorbing values by the time buildYeeGrid() reads them,
 // and this file's additive psi correction would be stacked on top of a medium UPML had already turned
 // absorbing -- two independent, incompatible PML formulations layered on the same cells. Confirmed in
 // practice: a real board's first NaN traced to exactly this (grid.vi at a PML cell reading ~1e-11,
 // eleven orders of magnitude off the ~217 a genuine vacuum cell reads, and reproducible with plain
-// UPML -- no CPML involved at all -- disabled). gerber2ems now uses Set_BC_Type()+MUR (never
+// UPML -- no CPML involved at all -- disabled). kicad_ems now uses Set_BC_Type()+MUR (never
 // Set_BC_PML()) for a CPML run specifically so no Operator_Ext_UPML ever gets created, and this file
-// computes its own shell geometry directly from `pmlDepthCells` (the same value gerber2ems would
+// computes its own shell geometry directly from `pmlDepthCells` (the same value kicad_ems would
 // otherwise have passed to Set_BC_PML()) and the Operator's own line counts instead.
 //
 // kappa (CPML's coordinate-*stretching* parameter, unrelated to openEMS's own same-named-but-

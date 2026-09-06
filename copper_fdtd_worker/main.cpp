@@ -1,11 +1,11 @@
 // A dedicated, single-purpose process that runs exactly one port's FDTD pass on Copper's GPU
-// engine and exits -- the GPU sibling of gerber2ems_fdtd_worker (see that target's own main.cpp,
+// engine and exits -- the GPU sibling of kicad_ems_fdtd_worker (see that target's own main.cpp,
 // which this one mirrors closely), posix_spawn'd by Simulation::run() when
 // RunOptions::backend == FDTDBackend::CopperGPU. Same job.json contract, same worker_error.txt
 // failure convention, same exit-code convention -- Simulation::run() itself can't tell which
 // backend actually produced a given simulation directory's output.
 //
-// IMPORTANT: this file includes gerber2ems/simulation.hpp (and therefore the *installed*
+// IMPORTANT: this file includes kicad_ems/simulation.hpp (and therefore the *installed*
 // <openEMS/openems.h>/<CSXCAD/ContinuousStructure.h> header forms) -- it must never also include
 // any Copper/Internal/ header directly, which all use the flat/source-checkout forms instead (see
 // Copper/Internal/CopperOpenEMSAccess.hpp's file comment). The only Copper entry point this file
@@ -20,17 +20,17 @@
 
 #include <nlohmann/json.hpp>
 
-#include "gerber2ems/config.hpp"
-#include "gerber2ems/constants.hpp"
-#include "gerber2ems/importer.hpp"
-#include "gerber2ems/paths_config.hpp"
-#include "gerber2ems/port_resolution.hpp"
-#include "gerber2ems/simulation.hpp"
-#include "gerber2ems/simulation_data.hpp"
+#include "kicad_ems/config.hpp"
+#include "kicad_ems/constants.hpp"
+#include "kicad_ems/importer.hpp"
+#include "kicad_ems/paths_config.hpp"
+#include "kicad_ems/port_resolution.hpp"
+#include "kicad_ems/simulation.hpp"
+#include "kicad_ems/simulation_data.hpp"
 
 #include "CopperFDTDRunner.h"
 
-using namespace gerber2ems;
+using namespace kicad_ems;
 
 namespace {
 
@@ -122,7 +122,7 @@ int main(int argc, char** argv) {
     // setBoundaryConditions(true)) happens on *this* freshly-constructed Simulation's own `_fdtd`,
     // not a reload of some other object's state -- unlike the old geometry.xml round trip (which
     // only ever restored `_csx`, leaving `_fdtd`'s separate boundary-condition state at openEMS's
-    // own PEC default -- see gerber2ems_fdtd_worker/main.cpp's own identical fix, which is what
+    // own PEC default -- see kicad_ems_fdtd_worker/main.cpp's own identical fix, which is what
     // first caught this: CopperPML's own shell discovery came back empty for a real board despite
     // the geometry step's own PML log line), there's no second, explicit setBoundaryConditions()
     // call needed here.
@@ -152,14 +152,14 @@ int main(int argc, char** argv) {
     }
 
     const std::filesystem::path probeDir = std::filesystem::current_path();
-    // pmlDepthCells passed explicitly (matching gerber2ems::constants::pmlDepthCells, the same
+    // pmlDepthCells passed explicitly (matching kicad_ems::constants::pmlDepthCells, the same
     // value Simulation::setBoundaryConditions() used -- or, for a CPML run, deliberately did *not*
     // pass to openEMS's own Set_BC_PML() -- see that function's own comment) rather than relying on
     // runFDTDPortOnGPU()'s own default staying in sync with it.
     const double cpmlAlphaMax = copper::cpmlAlphaMaxForFrequency(simulation.config().frequency().start());
     const copper::CopperFDTDRunResult gpuResult = copper::runFDTDPortOnGPU(
         simulation.fdtdEngine(), simulation.csx(), {}, copper::CopperBoundaryKind::CPML, cpmlAlphaMax,
-        gerber2ems::constants::pmlDepthCells);
+        kicad_ems::constants::pmlDepthCells);
     std::filesystem::current_path(cwd);
     if (!gpuResult.success) {
         writeError(simPath, gpuResult.errorMessage);
@@ -168,7 +168,7 @@ int main(int argc, char** argv) {
 
     // runFDTDPortOnGPU() no longer writes probe files itself -- this worker is one of the callers
     // that still needs them on disk (job.json's own contract is a directory of probe files, matching
-    // what gerber2ems_fdtd_worker's real CPU RunFDTD() would have produced), so it writes them
+    // what kicad_ems_fdtd_worker's real CPU RunFDTD() would have produced), so it writes them
     // explicitly from the returned in-memory result via CopperProbeResult::data().
     for (const copper::CopperProbeResult& probeResult : gpuResult.probes) {
         std::ofstream probeFile(probeDir / probeResult.name);

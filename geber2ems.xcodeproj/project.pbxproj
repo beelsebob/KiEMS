@@ -40,7 +40,7 @@
 		10DDAA48B5EFB9E602CA51F7 /* liblibkicadems.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 922BA8FA4CD5D8901DCAC9DA /* liblibkicadems.a */; };
 		129F2601A59B1AD3E6FA08D6 /* CSFunctionParser.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 54E688D3F9B73BD698459772 /* CSFunctionParser.cpp */; };
 		274621ADB58BCF83FF1AE33F /* CSUseful.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 4197F5CF683313F51CB45776 /* CSUseful.cpp */; };
-		2FBF45CFAE9FD71F5566E5AA /* gerber2ems_fdtd_worker in Embed Helper Tools */ = {isa = PBXBuildFile; fileRef = 1730AB8B76054706EB2AB0BA /* gerber2ems_fdtd_worker */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		2FBF45CFAE9FD71F5566E5AA /* kicad_ems_fdtd_worker in Embed Helper Tools */ = {isa = PBXBuildFile; fileRef = 1730AB8B76054706EB2AB0BA /* kicad_ems_fdtd_worker */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		3094727E7CECFEFF14791831 /* liblibkicadems.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 922BA8FA4CD5D8901DCAC9DA /* liblibkicadems.a */; };
 		385F960D3D19DB08177FB31F /* ContinuousStructure.cpp in Sources */ = {isa = PBXBuildFile; fileRef = DF70F1F0AB9C1CF89E638C1F /* ContinuousStructure.cpp */; };
 		3D4617AE4F349584B8319E2C /* ParameterObjects.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 11729C6743D6F1A9497C445B /* ParameterObjects.cpp */; };
@@ -126,7 +126,7 @@
 			containerPortal = 71AD228A30263515006D5847 /* Project object */;
 			proxyType = 1;
 			remoteGlobalIDString = 5034717F4A638C8CC653DE57;
-			remoteInfo = gerber2ems_fdtd_worker;
+			remoteInfo = kicad_ems_fdtd_worker;
 		};
 		195ED6A1B4F28D02DF92D867 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -432,7 +432,7 @@
 			dstSubfolderSpec = 6;
 			files = (
 				56EDE8D10A5333B5213EC614 /* libkicad_smoketest in Embed Helper Tools */,
-				2FBF45CFAE9FD71F5566E5AA /* gerber2ems_fdtd_worker in Embed Helper Tools */,
+				2FBF45CFAE9FD71F5566E5AA /* kicad_ems_fdtd_worker in Embed Helper Tools */,
 			);
 			name = "Embed Helper Tools";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -469,7 +469,7 @@
 		120F4DE57504AC7BB881B2C1 /* CSRectGrid.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSRectGrid.h; sourceTree = "<group>"; };
 		132063B9B19C2431D301FD53 /* CSPrimPolyhedron.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimPolyhedron.cpp; sourceTree = "<group>"; };
 		149266ED327B91C86E0B2697 /* CSPrimitives.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimitives.h; sourceTree = "<group>"; };
-		1730AB8B76054706EB2AB0BA /* gerber2ems_fdtd_worker */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = gerber2ems_fdtd_worker; sourceTree = BUILT_PRODUCTS_DIR; };
+		1730AB8B76054706EB2AB0BA /* kicad_ems_fdtd_worker */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = kicad_ems_fdtd_worker; sourceTree = BUILT_PRODUCTS_DIR; };
 		18823D244969BA56BEE17B07 /* CSTransform.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSTransform.h; sourceTree = "<group>"; };
 		18CC0BD80AA794FDDDF804C2 /* CSPrimWire.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimWire.h; sourceTree = "<group>"; };
 		1B8D9E3DF90F623540FB2550 /* CSFunctionParser.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSFunctionParser.h; sourceTree = "<group>"; };
@@ -651,9 +651,9 @@
 			path = CopperUtils;
 			sourceTree = "<group>";
 		};
-		8290469707C87811FFCE548F /* gerber2ems_fdtd_worker */ = {
+		8290469707C87811FFCE548F /* kicad_ems_fdtd_worker */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = gerber2ems_fdtd_worker;
+			path = kicad_ems_fdtd_worker;
 			sourceTree = "<group>";
 		};
 		B7D891E5D67D73D341733A71 /* Gerber2EMSStudio */ = {
@@ -813,7 +813,7 @@
 				1E051C9DFB9D9A4CF7CB1120 /* GerberCharts */,
 				B7D891E5D67D73D341733A71 /* Gerber2EMSStudio */,
 				71AD229430263516006D5847 /* geber2ems */,
-				8290469707C87811FFCE548F /* gerber2ems_fdtd_worker */,
+				8290469707C87811FFCE548F /* kicad_ems_fdtd_worker */,
 				006F3A1386AFF2AD46CD89E4 /* libkicadems */,
 				1CE9917EFF9195A3FF4FC1AA /* libkicadems_smoketest */,
 				429F16897495224E3C8CB5A0 /* libkicad */,
@@ -841,7 +841,7 @@
 				C6D729745136FAA65AEC601F /* libkicad_smoketest */,
 				922BA8FA4CD5D8901DCAC9DA /* liblibkicadems.a */,
 				CAE9E934278E88A4B6FDB4F0 /* libkicadems_smoketest */,
-				1730AB8B76054706EB2AB0BA /* gerber2ems_fdtd_worker */,
+				1730AB8B76054706EB2AB0BA /* kicad_ems_fdtd_worker */,
 				DEC747CBEC864D957296A740 /* GerberCharts.framework */,
 				71AD3CD6302FAAD5006D5847 /* Copper.framework */,
 				71AD3CE0302FAAD5006D5847 /* CopperTests.xctest */,
@@ -1132,9 +1132,9 @@
 			productReference = 47611C745FA02E5BA7871B3D /* copper_fdtd_worker */;
 			productType = "com.apple.product-type.tool";
 		};
-		5034717F4A638C8CC653DE57 /* gerber2ems_fdtd_worker */ = {
+		5034717F4A638C8CC653DE57 /* kicad_ems_fdtd_worker */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 34B3E31BCC3EA6AFAC9A4F16 /* Build configuration list for PBXNativeTarget "gerber2ems_fdtd_worker" */;
+			buildConfigurationList = 34B3E31BCC3EA6AFAC9A4F16 /* Build configuration list for PBXNativeTarget "kicad_ems_fdtd_worker" */;
 			buildPhases = (
 				EB32E30B8D408F92256E1749 /* Sources */,
 				945E3586B3A2D0D928F0F7AC /* Frameworks */,
@@ -1147,11 +1147,11 @@
 				D13B427235532B3778A56070 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				8290469707C87811FFCE548F /* gerber2ems_fdtd_worker */,
+				8290469707C87811FFCE548F /* kicad_ems_fdtd_worker */,
 			);
-			name = gerber2ems_fdtd_worker;
-			productName = gerber2ems_fdtd_worker;
-			productReference = 1730AB8B76054706EB2AB0BA /* gerber2ems_fdtd_worker */;
+			name = kicad_ems_fdtd_worker;
+			productName = kicad_ems_fdtd_worker;
+			productReference = 1730AB8B76054706EB2AB0BA /* kicad_ems_fdtd_worker */;
 			productType = "com.apple.product-type.tool";
 		};
 		5BC0C98C152C9B66E02544CD /* libkicadems_smoketest */ = {
@@ -1374,7 +1374,7 @@
 				0D27BC0AB714B88FE14FFB28 /* libkicad_smoketest */,
 				0E08621C93A1CC737D3F6A93 /* libkicadems */,
 				5BC0C98C152C9B66E02544CD /* libkicadems_smoketest */,
-				5034717F4A638C8CC653DE57 /* gerber2ems_fdtd_worker */,
+				5034717F4A638C8CC653DE57 /* kicad_ems_fdtd_worker */,
 				2971163407AC90FC988D853B /* Gerber2EMSStudio */,
 				07086D1AD104CA5BBA5AF140 /* GerberCharts */,
 				71AD3CD5302FAAD5006D5847 /* Copper */,
@@ -1843,7 +1843,7 @@
 		};
 		EDFF827E7F22C9DA08D011AC /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = 5034717F4A638C8CC653DE57 /* gerber2ems_fdtd_worker */;
+			target = 5034717F4A638C8CC653DE57 /* kicad_ems_fdtd_worker */;
 			targetProxy = 1540871D4E58EBEB434F4E6A /* PBXContainerItemProxy */;
 		};
 		F20D3A93C41E65474395766B /* PBXTargetDependency */ = {
@@ -2618,7 +2618,7 @@
 					"-lClipper2",
 					"-lmatplot",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = "com.tomdavie.gerber2ems-studio";
+				PRODUCT_BUNDLE_IDENTIFIER = "com.tomdavie.kicadems-studio";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "Gerber2EMSStudio/Bridge/Gerber2EMSStudio-Bridging-Header.h";
@@ -3396,7 +3396,7 @@
 					"-lClipper2",
 					"-lmatplot",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = "com.tomdavie.gerber2ems-studio";
+				PRODUCT_BUNDLE_IDENTIFIER = "com.tomdavie.kicadems-studio";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "Gerber2EMSStudio/Bridge/Gerber2EMSStudio-Bridging-Header.h";
@@ -3946,7 +3946,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		34B3E31BCC3EA6AFAC9A4F16 /* Build configuration list for PBXNativeTarget "gerber2ems_fdtd_worker" */ = {
+		34B3E31BCC3EA6AFAC9A4F16 /* Build configuration list for PBXNativeTarget "kicad_ems_fdtd_worker" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				C674A4B6897CD58CA339D0D9 /* Debug */,

@@ -134,7 +134,7 @@ final class JobScheduler {
     private init() {}
 
     private(set) var jobs: [Job] = []
-    private let executionQueue = DispatchQueue(label: "com.tomdavie.gerber2ems-studio.jobscheduler", qos: .userInitiated)
+    private let executionQueue = DispatchQueue(label: "com.tomdavie.kicad_ems-studio.jobscheduler", qos: .userInitiated)
     private var isExecuting = false
 
     private struct SimKey: Hashable {

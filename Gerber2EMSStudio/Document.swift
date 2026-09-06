@@ -16,7 +16,7 @@ final class Document: NSDocument {
 
     /// Where the geometry/simulation pipeline writes its fab/ems output -- see pipelineDirectory.
     /// Lives for this Document object's whole lifetime, saved or not: the pipeline (kicad-cli,
-    /// gerber2ems_fdtd_worker, the query helper) never writes into the real package directly, only
+    /// kicad_ems_fdtd_worker, the query helper) never writes into the real package directly, only
     /// here, precisely so it never touches packageURL's files out from under an open document -- see
     /// pipelineDirectory's own doc comment for why that matters. migrateScratchDirectory copies this
     /// into the real package at save time, but doesn't discard it afterward: the *next* pipeline run
@@ -70,7 +70,7 @@ final class Document: NSDocument {
     /// Where the geometry/simulation pipeline should write its fab/ems output: always a private
     /// per-document scratch directory under the system temp directory, created on first use --
     /// *never* packageURL directly, even once this document has been saved. The pipeline gets there
-    /// via subprocesses (kicad-cli, gerber2ems_fdtd_worker, the query helper) that aren't
+    /// via subprocesses (kicad-cli, kicad_ems_fdtd_worker, the query helper) that aren't
     /// NSDocument-aware; if one of them wrote straight into an already-saved package while it's
     /// still open, macOS's file-coordination layer sees an uncoordinated write from an unrelated
     /// process and flags the package as "modified by another application" the next time the user

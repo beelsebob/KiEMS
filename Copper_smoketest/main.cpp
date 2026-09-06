@@ -6,7 +6,7 @@
 // Operator, that CopperYeeGrid/CopperExcitation's own extraction exactly reproduces values read
 // directly from that same Operator/Excitation, and that CopperEngine's GPU leapfrog reproduces the
 // real CPU openEMS Engine's field values (to float-rounding tolerance) on an identical grid -- no
-// gerber2ems/libkicadems involvement at all, matching the plan's intent to keep this fixture
+// kicad_ems/libkicadems involvement at all, matching the plan's intent to keep this fixture
 // independent of the rest of the pipeline for phases 0-3.
 //
 // Plain assert-and-print-PASS/FAIL, matching this repo's existing libkicadems_smoketest/
@@ -60,7 +60,7 @@ void fail(const char* what) {
 }
 
 /// A trivial 11x11x3-line vacuum grid (1mm cells, PEC on every side), with a single soft E-field
-/// (excitation type 0, matching gerber2ems's own ports.cpp -- see CopperExcitation.hpp) excitation
+/// (excitation type 0, matching kicad_ems's own ports.cpp -- see CopperExcitation.hpp) excitation
 /// box in the middle of the domain, oriented along z like a real MSLPort's excitation. No material
 /// boxes at all otherwise -- a bare vacuum cell already has well-defined, checkable vv/vi/ii/iv
 /// coefficients, and this is intentionally the simplest geometry that still exercises the full
@@ -238,7 +238,7 @@ ContinuousStructure* buildCpmlCavityNoExcitation() {
 }
 
 /// buildTinyVacuumGrid()'s same domain/excitation, plus a voltage probe and a current probe laid
-/// out the same way LumpedPort::LumpedPort (libkicadems/gerber2ems/ports.cpp) lays its own real
+/// out the same way LumpedPort::LumpedPort (libkicadems/kicad_ems/ports.cpp) lays its own real
 /// u/i probes relative to a port box -- a voltage probe spanning the excitation direction at the
 /// port's center point, and a current probe forming a loop around the port's footprint at its
 /// midpoint along that same direction. Used for Phase 4b's probe discovery/sampling check.
@@ -297,7 +297,7 @@ ContinuousStructure* buildProbeFixture() {
     return csx;
 }
 
-/// A minimal ad-hoc reimplementation of libkicadems/gerber2ems/ports.cpp's own `_loadUiFile`
+/// A minimal ad-hoc reimplementation of libkicadems/kicad_ems/ports.cpp's own `_loadUiFile`
 /// parsing rule (skip blank/`%`-prefixed lines, take the first 2 whitespace-separated tokens of
 /// every other line as time/value) -- used to confirm CopperProbeWriter's actual file output
 /// round-trips through *that exact* rule, not just a rule this file assumes is equivalent.
@@ -488,7 +488,7 @@ int main() {
     // nonzero state from apply_excitation_e injecting the real Gaussian-pulse signal each step, the
     // same way Engine_Ext_Excitation::Apply2VoltagesImpl does on the CPU side. This fixture's
     // excitation is soft-E-field-only (Curr_Count==0, see buildTinyVacuumGrid()'s own doc comment),
-    // so this exercises apply_excitation_e but not apply_excitation_h -- the real gerber2ems port
+    // so this exercises apply_excitation_e but not apply_excitation_h -- the real kicad_ems port
     // excitation is the same soft-E-field type, so that's the path that actually matters.
     {
         Engine* cpuEngine = fdtd.GetEngineForCPU();
@@ -855,7 +855,7 @@ int main() {
     // fields -- this isolates CopperProbes' own indexing/sign logic from FDTD field parity, which
     // Phase 2/3/4a already cover; (b) CopperProbeWriter's actual file output, read back through a
     // reimplementation of ports.cpp's own `_loadUiFile` parsing rule, confirming the file Copper
-    // writes is the file gerber2ems's existing reader already expects, unmodified.
+    // writes is the file kicad_ems's existing reader already expects, unmodified.
     {
         ContinuousStructure* probeCsx = buildProbeFixture();
         copper::CopperOpenEMS probeFdtd;

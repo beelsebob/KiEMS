@@ -1,11 +1,11 @@
 #import "KicadBoardBridge.h"
 #import "EMSConfigBridge+Private.h"
 
-#include "gerber2ems/importer.hpp"
-#include "gerber2ems/libkicad_query.hpp"
-#include "gerber2ems/paths_config.hpp"
+#include "kicad_ems/importer.hpp"
+#include "kicad_ems/libkicad_query.hpp"
+#include "kicad_ems/paths_config.hpp"
 
-using gerber2ems::PathsConfig;
+using kicad_ems::PathsConfig;
 
 namespace {
 
@@ -71,7 +71,7 @@ NSArray<NSString*>* toNSStringArray(const std::vector<std::string>& values) {
                                 kicadQueryHelperPath:(NSString*)helperPath
                                                error:(NSError**)error {
     const PathsConfig paths = pathsForBoard(kicadPcbPath, helperPath);
-    auto result = gerber2ems::libkicad_query::netClasses(paths, "Listing net classes");
+    auto result = kicad_ems::libkicad_query::netClasses(paths, "Listing net classes");
     if (!result) {
         if (error != nil) *error = makeError(result.error());
         return nil;
@@ -83,7 +83,7 @@ NSArray<NSString*>* toNSStringArray(const std::vector<std::string>& values) {
                             kicadQueryHelperPath:(NSString*)helperPath
                                            error:(NSError**)error {
     const PathsConfig paths = pathsForBoard(kicadPcbPath, helperPath);
-    auto result = gerber2ems::libkicad_query::allNets(paths, "Listing nets");
+    auto result = kicad_ems::libkicad_query::allNets(paths, "Listing nets");
     if (!result) {
         if (error != nil) *error = makeError(result.error());
         return nil;
@@ -96,7 +96,7 @@ NSArray<NSString*>* toNSStringArray(const std::vector<std::string>& values) {
                                     kicadQueryHelperPath:(NSString*)helperPath
                                                    error:(NSError**)error {
     const PathsConfig paths = pathsForBoard(kicadPcbPath, helperPath);
-    auto result = gerber2ems::libkicad_query::netsInNetClass(paths, netClass.UTF8String, "Listing nets in net class");
+    auto result = kicad_ems::libkicad_query::netsInNetClass(paths, netClass.UTF8String, "Listing nets in net class");
     if (!result) {
         if (error != nil) *error = makeError(result.error());
         return nil;
@@ -108,7 +108,7 @@ NSArray<NSString*>* toNSStringArray(const std::vector<std::string>& values) {
                                           kicadQueryHelperPath:(NSString*)helperPath
                                                          error:(NSError**)error {
     const PathsConfig paths = pathsForBoard(kicadPcbPath, helperPath);
-    auto result = gerber2ems::libkicad_query::footprints(paths, "Listing footprints");
+    auto result = kicad_ems::libkicad_query::footprints(paths, "Listing footprints");
     if (!result) {
         if (error != nil) *error = makeError(result.error());
         return nil;
@@ -133,7 +133,7 @@ NSArray<NSString*>* toNSStringArray(const std::vector<std::string>& values) {
  kicadQueryHelperPath:(NSString*)helperPath
                 error:(NSError**)error {
     const PathsConfig paths = pathsForBoard(kicadPcbPath, helperPath);
-    if (auto result = gerber2ems::importStackup(paths, config.cxxConfig); !result) {
+    if (auto result = kicad_ems::importStackup(paths, config.cxxConfig); !result) {
         if (error != nil) *error = makeError(result.error());
         return NO;
     }

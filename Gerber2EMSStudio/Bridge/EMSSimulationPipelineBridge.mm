@@ -14,33 +14,33 @@
 #include <utility>
 #include <vector>
 
-#include "gerber2ems/config.hpp"
-#include "gerber2ems/constants.hpp"
-#include "gerber2ems/importer.hpp"
-#include "gerber2ems/paths_config.hpp"
-#include "gerber2ems/port_resolution.hpp"
-#include "gerber2ems/simulation.hpp"
-#include "gerber2ems/simulation_data.hpp"
+#include "kicad_ems/config.hpp"
+#include "kicad_ems/constants.hpp"
+#include "kicad_ems/importer.hpp"
+#include "kicad_ems/paths_config.hpp"
+#include "kicad_ems/port_resolution.hpp"
+#include "kicad_ems/simulation.hpp"
+#include "kicad_ems/simulation_data.hpp"
 
 // Forward-declare-only boundary header (see its own file comment) -- safe alongside every
-// gerber2ems header above despite those using the *installed* CSXCAD/openEMS forms and Copper's
+// kicad_ems header above despite those using the *installed* CSXCAD/openEMS forms and Copper's
 // own internals using the flat/source-checkout forms, for the same reason
 // geber2ems/main.cpp's own runGPUPortInProcess() can: this header never exposes a complete
 // openEMS/ContinuousStructure definition itself. This is what lets the App run Copper's GPU engine
-// in-process (see runGPUPortInProcess() below) instead of posix_spawning gerber2ems_fdtd_worker as
+// in-process (see runGPUPortInProcess() below) instead of posix_spawning kicad_ems_fdtd_worker as
 // a separate process -- Gerber2EMSStudio links Copper.framework directly (see the Xcode project's
 // own build settings), while libkicadems itself still never does.
 #include "CopperFDTDRunner.h"
 
-using gerber2ems::EMSConfig;
-using gerber2ems::FDTDBackend;
-using gerber2ems::PathsConfig;
-using gerber2ems::Postprocessor;
-using gerber2ems::RunOptions;
-using gerber2ems::Simulation;
-using gerber2ems::SimulationConfig;
-using gerber2ems::SimulationData;
-using gerber2ems::SimulationStage;
+using kicad_ems::EMSConfig;
+using kicad_ems::FDTDBackend;
+using kicad_ems::PathsConfig;
+using kicad_ems::Postprocessor;
+using kicad_ems::RunOptions;
+using kicad_ems::Simulation;
+using kicad_ems::SimulationConfig;
+using kicad_ems::SimulationData;
+using kicad_ems::SimulationStage;
 
 @implementation EMSPipelineProgress
 - (instancetype)initWithPhase:(EMSPipelineProgressPhase)phase
@@ -115,7 +115,7 @@ std::vector<double> linspace(double start, double stop, std::int32_t num) {
     return result;
 }
 
-/// The gerber2ems::FDTDPortRunner passed to gerber2ems::generateResults() so the FDTD step runs in
+/// The kicad_ems::FDTDPortRunner passed to kicad_ems::generateResults() so the FDTD step runs in
 /// this one process -- mirrors geber2ems/main.cpp's own runGPUPortInProcess() exactly (see its own
 /// doc comment for why a portRunner has to do the setupFDTDOperator()/runFDTDPortOnGPU()/
 /// probe-file-write sequence itself), just without CLI-style stdout progress logging: this app
@@ -179,7 +179,7 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     }
     const std::filesystem::path probeDir = *probeDirResult;
     // Boundary kind left at runFDTDPortOnGPU()'s own default (real CPML -- see
-    // Internal/CopperCPML.hpp) -- no app-side toggle for gerber2ems::PMLKind yet (plain UPML,
+    // Internal/CopperCPML.hpp) -- no app-side toggle for kicad_ems::PMLKind yet (plain UPML,
     // openEMS's own original formulation, is reachable via `--pml upml` on the CLI for
     // comparison/fallback -- see PMLKind's own doc comment). alphaMax is *not* left at
     // runFDTDPortOnGPU()'s own generic 100MHz-based default -- see copper::cpmlAlphaMaxForFrequency()'s
@@ -188,7 +188,7 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     // own value instead, or late-time energy from the under-damped gap between the two frequencies
     // persists and visibly grows over a long run.
     //
-    // pmlDepthCells passed explicitly (matching gerber2ems::constants::pmlDepthCells, the same value
+    // pmlDepthCells passed explicitly (matching kicad_ems::constants::pmlDepthCells, the same value
     // Simulation::setBoundaryConditions() used -- or, for a CPML run, deliberately did *not* pass to
     // openEMS's own Set_BC_PML() -- see that function's own comment) rather than relying on
     // runFDTDPortOnGPU()'s own default staying in sync with it.
@@ -233,7 +233,7 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     // ever reading the rest of the series.
     const copper::CopperFDTDRunResult gpuResult = copper::runFDTDPortOnGPU(
         sim.fdtdEngine(), sim.csx(), onCopperProgress, copper::CopperBoundaryKind::CPML, cpmlAlphaMax,
-        gerber2ems::constants::pmlDepthCells, [&] { return cancelRequested.load(); }, fieldSeries);
+        kicad_ems::constants::pmlDepthCells, [&] { return cancelRequested.load(); }, fieldSeries);
     // Best-effort restore -- `cwd` no longer existing shouldn't discard an otherwise-successful run's
     // own results (unlike currentPathOrError()'s other two call sites above, both load-bearing).
     std::error_code restoreEc;
@@ -390,15 +390,15 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     PathsConfig paths = PathsConfig::forConfigFile(std::filesystem::path(packageDir.UTF8String) / "simulation.json",
                                                     kicadCliPath.UTF8String, helperPath.UTF8String, "");
 
-    if (auto result = gerber2ems::exportKicadPcb(paths, *trimmedConfig.kicadPcbPath()); !result) {
+    if (auto result = kicad_ems::exportKicadPcb(paths, *trimmedConfig.kicadPcbPath()); !result) {
         if (error) *error = makeError(result.error());
         return NO;
     }
-    if (auto result = gerber2ems::importStackup(paths, trimmedConfig); !result) {
+    if (auto result = kicad_ems::importStackup(paths, trimmedConfig); !result) {
         if (error) *error = makeError(result.error());
         return NO;
     }
-    if (auto result = gerber2ems::resolveSimulationPorts(trimmedConfig, paths); !result) {
+    if (auto result = kicad_ems::resolveSimulationPorts(trimmedConfig, paths); !result) {
         if (error) *error = makeError(result.error());
         return NO;
     }
@@ -442,7 +442,7 @@ kicadQueryHelperPath:(NSString*)helperPath
     }
 
     // Geometry phase: only two real checkpoints exist (board-slicing and grid-placement each have
-    // no finer-grained progress of their own to report -- see gerber2ems::GeometryPhase, which
+    // no finer-grained progress of their own to report -- see kicad_ems::GeometryPhase, which
     // GeometryResult::build()'s own onProgress bracketing mirrors identically), so this reports
     // 0.0 -> 0.5 -> 1.0 rather than a continuously-advancing fraction. Reported even when only
     // EMSPipelineStageGeometry/Grid was actually requested, not just on the way to Results -- a
@@ -465,7 +465,7 @@ kicadQueryHelperPath:(NSString*)helperPath
             return NO;
         }
         reportGeometryProgress(0.0);
-        auto geometryResult = gerber2ems::generateGeometry(*_configured, *_scaledConfig, *_paths);
+        auto geometryResult = kicad_ems::generateGeometry(*_configured, *_scaledConfig, *_paths);
         if (!geometryResult) {
             if (error) *error = makeError(geometryResult.error());
             return NO;
@@ -479,7 +479,7 @@ kicadQueryHelperPath:(NSString*)helperPath
 
     // EMSPipelineStageGrid, or an unavoidable step on the way to EMSPipelineStageResults (Grid,
     // Results, and Postprocessing have no meaningful intermediate UI state between them once a real
-    // FDTD run is wanted -- see gerber2ems::generateResults()'s own doc comment -- so those three
+    // FDTD run is wanted -- see kicad_ems::generateResults()'s own doc comment -- so those three
     // still run straight through together below).
     RunOptions options;
     options.backend = FDTDBackend::CopperGPU;
@@ -494,7 +494,7 @@ kicadQueryHelperPath:(NSString*)helperPath
         // earlier ensureStage: call -- either way, grid placement is genuinely the second half of
         // this call's own remaining geometry-phase work.
         reportGeometryProgress(0.5);
-        auto grid = gerber2ems::generateGrid(*_geometry, *_scaledConfig, options, *_paths);
+        auto grid = kicad_ems::generateGrid(*_geometry, *_scaledConfig, options, *_paths);
         _grid.emplace(*_geometry, std::move(grid));
         // A cached -geometryPreview built while only EMSPipelineStageGeometry had run (gridLines
         // still empty) would otherwise keep serving that stale, grid-less snapshot forever now that
@@ -515,8 +515,8 @@ kicadQueryHelperPath:(NSString*)helperPath
             }
             return NO;
         }
-        if (auto result = gerber2ems::saveSimulationData(
-                *_grid, gerber2ems::simulationDataFile(*_paths, _simulationName));
+        if (auto result = kicad_ems::saveSimulationData(
+                *_grid, kicad_ems::simulationDataFile(*_paths, _simulationName));
             !result) {
             if (error) *error = makeError(result.error());
             return NO;
@@ -532,7 +532,7 @@ kicadQueryHelperPath:(NSString*)helperPath
     }
 
     std::vector<double> frequencies =
-        linspace(_scaledConfig->frequency().start(), _scaledConfig->frequency().stop(), gerber2ems::constants::frequencySampleCount);
+        linspace(_scaledConfig->frequency().start(), _scaledConfig->frequency().stop(), kicad_ems::constants::frequencySampleCount);
 
     if (!_results.has_value()) {
         std::size_t totalExcitedPorts = 0;
@@ -550,7 +550,7 @@ kicadQueryHelperPath:(NSString*)helperPath
             boardThickness += substrate.thickness();
         }
         constexpr double kSimUnitsToMeters =
-            gerber2ems::constants::baseUnit / static_cast<double>(gerber2ems::constants::unitMultiplier);
+            kicad_ems::constants::baseUnit / static_cast<double>(kicad_ems::constants::unitMultiplier);
         const double boardZMinMeters = -boardThickness * kSimUnitsToMeters;
         // Alternate files: the viewer may still have the preceding generation open while a rerun
         // begins, so truncating one fixed path is unsafe. Two slots avoid that collision without
@@ -588,7 +588,7 @@ kicadQueryHelperPath:(NSString*)helperPath
             return result;
         };
         auto resultsResult =
-            gerber2ems::generateResults(*_grid, *_scaledConfig, options, *_paths, frequencies, portRunner);
+            kicad_ems::generateResults(*_grid, *_scaledConfig, options, *_paths, frequencies, portRunner);
         if (!resultsResult) {
             // generateResults() only ever sees "cancelled" as a plain error string bubbled up from
             // portRunner (runGPUPortInProcess) -- it has no concept of cancellation itself -- so it
@@ -607,7 +607,7 @@ kicadQueryHelperPath:(NSString*)helperPath
     }
 
     if (!_postprocessing.has_value()) {
-        auto postprocessing = gerber2ems::generatePostprocessing(*_results, frequencies);
+        auto postprocessing = kicad_ems::generatePostprocessing(*_results, frequencies);
         // calculateSparams() (inside generatePostprocessing()) alone isn't enough for this app's own
         // charts -- impedance/diff-pair/trace-delay data additionally needs processData() (see
         // Postprocessor::processData()'s own doc comment: "Should be called after
@@ -630,7 +630,7 @@ kicadQueryHelperPath:(NSString*)helperPath
     if (_geometryPreviewCache) {
         return _geometryPreviewCache;
     }
-    const gerber2ems::ComputedGridLines* gridLines = _grid.has_value() ? &_grid->grid().gridLines : nullptr;
+    const kicad_ems::ComputedGridLines* gridLines = _grid.has_value() ? &_grid->grid().gridLines : nullptr;
     _geometryPreviewCache =
         buildGeometryPreview(_geometry->geometry().slicedBoard, *_simConfig, *_scaledConfig, *_paths, gridLines);
     return _geometryPreviewCache;

@@ -6,8 +6,8 @@
 // can't see at all.
 #import "SimulationResultsBridge.h"
 
-#include "gerber2ems/config.hpp"
-#include "gerber2ems/postprocess.hpp"
+#include "kicad_ems/config.hpp"
+#include "kicad_ems/postprocess.hpp"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -17,8 +17,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// inline after running the whole pipeline itself; factored out so a caller that already has a
 /// Postprocessor (e.g. EMSSimulationPipelineBridge, which caches one per simulation across
 /// Geometry/Results tab switches) doesn't need to re-run anything just to render it.
-EMSResultsPreview* buildResultsPreview(gerber2ems::Postprocessor& postprocessor,
-                                        const gerber2ems::SimulationConfig& simConfig,
-                                        const gerber2ems::Frequency& frequency);
+EMSResultsPreview* buildResultsPreview(kicad_ems::Postprocessor& postprocessor,
+                                        const kicad_ems::SimulationConfig& simConfig,
+                                        const kicad_ems::Frequency& frequency);
 
 NS_ASSUME_NONNULL_END
