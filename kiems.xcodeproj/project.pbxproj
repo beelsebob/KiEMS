@@ -97,6 +97,8 @@
 		C0A71A000000000000000013 /* libopenEMS.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = C0A71A000000000000000010 /* libopenEMS.dylib */; };
 		C0A71A000000000000000014 /* libopenEMS.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = C0A71A000000000000000010 /* libopenEMS.dylib */; };
 		C0A71A000000000000000015 /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B8F4508947040AF3A200E11 /* libCSXCAD.dylib */; };
+		C0A71A000000000000000016 /* libopenEMS.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = C0A71A000000000000000010 /* libopenEMS.dylib */; };
+		C0A71A000000000000000017 /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B8F4508947040AF3A200E11 /* libCSXCAD.dylib */; };
 		C1FE7C82D3B6D6DF1E6CAFAC /* CSPrimSphericalShell.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 4CCA7271B4E816E2DE044E5C /* CSPrimSphericalShell.cpp */; };
 		D1A3596A45AFCC1D666CCAD9 /* CSPrimSphere.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A4ABB3E67FA995DFC15350A7 /* CSPrimSphere.cpp */; };
 		D1B97BD0204C249DCB935BE0 /* ParameterCoord.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 801882DFF924DC3D075A3E2A /* ParameterCoord.cpp */; };
@@ -633,7 +635,7 @@
 			path = Copper_smoketest;
 			sourceTree = "<group>";
 		};
-		71AD229430263516006D5847 /* kiems */ = {
+		71AD229430263516006D5847 /* kiems-cli */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = "kiems-cli";
 			sourceTree = "<group>";
@@ -762,6 +764,8 @@
 			files = (
 				8979779CA20D12908A2A7A0E /* Copper.framework in Frameworks */,
 				E225E6C98F3F2C0B194070BD /* liblibkiems.a in Frameworks */,
+				C0A71A000000000000000016 /* libopenEMS.dylib in Frameworks */,
+				C0A71A000000000000000017 /* libCSXCAD.dylib in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -834,7 +838,7 @@
 				C0A71A000000000000000020 /* openEMS */,
 				1E051C9DFB9D9A4CF7CB1120 /* RememberRemember */,
 				B7D891E5D67D73D341733A71 /* KiEMS */,
-				71AD229430263516006D5847 /* kiems */,
+				71AD229430263516006D5847 /* kiems-cli */,
 				8290469707C87811FFCE548F /* kiems_fdtd_worker */,
 				006F3A1386AFF2AD46CD89E4 /* libkiems */,
 				1CE9917EFF9195A3FF4FC1AA /* libkiems_smoketest */,
@@ -1217,7 +1221,7 @@
 				8977C8A828BE3665BC518DA3 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				71AD229430263516006D5847 /* kiems */,
+				71AD229430263516006D5847 /* kiems-cli */,
 			);
 			name = kiems;
 			productName = kiems;
@@ -2495,8 +2499,16 @@
 					"$(inherited)",
 					"$(BUILT_PRODUCTS_DIR)",
 				);
-				OTHER_LDFLAGS = "$(inherited)";
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lClipper2",
+					"-lmatplot",
+				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				SYSTEM_HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)",
+				);
 			};
 			name = Debug;
 		};
@@ -2517,8 +2529,16 @@
 					"$(inherited)",
 					"$(BUILT_PRODUCTS_DIR)",
 				);
-				OTHER_LDFLAGS = "$(inherited)";
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lClipper2",
+					"-lmatplot",
+				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				SYSTEM_HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)",
+				);
 			};
 			name = Release;
 		};
