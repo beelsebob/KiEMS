@@ -83,6 +83,7 @@
 		984F4A8883D41F611D912AE3 /* CSPropDebyeMaterial.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C4226023679CEE1592511C1C /* CSPropDebyeMaterial.cpp */; };
 		9B20606B726FBDE39620FC66 /* CSPrimMultiBox.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C259DFC8925FEF6254736BAF /* CSPrimMultiBox.cpp */; };
 		9D2BD21EC2BFD175F4722C5B /* CSPrimRotPoly.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2E0A6B0B01BDA7784504DBD7 /* CSPrimRotPoly.cpp */; };
+		9F7176CC53A1D83D4A04FA8F /* liblibkiems.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 922BA8FA4CD5D8901DCAC9DA /* liblibkiems.a */; };
 		A159533DC4B4AE5B52C87829 /* CSPropResBox.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 33049C004A0AD9DE5FF7DB67 /* CSPropResBox.cpp */; };
 		A3D47B497AA3BE4FD9D35D2B /* CSTransform.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F4C290FF15D9A8C440B0E624 /* CSTransform.cpp */; };
 		ACF6C5FED62B1B1C2D682CA2 /* CSPrimCylinder.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 4424E561CBCC53DE77BA9D68 /* CSPrimCylinder.cpp */; };
@@ -212,6 +213,13 @@
 			remoteGlobalIDString = 07086D1AD104CA5BBA5AF140;
 			remoteInfo = RememberRemember;
 		};
+		5190B1C09E043761E92826A0 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 917B3FABD7921813B7A8BF98;
+			remoteInfo = CSXCAD;
+		};
 		6446391B4ED77176B8F180CF /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 71AD228A30263515006D5847 /* Project object */;
@@ -317,6 +325,13 @@
 			remoteGlobalIDString = 0E08621C93A1CC737D3F6A93;
 			remoteInfo = libkiems;
 		};
+		8796A5C4EFC7A0BBD6F6F647 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D621ED7A33B5BA1305450055;
+			remoteInfo = openEMS;
+		};
 		896EB885155C4FA6E502D81D /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 71AD228A30263515006D5847 /* Project object */;
@@ -379,6 +394,13 @@
 			proxyType = 1;
 			remoteGlobalIDString = 917B3FABD7921813B7A8BF98;
 			remoteInfo = CSXCAD;
+		};
+		D56C45F6411D0E5C8C32B009 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 0E08621C93A1CC737D3F6A93;
+			remoteInfo = libkiems;
 		};
 		D5998D2318CDD72E77F94AEF /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -478,6 +500,7 @@
 		232FA4E2D037A1BD03BAEC5C /* CSPropDiscMaterial.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropDiscMaterial.h; sourceTree = "<group>"; };
 		252340AF2DF277394293A777 /* CSPrimPolyhedronReader.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimPolyhedronReader.h; sourceTree = "<group>"; };
 		26BECA8A0D515EF0EB787386 /* CSPropLorentzMaterial.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropLorentzMaterial.h; sourceTree = "<group>"; };
+		27FC500F5EC82E42F046FEF3 /* libkiems_tests */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = libkiems_tests; sourceTree = BUILT_PRODUCTS_DIR; };
 		2E0A6B0B01BDA7784504DBD7 /* CSPrimRotPoly.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimRotPoly.cpp; sourceTree = "<group>"; };
 		30877432D1026706D7E805DA /* libhdf5.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = libhdf5.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
 		30A0506109278583137803EB /* CSPrimPolygon.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimPolygon.cpp; sourceTree = "<group>"; };
@@ -656,6 +679,11 @@
 			path = kiems_fdtd_worker;
 			sourceTree = "<group>";
 		};
+		87EBBDF2469E60AF87C97EB2 /* libkiems_tests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = libkiems_tests;
+			sourceTree = "<group>";
+		};
 		B7D891E5D67D73D341733A71 /* KiEMS */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = KiEMS;
@@ -686,6 +714,14 @@
 			buildActionMask = 2147483647;
 			files = (
 				3E7CD25FB948F81DEEC897B3 /* Cocoa.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		1E04FB4313433E3400D82F30 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9F7176CC53A1D83D4A04FA8F /* liblibkiems.a in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -816,6 +852,7 @@
 				8290469707C87811FFCE548F /* kiems_fdtd_worker */,
 				006F3A1386AFF2AD46CD89E4 /* libkiems */,
 				1CE9917EFF9195A3FF4FC1AA /* libkiems_smoketest */,
+				87EBBDF2469E60AF87C97EB2 /* libkiems_tests */,
 				429F16897495224E3C8CB5A0 /* libkicad */,
 				9D2EF3F131A05169F6A8F5B8 /* libkicad_api */,
 				0BA7820838B85822C655B32A /* libkicad_smoketest */,
@@ -849,6 +886,7 @@
 				47611C745FA02E5BA7871B3D /* copper_fdtd_worker */,
 				6B8F4508947040AF3A200E11 /* libCSXCAD.dylib */,
 				71B4EE8E304224C5002796EC /* libCopperUtils.a */,
+				27FC500F5EC82E42F046FEF3 /* libkiems_tests */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -1270,6 +1308,28 @@
 			productReference = 71B4EE8E304224C5002796EC /* libCopperUtils.a */;
 			productType = "com.apple.product-type.library.static";
 		};
+		8D5AE14D1127587CA08C54F7 /* libkiems_tests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D93F80F7B0ECDEEE962ED5A1 /* Build configuration list for PBXNativeTarget "libkiems_tests" */;
+			buildPhases = (
+				40070DE6B51561CC79C58E52 /* Sources */,
+				1E04FB4313433E3400D82F30 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				EA0A86660359852DE27A849C /* PBXTargetDependency */,
+				3CEC7F037011193018670516 /* PBXTargetDependency */,
+				402A78CD55C79FE5BE360E30 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				87EBBDF2469E60AF87C97EB2 /* libkiems_tests */,
+			);
+			name = libkiems_tests;
+			productName = libkiems_tests;
+			productReference = 27FC500F5EC82E42F046FEF3 /* libkiems_tests */;
+			productType = "com.apple.product-type.tool";
+		};
 		917B3FABD7921813B7A8BF98 /* CSXCAD */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 83F7CD830B23815D67023A0D /* Build configuration list for PBXNativeTarget "CSXCAD" */;
@@ -1385,6 +1445,7 @@
 				E71870C603134ADA6EEEA950 /* HDF5 */,
 				D621ED7A33B5BA1305450055 /* openEMS */,
 				71B4EE8D304224C5002796EC /* CopperUtils */,
+				8D5AE14D1127587CA08C54F7 /* libkiems_tests */,
 			);
 		};
 /* End PBXProject section */
@@ -1477,6 +1538,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		24C0C7D84B42BCB562805074 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		40070DE6B51561CC79C58E52 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -1669,10 +1737,22 @@
 			target = 0E08621C93A1CC737D3F6A93 /* libkiems */;
 			targetProxy = F90E814A552714159096AAF7 /* PBXContainerItemProxy */;
 		};
+		3CEC7F037011193018670516 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = CSXCAD;
+			target = 917B3FABD7921813B7A8BF98 /* CSXCAD */;
+			targetProxy = 5190B1C09E043761E92826A0 /* PBXContainerItemProxy */;
+		};
 		3E33A9C8EE26B6F26DDDE2A8 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 0D27BC0AB714B88FE14FFB28 /* libkicad_smoketest */;
 			targetProxy = 3429B0B7F4066519273A0A7D /* PBXContainerItemProxy */;
+		};
+		402A78CD55C79FE5BE360E30 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = openEMS;
+			target = D621ED7A33B5BA1305450055 /* openEMS */;
+			targetProxy = 8796A5C4EFC7A0BBD6F6F647 /* PBXContainerItemProxy */;
 		};
 		45D270673764BFEAB850DEA6 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
@@ -1841,6 +1921,12 @@
 			target = 917B3FABD7921813B7A8BF98 /* CSXCAD */;
 			targetProxy = 7723B54E7BD6FF81C173293B /* PBXContainerItemProxy */;
 		};
+		EA0A86660359852DE27A849C /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = libkiems;
+			target = 0E08621C93A1CC737D3F6A93 /* libkiems */;
+			targetProxy = D56C45F6411D0E5C8C32B009 /* PBXContainerItemProxy */;
+		};
 		EDFF827E7F22C9DA08D011AC /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 5034717F4A638C8CC653DE57 /* kiems_fdtd_worker */;
@@ -1896,6 +1982,24 @@
 				VERSION_INFO_PREFIX = "";
 			};
 			name = Debug;
+		};
+		267D1CBD028BDD9E5178D2D5 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_CXX_LANGUAGE_STANDARD = "c++23";
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/libkiems",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)",
+				);
+				OTHER_LDFLAGS = "$(inherited)";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+			};
+			name = Release;
 		};
 		26BF06E54C44F2408EBAEC10 /* Debug */ = {
 			isa = XCBuildConfiguration;
@@ -2190,6 +2294,24 @@
 					"/Users/tdavie/Documents/Simulation/kicad-11/thirdparty/3dxware_sdk/inc",
 					"$(inherited)",
 				);
+			};
+			name = Debug;
+		};
+		6B1740D988F76B333D388E17 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_CXX_LANGUAGE_STANDARD = "c++23";
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/libkiems",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)",
+				);
+				OTHER_LDFLAGS = "$(inherited)";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
 			};
 			name = Debug;
 		};
@@ -4050,6 +4172,15 @@
 			buildConfigurations = (
 				6A59402640FC101257497CAC /* Debug */,
 				A79FE867634EFFF25821E2AA /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		D93F80F7B0ECDEEE962ED5A1 /* Build configuration list for PBXNativeTarget "libkiems_tests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				267D1CBD028BDD9E5178D2D5 /* Release */,
+				6B1740D988F76B333D388E17 /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
