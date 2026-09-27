@@ -89,7 +89,7 @@ void shiftRowRightClampFirst(const float* row, float* shifted, std::size_t n) {
 class CPUEngineImpl final : public EngineBackend {
 public:
     CPUEngineImpl(const CopperYeeGrid& grid, const CopperExcitation& excitation,
-                  const std::vector<CopperCPMLShell>& cpmlShells);
+                  const std::vector<CopperCPMLShell>& cpmlShells, const CopperDomainMask& domainMask);
 
     void run(std::uint32_t steps) override;
     void runWithProbeSampling(std::uint32_t steps, const CopperEngine::ProbeSampler& sampler,
@@ -144,7 +144,8 @@ private:
 };
 
 CPUEngineImpl::CPUEngineImpl(const CopperYeeGrid& grid, const CopperExcitation& excitation,
-                              const std::vector<CopperCPMLShell>& cpmlShells)
+                              const std::vector<CopperCPMLShell>& cpmlShells,
+                              const CopperDomainMask& domainMask)
     : _dims(grid.dims),
       _cpmlShells(cpmlShells),
       _voltageCells(excitation.voltageCells),
@@ -161,6 +162,17 @@ CPUEngineImpl::CPUEngineImpl(const CopperYeeGrid& grid, const CopperExcitation& 
         _vi[axis] = grid.vi[axis];
         _ii[axis] = grid.ii[axis];
         _iv[axis] = grid.iv[axis];
+        if (!domainMask.empty()) {
+            for (std::uint32_t y = 0; y < _dims.ny; ++y) {
+                for (std::uint32_t x = 0; x < _dims.nx; ++x) {
+                    if (domainMask.at(x, y) != 0) continue;
+                    for (std::uint32_t z = 0; z < _dims.nz; ++z) {
+                        const std::size_t i = copperGridIndex(_dims, x, y, z);
+                        _vv[axis][i] = _vi[axis][i] = _ii[axis][i] = _iv[axis][i] = 0.0F;
+                    }
+                }
+            }
+        }
     }
 
     _scratch0.assign(_dims.nx, 0.0F);
@@ -463,8 +475,9 @@ double CPUEngineImpl::estimateEnergy() const {
 
 std::unique_ptr<EngineBackend> makeCPUEngineBackend(const CopperYeeGrid& grid,
                                                      const CopperExcitation& excitation,
-                                                     const std::vector<CopperCPMLShell>& cpmlShells) {
-    return std::make_unique<CPUEngineImpl>(grid, excitation, cpmlShells);
+                                                     const std::vector<CopperCPMLShell>& cpmlShells,
+                                                     const CopperDomainMask& domainMask) {
+    return std::make_unique<CPUEngineImpl>(grid, excitation, cpmlShells, domainMask);
 }
 
 } // namespace copper

@@ -245,10 +245,11 @@ typedef NS_ENUM(NSInteger, EMSGeometryTriangleKind) {
 @property (nonatomic, strong, readonly, nullable) EMSGeometryGridPlane *gridPlaneExcludingZ;
 @property (nonatomic, copy, readonly) NSArray<EMSGeometryGridMaterial *> *gridMaterials;
 @property (nonatomic, copy, readonly) NSArray<EMSGeometryGridLayer *> *gridLayers;
-/// The core mesh's own extent on X/Y -- everywhere *inside* these bounds is the regular densified
-/// mesh; everywhere outside is the PML band GridGenerator appends beyond it (see
-/// kiems::ComputedGridLines's own doc comment). All 0 alongside empty gridLinesX/Y, before the
-/// Grid stage has run.
+/// The legacy rectangular core mesh extent on X/Y. The material-coloured grid planes above already
+/// contain the authoritative hull-following classification: external edges are absent and the
+/// actual offset CPML rings are coloured as PML. These scalar bounds remain for fallback previews
+/// that do not have an irregular domain mask. All 0 alongside empty gridLinesX/Y, before the Grid
+/// stage has run.
 @property (nonatomic, readonly) double pmlInnerXMin;
 @property (nonatomic, readonly) double pmlInnerXMax;
 @property (nonatomic, readonly) double pmlInnerYMin;

@@ -44,13 +44,15 @@ public:
 /// moved behind this interface.
 std::unique_ptr<EngineBackend> makeMetalEngineBackend(const CopperYeeGrid& grid,
                                                         const CopperExcitation& excitation,
-                                                        const std::vector<CopperCPMLShell>& cpmlShells);
+                                                        const std::vector<CopperCPMLShell>& cpmlShells,
+                                                        const CopperDomainMask& domainMask);
 
 /// Defined in CopperCPUEngine.cpp -- a from-scratch CPU port of CopperFDTD.metal's own kernels (not
 /// openEMS's Engine -- see CopperCPUEngine.cpp's own file comment), sharing this same field-buffer
 /// layout so it is a drop-in alternative to the Metal backend above.
 std::unique_ptr<EngineBackend> makeCPUEngineBackend(const CopperYeeGrid& grid,
                                                       const CopperExcitation& excitation,
-                                                      const std::vector<CopperCPMLShell>& cpmlShells);
+                                                      const std::vector<CopperCPMLShell>& cpmlShells,
+                                                      const CopperDomainMask& domainMask);
 
 } // namespace copper

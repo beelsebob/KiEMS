@@ -96,10 +96,9 @@ struct SlicedBoard {
     /// This simulation's own outline (a single closed polygon loop), in the same coordinate frame
     /// as the rest of the pipeline (relative to the *original* board's Edge_Cuts origin, not
     /// re-origined to its own bounding box -- so xMin/yMin are generally nonzero, unlike the
-    /// whole-board [0,pcbWidth] x [0,pcbHeight] convention), replacing Edge_Cuts for
-    /// substrate/plane sizing. Only the *largest* loop of the true cutout region (see cutoutLoops
-    /// below) -- fine for substrate/plane sizing (a single rectangle-ish box already only
-    /// approximates the true shape), but NOT a substitute for cutoutLoops wherever the true,
+    /// whole-board [0,pcbWidth] x [0,pcbHeight] convention), replacing Edge_Cuts for legacy/fallback
+    /// sizing. Only the *largest* loop of the true cutout region (see cutoutLoops below), and
+    /// therefore NOT a substitute for cutoutLoops wherever the true,
     /// possibly-disjoint/possibly-holed shape actually matters.
     std::vector<Position> outline;
     /// The true cutout region computed by sliceBoardForSimulation() -- every loop of it, not just

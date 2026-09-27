@@ -24,6 +24,7 @@
 
 #include "FieldFrameSeriesWriter.hpp"
 #include "Internal/CopperCPML.hpp"
+#include "Internal/CopperDomain.hpp"
 #include "Internal/CopperEngine.hpp"
 #include "Internal/CopperExcitation.hpp"
 #include "Internal/CopperFieldFrameSignposts.hpp"
@@ -196,7 +197,21 @@ CopperFDTDRunResult runFDTDPortImpl(ContinuousStructure& csx, const CopperFDTDPo
             timer.mark("CopperOperator construction (mesh, coefficients, excitation)");
         }
 
-        std::vector<CopperCPMLShell> cpmlShells = buildCPMLShells(newOp, cpmlAlphaMax, pmlDepthCells);
+        const CopperDomainMask domainMask = buildDomainMask(newOp, portConfig, pmlDepthCells);
+        if (!domainMask.empty() && !onProgress) {
+            const std::size_t total = domainMask.xyClass.size();
+            std::size_t dispatched = 0;
+            for (const auto& box : domainMask.dispatchBoxes)
+                dispatched += static_cast<std::size_t>(box.width) * box.height;
+            const std::size_t skipped = total > dispatched ? total - dispatched : 0;
+            std::fprintf(stdout, "Copper: irregular XY domain dispatches %zu class-pure nodes and skips %zu/%zu "
+                                 "enclosing-grid nodes (%.1f%%) in %zu cuboids\n",
+                         dispatched, skipped, total,
+                         total == 0 ? 0.0 : 100.0 * static_cast<double>(skipped) / static_cast<double>(total),
+                         domainMask.dispatchBoxes.size());
+        }
+        std::vector<CopperCPMLShell> cpmlShells =
+            buildCPMLShells(newOp, cpmlAlphaMax, pmlDepthCells, domainMask);
         std::uint64_t pmlCellTotal = 0;
         std::size_t shellCount = 0;
         shellCount = cpmlShells.size();
@@ -255,7 +270,7 @@ CopperFDTDRunResult runFDTDPortImpl(ContinuousStructure& csx, const CopperFDTDPo
                          i, cell.axis, cell.x, cell.y, cell.z, cell.vvd, cell.vv2, cell.vj1, cell.vj2, cell.ib0,
                          cell.b1, cell.b2, allFinite ? "" : "  <-- NON-FINITE");
         }
-        CopperEngine engine(grid, excitation, cpmlShells, backend);
+        CopperEngine engine(grid, excitation, cpmlShells, backend, domainMask);
         if (!onProgress) {
             timer.mark(backend == CopperEngine::Backend::CPU ? "CopperEngine construction (CPU coefficient upload)"
                                                               : "CopperEngine construction (GPU buffer upload)");

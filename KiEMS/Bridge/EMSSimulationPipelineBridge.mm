@@ -257,6 +257,23 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     portConfig.f0 = sim.excitationF0();
     portConfig.fc = sim.excitationFc();
     portConfig.maxTimesteps = sim.maxTimesteps();
+    for (const auto& loop : sim.slicedBoard().cutoutLoops) {
+        std::vector<copper::CopperFDTDPortConfig::DomainPoint> out;
+        out.reserve(loop.size());
+        for (const auto& point : loop) out.push_back({point.x(), point.y()});
+        portConfig.domainCutoutLoops.push_back(std::move(out));
+    }
+    const auto gridLines = sim.computedGridLines();
+    const auto& bounds = sim.slicedBoard().bounds;
+    if (gridLines.x.size() > 2 * kiems::constants::pmlDepthCells &&
+        gridLines.y.size() > 2 * kiems::constants::pmlDepthCells) {
+        const auto depth = static_cast<std::size_t>(kiems::constants::pmlDepthCells);
+        portConfig.domainPadding = std::max({bounds.xMin - gridLines.x[depth],
+                                             gridLines.x[gridLines.x.size() - depth - 1] - bounds.xMax,
+                                             bounds.yMin - gridLines.y[depth],
+                                             gridLines.y[gridLines.y.size() - depth - 1] - bounds.yMax});
+    }
+    portConfig.domainCPMLCellSize = sim.config().grid().max();
     copper::CopperFDTDProgressCallback onCopperProgress;
     if (progressHandler) {
         onCopperProgress = [&](const copper::CopperFDTDProgress& p) {

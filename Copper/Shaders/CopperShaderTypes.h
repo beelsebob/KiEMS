@@ -13,6 +13,8 @@ struct CopperGridDimsGPU {
     uint32_t nz;
 };
 
+struct CopperDispatchOriginGPU { uint32_t x, y, z; };
+
 // One CPML shell's box: its origin in global grid coordinates, plus its local dimensions.
 struct CopperCPMLShellGPU {
     uint32_t startX, startY, startZ;
@@ -39,10 +41,8 @@ struct CopperExcitationParamsGPU {
     uint32_t signalLength;
 };
 
-// update_e_interior is dispatched over the full (nx,ny,nz) grid; update_h_interior over
-// (nx-1,ny-1,nz-1) -- see CopperEngine.mm's own comment on why (openEMS's own H/dual-mesh update
-// loop bounds, ported verbatim: H only physically exists on a grid one cell smaller per axis than
-// E, so every pos+1 neighbor read update_h_interior does stays in bounds by construction).
+// A rectangular run uses the full (nx,ny,nz)/(nx-1,ny-1,nz-1) extents. An irregular run uses an
+// origin plus a set of active cuboids within those same bounds; see CopperEngine.mm.
 enum CopperBufferIndex {
     CopperBufferIndexDims = 0,
     CopperBufferIndexEx = 1,
@@ -88,6 +88,7 @@ enum CopperBufferIndex {
     CopperBufferIndexCPMLCoeffC = 24, // c[w], axis-major merged by grading axis
     CopperBufferIndexCPMLPsi0 = 25,   // psi driven by the nP-axis curl term, axis-major by component, read-write
     CopperBufferIndexCPMLPsi1 = 26,   // psi driven by the nPP-axis curl term, axis-major by component, read-write
+    CopperBufferIndexDispatchOrigin = 27,
 };
 
 #endif /* CopperShaderTypes_h */

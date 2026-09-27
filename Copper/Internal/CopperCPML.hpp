@@ -48,6 +48,7 @@
 #include <vector>
 
 #include "CopperOperator.hpp"
+#include "CopperDomain.hpp"
 #include "CopperYeeGrid.hpp"
 
 namespace copper {
@@ -97,5 +98,10 @@ struct CopperCPMLShell {
 /// with no Operator_Ext_UPML extension involved at all. 0 returns no shells (a caller with no PML on
 /// this run -- e.g. a MUR-only smoketest -- can pass 0 rather than special-casing the call away).
 std::vector<CopperCPMLShell> buildCPMLShells(CopperOperator& op, double alphaMax, std::uint32_t pmlDepthCells);
+/// Irregular-domain form: XY grading follows domainMask's successive offset rings, decomposed into
+/// class-pure rectangular dispatch boxes; the conventional lower/upper Z slabs cover only the XY
+/// interior. Empty masks delegate to the rectangular overload above.
+std::vector<CopperCPMLShell> buildCPMLShells(CopperOperator& op, double alphaMax, std::uint32_t pmlDepthCells,
+                                             const CopperDomainMask& domainMask);
 
 } // namespace copper

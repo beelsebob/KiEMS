@@ -8,9 +8,13 @@
 // This worker stays on Copper's public boundary: simulation.hpp supplies the complete CSXCAD type,
 // while CopperFDTDRunner.h only forward-declares it. No Copper/Internal headers are needed here.
 
+#include <algorithm>
 #include <cstdlib>
+#include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <string>
 
@@ -60,11 +64,17 @@ int main(int argc, char** argv) {
 
     std::filesystem::path configPath;
     std::string simName;
-    std::int32_t excitedPort = 0;
+    std::int32_t excitedPort = -1;
+    std::optional<std::uint32_t> maxTimestepsOverride;
+    bool irregularDomain = true;
     try {
         configPath = job.at("config_path").get<std::string>();
         simName = job.at("simulation_name").get<std::string>();
-        excitedPort = job.at("excited_port").get<std::int32_t>();
+        excitedPort = job.value("excited_port", -1);
+        if (job.contains("max_timesteps")) {
+            maxTimestepsOverride = job.at("max_timesteps").get<std::uint32_t>();
+        }
+        irregularDomain = job.value("irregular_domain", true);
     } catch (const nlohmann::json::exception& error) {
         writeError(simPath, std::string("Malformed job file: ") + error.what());
         return EXIT_FAILURE;
@@ -102,6 +112,20 @@ int main(int argc, char** argv) {
         writeError(simPath, "Simulation \"" + simName + "\" not found in " + configPath.string());
         return EXIT_FAILURE;
     }
+    // Benchmark/diagnostic jobs may omit the derived port index and ask for the first configured
+    // excitation instead. Normal app jobs still pass their explicit index, preserving the existing
+    // worker contract and behavior.
+    if (excitedPort < 0) {
+        const auto it = std::find_if(simConfig->excitations().begin(), simConfig->excitations().end(),
+                                     [](const auto& excitation) {
+                                         return excitation.drivenPortIndex().has_value();
+                                     });
+        if (it == simConfig->excitations().end()) {
+            writeError(simPath, "Simulation \"" + simName + "\" has no resolved excitation port");
+            return EXIT_FAILURE;
+        }
+        excitedPort = *it->drivenPortIndex();
+    }
 
     // Deserializes the exact same SimulationData<Grid> (sliced board + placed grid lines -- see
     // simulation_data.hpp) GeometryResult::build()/load() would have in memory in-process -- this
@@ -138,7 +162,26 @@ int main(int argc, char** argv) {
     portConfig.boundaryIsPEC = simulation.boundaryIsPEC();
     portConfig.f0 = simulation.excitationF0();
     portConfig.fc = simulation.excitationFc();
-    portConfig.maxTimesteps = simulation.maxTimesteps();
+    portConfig.maxTimesteps = maxTimestepsOverride.value_or(simulation.maxTimesteps());
+    if (irregularDomain) {
+        for (const auto& loop : simulation.slicedBoard().cutoutLoops) {
+            std::vector<copper::CopperFDTDPortConfig::DomainPoint> out;
+            out.reserve(loop.size());
+            for (const auto& point : loop) out.push_back({point.x(), point.y()});
+            portConfig.domainCutoutLoops.push_back(std::move(out));
+        }
+        const auto& gridLines = simDataResult->grid().gridLines;
+        const auto& bounds = simulation.slicedBoard().bounds;
+        if (gridLines.x.size() > 2 * kiems::constants::pmlDepthCells &&
+            gridLines.y.size() > 2 * kiems::constants::pmlDepthCells) {
+            const auto depth = static_cast<std::size_t>(kiems::constants::pmlDepthCells);
+            portConfig.domainPadding = std::max({bounds.xMin - gridLines.x[depth],
+                                                 gridLines.x[gridLines.x.size() - depth - 1] - bounds.xMax,
+                                                 bounds.yMin - gridLines.y[depth],
+                                                 gridLines.y[gridLines.y.size() - depth - 1] - bounds.yMax});
+        }
+        portConfig.domainCPMLCellSize = simulation.config().grid().max();
+    }
     const copper::CopperFDTDRunResult gpuResult = copper::runFDTDPortOnGPU(
         simulation.csx(), portConfig, {}, cpmlAlphaMax,
         kiems::constants::pmlDepthCells);

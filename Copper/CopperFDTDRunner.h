@@ -39,6 +39,18 @@ struct CopperFDTDPortConfig {
     double f0 = 0.0;
     double fc = 0.0;
     std::uint32_t maxTimesteps = 0;
+
+    struct DomainPoint {
+        double x = 0.0;
+        double y = 0.0;
+    };
+    /// The true hull-cut board polygon (outer loops and clockwise holes), in CSX drawing units.
+    /// When present, Copper only updates the hull plus `domainPadding`, surrounds that with
+    /// `pmlDepthCells` offset CPML rings, and leaves every other XY cell identically zero. Empty
+    /// preserves the historical rectangular-domain behaviour for tests and non-KiEMS callers.
+    std::vector<std::vector<DomainPoint>> domainCutoutLoops;
+    double domainPadding = 0.0;
+    double domainCPMLCellSize = 0.0;
 };
 
 /// Opt-in request to persist this run's field-frame time series to disk in the field frame-series

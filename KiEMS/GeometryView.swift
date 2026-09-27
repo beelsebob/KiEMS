@@ -1398,13 +1398,10 @@ final class GeometryView: MTKView, MTKViewDelegate {
     // A muted cyan -- distinct from the plain grey outline/legend text and every copper color in
     // kicadDefaultLayerColors, so a mesh line stays identifiable crossing any layer's fill.
     private static let gridLineColor = SIMD4<Float>(0.3, 0.75, 0.8, 1)
-    // A dim magenta -- distinct from the cyan core-mesh color above, marking a line that falls in
-    // the PML band GridGenerator appends beyond the core mesh's own extent on any axis (outside
-    // preview.pmlInnerXMin/XMax/YMin/YMax/ZMin/ZMax), so it's visually obvious which of a run's
-    // grid lines are actual physical mesh vs. absorbing-boundary padding -- Z included: the board
-    // needs a PML/absorbing region in Z too (openEMS's Set_BC_PML() is applied on all 6 domain
-    // faces, not just the 4 X/Y ones), so its own graded margin cells beyond the substrate stack's
-    // top/bottom get the same highlighting as X/Y's.
+    // A dim magenta -- distinct from the cyan core-mesh color above, marking the real CPML cells.
+    // In X/Y those now follow Copper's hull-offset domain mask rather than the old rectangular
+    // pmlInner bounds; in Z the top/bottom bands remain conventional slabs. External X/Y edges are
+    // omitted from the buffers altogether, so empty work outside the CPML is visibly empty too.
     private static let pmlLineColor = SIMD4<Float>(0.85, 0.25, 0.85, 1)
     // Solid black -- distinct from every other marker color here (copper fills, gold via stroke,
     // blue ports), reads unambiguously as "nothing was placed here" rather than another kind of
@@ -2618,15 +2615,25 @@ final class GeometryView: MTKView, MTKViewDelegate {
         var edge = 0
         for y in yLines {
             for x in 0..<(xLines.count - 1) {
-                positions.append(contentsOf: [Position3(xLines[x], y, z), Position3(xLines[x + 1], y, z)])
-                colors.append(contentsOf: [edgeColors[edge], edgeColors[edge]])
+                let color = edgeColors[edge]
+                // The C++ preview marks edges whose two XY nodes are external with alpha zero.
+                // Omit them from the Metal buffers entirely: the grid pipeline is intentionally
+                // opaque, and more importantly an external cell means no shader work exists there,
+                // not a differently-coloured simulated region.
+                if color.w > 0 {
+                    positions.append(contentsOf: [Position3(xLines[x], y, z), Position3(xLines[x + 1], y, z)])
+                    colors.append(contentsOf: [color, color])
+                }
                 edge += 1
             }
         }
         for x in xLines {
             for y in 0..<(yLines.count - 1) {
-                positions.append(contentsOf: [Position3(x, yLines[y], z), Position3(x, yLines[y + 1], z)])
-                colors.append(contentsOf: [edgeColors[edge], edgeColors[edge]])
+                let color = edgeColors[edge]
+                if color.w > 0 {
+                    positions.append(contentsOf: [Position3(x, yLines[y], z), Position3(x, yLines[y + 1], z)])
+                    colors.append(contentsOf: [color, color])
+                }
                 edge += 1
             }
         }

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "CopperCPML.hpp"
+#include "CopperDomain.hpp"
 #include "CopperExcitation.hpp"
 #include "CopperYeeGrid.hpp"
 
@@ -45,7 +46,8 @@ public:
     /// buffer (matching FDTD's own E=H=0 initial condition). Throws std::runtime_error if `backend`
     /// is Metal and no Metal device is available or the shader library fails to load/compile.
     explicit CopperEngine(const CopperYeeGrid& grid, const CopperExcitation& excitation = {},
-                          const std::vector<CopperCPMLShell>& cpmlShells = {}, Backend backend = Backend::Metal);
+                          const std::vector<CopperCPMLShell>& cpmlShells = {}, Backend backend = Backend::Metal,
+                          const CopperDomainMask& domainMask = {});
     ~CopperEngine();
 
     CopperEngine(const CopperEngine&) = delete;

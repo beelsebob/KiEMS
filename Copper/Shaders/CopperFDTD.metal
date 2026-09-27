@@ -4,14 +4,17 @@
 // there's one place (this comment) documenting the correspondence rather than trusting it was
 // transcribed correctly by eye:
 //
-//   update_e_interior <-> Engine::UpdateVoltages, dispatched over the FULL (nx,ny,nz) grid. The
+//   update_e_interior <-> Engine::UpdateVoltages. Rectangular-domain callers dispatch the full
+//   (nx,ny,nz) grid; irregular-board runs dispatch the non-overlapping active cuboids produced by
+//   CopperDomain instead. The
 //   lower-index neighbor in each curl term is guarded by `shift = (pos != 0)`: at pos==0, shift is
 //   0, so `pos - shift` reads the *same* cell instead of underflowing -- and since both terms of
 //   that difference then read the identical value, they cancel to exactly zero. That's not a
 //   special case bolted on top; it's openEMS's own boundary treatment, baked into the same formula
 //   that runs everywhere else.
 //
-//   update_h_interior <-> Engine::UpdateCurrents, dispatched over (nx-1,ny-1,nz-1) only (openEMS's
+//   update_h_interior <-> Engine::UpdateCurrents, over the equivalent active subset of
+//   (nx-1,ny-1,nz-1) (openEMS's
 //   own IterateTS calls `UpdateCurrents(0, numLines[0]-1)`, one less than UpdateVoltages's full
 //   range, and UpdateCurrents' own y/z loops are separately bounded to numLines-1 too) -- H
 //   physically exists on a grid one cell smaller than E per axis (the dual/staggered mesh has one
@@ -52,7 +55,9 @@ kernel void update_e_interior(constant CopperGridDimsGPU& dims [[buffer(CopperBu
                                device const float* vi0 [[buffer(CopperBufferIndexVI0)]],
                                device const float* vi1 [[buffer(CopperBufferIndexVI1)]],
                                device const float* vi2 [[buffer(CopperBufferIndexVI2)]],
+                               constant CopperDispatchOriginGPU& origin [[buffer(CopperBufferIndexDispatchOrigin)]],
                                uint3 gid [[thread_position_in_grid]]) {
+    gid += uint3(origin.x, origin.y, origin.z);
     if (gid.x >= dims.nx || gid.y >= dims.ny || gid.z >= dims.nz) {
         return;
     }
@@ -94,7 +99,9 @@ kernel void update_h_interior(constant CopperGridDimsGPU& dims [[buffer(CopperBu
                                device const float* iv0 [[buffer(CopperBufferIndexIV0)]],
                                device const float* iv1 [[buffer(CopperBufferIndexIV1)]],
                                device const float* iv2 [[buffer(CopperBufferIndexIV2)]],
+                               constant CopperDispatchOriginGPU& origin [[buffer(CopperBufferIndexDispatchOrigin)]],
                                uint3 gid [[thread_position_in_grid]]) {
+    gid += uint3(origin.x, origin.y, origin.z);
     // Dispatched over exactly (nx-1, ny-1, nz-1) -- every pos+1 read below is guaranteed in bounds
     // by that dispatch size alone; this guard is defensive belt-and-suspenders, not load-bearing.
     if (gid.x + 1 >= dims.nx || gid.y + 1 >= dims.ny || gid.z + 1 >= dims.nz) {

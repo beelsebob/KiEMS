@@ -28,6 +28,9 @@
 #include "logging.hpp"
 #include "kiems/paths_config.hpp"
 
+#include "CopperFDTDRunner.h"
+#include "Copper/Internal/CopperDomain.hpp"
+
 using kiems::EMSConfig;
 using namespace Cu;
 using kiems::PathsConfig;
@@ -1023,13 +1026,51 @@ std::size_t midpointLineIndex(const std::vector<double>& lines) {
     return std::abs(lines[upper] - midpoint) < std::abs(lines[upper - 1] - midpoint) ? upper : upper - 1;
 }
 
-bool isInPML(const kiems::ComputedGridLines& grid, double x, double y, double z) {
-    return x < grid.pmlInnerXMin || x > grid.pmlInnerXMax || y < grid.pmlInnerYMin || y > grid.pmlInnerYMax ||
-           z < grid.pmlInnerZMin || z > grid.pmlInnerZMax;
+enum class GridDomainRegion { External, Interior, CPML };
+
+std::size_t nearestLineIndex(const std::vector<double>& lines, double coordinate) {
+    const auto upper = std::lower_bound(lines.begin(), lines.end(), coordinate);
+    if (upper == lines.begin()) return 0;
+    if (upper == lines.end()) return lines.size() - 1;
+    const std::size_t upperIndex = static_cast<std::size_t>(upper - lines.begin());
+    return std::abs(lines[upperIndex] - coordinate) < std::abs(lines[upperIndex - 1] - coordinate)
+        ? upperIndex : upperIndex - 1;
+}
+
+GridDomainRegion gridDomainRegion(const kiems::ComputedGridLines& grid,
+                                  const copper::CopperDomainMask& domain,
+                                  const std::array<double, 3>& p0,
+                                  const std::array<double, 3>& p1) {
+    // A missing irregular mask is the legacy rectangular-domain case. Preserve its old display
+    // exactly, including conventional rectangular X/Y PML bands.
+    if (domain.empty()) {
+        const double x = (p0[0] + p1[0]) * 0.5;
+        const double y = (p0[1] + p1[1]) * 0.5;
+        const double z = (p0[2] + p1[2]) * 0.5;
+        return x < grid.pmlInnerXMin || x > grid.pmlInnerXMax ||
+                       y < grid.pmlInnerYMin || y > grid.pmlInnerYMax ||
+                       z < grid.pmlInnerZMin || z > grid.pmlInnerZMax
+            ? GridDomainRegion::CPML : GridDomainRegion::Interior;
+    }
+
+    const auto pointClass = [&](const std::array<double, 3>& p) {
+        const std::size_t x = nearestLineIndex(grid.x, p[0]);
+        const std::size_t y = nearestLineIndex(grid.y, p[1]);
+        return domain.at(static_cast<std::uint32_t>(x), static_cast<std::uint32_t>(y));
+    };
+    const std::uint8_t c0 = pointClass(p0);
+    const std::uint8_t c1 = pointClass(p1);
+    if (c0 == 0 && c1 == 0) return GridDomainRegion::External;
+
+    const double z = (p0[2] + p1[2]) * 0.5;
+    if (z < grid.pmlInnerZMin || z > grid.pmlInnerZMax || c0 >= 2 || c1 >= 2)
+        return GridDomainRegion::CPML;
+    return GridDomainRegion::Interior;
 }
 
 template <typename Place>
 EMSGeometryGridPlane* buildMaterialPlane(ContinuousStructure& csx, const kiems::ComputedGridLines& grid,
+                                         const copper::CopperDomainMask& domain,
                                          const std::vector<double>& valuesA, const std::vector<double>& valuesB,
                                          double fixedC, Place place, GridMaterialColors& colors) {
     if (valuesA.empty() || valuesB.empty()) return nil;
@@ -1042,10 +1083,12 @@ EMSGeometryGridPlane* buildMaterialPlane(ContinuousStructure& csx, const kiems::
     const auto append = [&](double a0, double b0, double a1, double b1) {
         const auto p0 = place(a0, b0, fixedC);
         const auto p1 = place(a1, b1, fixedC);
+        const GridDomainRegion region = gridDomainRegion(grid, domain, p0, p1);
+        if (region == GridDomainRegion::External) return;
         const double coord[3] = {(p0[0] + p1[0]) * 0.5, (p0[1] + p1[1]) * 0.5, (p0[2] + p1[2]) * 0.5};
         CSProperties* property = csx.GetPropertyByCoordPriority(
             coord, static_cast<CSProperties::PropertyType>(CSProperties::MATERIAL | CSProperties::METAL), false);
-        const PackedGridColor color = colors.color(property, isInPML(grid, coord[0], coord[1], coord[2]));
+        const PackedGridColor color = colors.color(property, region == GridDomainRegion::CPML);
         positions.push_back({static_cast<float>(p0[0]), static_cast<float>(p0[1]), static_cast<float>(p0[2])});
         positions.push_back({static_cast<float>(p1[0]), static_cast<float>(p1[1]), static_cast<float>(p1[2])});
         edgeColors.push_back(color);
@@ -1065,6 +1108,7 @@ EMSGeometryGridPlane* buildMaterialPlane(ContinuousStructure& csx, const kiems::
 
 template <typename Place>
 NSData* buildMaterialEdgeColors(ContinuousStructure& csx, const kiems::ComputedGridLines& grid,
+                                const copper::CopperDomainMask& domain,
                                 const std::vector<double>& valuesA, const std::vector<double>& valuesB,
                                 double fixedC, Place place, GridMaterialColors& colors) {
     std::vector<PackedGridColor> edgeColors;
@@ -1073,10 +1117,15 @@ NSData* buildMaterialEdgeColors(ContinuousStructure& csx, const kiems::ComputedG
     const auto append = [&](double a0, double b0, double a1, double b1) {
         const auto p0 = place(a0, b0, fixedC);
         const auto p1 = place(a1, b1, fixedC);
+        const GridDomainRegion region = gridDomainRegion(grid, domain, p0, p1);
+        if (region == GridDomainRegion::External) {
+            edgeColors.push_back({0, 0, 0, 0});
+            return;
+        }
         const double coord[3] = {(p0[0] + p1[0]) * 0.5, (p0[1] + p1[1]) * 0.5, (p0[2] + p1[2]) * 0.5};
         CSProperties* property = csx.GetPropertyByCoordPriority(
             coord, static_cast<CSProperties::PropertyType>(CSProperties::MATERIAL | CSProperties::METAL), false);
-        edgeColors.push_back(colors.color(property, isInPML(grid, coord[0], coord[1], coord[2])));
+        edgeColors.push_back(colors.color(property, region == GridDomainRegion::CPML));
     };
     for (std::size_t b = 0; b < valuesB.size(); ++b)
         for (std::size_t a = 0; a + 1 < valuesA.size(); ++a)
@@ -1112,16 +1161,34 @@ MaterialGridBuffers buildMaterialGrid(const SlicedBoard& sliced, const Simulatio
     displayGrid.pmlInnerYMin += sliced.bounds.yMin;
     displayGrid.pmlInnerYMax += sliced.bounds.yMin;
 
+    copper::CopperFDTDPortConfig domainConfig;
+    for (const auto& loop : sliced.cutoutLoops) {
+        std::vector<copper::CopperFDTDPortConfig::DomainPoint> outputLoop;
+        outputLoop.reserve(loop.size());
+        for (const auto& point : loop) outputLoop.push_back({point.x(), point.y()});
+        domainConfig.domainCutoutLoops.push_back(std::move(outputLoop));
+    }
+    constexpr std::size_t pmlDepth = kiems::constants::pmlDepthCells;
+    if (grid.x.size() > 2 * pmlDepth && grid.y.size() > 2 * pmlDepth) {
+        domainConfig.domainPadding = std::max({sliced.bounds.xMin - grid.x[pmlDepth],
+                                               grid.x[grid.x.size() - pmlDepth - 1] - sliced.bounds.xMax,
+                                               sliced.bounds.yMin - grid.y[pmlDepth],
+                                               grid.y[grid.y.size() - pmlDepth - 1] - sliced.bounds.yMax});
+    }
+    domainConfig.domainCPMLCellSize = config.grid().max();
+    const copper::CopperDomainMask domain =
+        copper::buildDomainMask(grid.x, grid.y, domainConfig, static_cast<std::uint32_t>(pmlDepth));
+
     GridMaterialColors colors(config);
     MaterialGridBuffers result;
     const double fixedX = grid.x[midpointLineIndex(grid.x)];
     const double fixedY = grid.y[midpointLineIndex(grid.y)];
     const double fixedZ = grid.z[midpointLineIndex(grid.z)];
-    result.excludingZ = buildMaterialPlane(csx, displayGrid, grid.x, grid.y, fixedZ,
+    result.excludingZ = buildMaterialPlane(csx, displayGrid, domain, grid.x, grid.y, fixedZ,
         [](double x, double y, double z) { return std::array<double, 3>{x, y, z}; }, colors);
-    result.excludingY = buildMaterialPlane(csx, displayGrid, grid.x, grid.z, fixedY,
+    result.excludingY = buildMaterialPlane(csx, displayGrid, domain, grid.x, grid.z, fixedY,
         [](double x, double z, double y) { return std::array<double, 3>{x, y, z}; }, colors);
-    result.excludingX = buildMaterialPlane(csx, displayGrid, grid.y, grid.z, fixedX,
+    result.excludingX = buildMaterialPlane(csx, displayGrid, domain, grid.y, grid.z, fixedX,
         [](double y, double z, double x) { return std::array<double, 3>{x, y, z}; }, colors);
     NSMutableArray<EMSGeometryGridLayer*>* selectableLayers = [NSMutableArray array];
     double z = 0;
@@ -1131,7 +1198,7 @@ MaterialGridBuffers buildMaterialGrid(const SlicedBoard& sliced, const Simulatio
             continue;
         }
         if (layer.kind() != kiems::LayerKind::Metal) continue;
-        NSData* edgeColors = buildMaterialEdgeColors(csx, displayGrid, grid.x, grid.y, z,
+        NSData* edgeColors = buildMaterialEdgeColors(csx, displayGrid, domain, grid.x, grid.y, z,
             [](double x, double y, double fixedZ) { return std::array<double, 3>{x, y, fixedZ}; }, colors);
         [selectableLayers addObject:[[EMSGeometryGridLayer alloc] initWithName:@(layer.name().c_str())
                                                                             z:z

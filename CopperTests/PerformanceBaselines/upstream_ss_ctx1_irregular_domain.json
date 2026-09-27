@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-09-27T18:41:00+01:00",
+  "status": "single_comparison_run",
+  "machine": {
+    "model": "MacBook Pro",
+    "model_identifier": "Mac17,6",
+    "chip": "Apple M5 Max",
+    "memory_gib": 128,
+    "macos": "26.5 (25F71)"
+  },
+  "fixture": {
+    "package": "TestSim.g2esim",
+    "simulation": "Upstream/SS CTx1",
+    "simulation_json_sha256": "e750ee33b0fd2564d046f2c378e8e9314dbef8461e9988777cc8524ed8cd4d92",
+    "geometry_json_sha256": "c5ea89ac3f490030396ae2e65acaeb589a22900d14001ce57dcad0d0557b5add",
+    "timesteps": 1000,
+    "excitation": "first resolved excitation",
+    "field_frame_output": false
+  },
+  "baseline": {
+    "irregular_domain": false,
+    "operator_setup_seconds": 49.59,
+    "cpml_setup_seconds": 7.42,
+    "cpml_shell_count": 6,
+    "cpml_cell_count": 52597920,
+    "engine_setup_seconds": 1.06,
+    "fdtd_seconds": 64.46,
+    "total_seconds": 124.76,
+    "timesteps_per_second": 15.5135,
+    "metal_allocated_gib": 13.072,
+    "process_footprint_gib": 39.352,
+    "maximum_resident_bytes": 42314186752
+  },
+  "optimized": {
+    "irregular_domain": true,
+    "xy_grid_nodes": 1434450,
+    "dispatched_xy_nodes": 955551,
+    "external_xy_nodes": 478899,
+    "external_fraction": 0.333856,
+    "dispatch_cuboid_count": 995,
+    "operator_setup_seconds": 49.92,
+    "cpml_setup_seconds": 1.69,
+    "cpml_shell_count": 1390,
+    "cpml_cell_count": 32385042,
+    "engine_setup_seconds": 0.87,
+    "fdtd_seconds": 57.45,
+    "total_seconds": 111.41,
+    "timesteps_per_second": 17.4064,
+    "metal_allocated_gib": 11.352,
+    "process_footprint_gib": 35.706,
+    "maximum_resident_bytes": 38398410752
+  },
+  "change": {
+    "fdtd_time_percent": -10.875,
+    "throughput_percent": 12.202,
+    "total_time_percent": -10.701,
+    "cpml_setup_time_percent": -77.224,
+    "cpml_cells_percent": -38.429,
+    "metal_allocated_percent": -13.158,
+    "process_footprint_percent": -9.265,
+    "maximum_resident_percent": -9.254
+  }
+}

@@ -284,4 +284,115 @@ std::vector<CopperCPMLShell> buildCPMLShells(CopperOperator& op, double alphaMax
     return shells;
 }
 
+std::vector<CopperCPMLShell> buildCPMLShells(CopperOperator& op, double alphaMax, std::uint32_t pmlDepthCells,
+                                             const CopperDomainMask& domainMask) {
+    if (domainMask.empty()) return buildCPMLShells(op, alphaMax, pmlDepthCells);
+
+    const auto nx = static_cast<std::uint32_t>(op.numberOfLines(0));
+    const auto ny = static_cast<std::uint32_t>(op.numberOfLines(1));
+    const auto nz = static_cast<std::uint32_t>(op.numberOfLines(2));
+    if (domainMask.nx != nx || domainMask.ny != ny || nz <= 2 * pmlDepthCells) return {};
+
+    struct Box { std::uint32_t x, y, z, w, h, d; bool xy; };
+    std::vector<Box> boxes;
+    for (const auto& r : domainMask.dispatchBoxes) {
+        if (r.region == CopperDomainMask::Region::CPML) {
+            boxes.push_back({r.startX, r.startY, 0, r.width, r.height, nz, true});
+        } else {
+            // XY-interior columns still need the conventional top and bottom Z CPML slabs. Because
+            // the domain decomposition is class-pure, these never overlap an XY-CPML shell and
+            // never contain an external node.
+            boxes.push_back({r.startX, r.startY, 0, r.width, r.height, pmlDepthCells, false});
+            boxes.push_back({r.startX, r.startY, nz - pmlDepthCells,
+                             r.width, r.height, pmlDepthCells, false});
+        }
+    }
+
+    auto layerAt = [&](int x, int y) -> int {
+        if (x < 0 || y < 0 || x >= static_cast<int>(nx) || y >= static_cast<int>(ny))
+            return static_cast<int>(pmlDepthCells) + 1;
+        const auto c = domainMask.at(static_cast<std::uint32_t>(x), static_cast<std::uint32_t>(y));
+        return c == 0 ? static_cast<int>(pmlDepthCells) + 1 : std::max(0, static_cast<int>(c) - 1);
+    };
+    const double xyDl = [&] {
+        double largest = 0.0;
+        for (std::uint32_t x = 1; x < nx; ++x) largest = std::max(largest, op.discLine(0, x) - op.discLine(0, x - 1));
+        for (std::uint32_t y = 1; y < ny; ++y) largest = std::max(largest, op.discLine(1, y) - op.discLine(1, y - 1));
+        return largest * op.gridDeltaMetres();
+    }();
+    const double xyWidth = xyDl * pmlDepthCells;
+    auto layerVariesAlongAxis = [&](std::uint32_t x, std::uint32_t y, int axis, int layer) {
+        const double origin = op.discLine(axis, axis == 0 ? x : y);
+        for (int direction : {-1, 1}) {
+            int coordinate = static_cast<int>(axis == 0 ? x : y);
+            const int limit = static_cast<int>(axis == 0 ? nx : ny);
+            while (true) {
+                coordinate += direction;
+                if (coordinate < 0 || coordinate >= limit) break;
+                const double distance = std::abs(op.discLine(axis, static_cast<unsigned int>(coordinate)) - origin) *
+                                        op.gridDeltaMetres();
+                const int sample = axis == 0 ? layerAt(coordinate, static_cast<int>(y))
+                                             : layerAt(static_cast<int>(x), coordinate);
+                if (sample != layer) return true;
+                if (distance >= xyDl) break;
+            }
+        }
+        return false;
+    };
+    const double dT = op.timestepSeconds();
+    std::vector<CopperCPMLShell> shells;
+    shells.reserve(boxes.size());
+    for (const Box& box : boxes) {
+        CopperCPMLShell shell;
+        shell.startX = box.x; shell.startY = box.y; shell.startZ = box.z;
+        shell.dims = {box.w, box.h, box.d};
+        const auto count = shell.dims.cellCount();
+        for (int a = 0; a < 3; ++a) {
+            shell.bE[a].assign(count, 1.0F); shell.cE[a].assign(count, 0.0F);
+            shell.bH[a].assign(count, 1.0F); shell.cH[a].assign(count, 0.0F);
+            shell.psiE0[a].assign(count, 0.0F); shell.psiE1[a].assign(count, 0.0F);
+            shell.psiH0[a].assign(count, 0.0F); shell.psiH1[a].assign(count, 0.0F);
+        }
+        unsigned int pos[3];
+        for (std::uint32_t lz = 0; lz < box.d; ++lz) {
+            pos[2] = box.z + lz;
+            for (std::uint32_t ly = 0; ly < box.h; ++ly) {
+                pos[1] = box.y + ly;
+                for (std::uint32_t lx = 0; lx < box.w; ++lx) {
+                    pos[0] = box.x + lx;
+                    const auto i = copperGridIndex(shell.dims, lx, ly, lz);
+                    for (int axis = 0; axis < 3; ++axis) {
+                        Grading e{}, h{};
+                        if (axis == 2) {
+                            const int component = 0; // any off-axis component gives the required CPML staggering
+                            const BaseGrading base = computeBaseGrading(op, pmlDepthCells, axis, pos);
+                            e = finishGrading(base, op, axis, pos, true, component, alphaMax);
+                            h = finishGrading(base, op, axis, pos, false, component, alphaMax);
+                        } else if (box.xy) {
+                            const int layer = layerAt(static_cast<int>(pos[0]), static_cast<int>(pos[1]));
+                            // A tensor mesh can carry many fine X lines through a coarse Y-side
+                            // CPML ring (and vice versa). Looking only at immediate class neighbours
+                            // would therefore see a broad same-layer plateau and incorrectly turn
+                            // absorption off. Probe up to one coarse-cell width along each axis:
+                            // the true normal axis crosses an offset ring within that distance,
+                            // while the tangential axis on a straight section remains in the same
+                            // ring. Rounded/diagonal sections correctly grade both axes.
+                            const bool varies = layerVariesAlongAxis(pos[0], pos[1], axis, layer);
+                            if (varies && layer > 0 && layer <= static_cast<int>(pmlDepthCells)) {
+                                const double depth = (static_cast<double>(layer) - 0.5) * xyDl;
+                                const double sigma = defaultSigmaGrading(depth, xyDl, xyWidth, physical::impedance0);
+                                e = h = {sigma, sigma + alphaGrading(depth, xyWidth, alphaMax)};
+                            }
+                        }
+                        computeBC(e, dT, shell.bE[axis][i], shell.cE[axis][i]);
+                        computeBC(h, dT, shell.bH[axis][i], shell.cH[axis][i]);
+                    }
+                }
+            }
+        }
+        shells.push_back(std::move(shell));
+    }
+    return shells;
+}
+
 } // namespace copper

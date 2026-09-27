@@ -68,7 +68,7 @@ std::vector<float> concatAxes(const std::vector<float> (&perAxis)[3]) {
 class MetalEngineImpl final : public EngineBackend {
 public:
     MetalEngineImpl(const CopperYeeGrid& grid, const CopperExcitation& excitation,
-                     const std::vector<CopperCPMLShell>& cpmlShells);
+                     const std::vector<CopperCPMLShell>& cpmlShells, const CopperDomainMask& domainMask);
 
     void run(std::uint32_t steps) override;
     void runWithProbeSampling(std::uint32_t steps, const CopperEngine::ProbeSampler& sampler,
@@ -93,6 +93,7 @@ private:
     id<MTLComputePipelineState> _cpmlCorrectHPipeline;
 
     id<MTLBuffer> _dimsBuffer;
+    std::vector<CopperDomainMask::DispatchBox> _dispatchBoxes;
     id<MTLBuffer> _eField[3];
     id<MTLBuffer> _hField[3];
     id<MTLBuffer> _vv[3];
@@ -146,7 +147,8 @@ private:
 };
 
 MetalEngineImpl::MetalEngineImpl(const CopperYeeGrid& grid, const CopperExcitation& excitation,
-                                  const std::vector<CopperCPMLShell>& cpmlShells) {
+                                  const std::vector<CopperCPMLShell>& cpmlShells,
+                                  const CopperDomainMask& domainMask) {
     _dims = grid.dims;
     _timestepSeconds = grid.timestepSeconds;
     _signalPeriodSeconds = excitation.signalPeriodSeconds;
@@ -194,6 +196,12 @@ MetalEngineImpl::MetalEngineImpl(const CopperYeeGrid& grid, const CopperExcitati
 
     CopperGridDimsGPU dimsGPU{grid.dims.nx, grid.dims.ny, grid.dims.nz};
     _dimsBuffer = [_device newBufferWithBytes:&dimsGPU length:sizeof(dimsGPU) options:MTLResourceStorageModeShared];
+    if (domainMask.empty()) {
+        _dispatchBoxes.push_back(
+            {0, 0, grid.dims.nx, grid.dims.ny, CopperDomainMask::Region::Interior});
+    } else {
+        _dispatchBoxes = domainMask.dispatchBoxes;
+    }
 
     const std::size_t cellCount = grid.dims.cellCount();
     for (int axis = 0; axis < 3; ++axis) {
@@ -324,7 +332,12 @@ void MetalEngineImpl::encodeIterationPhase(id<MTLComputeCommandEncoder> encoder,
         [encoder setBuffer:_vi[0] offset:0 atIndex:CopperBufferIndexVI0];
         [encoder setBuffer:_vi[1] offset:0 atIndex:CopperBufferIndexVI1];
         [encoder setBuffer:_vi[2] offset:0 atIndex:CopperBufferIndexVI2];
-        [encoder dispatchThreads:eGrid threadsPerThreadgroup:threadsPerThreadgroup];
+        for (const auto& box : _dispatchBoxes) {
+            const CopperDispatchOriginGPU origin{box.startX, box.startY, 0};
+            [encoder setBytes:&origin length:sizeof(origin) atIndex:CopperBufferIndexDispatchOrigin];
+            [encoder dispatchThreads:MTLSizeMake(box.width, box.height, eGrid.depth)
+                 threadsPerThreadgroup:threadsPerThreadgroup];
+        }
 
         // CPML reads the fields this dispatch just wrote.
         [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
@@ -366,7 +379,16 @@ void MetalEngineImpl::encodeIterationPhase(id<MTLComputeCommandEncoder> encoder,
         [encoder setBuffer:_iv[0] offset:0 atIndex:CopperBufferIndexIV0];
         [encoder setBuffer:_iv[1] offset:0 atIndex:CopperBufferIndexIV1];
         [encoder setBuffer:_iv[2] offset:0 atIndex:CopperBufferIndexIV2];
-        [encoder dispatchThreads:hGrid threadsPerThreadgroup:threadsPerThreadgroup];
+        for (const auto& box : _dispatchBoxes) {
+            if (box.startX >= hGrid.width || box.startY >= hGrid.height) continue;
+            const NSUInteger width = std::min<NSUInteger>(box.width, hGrid.width - box.startX);
+            const NSUInteger height = std::min<NSUInteger>(box.height, hGrid.height - box.startY);
+            if (width == 0 || height == 0 || hGrid.depth == 0) continue;
+            const CopperDispatchOriginGPU origin{box.startX, box.startY, 0};
+            [encoder setBytes:&origin length:sizeof(origin) atIndex:CopperBufferIndexDispatchOrigin];
+            [encoder dispatchThreads:MTLSizeMake(width, height, hGrid.depth)
+                 threadsPerThreadgroup:threadsPerThreadgroup];
+        }
 
         // CPML reads the fields this dispatch just wrote.
         [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
@@ -516,8 +538,9 @@ double MetalEngineImpl::estimateEnergy() const {
 
 std::unique_ptr<EngineBackend> makeMetalEngineBackend(const CopperYeeGrid& grid,
                                                        const CopperExcitation& excitation,
-                                                       const std::vector<CopperCPMLShell>& cpmlShells) {
-    return std::make_unique<MetalEngineImpl>(grid, excitation, cpmlShells);
+                                                       const std::vector<CopperCPMLShell>& cpmlShells,
+                                                       const CopperDomainMask& domainMask) {
+    return std::make_unique<MetalEngineImpl>(grid, excitation, cpmlShells, domainMask);
 }
 
 } // namespace copper

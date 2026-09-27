@@ -729,12 +729,36 @@ void Simulation::addSubstrates() {
     double offset = 0;
     const auto substrates = _config.getSubstrates();
     for (std::size_t i = 0; i < substrates.size(); ++i) {
-        addBox(*_substrateMaterials[i], {_slicedBoard.bounds.xMin, _slicedBoard.bounds.yMin, offset},
-               {_slicedBoard.bounds.xMax, _slicedBoard.bounds.yMax, offset - substrates[i].thickness()},
-               -static_cast<std::int32_t>(i) - 1);
+        const double thickness = substrates[i].thickness();
+        const std::int32_t substratePriority = -static_cast<std::int32_t>(i) - 1;
+        if (_slicedBoard.cutoutLoops.empty()) {
+            // Compatibility fallback for geometry caches predating cutoutLoops.
+            addBox(*_substrateMaterials[i], {_slicedBoard.bounds.xMin, _slicedBoard.bounds.yMin, offset},
+                   {_slicedBoard.bounds.xMax, _slicedBoard.bounds.yMax, offset - thickness}, substratePriority);
+        } else {
+            // The old bounding-box slab left dielectric in concave corners and between disjoint
+            // pieces of the hull-cut board. That material then influenced both coefficient painting
+            // and the supposedly-vacuum expansion band. Build the dielectric from the true cutout
+            // loops instead; clockwise loops are holes and receive a higher-priority vacuum punch.
+            for (const auto& loop : _slicedBoard.cutoutLoops) {
+                std::vector<double> xs, ys;
+                xs.reserve(loop.size());
+                ys.reserve(loop.size());
+                for (const Position& point : loop) {
+                    xs.push_back(point.x());
+                    ys.push_back(point.y());
+                }
+                if (Cu::isPositive(loop)) {
+                    addLinPoly(*_substrateMaterials[i], xs, ys, axisIndex("z"), offset - thickness, thickness,
+                               substratePriority);
+                } else {
+                    addLinPoly(*_npthVoidMaterial, xs, ys, axisIndex("z"), offset - thickness, thickness, 5);
+                }
+            }
+        }
         logDebug("Added substrate from " + std::to_string(offset) + " to " +
-                 std::to_string(offset - substrates[i].thickness()));
-        offset -= substrates[i].thickness();
+                 std::to_string(offset - thickness));
+        offset -= thickness;
     }
 }
 
@@ -769,9 +793,8 @@ void Simulation::addSolderMask() {
         CSProperties* material =
             addMaterial(*_csx, isTop ? "SolderMaskTop" : "SolderMaskBottom", mask.epsilon(), kappa);
         _solderMaskMaterials.push_back(material);
-        // One primitive for the *whole* coverage area -- this simulation's own real cutout shape
-        // (_slicedBoard.outline, the same polygon addSubstrates() approximates with a plain
-        // bounding box instead), not a bounding-box rectangle: a tighter outer shape means fewer
+        // A small set of primitives for the *whole* coverage area -- this simulation's true cutout
+        // loops (including disjoint pieces and holes), not a bounding-box rectangle: a tighter outer shape means fewer
         // quarter-cells even have a candidate reason to evaluate this primitive at all outside the
         // real board area (e.g. past a rounded/notched edge), on top of the primitive-count win
         // below. Every individual pad/via opening is then punched out via a small number of
@@ -794,15 +817,24 @@ void Simulation::addSolderMask() {
         // traces would stop being resolved as PEC everywhere the mask covers them (i.e. everywhere
         // except punched pad/via openings) -- exactly what caused the "signal never leaves the pad"
         // regression this priority was raised to fix.
-        std::vector<double> outlineXs;
-        std::vector<double> outlineYs;
-        outlineXs.reserve(_slicedBoard.outline.size());
-        outlineYs.reserve(_slicedBoard.outline.size());
-        for (const Position& point : _slicedBoard.outline) {
-            outlineXs.push_back(point.x());
-            outlineYs.push_back(point.y());
+        std::vector<std::vector<Position>> fallbackCutoutLoops;
+        const std::vector<std::vector<Position>>* cutoutLoops = &_slicedBoard.cutoutLoops;
+        if (cutoutLoops->empty()) {
+            fallbackCutoutLoops.push_back(_slicedBoard.outline);
+            cutoutLoops = &fallbackCutoutLoops;
         }
-        addLinPoly(*material, outlineXs, outlineYs, axisIndex("z"), elevation, length, 2);
+        for (const auto& loop : *cutoutLoops) {
+            std::vector<double> xs, ys;
+            xs.reserve(loop.size());
+            ys.reserve(loop.size());
+            for (const Position& point : loop) {
+                xs.push_back(point.x());
+                ys.push_back(point.y());
+            }
+            const bool filled = Cu::isPositive(loop);
+            addLinPoly(filled ? *material : *_npthVoidMaterial, xs, ys, axisIndex("z"), elevation, length,
+                       filled ? 2 : 3);
+        }
         for (const std::vector<Position>& loop : openingLoops) {
             std::vector<double> xs;
             std::vector<double> ys;
