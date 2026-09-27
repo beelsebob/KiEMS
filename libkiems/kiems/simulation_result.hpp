@@ -42,9 +42,8 @@ public:
     /// never depend on Copper.framework -- see CopperFDTDRunner.h's own file comment) substitute an
     /// in-process GPU run instead, without this function needing to know Copper exists. The
     /// Simulation passed to it has already had adoptSlicedBoard()/adoptGridLines()/
-    /// populateGeometry() (which includes its own setBoundaryConditions())/setExcitation()/
-    /// setupPorts() called -- see simulation_data.hpp's generateResults(), which actually drives
-    /// this sequence now; it does NOT yet have setupFDTDOperator() applied (unlike
+    /// populateGeometry()/setupPorts() called -- see simulation_data.hpp's generateResults(), which drives
+    /// this sequence now; it does NOT yet have prepareRunDirectory() applied (unlike
     /// Simulation::run()'s own spawned-worker path, whose worker process does that itself) -- an
     /// in-process portRunner must do that part itself (see kiems_fdtd_worker/main.cpp and
     /// copper_fdtd_worker/main.cpp for the exact sequence to mirror).

@@ -1,0 +1,12 @@
+// Portable defaults for dependencies which live outside this repository.
+//
+// Override any of these on the xcodebuild command line, in Xcode's build settings, or by creating
+// an untracked BuildPaths.local.xcconfig alongside this file. The checked-in defaults match the
+// repository's usual Apple Silicon development layout without embedding a developer's home path.
+KICAD_SOURCE_ROOT = $(SRCROOT)/../Simulation/kicad-11
+KICAD_BUILD_ROOT = $(KICAD_SOURCE_ROOT)/build
+KICAD_FRAMEWORK_ROOT = $(KICAD_BUILD_ROOT)/kicad/KiCad.app/Contents/Frameworks
+HOMEBREW_PREFIX = /opt/homebrew
+OPENEMS_INSTALL_ROOT = $(HOME)/opt/openEMS
+
+#include? "BuildPaths.local.xcconfig"

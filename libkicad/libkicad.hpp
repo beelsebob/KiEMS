@@ -18,6 +18,18 @@
 
 namespace libkicad {
 
+/// The two files needed to load one KiCad board. This value type lets applications retain a board
+/// source without introducing their own query-wrapper API.
+struct BoardPaths {
+    std::string projectPath;
+    std::string boardPath;
+};
+
+/// Initializes KiCad's process-global runtime. Cocoa applications must call this from their main
+/// thread before issuing any libkicad query on a background queue. Command-line clients may rely
+/// on the first query to initialize lazily, provided that query runs on their main thread.
+std::expected<void, std::string> initialize();
+
 std::expected<PadCounts, std::string> countPads(const std::string& projectPath, const std::string& boardPath);
 
 /// Resolves the net connected to one footprint's pin. `pin` is tried first as a pad number
@@ -26,6 +38,12 @@ std::expected<PadCounts, std::string> countPads(const std::string& projectPath, 
 std::expected<std::string, std::string> netForFootprintPin(const std::string& projectPath,
                                                              const std::string& boardPath,
                                                              const std::string& footprintRef, const std::string& pin);
+
+/// The effective KiCad net class for one concrete net. Composite/pattern class resolution is left
+/// to KiCad; the returned name is exactly NETCLASS::GetName().
+std::expected<std::string, std::string> netClassForNet(const std::string& projectPath,
+                                                         const std::string& boardPath,
+                                                         const std::string& netName);
 
 /// Resolves one footprint's pin to its full pad identity (including position/orientation/layer and
 /// which net it's on) -- the same pad lookup as netForFootprintPin, but returning everything about
@@ -56,17 +74,32 @@ std::expected<std::vector<TrackSegment>, std::string> tracksOnNet(const std::str
 std::expected<std::vector<ZoneInfo>, std::string> zones(const std::string& projectPath,
                                                            const std::string& boardPath);
 
-/// Exact board outline, net-owned copper, and solder-mask openings from KiCad's BOARD model.
+/// Exact board outline, net-owned copper (including a zone/non-zone display distinction),
+/// solder-mask openings, and expanded front/back silkscreen from KiCad's BOARD model.
 std::expected<BoardGeometry, std::string> boardGeometry(const std::string& projectPath,
                                                            const std::string& boardPath);
+
+/// Every layer enabled in the board file, including non-stackup technical/user layers.
+std::expected<std::vector<BoardLayerInfo>, std::string> boardLayers(const std::string& projectPath,
+                                                                     const std::string& boardPath);
+
+/// Extract just one layer. This intentionally permits preview clients to schedule visible layers
+/// first instead of paying for every enabled layer before presenting their UI.
+std::expected<BoardLayerGeometry, std::string> boardLayerGeometry(const std::string& projectPath,
+                                                                   const std::string& boardPath,
+                                                                   const std::string& layerName);
+
+/// Bounds of a BoardGeometry's Edge.Cuts contours, in the geometry's native millimetre frame.
+std::expected<BoardBounds, std::string> boardBounds(const BoardGeometry& geometry);
 
 /// Every pad on the board regardless of net, in one single board load -- see
 /// detail::allPadsRaw()'s own doc comment for why this exists alongside padsOnNet().
 std::expected<std::vector<PadPosition>, std::string> allPads(const std::string& projectPath,
                                                                 const std::string& boardPath);
 
-/// Every straight PCB track segment on the board regardless of net, paired with its own net name, in
-/// one single board load -- see detail::allPadsRaw()'s own doc comment.
+/// Every PCB track centreline on the board regardless of net, paired with its own net name, in one
+/// single board load. Curved tracks are flattened into short connected segments; vias are returned
+/// separately by throughHoles().
 std::expected<std::vector<std::pair<std::string, TrackSegment>>, std::string> allTracks(
     const std::string& projectPath, const std::string& boardPath);
 
@@ -77,12 +110,18 @@ std::expected<std::vector<std::pair<std::string, TrackSegment>>, std::string> al
 std::expected<std::vector<StackupLayer>, std::string> stackup(const std::string& projectPath,
                                                                 const std::string& boardPath);
 
-/// Every copper layer's configured color, from the currently active PCB color theme -- KiCad's own
+/// Every enabled board layer's configured color, from the currently active PCB color theme -- KiCad's own
 /// "layer colours" (Board Setup/Preferences > Colors), not something unique to this board; falls
 /// back to KiCad's built-in default theme if no other theme is resolvable for this process. Not
-/// necessarily in stackup order, and only covers layers the active theme has an entry for.
+/// layer order, and only covers layers the active theme has an entry for.
 std::expected<std::vector<LayerColor>, std::string> layerColors(const std::string& projectPath,
                                                                   const std::string& boardPath);
+
+/// Every net with a configured PCB color override. Explicit per-net colors win over the net's
+/// effective net-class color, exactly as KiCad's PCB renderer resolves them. Nets with neither
+/// kind of override are omitted and should use their copper-layer color.
+std::expected<std::vector<NetColor>, std::string> netColors(const std::string& projectPath,
+                                                              const std::string& boardPath);
 
 /// Every net class name assigned to at least one net on the board, deduplicated. Requires the
 /// board to have a linked project (a sibling .kicad_pro), same as netsInNetClass.
@@ -124,5 +163,78 @@ std::expected<ComponentModelExportResult, std::string> exportComponentModels(con
                                                                                 const std::string& boardPath,
                                                                                 const std::string& componentFilter,
                                                                                 const std::string& outputStlPath);
+
+// BoardPaths conveniences keep callers on libkicad's in-process API without repeating the two
+// filenames at every query site.
+inline std::expected<std::string, std::string> netForFootprintPin(const BoardPaths& p,
+    const std::string& footprint, const std::string& pin) {
+    return netForFootprintPin(p.projectPath, p.boardPath, footprint, pin);
+}
+inline std::expected<std::string, std::string> netClassForNet(const BoardPaths& p, const std::string& net) {
+    return netClassForNet(p.projectPath, p.boardPath, net);
+}
+inline std::expected<PadPosition, std::string> resolvePin(const BoardPaths& p, const std::string& footprint,
+                                                          const std::string& pin) {
+    return resolvePin(p.projectPath, p.boardPath, footprint, pin);
+}
+inline std::expected<std::vector<std::string>, std::string> netsInNetClass(const BoardPaths& p,
+                                                                           const std::string& name) {
+    return netsInNetClass(p.projectPath, p.boardPath, name);
+}
+inline std::expected<std::vector<PadPosition>, std::string> padsOnNet(const BoardPaths& p,
+                                                                      const std::string& net) {
+    return padsOnNet(p.projectPath, p.boardPath, net);
+}
+inline std::expected<std::vector<TrackSegment>, std::string> tracksOnNet(const BoardPaths& p,
+                                                                         const std::string& net) {
+    return tracksOnNet(p.projectPath, p.boardPath, net);
+}
+inline std::expected<std::vector<ZoneInfo>, std::string> zones(const BoardPaths& p) {
+    return zones(p.projectPath, p.boardPath);
+}
+inline std::expected<BoardGeometry, std::string> boardGeometry(const BoardPaths& p) {
+    return boardGeometry(p.projectPath, p.boardPath);
+}
+inline std::expected<std::vector<BoardLayerInfo>, std::string> boardLayers(const BoardPaths& p) {
+    return boardLayers(p.projectPath, p.boardPath);
+}
+inline std::expected<BoardLayerGeometry, std::string> boardLayerGeometry(const BoardPaths& p,
+                                                                          const std::string& layerName) {
+    return boardLayerGeometry(p.projectPath, p.boardPath, layerName);
+}
+inline std::expected<std::vector<PadPosition>, std::string> allPads(const BoardPaths& p) {
+    return allPads(p.projectPath, p.boardPath);
+}
+inline std::expected<std::vector<std::pair<std::string, TrackSegment>>, std::string> allTracks(const BoardPaths& p) {
+    return allTracks(p.projectPath, p.boardPath);
+}
+inline std::expected<std::vector<StackupLayer>, std::string> stackup(const BoardPaths& p) {
+    return stackup(p.projectPath, p.boardPath);
+}
+inline std::expected<std::vector<LayerColor>, std::string> layerColors(const BoardPaths& p) {
+    return layerColors(p.projectPath, p.boardPath);
+}
+inline std::expected<std::vector<NetColor>, std::string> netColors(const BoardPaths& p) {
+    return netColors(p.projectPath, p.boardPath);
+}
+inline std::expected<std::vector<std::string>, std::string> netClasses(const BoardPaths& p) {
+    return netClasses(p.projectPath, p.boardPath);
+}
+inline std::expected<std::vector<std::string>, std::string> allNets(const BoardPaths& p) {
+    return allNets(p.projectPath, p.boardPath);
+}
+inline std::expected<std::vector<FootprintInfo>, std::string> footprints(const BoardPaths& p) {
+    return footprints(p.projectPath, p.boardPath);
+}
+inline std::expected<std::vector<ThroughHole>, std::string> throughHoles(const BoardPaths& p) {
+    return throughHoles(p.projectPath, p.boardPath);
+}
+inline std::expected<std::vector<NonPlatedHole>, std::string> nonPlatedHoles(const BoardPaths& p) {
+    return nonPlatedHoles(p.projectPath, p.boardPath);
+}
+inline std::expected<ComponentModelExportResult, std::string> exportComponentModels(
+    const BoardPaths& p, const std::string& filter, const std::string& outputStlPath) {
+    return exportComponentModels(p.projectPath, p.boardPath, filter, outputStlPath);
+}
 
 } // namespace libkicad

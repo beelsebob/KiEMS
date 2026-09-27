@@ -60,9 +60,6 @@ public:
     FDTDBackend backend() const { return _backend; }
     void setBackend(FDTDBackend value) { _backend = value; }
 
-    PMLKind pmlKind() const { return _pmlKind; }
-    void setPmlKind(PMLKind value) { _pmlKind = value; }
-
 private:
     std::optional<std::string> _configPath;
     bool _updateConfig = false;
@@ -79,9 +76,7 @@ private:
     bool _debug = false;
     std::optional<std::string> _logLevel;
     FDTDBackend _backend = FDTDBackend::OpenEMSCPU;
-    PMLKind _pmlKind = PMLKind::CPML;
 };
 
 } // namespace kiems
-
 

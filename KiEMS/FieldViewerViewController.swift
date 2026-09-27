@@ -1,5 +1,55 @@
 import Cocoa
 
+/// Custom view for one Field-series popup item. NSMenuItem keeps its ordinary title for popup
+/// selection/accessibility; this view only replaces the menu row's drawing so excitation names use
+/// the same KiCad-aware formatting as net names everywhere else in the app.
+private final class FieldSeriesMenuItemView: NSView {
+    private let nameCell = NetNameCellView()
+
+    init(title: String) {
+        let font = NSFont.menuFont(ofSize: NSFont.systemFontSize)
+        let textSize = NetNameFormatting.size(for: NetNameFormatting.segments(for: title, font: font))
+        let horizontalInset: CGFloat = 14
+        let rowHeight = max(22, ceil(textSize.height) + 6)
+        super.init(frame: NSRect(x: 0, y: 0,
+                                 width: max(300, ceil(textSize.width) + horizontalInset * 2),
+                                 height: rowHeight))
+
+        nameCell.configure(name: title, font: font)
+        nameCell.frame = bounds.insetBy(dx: horizontalInset, dy: 0)
+        nameCell.autoresizingMask = [.width, .height]
+        addSubview(nameCell)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewWillDraw() {
+        nameCell.backgroundStyle = enclosingMenuItem?.isHighlighted == true ? .emphasized : .normal
+        super.viewWillDraw()
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        // NetNameCellView is visual content here, not a separate control. Keep it from becoming the
+        // deepest hit view so clicks reach this menu-row view's mouseUp implementation below.
+        super.hitTest(point) == nil ? nil : self
+    }
+
+    /// Once an NSMenuItem has a custom view AppKit leaves pointer handling to that view, so the
+    /// popup button no longer performs the item automatically. Route a completed click back through
+    /// NSMenu's normal action machinery to preserve target/action and accessibility behaviour.
+    override func mouseUp(with event: NSEvent) {
+        guard bounds.contains(convert(event.locationInWindow, from: nil)),
+              let item = enclosingMenuItem,
+              let menu = item.menu,
+              let itemIndex = menu.items.firstIndex(of: item) else { return }
+        menu.cancelTracking()
+        menu.performActionForItem(at: itemIndex)
+    }
+}
+
 /// Content for a simulation's "Field Viewer" sub-entry, selected via SimulationListViewController's
 /// outline view. Shares the same `.results` pipeline stage SimulationResultsViewController drives
 /// (a real FDTD run) -- selecting this tab for a simulation whose results aren't cached yet kicks
@@ -16,6 +66,10 @@ final class FieldViewerViewController: NSViewController {
 
     private let seriesSelectorBackground = NSVisualEffectView()
     private let seriesPopUp = NSPopUpButton()
+    private let seriesProgressIndicator = NSProgressIndicator()
+    private let seriesProgressPrefix = NSTextField(labelWithString: "")
+    private let seriesProgressNetName = NetNameView()
+    private var seriesProgressStack: NSStackView!
     private var currentSnapshots: [EMSFieldSnapshot] = []
     private var selectedExcitedPortBySimulation: [Int: Int] = [:]
     private var displayedSeriesKey: String?
@@ -42,17 +96,36 @@ final class FieldViewerViewController: NSViewController {
     private var runStartTime: [Int: Date] = [:]
     private var timeEstimateText: [Int: String] = [:]
     private var currentIndex: Int?
+    /// DocumentWindowController swaps the right-hand panes by toggling their views' `isHidden`
+    /// properties directly, so NSViewController appearance callbacks are not a dependable signal
+    /// for whether this pane is selected. Scheduler notifications still need to update the cheap
+    /// job/progress bookkeeping while hidden, but must not reopen field frames and rebuild the
+    /// voxel colour buffer on every tick.
+    private var isViewerVisible = false
+    /// The JobKind actually driving `runningIndices`'/`latestProgress`'s own updates for each
+    /// simulation, as of the most recent syncFromScheduler() tick -- see that method's own doc
+    /// comment for why `activeJob` (and therefore its kind) can silently change mid-run as this
+    /// simulation progresses through its prerequisite chain (geometry -> simulation ->
+    /// field post-processing), with no corresponding onRunStateChanged transition to hang a "kind
+    /// just changed" event off of. Captured here (rather than re-read from JobScheduler at the point
+    /// a run finishes, when the job that was actually running may already have been removed) so
+    /// onRunFinished/onRunCancelled can still report the right kind even after its own Job is gone.
+    private var runningJobKind: [Int: JobKind] = [:]
 
-    /// Fired whenever a given simulation's Field Viewer step starts/finishes running -- see
-    /// GeometryViewController's identical property. Now genuinely wired to the source-list row's own
-    /// spinner (see SimulationListViewController.setFieldViewerRowBusy/etc.) -- JobScheduler tracks
-    /// .fieldPostProcessing as a real job, so the Field Viewer row is no longer the static "Not a
-    /// pipeline stage yet" placeholder it used to be.
-    var onRunStateChanged: ((Int, Bool) -> Void)?
-    var onRunFinished: ((Int, Bool) -> Void)?
-    var onProgressChanged: ((Int, EMSPipelineProgress) -> Void)?
-    /// See GeometryViewController.onRunCancelled's identical doc comment.
-    var onRunCancelled: ((Int) -> Void)?
+    /// Fired whenever a given simulation's *currently active prerequisite* job starts/stops running
+    /// -- `kind` is whichever of .geometryGeneration/.simulation/.fieldPostProcessing is actually
+    /// driving it at that moment (see syncFromScheduler()'s own doc comment for why this VC has to
+    /// watch all three, not just .fieldPostProcessing, for its own content-pane progress display).
+    /// DocumentWindowController must filter on `kind == .fieldPostProcessing` before relaying to the
+    /// sidebar's own Field Viewer row (see SimulationListViewController.setBusy/etc.) -- forwarding
+    /// every kind unfiltered was the source of a real bug: a geometry-phase progress report making
+    /// the Field Viewer row's own indicator fill up while geometry was still building.
+    var onRunStateChanged: ((Int, JobKind, Bool) -> Void)?
+    var onRunFinished: ((Int, JobKind, Bool) -> Void)?
+    var onProgressChanged: ((Int, JobKind, EMSPipelineProgress) -> Void)?
+    /// See GeometryViewController.onRunCancelled's identical doc comment, and onRunStateChanged's
+    /// own doc comment above for why `kind` is required here too.
+    var onRunCancelled: ((Int, JobKind) -> Void)?
 
     init(document: Document) {
         self.document = document
@@ -63,6 +136,27 @@ final class FieldViewerViewController: NSViewController {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidDisappear() {
+        super.viewDidDisappear()
+        stopPlayback()
+        fieldView.discardCachedFrameData()
+    }
+
+    /// Called by DocumentWindowController after it has selected or hidden this pane. Becoming
+    /// visible performs one catch-up refresh from the pipeline's latest snapshot; becoming hidden
+    /// stops playback and drops decoded frame data immediately. Progress state continues to be
+    /// tracked by syncFromScheduler() either way.
+    func setViewerVisible(_ visible: Bool) {
+        guard isViewerVisible != visible else { return }
+        isViewerVisible = visible
+        if visible {
+            refreshDisplay()
+        } else {
+            stopPlayback()
+            fieldView.discardCachedFrameData()
+        }
     }
 
     override func loadView() {
@@ -108,7 +202,21 @@ final class FieldViewerViewController: NSViewController {
         seriesPopUp.target = self
         seriesPopUp.action = #selector(seriesSelectionChanged)
 
-        let stack = NSStackView(views: [label, seriesPopUp])
+        seriesProgressIndicator.style = .spinning
+        seriesProgressIndicator.controlSize = .small
+        seriesProgressIndicator.startAnimation(nil)
+        let progressFont = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        seriesProgressPrefix.font = progressFont
+        seriesProgressPrefix.textColor = .secondaryLabelColor
+        seriesProgressStack = NSStackView(views: [seriesProgressIndicator,
+                                                   seriesProgressPrefix,
+                                                   seriesProgressNetName])
+        seriesProgressStack.orientation = .horizontal
+        seriesProgressStack.alignment = .centerY
+        seriesProgressStack.spacing = 3
+        seriesProgressStack.isHidden = true
+
+        let stack = NSStackView(views: [label, seriesPopUp, seriesProgressStack])
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.spacing = 8
@@ -213,6 +321,10 @@ final class FieldViewerViewController: NSViewController {
     }
 
     private func refreshDisplay() {
+        // This is the only path that calls display(snapshot:preview:), and therefore the only path
+        // that can replace FieldView.fieldSnapshot and rebuild its multi-megabyte voxel colour
+        // buffer. Scheduler updates deliberately stop here while another pane is selected.
+        guard isViewerVisible else { return }
         guard let currentIndex, let document, currentIndex < document.config.simulations.count else { return }
         let name = document.config.simulations[currentIndex].name
         let pipeline = document.pipeline(forSimulationNamed: name)
@@ -227,6 +339,7 @@ final class FieldViewerViewController: NSViewController {
             let snapshot = snapshots[selectedIndex]
             selectedExcitedPortBySimulation[currentIndex] = snapshot.excitedPort
             updateSeriesSelector(snapshots: snapshots, selectedIndex: selectedIndex)
+            updateLiveSeriesStatus(runningIndices.contains(currentIndex) ? latestProgress[currentIndex] : nil)
             display(snapshot: snapshot, preview: pipeline.geometryPreview())
             fieldView.isHidden = false
             progressStatus.setState(.hidden)
@@ -242,9 +355,13 @@ final class FieldViewerViewController: NSViewController {
             // means an animated indeterminate bar, and time-estimate text nil hides that row, instead
             // of guessing a duration.
             let isSettingUp = progress?.phase == .settingUp
+            let netStatus = progress?.excitedNetName.map {
+                ProgressStatusView.NetStatus(prefix: isSettingUp ? "Preparing " : "Exciting ", netName: $0)
+            }
             progressStatus.setState(.progress(
                 status: isSettingUp ? "Setting up Simulation…"
                     : "Running simulation…\n\nA full FDTD run can take several minutes.",
+                netStatus: netStatus,
                 fraction: isSettingUp ? nil : (progress?.fraction ?? 0),
                 timeEstimateText: isSettingUp ? nil
                     : (timeEstimateText[currentIndex] ?? TimeRemainingFormatter.string(secondsRemaining: nil))))
@@ -268,11 +385,33 @@ final class FieldViewerViewController: NSViewController {
 
     private func updateSeriesSelector(snapshots: [EMSFieldSnapshot], selectedIndex: Int) {
         seriesPopUp.removeAllItems()
-        for snapshot in snapshots {
-            seriesPopUp.addItem(withTitle: "\(snapshot.simulationName) – \(snapshot.excitationName)")
+        for (index, snapshot) in snapshots.enumerated() {
+            let title = "\(snapshot.simulationName) – \(snapshot.excitationName)"
+            seriesPopUp.addItem(withTitle: title)
+            seriesPopUp.lastItem?.target = self
+            seriesPopUp.lastItem?.action = #selector(seriesMenuItemSelected(_:))
+            seriesPopUp.lastItem?.tag = index
+            seriesPopUp.lastItem?.view = FieldSeriesMenuItemView(title: title)
         }
         seriesPopUp.selectItem(at: selectedIndex)
         seriesSelectorBackground.isHidden = false
+    }
+
+    /// Once the first excitation has published frames the field itself remains usable, so the
+    /// full-screen progress state is deliberately hidden. Keep a compact status beside the series
+    /// selector while later excitations are being prepared/run; otherwise a differential-pair run
+    /// appears to stop after its first leg during the (potentially minutes-long) opaque setup for
+    /// the second one.
+    private func updateLiveSeriesStatus(_ progress: EMSPipelineProgress?) {
+        guard let progress, let netName = progress.excitedNetName else {
+            seriesProgressStack.isHidden = true
+            return
+        }
+        seriesProgressPrefix.stringValue = progress.phase == .settingUp ? "Preparing" : "Running"
+        seriesProgressNetName.configure(name: netName,
+                                        font: .systemFont(ofSize: NSFont.smallSystemFontSize),
+                                        color: .secondaryLabelColor)
+        seriesProgressStack.isHidden = false
     }
 
     private func display(snapshot: EMSFieldSnapshot, preview: EMSGeometryPreview?) {
@@ -293,10 +432,22 @@ final class FieldViewerViewController: NSViewController {
     }
 
     @objc private func seriesSelectionChanged() {
-        guard let currentIndex, seriesPopUp.indexOfSelectedItem >= 0,
-              seriesPopUp.indexOfSelectedItem < currentSnapshots.count,
+        selectSeries(at: seriesPopUp.indexOfSelectedItem)
+    }
+
+    /// Custom-view menu items don't update NSPopUpButton's selection on their own. Their explicit
+    /// action carries the snapshot index in the tag and rejoins the same path used by keyboard
+    /// selection through the popup button.
+    @objc private func seriesMenuItemSelected(_ sender: NSMenuItem) {
+        selectSeries(at: sender.tag)
+    }
+
+    private func selectSeries(at index: Int) {
+        guard let currentIndex, index >= 0,
+              index < currentSnapshots.count,
               let document, currentIndex < document.config.simulations.count else { return }
-        let snapshot = currentSnapshots[seriesPopUp.indexOfSelectedItem]
+        seriesPopUp.selectItem(at: index)
+        let snapshot = currentSnapshots[index]
         selectedExcitedPortBySimulation[currentIndex] = snapshot.excitedPort
         let simulationName = document.config.simulations[currentIndex].name
         display(snapshot: snapshot, preview: document.pipeline(forSimulationNamed: simulationName).geometryPreview())
@@ -329,6 +480,7 @@ final class FieldViewerViewController: NSViewController {
 
     private func hideFieldSeriesControls() {
         seriesSelectorBackground.isHidden = true
+        seriesProgressStack.isHidden = true
         currentSnapshots = []
         displayedSeriesKey = nil
         hideTransport()
@@ -413,9 +565,13 @@ final class FieldViewerViewController: NSViewController {
     /// in the first two, well before .fieldPostProcessing's own (near-instant) job ever exists, so
     /// this VC's "is something in progress for me" state has to track whichever of the three is
     /// currently the active one, the same way SimulationResultsViewController does for its own
-    /// two-job chain. progressReceived(...) here is already phase-agnostic (just fraction/time
-    /// estimate, no per-phase row to choose between), so forwarding progress from any of the three
-    /// through it unchanged is correct as-is.
+    /// two-job chain. progressReceived(...) here is already phase-agnostic for its own *content-pane*
+    /// display purposes (just fraction/time estimate, no per-phase row of its own to choose between),
+    /// so forwarding progress from any of the three through it unchanged is correct as-is -- but
+    /// `activeJob.kind` is still threaded through every onRunStateChanged/onProgressChanged/
+    /// onRunFinished/onRunCancelled call below, so DocumentWindowController can tell which of the
+    /// three is actually being reported and only relay `.fieldPostProcessing` ones to the sidebar's
+    /// own Field Viewer row (see those properties' own doc comments).
     private func syncFromScheduler() {
         guard let document else { return }
         for index in 0..<document.config.simulations.count {
@@ -429,31 +585,39 @@ final class FieldViewerViewController: NSViewController {
 
             switch activeJob?.status {
             case .running, .cancelling:
+                guard let activeJob else { continue }
+                // Recorded on every tick, not just the `!wasRunning` transition below -- `activeJob`
+                // can silently move from one JobKind to the next (e.g. geometry finishes, its Job is
+                // removed, the simulation Job takes over as `activeJob`) with no onRunStateChanged
+                // transition of its own to hang the update off of, so onProgressChanged must always
+                // report whichever kind is *currently* driving this tick.
+                runningJobKind[index] = activeJob.kind
                 if !wasRunning {
                     runningIndices.insert(index)
                     runStartTime[index] = Date()
-                    onRunStateChanged?(index, true)
+                    onRunStateChanged?(index, activeJob.kind, true)
                     refreshDisplay()
                 }
-                if let progress = activeJob?.progress {
-                    progressReceived(progress, forSimulationIndex: index)
+                if let progress = activeJob.progress {
+                    progressReceived(progress, forSimulationIndex: index, kind: activeJob.kind)
                 }
 
             case .failed(let message):
-                guard wasRunning else { continue }
-                finishTracking(forSimulationIndex: index)
+                guard wasRunning, let activeJob else { continue }
+                let kind = activeJob.kind
+                finishTracking(forSimulationIndex: index, kind: kind)
                 errors[index] = message
-                onRunFinished?(index, false)
-                if let jobID = activeJob?.id { JobScheduler.shared.dismiss(jobID: jobID) }
+                onRunFinished?(index, kind, false)
+                JobScheduler.shared.dismiss(jobID: activeJob.id)
                 refreshDisplay()
 
             case .queued, nil:
-                guard wasRunning else { continue }
-                finishTracking(forSimulationIndex: index)
+                guard wasRunning, let kind = runningJobKind[index] else { continue }
+                finishTracking(forSimulationIndex: index, kind: kind)
                 if !pipeline.fieldSnapshots().isEmpty {
-                    onRunFinished?(index, true)
+                    onRunFinished?(index, kind, true)
                 } else {
-                    onRunCancelled?(index)
+                    onRunCancelled?(index, kind)
                 }
                 refreshDisplay()
             }
@@ -468,17 +632,18 @@ final class FieldViewerViewController: NSViewController {
         }
     }
 
-    private func finishTracking(forSimulationIndex index: Int) {
+    private func finishTracking(forSimulationIndex index: Int, kind: JobKind) {
         runningIndices.remove(index)
         latestProgress[index] = nil
         runStartTime[index] = nil
         timeEstimateText[index] = nil
-        onRunStateChanged?(index, false)
+        runningJobKind[index] = nil
+        onRunStateChanged?(index, kind, false)
     }
 
-    private func progressReceived(_ progress: EMSPipelineProgress, forSimulationIndex index: Int) {
+    private func progressReceived(_ progress: EMSPipelineProgress, forSimulationIndex index: Int, kind: JobKind) {
         latestProgress[index] = progress
-        onProgressChanged?(index, progress)
+        onProgressChanged?(index, kind, progress)
         // .settingUp (openEMS's own silent SetupFDTD() call -- see EMSPipelineProgressPhase's own doc
         // comment) has no fraction of any kind to extrapolate a remaining time from -- refreshDisplay()
         // shows a plain indeterminate bar and no time-estimate text for it instead of guessing.

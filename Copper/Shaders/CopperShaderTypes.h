@@ -13,11 +13,8 @@ struct CopperGridDimsGPU {
     uint32_t nz;
 };
 
-// One PML shell's box: its origin in *global* grid coordinates, plus its own *local* dimensions.
-// pml_pre_e/pml_post_e/pml_pre_h/pml_post_h are each dispatched once per shell, over (nx,ny,nz)
-// threads in the shell's *local* index space -- see CopperPML.hpp for why there can be several of
-// these (one per active PML face, not one shared box for the whole boundary).
-struct CopperPMLShellGPU {
+// One CPML shell's box: its origin in global grid coordinates, plus its local dimensions.
+struct CopperCPMLShellGPU {
     uint32_t startX, startY, startZ;
     uint32_t nx, ny, nz;
 };
@@ -67,45 +64,30 @@ enum CopperBufferIndex {
     CopperBufferIndexIV1 = 17,
     CopperBufferIndexIV2 = 18,
 
-    // PML kernels (pml_pre_e/pml_post_e/pml_pre_h/pml_post_h) reuse CopperBufferIndexDims (the
-    // *global* grid dims, needed to index into the full-size Ex/Ey/Ez/Hx/Hy/Hz buffers, which they
-    // also share via the indices above) plus these PML-only slots. "CoeffA/B/C" hold whichever
-    // shell-local coefficient triplet that particular kernel needs (vv/vvfo/vvfn for the E-side
-    // pre/post pair, ii/iifo/iifn for the H-side pair) -- never more than one triplet is bound at
-    // once, so E-side and H-side dispatches safely reuse the same three index slots at different
-    // points in the per-timestep dispatch sequence (see CopperEngine.mm's run()).
-    CopperBufferIndexPMLShell = 19,
-    CopperBufferIndexPMLCoeffA = 20, // vv (E pre/post) or ii (H pre/post)
-    CopperBufferIndexPMLCoeffB = 21, // vvfo (E pre) or iifo (H pre) -- unused by the post kernels
-    CopperBufferIndexPMLCoeffC = 22, // vvfn (E post) or iifn (H post) -- unused by the pre kernels
-    CopperBufferIndexPMLFlux = 23,   // volt_flux (E-side) or curr_flux (H-side), shell-local
+    CopperBufferIndexCPMLShell = 19,
 
     // apply_excitation_e/apply_excitation_h -- dispatched with one thread per excited cell (a tiny
     // dispatch against the excitation box, not the whole grid), reusing CopperBufferIndexDims and
     // the field-buffer indices above like the PML kernels do.
-    CopperBufferIndexExcCells = 24,  // device array of CopperExcitationCellGPU
-    CopperBufferIndexExcSignal = 25, // device array of float: openEMS's own precomputed pulse samples
+    CopperBufferIndexExcCells = 20,  // device array of CopperExcitationCellGPU
+    CopperBufferIndexExcSignal = 21, // device array of float: openEMS's own precomputed pulse samples
     // CopperExcitationParamsGPU -- bound via setBytes:length:atIndex:, not an uploaded MTLBuffer, so
     // each timestep's dispatch gets its own encode-time snapshot (see CopperEngine.mm's own comment
     // on why a shared, CPU-rewritten buffer doesn't work once several timesteps get batched into one
     // command buffer).
-    CopperBufferIndexExcParams = 26,
+    CopperBufferIndexExcParams = 22,
 
     // cpml_correct_e/cpml_correct_h -- see CopperCPML.hpp's own doc comment for why this is a
-    // separate, purely-additive kernel pair rather than a pre/post swap like PMLCoeffA/B/C above.
-    // Reuses CopperBufferIndexDims/PMLShell (the shell-box uniform is the identical
-    // CopperPMLShellGPU shape) and the field/VI/IV buffer indices above. "CoeffB"/"CoeffC" hold the
+    // separate, purely-additive kernel pair. Reuses CopperBufferIndexDims/CPMLShell and the
+    // field/VI/IV buffer indices above. "CoeffB"/"CoeffC" hold the
     // per-*grading*-axis b[w]/c[w] coefficients (axis-major merged, 3 axes); "Psi0"/"Psi1" hold the
     // per-*field-component* auxiliary convolution state (also axis-major merged, but over the 3
     // field-component axes) -- see CopperCPMLShell's own doc comment for why these are two distinct
-    // "axis-major" meanings sharing the same buffer layout convention. Never bound at the same time
-    // as the PMLCoeffA/PMLFlux slots (CPML and UPML are mutually exclusive per run), so reusing
-    // PMLCoeffB/PMLCoeffC's own index numbers would also have been safe, but distinct names/slots
-    // keep the two kernel families easier to read independently.
-    CopperBufferIndexCPMLCoeffB = 27, // b[w], axis-major merged by grading axis
-    CopperBufferIndexCPMLCoeffC = 28, // c[w], axis-major merged by grading axis
-    CopperBufferIndexCPMLPsi0 = 29,   // psi driven by the nP-axis curl term, axis-major by component, read-write
-    CopperBufferIndexCPMLPsi1 = 30,   // psi driven by the nPP-axis curl term, axis-major by component, read-write
+    // "axis-major" meanings sharing the same buffer layout convention.
+    CopperBufferIndexCPMLCoeffB = 23, // b[w], axis-major merged by grading axis
+    CopperBufferIndexCPMLCoeffC = 24, // c[w], axis-major merged by grading axis
+    CopperBufferIndexCPMLPsi0 = 25,   // psi driven by the nP-axis curl term, axis-major by component, read-write
+    CopperBufferIndexCPMLPsi1 = 26,   // psi driven by the nPP-axis curl term, axis-major by component, read-write
 };
 
 #endif /* CopperShaderTypes_h */

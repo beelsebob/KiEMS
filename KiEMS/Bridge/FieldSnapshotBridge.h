@@ -6,8 +6,8 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// One captured instant's full-grid energy state -- see EMSFieldSnapshot's own doc comment for the
-/// shared grid geometry every frame is read against.
+/// One captured instant's low-resolution playback energy state. Full-resolution detail remains in
+/// independently compressed storage tiles and is not decoded by ordinary playback.
 @interface EMSFieldFrame : NSObject
 
 @property (nonatomic, readonly) NSUInteger timestep;
@@ -22,11 +22,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
-/// Asynchronously warms the on-disk chunk containing this frame, on a background queue, without
-/// blocking the caller or evicting whatever chunk `cellEnergyData` is currently being served from --
-/// call this on the frame index playback is about to reach next, so that by the time
-/// `cellEnergyData` is actually requested for it, decoding has likely already finished. A no-op if
-/// this chunk is already cached or already being prefetched.
+/// Playback hint. Preview frames are small and currently streamed when displayed, so this is a
+/// no-op and—critically—never triggers a full-resolution prefetch.
 @interface EMSFieldFrame (Prefetch)
 - (void)prefetch;
 @end
@@ -63,12 +60,17 @@ NS_ASSUME_NONNULL_BEGIN
 /// frame's cellEnergyData is requested.
 @property (nonatomic, copy, readonly) NSArray<EMSFieldFrame *> *frames;
 
-/// The minimum and maximum cell-energy values present across *every* frame's cellEnergyData, not
-/// just one frame's own -- precomputed here so a renderer maps color consistently across playback
-/// (a per-frame min/max would make each frame independently rescale to full brightness, hiding the
-/// run's own real growth/decay).
+/// The minimum and maximum cell-energy values for the series. Single-ended series use exact
+/// precomputed metadata; a differential combination uses a conservative bound derived from its two
+/// legs so constructing the lightweight snapshot never decodes every frame. Renderers may refine
+/// their display scale incrementally as frames stream in.
 @property (nonatomic, readonly) float minCellEnergy;
 @property (nonatomic, readonly) float maxCellEnergy;
+
+/// Releases decoded field data while retaining this snapshot's lightweight metadata and open
+/// reader. Used when switching away from a series so visiting several excitations cannot accumulate
+/// one pair of frame caches per series; displaying it again simply streams its selected frame anew.
+- (void)discardCachedFrameData;
 
 @end
 

@@ -15,9 +15,12 @@
 
 #include <nlohmann/json.hpp>
 
+#include "geometry.hpp"
 #include "net_name.hpp"
 
 namespace kiems {
+
+using Cu::Position;
 
 /// Plotting mode, matching the gerber file specification (G01, G02, G03).
 enum class PlotMode : std::uint8_t {
@@ -25,37 +28,6 @@ enum class PlotMode : std::uint8_t {
     CircularClockwise = 2,
     CircularCounterClockwise = 3,
 };
-
-/// Coordinates of a 2D point.
-class Position {
-public:
-    Position() = default;
-    Position(double x, double y) : _x(x), _y(y) {}
-
-    double x() const { return _x; }
-    double y() const { return _y; }
-    void setX(double value) { _x = value; }
-    void setY(double value) { _y = value; }
-
-    void mirrorX() { _x = -_x; }
-    void mirrorY() { _y = -_y; }
-    /// Rotate point around (0,0). NOTE: mirrors the Python source's formula exactly, which passes
-    /// its angle straight into std::cos/std::sin without a degrees->radians conversion despite
-    /// callers treating the angle as degrees; preserved for behavioural fidelity.
-    void rotate(double angle);
-    void scale(double factor);
-    void move(const Position& offset);
-
-private:
-    friend void to_json(nlohmann::json& j, const Position& p);
-    friend void from_json(const nlohmann::json& j, Position& p);
-
-    double _x = 0;
-    double _y = 0;
-};
-
-void to_json(nlohmann::json& j, const Position& p);
-void from_json(const nlohmann::json& j, Position& p);
 
 /// Metadata about a pad (which component/pin it belongs to).
 class PadMeta {
@@ -181,7 +153,7 @@ public:
 
     /// Returns finely-tessellated closed polygon loops (points per loop, no repeated closing vertex)
     /// approximating this aperture's true shape with the given transform applied -- for the
-    /// Clipper2-based copper compositor. Unlike contours() (a flat, often-coarse segment chain used
+    /// GEOS-based copper compositor. Unlike contours() (a flat, often-coarse segment chain used
     /// only for grid-line-placement heuristics), this reconstructs the shape from its actual
     /// geometric definition: exact for straight-edged shapes, tessellated to `tessellationTolerance`
     /// (a chord/sagitta length, in the same units as coordinates) for curved ones. Transform
@@ -340,7 +312,7 @@ public:
     /// Parses the gerber file at `path`. A constructor can't report failure, so parsing happens
     /// behind this factory instead; the object it returns is always fully parsed.
     /// `tessellationTolerance` (simulation units) controls arc-tessellation fidelity -- the same
-    /// value gerber_composite.cpp's compositeOps()/triangulate() take explicitly.
+    /// value CopperUtils/polygon_geometry.cpp's triangulate() takes explicitly.
     static std::expected<GerberFile, std::string> load(const std::filesystem::path& path,
                                                          double tessellationTolerance);
 

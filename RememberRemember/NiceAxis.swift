@@ -13,7 +13,11 @@ struct NiceAxisRange {
     var ticks: [Double] {
         guard step > 0, step.isFinite, min.isFinite, max.isFinite else { return [min] }
         var result: [Double] = []
-        var value = min
+        // A viewport may start at an arbitrary value while panning or zooming. Keep that exact
+        // viewport boundary, but begin grid lines at the first nice step inside it rather than
+        // forcing the viewport itself onto a nice number.
+        var value = (min / step).rounded(.up) * step
+        if abs(value) < step * 1e-12 { value = 0 }
         let limit = max + step * 0.001
         while value <= limit, result.count < 200 {
             result.append(value)
@@ -33,8 +37,12 @@ struct NiceAxisRange {
         }
         if lo > hi { swap(&lo, &hi) }
         if lo == hi {
-            lo -= 1
-            hi += 1
+            // An absolute ±1 fallback makes a lone tiny measurement (for example a femtoamp-scale
+            // probe current) visually collapse onto zero. Expand around a nonzero value relative
+            // to its own magnitude; retain the ordinary ±1 default only for an actual zero.
+            let padding = lo == 0 ? 1 : abs(lo) * 0.1
+            lo -= padding
+            hi += padding
         }
 
         let extent = niceNumber(hi - lo, round: false)

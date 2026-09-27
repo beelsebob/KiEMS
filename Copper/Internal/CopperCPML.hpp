@@ -47,17 +47,18 @@
 #include <cstdint>
 #include <vector>
 
+#include "CopperOperator.hpp"
 #include "CopperYeeGrid.hpp"
 
 namespace copper {
 
-/// One PML face's auxiliary CPML state -- unlike CopperPMLShell (CopperPML.hpp), this never touches
-/// grid.vv/vi/ii/iv or needs any "flux" swap: it is a pure additive correction, applied by new
+/// One PML face's auxiliary CPML state. This never touches grid.vv/vi/ii/iv or needs any "flux"
+/// swap: it is a pure additive correction, applied by
 /// cpml_correct_e/cpml_correct_h kernels dispatched *after* update_e_interior/update_h_interior (same
 /// H/E snapshot either order, since neither kernel here writes the field it reads).
 ///
 /// All arrays are local-indexed (copperGridIndex(dims, lx, ly, lz)) and axis-major merged for GPU
-/// upload, mirroring CopperPMLShell's own convention.
+/// upload.
 struct CopperCPMLShell {
     std::uint32_t startX = 0, startY = 0, startZ = 0;
     CopperGridDims dims;
@@ -66,8 +67,8 @@ struct CopperCPMLShell {
     //   b[w] = exp(-(sigma_w + alpha_w) * dT / EPS0)
     //   c[w] = sigma_w * (b[w] - 1) / (sigma_w + alpha_w)      (0 if sigma_w=alpha_w=0)
     // Evaluated at the V-side (E-update, eq. 7.105) and I-side (H-update, eq. 7.110) positions
-    // separately -- these differ by the same half-cell Yee-staggering offset CopperPML.hpp's own
-    // vv/vi (V-side) vs ii/iv (I-side) split already accounts for, so two separate coefficient sets
+    // separately -- these differ by the same half-cell Yee-staggering offset the vv/vi (V-side) vs
+    // ii/iv (I-side) split already accounts for, so two separate coefficient sets
     // are needed, not one shared set.
     std::vector<float> bE[3], cE[3];
     std::vector<float> bH[3], cH[3];
@@ -82,8 +83,8 @@ struct CopperCPMLShell {
     std::vector<float> psiH0[3], psiH1[3];
 };
 
-/// `alphaMax` is CPML's own alpha (CFS) parameter, S/m, graded per axis exactly as CopperPML.hpp's
-/// sigma grading already is (see CopperCPML.cpp) -- standard choice is `2*pi*f_low*EPS0` for this
+/// `alphaMax` is CPML's own alpha (CFS) parameter, S/m, graded per axis alongside sigma (see
+/// CopperCPML.cpp) -- standard choice is `2*pi*f_low*EPS0` for this
 /// simulation's own lowest frequency of interest. alphaMax=0 makes every b[w]/c[w] collapse to what
 /// the same axis's *sigma-only* stretched-coordinate CPML would produce (not identical to plain UPML
 /// bit-for-bit, since this is a structurally different formulation -- see this header's own top
@@ -95,6 +96,6 @@ struct CopperCPMLShell {
 /// comment for why); shell geometry here is computed directly from it and `op`'s own line counts,
 /// with no Operator_Ext_UPML extension involved at all. 0 returns no shells (a caller with no PML on
 /// this run -- e.g. a MUR-only smoketest -- can pass 0 rather than special-casing the call away).
-std::vector<CopperCPMLShell> buildCPMLShells(Operator& op, double alphaMax, std::uint32_t pmlDepthCells);
+std::vector<CopperCPMLShell> buildCPMLShells(CopperOperator& op, double alphaMax, std::uint32_t pmlDepthCells);
 
 } // namespace copper

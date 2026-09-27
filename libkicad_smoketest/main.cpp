@@ -75,10 +75,8 @@ void _printFootprints(const std::vector<libkicad::FootprintInfo>& footprints) {
 
 // Machine-readable query mode used by port_resolution.cpp (invoked as a subprocess, exactly like
 // this project already invokes kicad-cli -- see importer.cpp's _runProcess). libkicad pulls in
-// KiCad's own wx/protobuf/abseil/OpenCASCADE dependency chain, including a *different* build of
-// Clipper2 than the one kiems links directly (Homebrew's, vs. KiCad's own bundled copy) --
-// linking libkicad straight into the main kiems executable would risk duplicate-symbol errors
-// between the two Clipper2 builds. A subprocess keeps the two dependency worlds fully separate.
+// KiCad's own wx/protobuf/abseil/OpenCASCADE dependency chain, including KiCad's bundled Clipper2.
+// A subprocess keeps that dependency world fully separate from the simulator.
 // Output on success is line-oriented plain text (tab-separated for multi-field rows); on failure,
 // an error message goes to stderr and the process exits 1. No JSON library is linked into either
 // binary purely for this.
@@ -92,6 +90,16 @@ int _runQuery(int argc, char** argv) {
             return 1;
         }
         std::cout << *net << "\n";
+        return 0;
+    }
+
+    if (command == "net-class-for-net" && argc == 5) {
+        const std::expected<std::string, std::string> netClass = libkicad::netClassForNet(argv[2], argv[3], argv[4]);
+        if (!netClass.has_value()) {
+            std::cerr << netClass.error() << "\n";
+            return 1;
+        }
+        std::cout << *netClass << "\n";
         return 0;
     }
 
@@ -189,7 +197,8 @@ int _runQuery(int argc, char** argv) {
         }
         for (const libkicad::CopperPolygon& polygon : geometry->copper) {
             std::cout << "copper\t" << polygon.netName << '\t' << polygon.copperLayerName << '\t'
-                      << (polygon.loop.hole ? "1" : "0");
+                      << (polygon.zone ? "1" : "0") << '\t' << polygon.footprintRef << '\t'
+                      << polygon.padNumber << '\t' << (polygon.loop.hole ? "1" : "0");
             for (const auto& [x, y] : polygon.loop.pointsMm) {
                 std::cout << '\t' << _formatDouble(x) << ',' << _formatDouble(y);
             }
@@ -201,6 +210,36 @@ int _runQuery(int argc, char** argv) {
         for (const libkicad::PolygonLoop& loop : geometry->backMaskOpenings) {
             _printPolygonLoop("back-mask", loop);
         }
+        for (const libkicad::SilkscreenPolygon& polygon : geometry->frontSilkscreen) {
+            _printPolygonLoop("front-silkscreen\t" + polygon.footprintRef, polygon.loop);
+        }
+        for (const libkicad::SilkscreenPolygon& polygon : geometry->backSilkscreen) {
+            _printPolygonLoop("back-silkscreen\t" + polygon.footprintRef, polygon.loop);
+        }
+        return 0;
+    }
+
+    if (command == "board-layers" && argc == 4) {
+        const auto layers = libkicad::boardLayers(argv[2], argv[3]);
+        if (!layers) {
+            std::cerr << layers.error() << "\n";
+            return 1;
+        }
+        for (const auto& layer : *layers) {
+            std::cout << layer.name << '\t' << (layer.copper ? "copper" : "technical") << '\t'
+                      << (layer.solderMask ? "mask" : "ordinary") << '\n';
+        }
+        return 0;
+    }
+
+    if (command == "board-layer-geometry" && argc == 5) {
+        const auto geometry = libkicad::boardLayerGeometry(argv[2], argv[3], argv[4]);
+        if (!geometry) {
+            std::cerr << geometry.error() << "\n";
+            return 1;
+        }
+        std::cout << geometry->layer.name << '\t' << geometry->copper.size() << '\t'
+                  << geometry->contours.size() << '\t' << geometry->boardOutline.size() << '\n';
         return 0;
     }
 
@@ -235,6 +274,19 @@ int _runQuery(int argc, char** argv) {
             return 1;
         }
         for (const libkicad::LayerColor& color : *colors) {
+            std::cout << color.name << '\t' << color.hex << "\n";
+        }
+        return 0;
+    }
+
+    if (command == "net-colors" && argc == 4) {
+        const std::expected<std::vector<libkicad::NetColor>, std::string> colors =
+                libkicad::netColors(argv[2], argv[3]);
+        if (!colors.has_value()) {
+            std::cerr << colors.error() << "\n";
+            return 1;
+        }
+        for (const libkicad::NetColor& color : *colors) {
             std::cout << color.name << '\t' << color.hex << "\n";
         }
         return 0;
@@ -321,8 +373,8 @@ int _runQuery(int argc, char** argv) {
         // moment a message happened to contain a tab.
         // Line 1: exportSucceeded ("1"/"0"). Line 2: topCopperZMm (see ComponentModelExportResult's
         // own doc comment). Line 3: message count. Next N lines: one message each. Next line:
-        // triangle count. Next M lines: one triangle each, 13 tab-separated fields (ax ay az bx by
-        // bz cx cy cz r g b a) -- see ComponentTriangle's own doc comment.
+        // triangle count. Next M lines: one triangle each, 14 tab-separated fields (ax ay az bx by
+        // bz cx cy cz r g b a footprint-reference) -- see ComponentTriangle's own doc comment.
         std::cout << (exportResult->exportSucceeded ? "1" : "0") << "\n";
         std::cout << _formatDouble(exportResult->topCopperZMm) << "\n";
         std::cout << exportResult->messages.size() << "\n";
@@ -335,16 +387,18 @@ int _runQuery(int argc, char** argv) {
                        << _formatDouble(t.bx) << '\t' << _formatDouble(t.by) << '\t' << _formatDouble(t.bz) << '\t'
                        << _formatDouble(t.cx) << '\t' << _formatDouble(t.cy) << '\t' << _formatDouble(t.cz) << '\t'
                        << _formatDouble(t.r) << '\t' << _formatDouble(t.g) << '\t' << _formatDouble(t.b) << '\t'
-                       << _formatDouble(t.a) << '\n';
+                       << _formatDouble(t.a) << '\t' << t.footprintReference << '\n';
         }
         return 0;
     }
 
     std::cerr << "usage: " << argv[0]
-               << " {net-for-pin <project> <board> <footprint> <pin> | nets-in-class <project> <board> "
+               << " {net-for-pin <project> <board> <footprint> <pin> | net-class-for-net <project> <board> <net> | "
+                  "nets-in-class <project> <board> "
                   "<net_class> | pads-on-net <project> <board> <net> | tracks-on-net <project> <board> <net> | "
                   "resolve-pin <project> <board> "
                   "<footprint> <pin> | stackup <project> <board> | layer-colors <project> <board> | "
+                  "net-colors <project> <board> | "
                   "net-classes <project> <board> | all-nets <project> <board> | "
                   "footprints <project> <board> | through-holes <project> <board> | "
                   "non-plated-holes <project> <board> | board-geometry <project> <board> | "
@@ -462,11 +516,12 @@ int _runSmoketest(int argc, char** argv) {
     return 0;
 }
 
-const std::vector<std::string> kQueryCommands = {"net-for-pin",  "nets-in-class", "pads-on-net", "tracks-on-net",
+const std::vector<std::string> kQueryCommands = {"net-for-pin", "net-class-for-net", "nets-in-class", "pads-on-net", "tracks-on-net",
                                                   "all-pads",     "all-tracks",    "zones",       "resolve-pin",
-                                                  "stackup",      "layer-colors",  "net-classes", "all-nets",
+                                                  "stackup",      "layer-colors",  "net-colors",   "net-classes",
+                                                  "all-nets",
                                                   "footprints",   "through-holes", "non-plated-holes",
-                                                  "board-geometry",
+                                                  "board-geometry", "board-layers", "board-layer-geometry",
                                                   "export-component-models"};
 
 } // namespace

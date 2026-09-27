@@ -2,6 +2,7 @@
 #import "EMSConfigBridge+Private.h"
 
 #include <algorithm>
+#include "kiems/component_value.hpp"
 
 using kiems::EMSConfig;
 using kiems::ExcitationConfig;
@@ -263,6 +264,9 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
 - (BOOL)hasExplicitPinSelections {
     return self.cxxNet.hasExplicitPinSelections() ? YES : NO;
 }
+- (void)useExplicitPinSelections {
+    self.cxxNet.useExplicitPinSelections();
+}
 - (BOOL)isPinProbedWithFootprint:(NSString*)footprint pin:(NSString*)pin {
     // probedPinIsProbe(), not just "is there any probedPins() entry at all" -- an absorb-only entry
     // (setPinAbsorbOnly()) is also in that list, but isn't a "Probe" selection.
@@ -281,7 +285,8 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
 }
 - (BOOL)isPinAbsorbOnlyWithFootprint:(NSString*)footprint pin:(NSString*)pin {
     const auto isProbe = self.cxxNet.probedPinIsProbe(footprint.UTF8String, pin.UTF8String);
-    return (isProbe.has_value() && !*isProbe) ? YES : NO;
+    const auto absorbs = self.cxxNet.probedPinAbsorbs(footprint.UTF8String, pin.UTF8String);
+    return (isProbe.has_value() && !*isProbe && absorbs.value_or(false)) ? YES : NO;
 }
 - (void)setPinAbsorbOnly:(BOOL)enabled withFootprint:(NSString*)footprint pin:(NSString*)pin {
     self.cxxNet.setPinAbsorbOnly(footprint.UTF8String, pin.UTF8String, enabled ? true : false);
@@ -302,6 +307,15 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
 - (void)setDirectionOverride:(nullable NSNumber*)direction withFootprint:(NSString*)footprint pin:(NSString*)pin {
     self.cxxNet.setPinDirectionOverride(footprint.UTF8String, pin.UTF8String,
                                          direction != nil ? std::optional<double>(direction.doubleValue) : std::nullopt);
+}
+
+- (nullable NSNumber*)impedanceWithFootprint:(NSString*)footprint pin:(NSString*)pin {
+    const auto value = self.cxxNet.pinImpedance(footprint.UTF8String, pin.UTF8String);
+    return value.has_value() ? @(*value) : nil;
+}
+- (void)setImpedance:(nullable NSNumber*)impedance withFootprint:(NSString*)footprint pin:(NSString*)pin {
+    self.cxxNet.setPinImpedance(footprint.UTF8String, pin.UTF8String,
+                                 impedance != nil ? std::optional<double>(impedance.doubleValue) : std::nullopt);
 }
 
 @end
@@ -442,6 +456,13 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
     self.cxxSim.setEyeBitRate(value);
 }
 
+- (BOOL)isDifferentialPair {
+    return self.cxxSim.isDifferentialPair() ? YES : NO;
+}
+- (void)setIsDifferentialPair:(BOOL)value {
+    self.cxxSim.setIsDifferentialPair(value);
+}
+
 - (EMSInvolvedNetBridge*)_wrapperForInvolvedNetIndex:(NSInteger)index {
     EMSInvolvedNetBridge* wrapper = [[EMSInvolvedNetBridge alloc] init];
     wrapper->_parentSim = self;
@@ -506,11 +527,11 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
     ExcitationConfig excitation;
     excitation.setFootprint(footprint.UTF8String);
     excitation.setPin(pin.UTF8String);
-    // Defaults to a non-main excitation with frequency/amplitude set: from_json() rejects a
-    // non-main excitation missing either, so a freshly-added one needs both present to survive a
-    // save+reparse round trip (matching addSimulationNamed:'s identical involved_nets concern).
-    excitation.setIsMain(false);
-    excitation.setFrequency(0.0);
+    // A newly-added pin is normally the broadband source driven across the simulation's sweep.
+    // The UI can turn Main off to make this a narrowband excitation and will then supply the
+    // required frequency. Keep amplitude explicit because it is independently useful for main
+    // excitations too (notably the -1 leg of a differential drive).
+    excitation.setIsMain(true);
     excitation.setAmplitude(1.0);
     // Long enough for 5 full cycles at the sweep's lowest frequency (period = 1/f) -- the slowest
     // waveform component the excitation needs to represent, so 5 periods is a reasonable amount of
@@ -674,6 +695,26 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
         return;
     }
     simulations.erase(simulations.begin() + index);
+}
+
+@end
+
+@implementation EMSConfigBridge (LumpedComponentValue)
+
++ (BOOL)componentValueIsSensible:(NSString *)value unit:(EMSLumpedComponentUnit)unit {
+    kiems::ComponentUnit kiemsUnit;
+    switch (unit) {
+        case EMSLumpedComponentUnitResistance:
+            kiemsUnit = kiems::ComponentUnit::Resistance;
+            break;
+        case EMSLumpedComponentUnitInductance:
+            kiemsUnit = kiems::ComponentUnit::Inductance;
+            break;
+        case EMSLumpedComponentUnitCapacitance:
+            kiemsUnit = kiems::ComponentUnit::Capacitance;
+            break;
+    }
+    return kiems::parseSensibleComponentValue(value.UTF8String, kiemsUnit).has_value();
 }
 
 @end

@@ -10,11 +10,11 @@
 #include <sstream>
 #include <stdexcept>
 
-#include <clipper2/clipper.h>
 
 #include "config.hpp"
 #include "constants.hpp"
 #include "logging.hpp"
+#include "polygon_geometry.hpp"
 
 namespace kiems {
 
@@ -298,28 +298,9 @@ std::vector<Position> _widenSegmentFlat(const Position& start, const Position& s
             Position(stop.x() - nx, stop.y() - ny), Position(start.x() - nx, start.y() - ny)};
 }
 
-// ---- small Clipper2 conversions (used only for compositing an aperture macro's own sub-primitives
+// ---- small polygon conversions (used only for compositing an aperture macro's own sub-primitives
 // together in ApertureMacro::_toPolygon; the copper-layer compositor has its own, separately-scaled
 // conversion) ----
-
-Clipper2Lib::Path64 _positionsToPath64(const std::vector<Position>& points) {
-    Clipper2Lib::Path64 path;
-    path.reserve(points.size());
-    for (const auto& p : points) {
-        path.emplace_back(static_cast<std::int64_t>(std::llround(p.x())),
-                           static_cast<std::int64_t>(std::llround(p.y())));
-    }
-    return path;
-}
-
-std::vector<Position> _path64ToPositions(const Clipper2Lib::Path64& path) {
-    std::vector<Position> points;
-    points.reserve(path.size());
-    for (const auto& pt : path) {
-        points.emplace_back(static_cast<double>(pt.x), static_cast<double>(pt.y));
-    }
-    return points;
-}
 
 // ---- aperture macro expression parsing ----
 // Gerber macro expressions use 'x' for multiplication and `$N` for parameter references, plus the
@@ -428,32 +409,6 @@ std::function<double(const std::vector<double>&)> _parseMacroExpression(const st
 }
 
 } // namespace
-
-// ---- Position ----
-
-void Position::rotate(double angle) {
-    const double newX = _x * std::cos(angle) + _y * std::sin(angle);
-    const double newY = _x * std::sin(angle) + _y * std::cos(angle);
-    _x = newX;
-    _y = newY;
-}
-
-void Position::scale(double factor) {
-    _x *= factor;
-    _y *= factor;
-}
-
-void Position::move(const Position& offset) {
-    _x += offset._x;
-    _y += offset._y;
-}
-
-void to_json(nlohmann::json& j, const Position& p) { j = nlohmann::json{{"x", p._x}, {"y", p._y}}; }
-
-void from_json(const nlohmann::json& j, Position& p) {
-    j.at("x").get_to(p._x);
-    j.at("y").get_to(p._y);
-}
 
 // ---- TraceSegment ----
 
@@ -661,7 +616,7 @@ std::vector<std::vector<Position>> ApertureObround::_toPolygon(double tessellati
                           tessellationTolerance);
         // The traversal above is correct but clockwise (unlike every other aperture shape's
         // counter-clockwise convention here); reverse it for consistency. Harmless either way for
-        // Clipper2's NonZero fill rule, but consistent winding avoids surprises for any future code
+        // Non-zero winding fills either orientation, but consistency avoids surprises for future code
         // that assumes it (e.g. direct shoelace-based orientation checks).
         std::reverse(points.begin(), points.end());
     }
@@ -974,7 +929,7 @@ std::vector<std::vector<Position>> ApertureMacro::_toPolygon(double tessellation
     // regardless of their own exposure parameter (see _polygonCommands' declaration) -- so the result
     // may still be more than one disjoint loop (e.g. a macro whose primitives don't all overlap),
     // which is why this returns every resulting loop rather than picking just one.
-    Clipper2Lib::Paths64 accumulated;
+    PolygonSet accumulated;
     for (const auto& command : _polygonCommands) {
         std::vector<double> callArgs;
         callArgs.reserve(localArgs.size() + 1);
@@ -991,21 +946,16 @@ std::vector<std::vector<Position>> ApertureMacro::_toPolygon(double tessellation
         // Forcing a consistent orientation before each incremental Union call keeps every
         // overlapping primitive purely additive, matching a macro's real semantics (every listed
         // primitive just adds more shape, regardless of the direction its own points happen to be
-        // listed in) -- see gerber_composite.cpp's _normalizePositiveOrientation for the same fix
-        // one level up, between whole pads/zones/strokes.
-        Clipper2Lib::Path64 primitivePath = _positionsToPath64(poly);
-        if (!Clipper2Lib::IsPositive(primitivePath)) {
+        // listed in).
+        Polygon primitivePath = poly;
+        if (!isPositive(primitivePath)) {
             std::reverse(primitivePath.begin(), primitivePath.end());
         }
-        accumulated = Clipper2Lib::Union(accumulated, {primitivePath}, Clipper2Lib::FillRule::NonZero);
+        accumulated.push_back(std::move(primitivePath));
+        accumulated = unionPolygons(accumulated);
     }
 
-    std::vector<std::vector<Position>> loops;
-    loops.reserve(accumulated.size());
-    for (const auto& path : accumulated) {
-        loops.push_back(_path64ToPositions(path));
-    }
-    return loops;
+    return accumulated;
 }
 
 // ---- GerberFile ----

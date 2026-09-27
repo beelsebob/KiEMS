@@ -101,6 +101,10 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 /// pin-selection resolution from the legacy excludedPins()-based mode to strict, explicit opt-in
 /// (see kiems::InvolvedNetConfig's own doc comment). Never goes back to NO.
 @property (nonatomic, readonly) BOOL hasExplicitPinSelections;
+/// Switches this entry to explicit opt-in mode with no pins selected. Intended for newly-created
+/// net entries whose UI defaults Probe to off; existing legacy entries are left untouched unless
+/// this is called explicitly.
+- (void)useExplicitPinSelections;
 /// Only meaningful once hasExplicitPinSelections is YES.
 - (BOOL)isPinProbedWithFootprint:(NSString *)footprint pin:(NSString *)pin;
 /// Only meaningful if isPinProbedWithFootprint:pin: is YES for the same pin -- defaults to YES.
@@ -115,14 +119,12 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 /// that distinction matters for a "compact summary" view).
 @property (nonatomic, readonly) NSArray<EMSProbedPinBridge *> *probedPins;
 
-/// Absorb-only: a real resistive termination port gets built for this pin (so it doesn't behave as
-/// an open, fully-reflecting stub in the FDTD field -- see kiems::PortConfig::absorbSignal()'s
-/// own doc comment), but it's never shown as a measured port in Results and never becomes an
-/// excitation target on its own. Meant for a pin whose real destination (an IC input, a resistor to
-/// ground, ...) isn't itself part of this simulation, so the trace leading to it would otherwise
-/// dangle unterminated. Works on a GeometryOnly entry, unlike isPinProbedWithFootprint:pin:/
-/// setPinProbed:absorbSignal:withFootprint:pin: above, which are meaningless there. Mutually
-/// exclusive with an existing Probe selection for the same pin -- setting one clears the other.
+/// Stores the explicit unprobed Absorbing choice. YES builds a real resistive termination port (so
+/// the trace does not behave as an open stub); NO persists an explicit no-port override, distinct
+/// from an absent pin whose UI may default to absorbing. Neither state is shown as a measured port
+/// in Results or becomes an excitation target. Works on a GeometryOnly entry, unlike Probe.
+/// Mutually exclusive with an existing Probe selection for the same pin -- setting one replaces
+/// the other.
 - (BOOL)isPinAbsorbOnlyWithFootprint:(NSString *)footprint pin:(NSString *)pin;
 - (void)setPinAbsorbOnly:(BOOL)enabled withFootprint:(NSString *)footprint pin:(NSString *)pin;
 
@@ -133,6 +135,11 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 /// `direction`, then auto-derivation, same as before this existed.
 - (nullable NSNumber *)directionOverrideWithFootprint:(NSString *)footprint pin:(NSString *)pin;
 - (void)setDirectionOverride:(nullable NSNumber *)direction withFootprint:(NSString *)footprint pin:(NSString *)pin;
+
+/// Per-pin port impedance in ohms. nil means to inherit this involved net's impedance.
+/// This is independent of the pin's Probe/Absorb/Excite state.
+- (nullable NSNumber *)impedanceWithFootprint:(NSString *)footprint pin:(NSString *)pin;
+- (void)setImpedance:(nullable NSNumber *)impedance withFootprint:(NSString *)footprint pin:(NSString *)pin;
 
 @end
 
@@ -171,6 +178,12 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 /// Serial data rate used for eye-diagram synthesis. Existing configurations without an explicit
 /// value read as the document's frequency stop; assigning it persists a per-simulation override.
 @property (nonatomic) double eyeBitRate;
+
+/// Whether this simulation is fundamentally about a differential pair -- see
+/// kiems::SimulationConfig::isDifferentialPair()'s own doc comment for exactly what toggling this
+/// changes (gates whether involvedNets() entries carrying a reciprocal differentialPairPartner
+/// pairing actually get turned into a diffPairs() entry, or are left as plain single-ended ports).
+@property (nonatomic) BOOL isDifferentialPair;
 
 @property (nonatomic, readonly) NSArray<EMSInvolvedNetBridge *> *involvedNets;
 - (EMSInvolvedNetBridge *)addInvolvedNetWithKind:(EMSNetSelectorKind)kind;
@@ -228,6 +241,24 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 - (EMSSimulationBridge *)addSimulationNamed:(NSString *)name;
 - (void)removeSimulationAtIndex:(NSInteger)index;
 
+@end
+
+/// Which physical quantity a lumped-component Value field string is being checked as -- mirrors
+/// kiems::ComponentUnit (component_value.hpp).
+typedef NS_ENUM(NSInteger, EMSLumpedComponentUnit) {
+    EMSLumpedComponentUnitResistance,
+    EMSLumpedComponentUnitInductance,
+    EMSLumpedComponentUnitCapacitance,
+};
+
+/// Lets the configuration UI flag an R/L/C footprint whose Value field won't produce a usable
+/// lumped component -- see kiems::parseComponentValue()'s own doc comment for the text formats
+/// this understands ("4k7", "100nF", "0R1", ...). A component with no sensible value here is
+/// silently dropped from the simulation entirely. A zero-ohm resistor is deliberately accepted as
+/// a physical jumper and simulated as a representative 10 mOhm; zero-valued capacitors and
+/// inductors remain invalid.
+@interface EMSConfigBridge (LumpedComponentValue)
++ (BOOL)componentValueIsSensible:(NSString *)value unit:(EMSLumpedComponentUnit)unit;
 @end
 
 NS_ASSUME_NONNULL_END

@@ -15,23 +15,13 @@
 
 namespace kiems {
 
-/// Which FDTD engine actually runs the per-port simulation -- see Simulation::run(), which
-/// posix_spawns paths.fdtdWorkerPath or paths.copperFdtdWorkerPath depending on this.
+/// Which Copper engine backend actually runs the per-port simulation -- see Simulation::run(),
+/// which posix_spawns paths.fdtdWorkerPath (`OpenEMSCPU`) or paths.copperFdtdWorkerPath
+/// (`CopperGPU`) depending on this. `OpenEMSCPU`'s own name is a historical holdover from when that
+/// worker ran openEMS's real `Engine::RunFDTD()` directly -- it now runs `copper::CopperEngine`'s
+/// own CPU backend instead, kept only so
+/// every existing `--backend cpu`/serialized value stays stable.
 enum class FDTDBackend { OpenEMSCPU, CopperGPU };
-
-/// Which PML formulation the GPU backend's boundary uses -- only meaningful when `backend` is
-/// CopperGPU (the CPU backend always uses openEMS's own UPML, unmodified). Plain UPML can diverge
-/// numerically on very long runs (confirmed: stable through ~250,000 timesteps, then exponential
-/// blowup by step ~740,000 on a real board) -- a well-documented FDTD phenomenon ("late-time PML
-/// instability"), not a bug specific to this codebase's own GPU port. CPML fixes it structurally,
-/// and is this codebase's own default (validated on the exact real-board scenario that exposed
-/// UPML's own failure: same board, same 1,000,000-timestep run, CPML showed no divergence at all --
-/// see copper::CopperBoundaryKind's own doc comment). UPML stays available (openEMS's own formula,
-/// untouched) for comparison/fallback. This enum stays libkiems-native (no Copper dependency,
-/// matching `FDTDBackend`'s own convention) -- translated to `copper::CopperBoundaryKind` only at
-/// the call sites that already link Copper (kiems-cli/main.cpp, KiEMS's
-/// EMSSimulationPipelineBridge.mm).
-enum class PMLKind { UPML, CPML };
 
 /// Class representing a single simulation port. Never (de)serialized directly -- populated by
 /// port_resolution.cpp from a SimulationConfig's InvolvedNetConfig entries, one instance per pad
@@ -140,6 +130,19 @@ private:
     bool _probe = true;
 };
 
+/// Axis-aligned XY footprint used to reserve mesh density for a component-facing port. It must
+/// match Simulation::addResistivePort()'s box exactly: if the synthetic grid pad is offset or
+/// smaller than the resistor, mesh deduplication can leave the termination with no electrically
+/// connected Yee column even though its configured pad is inside the simulation cutout.
+struct PortGridFootprint {
+    double centerX;
+    double centerY;
+    double width;
+    double height;
+};
+
+PortGridFootprint portGridFootprint(const PortConfig& port);
+
 /// Which of a LumpedComponentConfig's R/L/C fields are physically present -- mirrors how
 /// CSPropLumpedElement/Operator_Ext_LumpedRLC themselves distinguish "absent" (NaN) from "present,
 /// value zero" (see operator_ext_lumpedRLC.cpp's own doc comment on this), just narrowed to the
@@ -149,8 +152,9 @@ enum class LumpedComponentType { Resistor, Inductor, Capacitor };
 /// One auto-discovered 2-pin R/L/C component, resolved to real board geometry -- populated
 /// entirely by resolveSimulationPorts() (never (de)serialized, same as PortConfig; see
 /// SimulationConfig::_lumpedComponents' own comment). A component only ever gets one of these if
-/// both its pins sit on a net already involved in this simulation (or its ground net) -- see
-/// port_resolution.cpp's own doc comment on the discovery rule.
+/// both its pins sit on nets included at either inclusion level (or on the simulation's ground net)
+/// and at least one pad centre survives inside the subsequently computed board cutout -- see
+/// port_resolution.cpp's discovery and restrictLumpedComponentsToCutout()'s spatial filter.
 class LumpedComponentConfig {
 public:
     const std::string& reference() const { return _reference; }
@@ -158,6 +162,14 @@ public:
 
     LumpedComponentType type() const { return _type; }
     void setType(LumpedComponentType value) { _type = value; }
+
+    /// Display-form net names at the two terminals. These are retained alongside the geometry so
+    /// result presentation can identify every net electrically reachable through the passives
+    /// that were actually included in this simulation.
+    const std::string& net1() const { return _net1; }
+    void setNet1(std::string value) { _net1 = std::move(value); }
+    const std::string& net2() const { return _net2; }
+    void setNet2(std::string value) { _net2 = std::move(value); }
 
     /// NaN means "not physically present" (this component isn't of that kind) -- matches
     /// CSPropLumpedElement's own NaN-means-absent convention exactly, so these are handed straight
@@ -247,6 +259,8 @@ public:
     void scaleToSimulationUnits(std::int32_t unitMultiplier) { _width *= unitMultiplier; }
 
 private:
+    std::string _net1;
+    std::string _net2;
     std::string _reference;
     LumpedComponentType _type = LumpedComponentType::Resistor;
     double _resistance = std::numeric_limits<double>::quiet_NaN();
@@ -303,7 +317,10 @@ enum class NetSelectorKind {
 /// strict subset: the net's copper is composited into the simulated geometry (clipped to whatever
 /// hull the SimulationNet-level entries already produced, exactly like ground-net copper already
 /// is -- see board_slicing.cpp), but never grows the hull itself, never enters resolvedNets(), and
-/// never becomes port/probe/excitation-eligible. Meant for geometry (e.g. via-stitched ground-
+/// never becomes probe/excitation-eligible. An explicitly absorbing pin, or a non-ground KiCad
+/// input/bidirectional/power-input pin with no explicit override, is the sole port exception: it
+/// still gets an unreported physical termination, without promoting the net or expanding the hull.
+/// Meant for geometry (e.g. via-stitched ground-
 /// adjacent structure) that needs to physically exist in the mesh/model but isn't itself something
 /// being probed or exciting a response -- see grid_gen.cpp's own ground-net density treatment for
 /// the same reasoning applied one layer up (mesh density, not geometry inclusion).
@@ -330,8 +347,10 @@ void from_json(const nlohmann::json& j, ExcludedPin& p);
 /// for how this coexists with the older, opt-*out* ExcludedPin list). `probe` defaults true (every
 /// pre-existing entry -- from before this field existed -- keeps meaning exactly what it always did:
 /// a real, reportable S-parameter/impedance probe); `probe=false` is InvolvedNetConfig::
-/// setPinAbsorbOnly()'s own state -- a real resistive termination with nothing shown in Results (see
-/// PortConfig::probe()'s own doc comment). `probe` is declared *after* absorbSignal so every
+/// setPinAbsorbOnly()'s own state. With absorbSignal=true that is a real resistive termination with
+/// nothing shown in Results (see PortConfig::probe()'s own doc comment); with absorbSignal=false it
+/// is an explicit no-port choice, retained so a UI default such as "active-component pins absorb"
+/// can be overridden and round-tripped. `probe` is declared *after* absorbSignal so every
 /// existing 3-argument positional `ProbedPin{footprint, pin, absorbSignal}` construction keeps
 /// working unchanged, defaulting the new field to true.
 struct ProbedPin {
@@ -366,6 +385,21 @@ struct PinDirectionOverride {
 void to_json(nlohmann::json& j, const PinDirectionOverride& p);
 void from_json(const nlohmann::json& j, PinDirectionOverride& p);
 
+/// One footprint+pin port-impedance override, in ohms. Kept separate from ProbedPin so changing a
+/// pin between probed, absorb-only, and excited states does not discard its termination setting.
+struct PinImpedanceOverride {
+    std::string footprint;
+    std::string pin;
+    double impedance = 45;
+
+    bool operator==(const PinImpedanceOverride& other) const {
+        return footprint == other.footprint && pin == other.pin;
+    }
+};
+
+void to_json(nlohmann::json& j, const PinImpedanceOverride& p);
+void from_json(const nlohmann::json& j, PinImpedanceOverride& p);
+
 /// One entry in a SimulationConfig's involved-nets list. Resolves (via port_resolution.cpp and
 /// libkicad) to a set of net names -- a net class expands to every net assigned to it; a
 /// footprint+pin resolves to the net connected to that pin and is thereafter treated exactly like
@@ -379,11 +413,11 @@ void from_json(const nlohmann::json& j, PinDirectionOverride& p);
 ///    This is what makes loading an old simulation.json a no-op: an entry nobody has touched under
 ///    the new per-pin UI keeps resolving exactly as it always did.
 ///  - Explicit (hasExplicitPinSelections()==true, set permanently the first time any pin under
-///    this net is edited via the new UI): only pads named in probedPins() get a PortConfig (with
-///    that entry's own absorbSignal), plus any pad targeted by a SimulationConfig-level
-///    ExcitationConfig (which always gets absorbSignal()==true regardless of its probedPins()
-///    entry, if any -- see port_resolution.cpp's resolution rule). excludedPins() is not consulted
-///    in this mode.
+///    this net is edited via the new UI): pads named in probedPins() use that explicit state;
+///    otherwise non-ground KiCad input/bidirectional/power-input pins get an unreported 45-ohm
+///    absorbing port by default. A SimulationConfig-level ExcitationConfig always gets a full
+///    absorbing/reportable port regardless of either rule. excludedPins() is not consulted in this
+///    mode.
 /// See port_resolution.cpp's resolveSimulationPorts() for the exact rule, and
 /// SourceListViewController's probeToggled()/absorbToggled()/excitedToggled() for how the GUI
 /// drives it.
@@ -411,6 +445,10 @@ public:
     /// see this class's own doc comment for what that switches probedPins()/excludedPins()
     /// resolution to. Never set back to false.
     bool hasExplicitPinSelections() const { return _hasExplicitPinSelections; }
+    /// Switches a newly-created net to explicit opt-in mode without having to invent a dummy pin.
+    /// This is used by selection-driven configuration UIs whose documented default is zero probed
+    /// pins. Serialisation writes an empty `probed_pins` array, so the choice round-trips.
+    void useExplicitPinSelections() { _hasExplicitPinSelections = true; }
     /// Only meaningful for a Net-kind entry, and only consulted when hasExplicitPinSelections() is
     /// true -- see this class's own doc comment.
     const std::vector<ProbedPin>& probedPins() const { return _probedPins; }
@@ -445,25 +483,25 @@ public:
             _probedPins.push_back({footprint, pin, *absorbSignal, /*probe=*/true});
         }
     }
-    /// Sets (enabled) or clears (!enabled) this one pad as absorb-only: a real resistive termination
-    /// port gets built for it (see PortConfig::absorbSignal()'s own doc comment on
+    /// Stores this one pad's explicit unprobed absorbing choice. When enabled, a real resistive
+    /// termination port gets built for it (see PortConfig::absorbSignal()'s own doc comment on
     /// Simulation::addResistivePort()), so it doesn't behave as an open, fully-reflecting stub in
-    /// the FDTD field -- but it's never shown as a measured port in Results (PortConfig::probe()==
-    /// false) and never becomes an excitation target on its own. Works on a GeometryOnly entry too
+    /// the FDTD field. When disabled, the retained probe=false/absorbSignal=false entry explicitly
+    /// means no port, overriding UI defaults while still round-tripping through JSON. It is never
+    /// shown as a measured port in Results and never becomes an excitation target on its own.
+    /// Works on a GeometryOnly entry too
     /// (unlike setPinProbed(), which is meaningless there -- see NetInclusionLevel's own doc comment
     /// and port_resolution.cpp's resolveSimulationPorts(), which reads probedPins() for a
     /// GeometryOnly entry only to find absorb-only pins like this one, never to grow resolvedNets()
     /// or place a reportable probe). Mutually exclusive with setPinProbed() for the same pin -- a pin
     /// is either measured or just loaded, never both -- so this replaces any existing entry outright,
-    /// same erase-then-maybe-push_back shape as setPinProbed().
+    /// same erase-then-push_back shape as setPinProbed().
     void setPinAbsorbOnly(const std::string& footprint, const std::string& pin, bool enabled) {
         _hasExplicitPinSelections = true;
         _probedPins.erase(std::remove_if(_probedPins.begin(), _probedPins.end(),
                                           [&](const ProbedPin& p) { return p.footprint == footprint && p.pin == pin; }),
                            _probedPins.end());
-        if (enabled) {
-            _probedPins.push_back({footprint, pin, /*absorbSignal=*/true, /*probe=*/false});
-        }
+        _probedPins.push_back({footprint, pin, /*absorbSignal=*/enabled, /*probe=*/false});
     }
 
     double impedance() const { return _impedance; }
@@ -521,6 +559,27 @@ public:
         }
     }
 
+    std::optional<double> pinImpedance(const std::string& footprint, const std::string& pin) const {
+        const auto it = std::find_if(_pinImpedanceOverrides.begin(), _pinImpedanceOverrides.end(),
+                                     [&](const PinImpedanceOverride& o) {
+                                         return o.footprint == footprint && o.pin == pin;
+                                     });
+        return it != _pinImpedanceOverrides.end() ? std::optional<double>(it->impedance) : std::nullopt;
+    }
+    /// Sets (or, given nullopt, clears) this pin's port-impedance override.
+    void setPinImpedance(const std::string& footprint, const std::string& pin,
+                         std::optional<double> impedance) {
+        _pinImpedanceOverrides.erase(
+            std::remove_if(_pinImpedanceOverrides.begin(), _pinImpedanceOverrides.end(),
+                           [&](const PinImpedanceOverride& o) {
+                               return o.footprint == footprint && o.pin == pin;
+                           }),
+            _pinImpedanceOverrides.end());
+        if (impedance.has_value()) {
+            _pinImpedanceOverrides.push_back({footprint, pin, *impedance});
+        }
+    }
+
     // impedance/length/width are intentionally left unscaled here: they're copied verbatim into a
     // resolved PortConfig by port_resolution.cpp, which scales the whole PortConfig exactly once
     // (PortConfig::scaleToSimulationUnits) -- scaling them here too would double-scale.
@@ -561,6 +620,7 @@ private:
     std::optional<double> _dBMargin;
     std::optional<double> _direction;
     std::vector<PinDirectionOverride> _pinDirectionOverrides;
+    std::vector<PinImpedanceOverride> _pinImpedanceOverrides;
 };
 
 void to_json(nlohmann::json& j, const InvolvedNetConfig& p);
@@ -640,24 +700,86 @@ private:
 void to_json(nlohmann::json& j, const ExcitationConfig& p);
 void from_json(const nlohmann::json& j, ExcitationConfig& p);
 
+/// Which of DiffPairNetMember's mutually-exclusive selector fields is populated.
+enum class DiffPairNetKind {
+    NetClass,
+    Net,
+};
+
+/// One entry in a DifferentialPairConfig's positiveNets()/negativeNets() list -- a net or net
+/// class that belongs to that half of the pair. More than one entry on a side means those nets
+/// are expected to be connected to each other by series components only (e.g. AC-coupling caps),
+/// which is also why positiveProbe/negativeProbe can legitimately land on a different net than
+/// positiveExcitation/negativeExcitation -- see DifferentialPairConfig's own doc comment.
+/// Serializes as a single "net://name" or "net-class://name" string rather than an object, to
+/// keep a hand-written differential_pairs entry terse.
+class DiffPairNetMember {
+public:
+    DiffPairNetKind kind() const { return _kind; }
+    const std::optional<std::string>& netClass() const { return _netClass; }
+    const std::optional<std::string>& net() const { return _net; }
+
+    void setKind(DiffPairNetKind value) { _kind = value; }
+    void setNetClass(std::optional<std::string> value) { _netClass = std::move(value); }
+    void setNet(std::optional<std::string> value) { _net = std::move(value); }
+
+private:
+    friend void to_json(nlohmann::json& j, const DiffPairNetMember& p);
+    friend void from_json(const nlohmann::json& j, DiffPairNetMember& p);
+
+    DiffPairNetKind _kind = DiffPairNetKind::Net;
+    std::optional<std::string> _netClass;
+    std::optional<std::string> _net;
+};
+
+void to_json(nlohmann::json& j, const DiffPairNetMember& p);
+void from_json(const nlohmann::json& j, DiffPairNetMember& p);
+
 /// Class representing and parsing differential pair config, for postprocessing (mixed-mode
-/// S-parameter / differential impedance) purposes. References ports by footprint+pin rather than
-/// index, since one-port-per-pad makes hand-written indices unpredictable.
+/// S-parameter / differential impedance) and field-viewer (combined-mode field snapshot)
+/// purposes. References ports by footprint+pin rather than index, since one-port-per-pad makes
+/// hand-written indices unpredictable.
+///
+/// Named for how a differential pair is actually used, not the geometric start/stop language an
+/// earlier shape of this class used: `positiveExcitation`/`negativeExcitation` are the driven,
+/// independently-excited near-end pins (the two ports the FDTD sweep runs separately -- see
+/// EMSSimulationPipelineBridge.mm's combined field-snapshot code and Postprocessor::
+/// getDiffPairSdd(), which both linearly combine those two ports' own independent results rather
+/// than reading anything from positiveProbe/negativeProbe directly). `positiveProbe`/
+/// `negativeProbe` are the absorbing far-end pins mixed-mode S-parameter/impedance analysis
+/// reports against.
+///
+/// `positiveNets`/`negativeNets` record every net that half of the signal actually travels over
+/// between those two ends -- more than one when series components break net continuity along the
+/// way (see DiffPairNetMember's own doc comment), which is also why positiveProbe/negativeProbe
+/// can land on a different net than positiveExcitation/negativeExcitation.
 class DifferentialPairConfig {
 public:
-    const PortRef& startP() const { return _startP; }
-    PortRef& startP() { return _startP; }
-    const PortRef& stopP() const { return _stopP; }
-    PortRef& stopP() { return _stopP; }
-    const PortRef& startN() const { return _startN; }
-    PortRef& startN() { return _startN; }
-    const PortRef& stopN() const { return _stopN; }
-    PortRef& stopN() { return _stopN; }
+    const PortRef& positiveExcitation() const { return _positiveExcitation; }
+    PortRef& positiveExcitation() { return _positiveExcitation; }
+    const PortRef& positiveProbe() const { return _positiveProbe; }
+    PortRef& positiveProbe() { return _positiveProbe; }
+    const PortRef& negativeExcitation() const { return _negativeExcitation; }
+    PortRef& negativeExcitation() { return _negativeExcitation; }
+    const PortRef& negativeProbe() const { return _negativeProbe; }
+    PortRef& negativeProbe() { return _negativeProbe; }
+    const std::vector<DiffPairNetMember>& positiveNets() const { return _positiveNets; }
+    std::vector<DiffPairNetMember>& positiveNets() { return _positiveNets; }
+    const std::vector<DiffPairNetMember>& negativeNets() const { return _negativeNets; }
+    std::vector<DiffPairNetMember>& negativeNets() { return _negativeNets; }
     const std::optional<std::string>& name() const { return _name; }
     void setName(std::optional<std::string> value) { _name = std::move(value); }
+    /// Canonical user-facing label shared by the Field Viewer and every results category.
+    std::string displayName() const { return "Differential Pair - " + _name.value_or("Unnamed"); }
     bool automatic() const { return _automatic; }
     void setAutomatic(bool value) { _automatic = value; }
     bool correct() const { return _correct; }
+    /// Lets port_resolution.cpp fail this pair after postInit() -- e.g. once it's found that
+    /// positiveNets()/negativeNets() don't actually connect positiveExcitation()/positiveProbe()
+    /// (or the negative equivalents) via series components -- the same board-query-dependent kind
+    /// of check postInit() itself can't do, since it takes no PathsConfig and never talks to the
+    /// board.
+    void setCorrect(bool value) { _correct = value; }
 
     /// Validate that every PortRef resolved to a real port (mirrors __post_init__, now
     /// resolution-based instead of index-range-based).
@@ -667,10 +789,12 @@ private:
     friend void to_json(nlohmann::json& j, const DifferentialPairConfig& p);
     friend void from_json(const nlohmann::json& j, DifferentialPairConfig& p);
 
-    PortRef _startP;
-    PortRef _stopP;
-    PortRef _startN;
-    PortRef _stopN;
+    PortRef _positiveExcitation;
+    PortRef _positiveProbe;
+    PortRef _negativeExcitation;
+    PortRef _negativeProbe;
+    std::vector<DiffPairNetMember> _positiveNets;
+    std::vector<DiffPairNetMember> _negativeNets;
     std::optional<std::string> _name;
     bool _correct = true; // not (de)serialized
     bool _automatic = false; // derived from involved-net pairing; never serialized
@@ -715,7 +839,7 @@ enum class LayerKind {
     SolderMaskBottom,
 };
 
-/// One layer of a resolved board stackup (see libkicad_query::stackup()) -- copper, substrate, or
+/// One layer of a resolved board stackup (see libkicad::stackup()) -- copper, substrate, or
 /// (top/bottom) solder mask, already scaled to simulation units.
 class LayerConfig {
 public:
@@ -925,6 +1049,17 @@ public:
     double eyeBitRate() const { return _eyeBitRate; }
     void setEyeBitRate(double value) { _eyeBitRate = value; }
 
+    /// Whether this simulation is fundamentally about a differential pair -- gates
+    /// resolveSimulationPorts()'s own reciprocal-net-pair auto-detection (which populates
+    /// diffPairs() from involvedNets() entries carrying a differentialPairPartner/
+    /// simulateAsDifferentialPair pairing): that auto-generation only ever runs when this is true,
+    /// so a false positive (two nets that happen to look paired) never silently turns a normal,
+    /// single-ended simulation's results into a mixed-mode one. False by default -- existing
+    /// configurations keep resolving with no diffPairs() at all until this is explicitly set,
+    /// matching their behavior from before this flag existed.
+    bool isDifferentialPair() const { return _isDifferentialPair; }
+    void setIsDifferentialPair(bool value) { _isDifferentialPair = value; }
+
     std::vector<ExcitationConfig>& excitations() { return _excitations; }
     const std::vector<ExcitationConfig>& excitations() const { return _excitations; }
     std::vector<SingleEndedConfig>& traces() { return _traces; }
@@ -943,7 +1078,7 @@ public:
 
     /// Every net name resolved from involvedNets() (populated once by resolveSimulationPorts(),
     /// alongside ports()) -- cached here so grid_gen.cpp's mesh-density placement doesn't need to
-    /// re-resolve net_class/footprint+pin entries via another libkicad_query round trip. The mesh's
+    /// re-resolve net_class/footprint+pin entries via another ki round trip. The mesh's
     /// own core-boundary (domain size) is derived directly from the sliced board's own extent, not
     /// from this list, so it does not need the ground net included; grid_gen.cpp's density placement
     /// doesn't need it either (the ground pour's own extent is already covered by the domain-sized
@@ -971,6 +1106,7 @@ private:
     double _viaEdgeDistance = 1500;
     double _viaSpacing = 1500;
     double _eyeBitRate = 0;
+    bool _isDifferentialPair = false;
     std::vector<ExcitationConfig> _excitations;
     std::vector<SingleEndedConfig> _traces;
     std::vector<DifferentialPairConfig> _diffPairs;
@@ -992,7 +1128,6 @@ struct RunOptions {
     bool transparent = false;
     bool plotPhase = false;
     FDTDBackend backend = FDTDBackend::OpenEMSCPU;
-    PMLKind pmlKind = PMLKind::CPML;
 };
 
 /// Parsed simulation.json configuration, plus the stackup imported into it separately (see
@@ -1025,7 +1160,7 @@ public:
     EMSConfig scaledToSimulationUnits() const;
 
     /// Replaces layers() with `layers` (already resolved by the caller from the live board via
-    /// libkicad_query::stackup() -- see importer.cpp's importStackup()).
+    /// libkicad::stackup() -- see importer.cpp's importStackup()).
     void loadStackup(std::vector<LayerConfig> layers);
 
     /// The .kicad_pcb this document is linked to -- an absolute path to wherever the user's KiCad
@@ -1044,8 +1179,8 @@ public:
 
     const Frequency& frequency() const { return _frequency; }
     void setFrequency(Frequency value) { _frequency = value; }
-    /// Hard cap on FDTD timesteps (Simulation::run() -> openEMS::SetNumberOfTimeSteps()) -- the run
-    /// stops here even if openEMS's own -60dB energy-decay end criteria hasn't been reached yet. Too
+    /// Hard cap on FDTD timesteps -- the run stops here even if Copper's -60dB energy-decay end
+    /// criterion hasn't been reached yet. Too
     /// low a value truncates the recorded time-domain signal before it's actually decayed, which
     /// shows up in post-processed S-parameters as spurious ripple and rapid phase rotation (a
     /// truncated time-domain signal is equivalent to windowing it with a hard rectangular cutoff,

@@ -1,7 +1,8 @@
-// Interacting with openEMS/CSXCAD to build and run the FDTD simulation. Ported from
+// Interacting with CSXCAD to build and run the FDTD simulation. Ported from
 // kiems/simulation.py.
 #pragma once
 
+#include <array>
 #include <complex>
 #include <cstdint>
 #include <expected>
@@ -14,7 +15,6 @@
 #include <vector>
 
 #include <CSXCAD/ContinuousStructure.h>
-#include <openEMS/openems.h>
 
 #include <nlohmann/json.hpp>
 
@@ -30,8 +30,8 @@ namespace kiems {
 
 class Simulation;
 
-/// Runs one excited port's FDTD pass on an already-geometry-populated/setExcitation()'d/
-/// setupPorts()'d Simulation, writing its probe files wherever that backend's own convention puts
+/// Runs one excited port's FDTD pass on an already-geometry-populated/setupPorts()'d Simulation,
+/// writing its probe files wherever that backend's own convention puts
 /// them -- the extension point that lets a caller outside libkiems (which must never depend
 /// on Copper.framework -- see CopperFDTDRunner.h's own file comment) substitute an in-process GPU
 /// run for the default posix_spawn'd CPU worker (Simulation::run()). Declared here (rather than
@@ -87,7 +87,7 @@ inline void from_json(const nlohmann::json& j, ComputedGridLines& g) {
     g.pmlInnerZMax = j.value("pmlInnerZMax", 0.0);
 }
 
-/// Interacts with openEMS/CSXCAD to build simulation geometry and run the FDTD simulation.
+/// Builds CSXCAD simulation geometry and orchestrates the selected Copper FDTD backend.
 class Simulation {
 public:
     /// `simConfig`/`config`/`options`/`paths` must all outlive this Simulation (kept by reference).
@@ -112,9 +112,9 @@ public:
     const SlicedBoard& slicedBoard() const { return _slicedBoard; }
 
     /// Snapshots _grid's current line arrays -- meaningful only once addGrid() (or adoptGridLines())
-    /// has actually populated them. GridGenerator::generate() (addGrid()'s own real work) re-parses
-    /// every gerber file to place these -- capturing the answer here is what lets a second
-    /// Simulation skip that entirely via adoptGridLines() instead of calling addGrid() itself. Named
+    /// has actually populated them. GridGenerator::generate() (addGrid()'s own real work) derives
+    /// these from the sliced copper -- capturing the answer here is what lets a second Simulation
+    /// skip that work entirely via adoptGridLines() instead of calling addGrid() itself. Named
     /// distinctly from csx_grid_utils.hpp's own gridLines(CSRectGrid&, ...) free function (which
     /// this is implemented in terms of) -- an unqualified call to that name from inside a Simulation
     /// member function would otherwise resolve to this method instead (class-scope names hide
@@ -129,7 +129,7 @@ public:
     void adoptGridLines(const ComputedGridLines& lines);
 
     /// createMaterials()/addGerbers()/addGrid()/addSubstrates()/addNPTHHoles()/(addDumpBoxes() if
-    /// options.exportField)/setBoundaryConditions(true)/addVias()/addPorts(), in the one order
+    /// options.exportField)/addVias()/addPorts(), in the one order
     /// that's actually valid (each one depends on state an earlier one sets up) -- sliceBoard() or
     /// adoptSlicedBoard() must already have been called. addGrid() itself is skipped when
     /// adoptGridLines() was already called (grid lines already present) -- GridGenerator::generate()
@@ -137,10 +137,9 @@ public:
     /// never pay for it twice. This is the exact sequence GeometryResult::build() runs once per
     /// simulation to produce the canonical geometry, and that SimulationResult::run()'s own
     /// per-excited-port Simulation re-runs against GeometryResult::slicedBoard()'s cached copy -- a
-    /// second, genuinely independent ContinuousStructure is unavoidable per excited port (openEMS's
-    /// own SetCSX()/Reset() give a freshly-constructed openEMS object exclusive ownership of its
-    /// ContinuousStructure, deleting it on destruction -- see _csx's own doc comment -- so N excited
-    /// ports need N separate ContinuousStructure instances, never one shared/reused across them),
+    /// second, genuinely independent ContinuousStructure is used per excited port so each run owns
+    /// its mutable geometry and ports; N excited ports therefore use N structures rather than
+    /// sharing one across runs,
     /// but rebuilding CSXCAD primitives directly from the already-sliced-and-cached SlicedBoard (and
     /// already-placed grid lines) is real, cheap, in-memory construction work, not serialization --
     /// unlike the geometry.xml round-trip this replaces for any caller running in the same process
@@ -176,9 +175,8 @@ public:
     /// bridging its two real pad positions -- see that type's own doc comment and
     /// port_resolution.cpp's discovery rule. Unlike ports, these are never individually excited and
     /// aren't tracked in _ports (nothing in this library reads their probe data back) -- the CPU
-    /// backend picks them up automatically via Operator_Ext_LumpedRLC once SetupFDTD() runs (see
-    /// openems.cpp's own unconditional `if (CSX has any LUMPED_ELEMENT) AddExtension(...)`); the GPU
-    /// backend's own pass lives in Copper/Internal/CopperLumpedRLC.hpp instead.
+    /// backend picks them up while constructing Copper's operator; the shared implementation lives
+    /// in Copper/Internal/CopperLumpedRLC.hpp.
     std::expected<void, std::string> addLumpedComponents();
     void addPlane(double zHeight);
     void addSubstrates();
@@ -192,7 +190,7 @@ public:
     /// `diameter` is the drill hole; `outerDiameter` is the copper conductor's outer edge (the
     /// "annular ring" OD) -- callers compute this differently per via kind, see addVias().
     /// `cropToOutline`, when set, clips the via's cross-section to `_slicedBoard.outline` (via
-    /// Clipper2 intersection) before adding it -- for a real board via kept because its disc merely
+    /// polygon intersection) before adding it -- for a real board via kept because its disc merely
     /// *reaches* the cutout boundary (see _viaIntersectsOutline's own doc comment), this prevents
     /// its geometry from extending past the simulation's own domain. A freshly-placed stitching via
     /// is always positioned viaEdgeDistance() inward of the boundary by construction, so it never
@@ -215,58 +213,55 @@ public:
     /// floating in open space radiates close to the domain boundary -- MUR reflections can keep the
     /// domain's total energy from ever decaying to the FDTD end criteria at all. Defaults to PML for
     /// that reason; MUR exists as an option mainly for comparison/debugging.
-    void setBoundaryConditions(bool pml = true);
-    void setExcitation();
-    void setSinusExcitation(double freq);
-
     /// Runs one port's FDTD pass in a dedicated posix_spawn'd worker process (see
     /// paths.fdtdWorkerPath/paths.copperFdtdWorkerPath, selected by options.backend), rather than
     /// chdir'ing this process -- so the caller's own working directory (and any other threads it
     /// owns) are never touched. The worker reconstructs its own Simulation from
     /// paths.configFile/simConfig.name()'s own serialized SimulationData<Grid> (see
     /// simulation_data.hpp's loadSimulationData()); it doesn't share memory with this object.
-    /// adoptSlicedBoard()/adoptGridLines()/populateGeometry()/setExcitation()/
+    /// adoptSlicedBoard()/adoptGridLines()/populateGeometry()/
     /// setupPorts(excitedPortNumber) must already have been called on *this* Simulation before
     /// run(), even though the worker redoes the same steps on its own copy -- getPortParameters()
     /// afterwards still reads this object's _ports.
     std::expected<void, std::string> run(std::int32_t excitedPortNumber);
 
-    /// The chdir + SetOverSampling + SetupFDTD() prologue shared by both FDTD backends: chdirs into
-    /// this port's simulation directory and builds the real openEMS Yee grid/coefficients/excitation
-    /// signal (fdtdEngine()'s Operator afterwards), but does NOT run any timesteps and does NOT
-    /// restore the working directory on success (the caller -- runFDTDInPlace() for the CPU backend,
-    /// copper_fdtd_worker's main() for the GPU one -- does that once its own run is actually done, so
-    /// probe/dump files land next to whichever backend produced them). Restores the working directory
-    /// and returns an error if SetupFDTD() itself fails. Only ever safe to call from a freshly-spawned,
-    /// single-purpose process, same as runFDTDInPlace().
-    std::expected<void, std::string> setupFDTDOperator(std::int32_t excitedPortNumber);
+    /// Chdirs into this port's
+    /// simulation directory so probe/dump files land next to whichever backend produced them, but
+    /// does NOT run any timesteps and does NOT restore the working directory on success (the caller
+    /// does that once its own copper::runFDTDPortOnCPU()/runFDTDPortOnGPU() run is actually done).
+    /// CopperOperator computes the mesh and coefficients directly from `csx()`, so this only
+    /// prepares the output directory. Only ever safe to call from a freshly-spawned,
+    /// single-purpose process because it changes the working directory on success.
+    std::expected<void, std::string> prepareRunDirectory(std::int32_t excitedPortNumber);
 
-    /// The actual FDTD execution: setupFDTDOperator() + the real CPU RunFDTD(), then restores the
-    /// previous working directory. Only ever safe to call from a freshly-spawned, single-purpose
-    /// process (see kiems_fdtd_worker's main()) -- never called directly by run(), which spawns
-    /// exactly such a process instead of calling this itself.
-    std::expected<void, std::string> runFDTDInPlace(std::int32_t excitedPortNumber);
-
-    /// The real openEMS engine object -- exposed so a Copper GPU worker (which links this library
-    /// but this library never links it, see the Copper implementation plan's "no dependency on
-    /// Copper" rule) can reach setupFDTDOperator()'s already-built Operator via its own
-    /// copper::CopperOpenEMS::GetOperatorForGPU(), reached by `static_cast`ing this reference --
-    /// well-defined-in-practice the same way CopperOpenEMSAccess.hpp's own UPML/Excitation
-    /// accessors are (identical layout, no new data members/vtable), not because this object was
-    /// ever actually constructed as a CopperOpenEMS. Not used by anything in this library itself.
-    openEMS& fdtdEngine() { return _fdtd; }
-
-    /// The real CSXCAD geometry -- exposed for the same reason as fdtdEngine(): a Copper worker
+    /// The CSXCAD geometry -- exposed because a Copper worker
     /// needs it to discover probe boxes (see Copper/Internal/CopperProbes.hpp's discoverProbes()),
-    /// which the Operator alone doesn't carry. Non-owning (see _csx's own doc comment) -- valid for
-    /// as long as this Simulation (and therefore _fdtd) is alive.
+    /// which the Operator alone doesn't carry. The returned reference remains valid for as long as
+    /// this Simulation is alive.
     ContinuousStructure& csx() { return *_csx; }
 
-    /// Exposed for the same reason as fdtdEngine()/csx(): a GPU worker needs this simulation's own
+    /// A Copper worker needs this simulation's own
     /// EMSConfig::frequency() to compute a correctly-scaled CPML alphaMax (see
     /// copper::cpmlAlphaMaxForFrequency()'s own doc comment) rather than relying on
-    /// runFDTDPortOnGPU()'s generic, frequency-agnostic default.
+    /// runFDTDPortOnCPU()'s/runFDTDPortOnGPU()'s generic, frequency-agnostic default, and to build a
+    /// copper::CopperFDTDPortConfig directly (maxTimesteps()/excitationF0()/excitationFc() below,
+    /// plus boundaryIsPEC()) instead of reading those values back off a real Operator.
     const EMSConfig& config() const { return _config; }
+
+    /// Per-side boundary state (face order 0=xmin,1=xmax,2=ymin,3=ymax,4=zmin,5=zmax, matching
+    /// copper::CopperOperator::Config::boundary). True means PEC; false means open, with a CPML
+    /// shell providing absorption. kiems never requests a PEC boundary today, so this is all-false
+    /// in practice, but a Copper worker should read it rather than assume that.
+    const std::array<bool, 6>& boundaryIsPEC() const { return _boundaryIsPEC; }
+
+    /// `config().maxSteps()`, pre-cast to the unsigned type
+    /// copper::CopperFDTDPortConfig::maxTimesteps expects.
+    std::uint32_t maxTimesteps() const { return static_cast<std::uint32_t>(_config.maxSteps()); }
+
+    /// The Gaussian pulse center frequency/half-bandwidth derived from config().frequency(), exposed
+    /// so a Copper worker can build copper::CopperFDTDPortConfig::f0/fc directly.
+    double excitationF0() const { return (_config.frequency().start() + _config.frequency().stop()) / 2; }
+    double excitationFc() const { return (_config.frequency().stop() - _config.frequency().start()) / 2; }
 
     /// `reflected`/`incident` are uf phasors per port (a same-length, all-NaN placeholder for any
     /// port with absorbSignal()==false, which never computes a meaningful incident/reflected split
@@ -297,13 +292,7 @@ private:
     void addSingleDumpBox(const std::string& name, double z);
     void printGridStats() const;
 
-    // Heap-allocated (not a value/unique_ptr member): openEMS::SetCSX() hands ownership to the
-    // FDTD engine, whose own destructor (via Reset()) unconditionally `delete`s it. A value member
-    // here would make that delete operate on non-heap memory (a real crash reproduced against a
-    // live board during verification); a unique_ptr would double-free. Raw, deliberately
-    // non-owning pointer is correct here.
-    ContinuousStructure* _csx;
-    openEMS _fdtd;
+    std::unique_ptr<ContinuousStructure> _csx;
     CSRectGrid* _grid;
 
     SimulationConfig& _simConfig;
@@ -314,6 +303,7 @@ private:
     // Set by adoptGridLines(); checked (only) by populateGeometry() to skip its own addGrid() call
     // -- see both their own doc comments.
     bool _gridLinesAdopted = false;
+    std::array<bool, 6> _boundaryIsPEC = {false, false, false, false, false, false};
 
     std::vector<std::unique_ptr<Port>> _ports;
     std::vector<CSProperties*> _gerberMaterials;   // owned by _csx

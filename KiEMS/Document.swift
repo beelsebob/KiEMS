@@ -1,4 +1,5 @@
 import Cocoa
+import Darwin
 
 /// A simulation.json document, stored as a package directory (Finder shows it as one file, like
 /// .xcodeproj) rather than a flat file: `simulation.json` today, plus `ems/` (geometry/simulation/
@@ -16,12 +17,42 @@ final class Document: NSDocument {
 
     /// Where the geometry/simulation pipeline writes its fab/ems output -- see pipelineDirectory.
     /// Lives for this Document object's whole lifetime, saved or not: the pipeline (kicad-cli,
-    /// kiems_fdtd_worker, the query helper) never writes into the real package directly, only
+    /// kiems_fdtd_worker) never writes into the real package directly, only
     /// here, precisely so it never touches packageURL's files out from under an open document -- see
     /// pipelineDirectory's own doc comment for why that matters. migrateScratchDirectory copies this
     /// into the real package at save time, but doesn't discard it afterward: the *next* pipeline run
     /// still needs somewhere of its own to write, same as before the document was ever saved.
     private var scratchDirectory: URL?
+    /// Held for exactly as long as scratchDirectory can still be used by this document or one of
+    /// its finishing background jobs. A later KiEMS process can therefore distinguish abandoned
+    /// temp directories left by a crash/forced Xcode stop from another live document's workspace.
+    private var scratchLockFileDescriptor: Int32?
+
+    private static let scratchDirectoryPrefix = "KiEMS-"
+    private static let scratchLockFileName = ".active.lock"
+
+    /// Removes only abandoned KiEMS scratch directories. `flock` is process-scoped and released by
+    /// the kernel even after a crash, so successfully taking this non-blocking exclusive lock proves
+    /// that no live KiEMS document still owns the directory. Legacy directories made before the
+    /// lock file existed are handled too: opening the marker creates it, then the same lock test
+    /// makes them collectable on the first launch of a fixed build.
+    static func removeStaleScratchDirectories() {
+        let fileManager = FileManager.default
+        let temp = fileManager.temporaryDirectory
+        guard let children = try? fileManager.contentsOfDirectory(
+            at: temp, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else { return }
+        for directory in children where directory.lastPathComponent.hasPrefix(scratchDirectoryPrefix) {
+            guard (try? directory.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
+            let lockURL = directory.appendingPathComponent(scratchLockFileName)
+            let descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+            guard descriptor >= 0 else { continue }
+            if flock(descriptor, LOCK_EX | LOCK_NB) == 0 {
+                try? fileManager.removeItem(at: directory)
+                _ = flock(descriptor, LOCK_UN)
+            }
+            Darwin.close(descriptor)
+        }
+    }
 
     /// One EMSSimulationPipelineBridge per simulation, keyed by simulation name -- shared by
     /// GeometryViewController and SimulationResultsViewController so switching between a
@@ -70,7 +101,7 @@ final class Document: NSDocument {
     /// Where the geometry/simulation pipeline should write its fab/ems output: always a private
     /// per-document scratch directory under the system temp directory, created on first use --
     /// *never* packageURL directly, even once this document has been saved. The pipeline gets there
-    /// via subprocesses (kicad-cli, kiems_fdtd_worker, the query helper) that aren't
+    /// via subprocesses (kicad-cli and kiems_fdtd_worker) that aren't
     /// NSDocument-aware; if one of them wrote straight into an already-saved package while it's
     /// still open, macOS's file-coordination layer sees an uncoordinated write from an unrelated
     /// process and flags the package as "modified by another application" the next time the user
@@ -85,8 +116,29 @@ final class Document: NSDocument {
             return scratchDirectory
         }
         let scratch = FileManager.default.temporaryDirectory
-            .appendingPathComponent("KiEMS-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("\(Self.scratchDirectoryPrefix)\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        let lockURL = scratch.appendingPathComponent(Self.scratchLockFileName)
+        let descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        if descriptor >= 0, flock(descriptor, LOCK_EX | LOCK_NB) == 0 {
+            scratchLockFileDescriptor = descriptor
+        } else if descriptor >= 0 {
+            Darwin.close(descriptor)
+        }
+        // A reopened package may already contain completed geometry, simulation CSVs, and lazy
+        // field-frame files. Seed the private working copy with them before the pipeline first
+        // examines it; otherwise every bridge starts against an empty directory and necessarily
+        // treats all saved stages as cache misses. The scratch copy remains authoritative for this
+        // open Document and is copied back by migrateScratchDirectory on the next save.
+        if let packageURL {
+            let fileManager = FileManager.default
+            for subdirectory in ["fab", "ems"] {
+                let source = packageURL.appendingPathComponent(subdirectory)
+                guard fileManager.fileExists(atPath: source.path) else { continue }
+                let destination = scratch.appendingPathComponent(subdirectory)
+                try? fileManager.copyItem(at: source, to: destination)
+            }
+        }
         scratchDirectory = scratch
         return scratch
     }
@@ -128,7 +180,9 @@ final class Document: NSDocument {
         // into crashes it the moment it next asks for its own cwd -- see cleanUpDirectory(_:)'s own
         // doc comment for the full story and why routing through JobScheduler's serial queue fixes it.
         if let scratchDirectory {
-            JobScheduler.shared.cleanUpDirectory(scratchDirectory)
+            JobScheduler.shared.cleanUpDirectory(
+                scratchDirectory, lockFileDescriptor: scratchLockFileDescriptor)
+            scratchLockFileDescriptor = nil
         }
     }
 

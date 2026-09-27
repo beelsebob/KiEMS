@@ -2,8 +2,12 @@
 #include "libkicad_result.hpp"
 
 #include <cstdint>
+#include <cmath>
+#include <filesystem>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <system_error>
 #include <utility>
 
 // KiCad and wx headers aren't built against this project's strict warning settings and aren't
@@ -19,6 +23,7 @@
 
 #include <pgm_base.h>
 #include <settings/settings_manager.h>
+#include <settings/common_settings.h>
 #include <settings/color_settings.h>
 #include <project.h>
 #include <project/project_file.h>
@@ -28,7 +33,12 @@
 #include <footprint.h>
 #include <pad.h>
 #include <padstack.h>
+#include <pcb_barcode.h>
+#include <pcb_dimension.h>
 #include <pcb_shape.h>
+#include <pcb_table.h>
+#include <pcb_text.h>
+#include <pcb_textbox.h>
 #include <pcb_track.h>
 #include <zone.h>
 #include <convert_shape_list_to_polygon.h>
@@ -97,13 +107,24 @@ bool _ensureWxInitialized() {
 
     SetPgm(new MinimalPgm());
 
-    // Real initialization, not a stub: sets up the process-wide SETTINGS_MANAGER that
-    // LIBRARY_MANAGER and friends reach via Pgm().GetSettingsManager(). Skipping this leaves
-    // that unique_ptr null and crashes the first time anything follows that path.
-    bool pgmInitOk = Pgm().InitPgm(/* aHeadless = */ true);
-    if (!pgmInitOk) {
+    // Use KiCad's deliberately minimal initialization path for embedded/unit-test clients.  It
+    // creates SETTINGS_MANAGER and the other process-wide services that board/project loading
+    // requires, then returns before full application startup (installed colour-theme scanning,
+    // notifications, plug-ins, Python discovery, instance locking, and so on).  Running the full
+    // InitPgm() inside another GUI application is both unnecessary and unsafe: on macOS it can
+    // enter Security.framework while enumerating installed resources, producing failures around
+    // /private/var/db/DetachedSignatures.
+    Pgm().InitPgm(/* aHeadless = */ true, /* aIsUnitTest = */ true);
+
+    SETTINGS_MANAGER& settingsManager = Pgm().GetSettingsManager();
+    if (!settingsManager.IsOK()) {
         return false;
     }
+
+    // The early-return path intentionally skips environment setup.  We still need KiCad's local
+    // environment map for footprint/3D-model variable expansion; unlike the rest of full startup,
+    // this is data-only and required by the board reader.
+    Pgm().GetCommonSettings()->InitializeEnvironment();
 
     initialized = true;
     return true;
@@ -158,6 +179,18 @@ RawBoardGeometryResult _failBoardGeometry(std::string error) {
     return result;
 }
 
+RawBoardLayersResult _failBoardLayers(std::string error) {
+    RawBoardLayersResult result;
+    result.error = std::move(error);
+    return result;
+}
+
+RawBoardLayerGeometryResult _failBoardLayerGeometry(std::string error) {
+    RawBoardLayerGeometryResult result;
+    result.error = std::move(error);
+    return result;
+}
+
 RawNonPlatedHolesResult _failNonPlatedHoles(std::string error) {
     RawNonPlatedHolesResult result;
     result.ok = false;
@@ -181,6 +214,13 @@ RawStackupResult _failStackup(std::string error) {
 
 RawLayerColorsResult _failLayerColors(std::string error) {
     RawLayerColorsResult result;
+    result.ok = false;
+    result.error = std::move(error);
+    return result;
+}
+
+RawNetColorsResult _failNetColors(std::string error) {
+    RawNetColorsResult result;
     result.ok = false;
     result.error = std::move(error);
     return result;
@@ -216,9 +256,31 @@ RawComponentModelExportResult _failComponentModelExport(std::string error) {
 
 // Keeps the BOARD alive (owned by the context) for as long as the caller needs it.
 struct LoadedBoard {
+    // SETTINGS_MANAGER, Pgm(), wxWidgets initialization, and several KiCad caches are process-wide
+    // mutable state.  Keep the lock for the complete lifetime of the loaded BOARD, not merely for
+    // LoadBoard(), because callers continue consulting its PROJECT and those caches afterwards.
+    std::unique_lock<std::mutex> lock;
     std::shared_ptr<HEADLESS_PCB_CONTEXT> context;
     BOARD* board = nullptr;
 };
+
+std::mutex g_kicadMutex;
+
+// Caches the most recently loaded board so that a burst of queries against the same
+// (projectPath, boardPath) -- e.g. resolvePin() called once per pin while resolving ports --
+// reparses neither file after the first call. Invalidated by path mismatch or either file's mtime
+// changing (e.g. the user re-saves the board in KiCad), so callers never see stale geometry.
+// Guarded by g_kicadMutex, same as everything else that touches KiCad's process-wide state.
+struct BoardCacheEntry {
+    std::string projectPath;
+    std::string boardPath;
+    std::filesystem::file_time_type projectMTime;
+    std::filesystem::file_time_type boardMTime;
+    std::shared_ptr<HEADLESS_PCB_CONTEXT> context;
+    BOARD* board = nullptr;
+};
+
+std::optional<BoardCacheEntry> g_boardCache;
 
 // Shared board-loading sequence: wx init, SETTINGS_MANAGER project load, PCB_IO_KICAD_SEXPR board
 // load, HEADLESS_PCB_CONTEXT construction (this is what wires BOARD::SetProject(), needed before
@@ -229,11 +291,38 @@ struct LoadedBoard {
 // KICAD_SEXP.
 std::optional<LoadedBoard> _loadBoard(const std::string& projectPath, const std::string& boardPath,
                                        std::string& error) {
+    std::unique_lock<std::mutex> lock(g_kicadMutex);
+
     bool wxInitialized = _ensureWxInitialized();
     if (!wxInitialized) {
         error = "wxInitialize failed";
         return std::nullopt;
     }
+
+    std::error_code projectMTimeError;
+    std::error_code boardMTimeError;
+    const std::filesystem::file_time_type projectMTime =
+            std::filesystem::last_write_time(projectPath, projectMTimeError);
+    const std::filesystem::file_time_type boardMTime = std::filesystem::last_write_time(boardPath, boardMTimeError);
+
+    if (!projectMTimeError && !boardMTimeError && g_boardCache && g_boardCache->projectPath == projectPath &&
+        g_boardCache->boardPath == boardPath && g_boardCache->projectMTime == projectMTime &&
+        g_boardCache->boardMTime == boardMTime) {
+        LoadedBoard result;
+        result.lock = std::move(lock);
+        result.context = g_boardCache->context;
+        result.board = g_boardCache->board;
+        return result;
+    }
+
+    // Drop any stale cache entry before touching SETTINGS_MANAGER: it holds exactly one active
+    // PROJECT, so LoadProject() below may silently unload and delete a different
+    // previously-loaded project out from under a cached BOARD that still points at it (KiCad has
+    // no "no MDI yet" concept of multiple simultaneously-loaded projects). Releasing our own
+    // reference first runs HEADLESS_PCB_CONTEXT's (and BOARD::ClearProject's) cleanup while that
+    // PROJECT is still the one SETTINGS_MANAGER has live, instead of after LoadProject has already
+    // freed it out from under us.
+    g_boardCache.reset();
 
     SETTINGS_MANAGER& settingsManager = Pgm().GetSettingsManager();
     wxString wxProjectPath = wxString::FromUTF8(projectPath);
@@ -265,7 +354,15 @@ std::optional<LoadedBoard> _loadBoard(const std::string& projectPath, const std:
         return std::nullopt;
     }
 
+    g_boardCache = BoardCacheEntry{.projectPath = projectPath,
+                                    .boardPath = boardPath,
+                                    .projectMTime = projectMTime,
+                                    .boardMTime = boardMTime,
+                                    .context = context,
+                                    .board = boardPtr};
+
     LoadedBoard result;
+    result.lock = std::move(lock);
     result.context = std::move(context);
     result.board = boardPtr;
     return result;
@@ -327,17 +424,30 @@ void _forEachPolygonLoop(const SHAPE_POLY_SET& polygons, const VECTOR2I& auxOrig
 
 void _appendCopperPolygons(const SHAPE_POLY_SET& polygons, const VECTOR2I& auxOrigin,
                            const std::string& netName, const std::string& layerName,
-                           std::vector<CopperPolygon>& destination) {
+                           bool zone, std::vector<CopperPolygon>& destination,
+                           const std::string& footprintRef = {}, const std::string& padNumber = {}) {
     _forEachPolygonLoop(polygons, auxOrigin, [&](PolygonLoop loop) {
         CopperPolygon polygon;
         polygon.netName = netName;
         polygon.copperLayerName = layerName;
+        polygon.zone = zone;
+        polygon.footprintRef = footprintRef;
+        polygon.padNumber = padNumber;
         polygon.loop = std::move(loop);
         destination.push_back(std::move(polygon));
     });
 }
 
 } // namespace
+
+bool initializeRaw(std::string& error) {
+    std::lock_guard<std::mutex> lock(g_kicadMutex);
+    if (!_ensureWxInitialized()) {
+        error = "KiCad/wx runtime initialization failed";
+        return false;
+    }
+    return true;
+}
 
 RawPadCountsResult countPadsRaw(const std::string& projectPath, const std::string& boardPath) {
     ensureGeneratorsRegistered();
@@ -412,6 +522,43 @@ RawNetNameResult netForFootprintPinRaw(const std::string& projectPath, const std
     return result;
 }
 
+RawNetNameResult netClassForNetRaw(const std::string& projectPath, const std::string& boardPath,
+                                    const std::string& netName) {
+    std::string error;
+    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    if (!loaded) {
+        return _failNetName(std::move(error));
+    }
+
+    BOARD* board = loaded->board;
+    // Resolve pattern, label, and composite assignments before asking the net for its
+    // effective class.  A freshly loaded board otherwise commonly reports Default here.
+    board->SynchronizeNetsAndNetClasses(/* aResetTrackAndViaSizes = */ false);
+
+    const wxString requestedName = wxString::FromUTF8(netName);
+    for (NETINFO_ITEM* net : board->GetNetInfo()) {
+        if (net->GetNetCode() == NETINFO_LIST::UNCONNECTED || net->GetNetname() != requestedName) {
+            continue;
+        }
+        RawNetNameResult result;
+        result.ok = true;
+        if (const NETCLASS* netClass = net->GetNetClass()) {
+            // An effective class may be a synthesized aggregate such as "GND,Default".  That
+            // aggregate is not itself a selectable class (ContainsNetclassWithName only matches
+            // its real constituents), so report the highest-priority constituent.  KiCad keeps
+            // this vector in priority order; a single-class net simply contains itself.
+            for (const NETCLASS* constituent : netClass->GetConstituentNetclasses()) {
+                if (constituent != nullptr) {
+                    result.netName = constituent->GetName().ToStdString();
+                    break;
+                }
+            }
+        }
+        return result;
+    }
+    return _failNetName("No net named \"" + netName + "\" exists on the board");
+}
+
 RawPadResult resolvePinRaw(const std::string& projectPath, const std::string& boardPath,
                             const std::string& footprintRef, const std::string& pin) {
     std::string error;
@@ -435,12 +582,13 @@ RawPadResult resolvePinRaw(const std::string& projectPath, const std::string& bo
     result.pad.footprintRef = footprintRef;
     result.pad.padNumber = pad->GetNumber().ToStdString();
     result.pad.netName = pad->GetNetname().ToStdString();
+    result.pad.pinType = pad->GetPinType().ToStdString();
     result.pad.xMm = pcbIUScale.IUTomm(position.x);
     // KiCad's internal coordinate system has Y increasing downward; Gerber/pos.csv exports (and
     // this whole pipeline's own native frame, built entirely from those exports) have Y increasing
     // upward. kicad-cli's own exporters apply this flip internally; PAD::GetPosition() returns the
     // raw internal value, so it has to be negated here to land in the same frame as everything
-    // else libkicad_query's callers consume. Confirmed empirically against a real board: a pad's
+    // else libkicad's callers consume. Confirmed empirically against a real board: a pad's
     // libkicad-reported Y was the exact negation of its Gerber-file Y at the same physical spot.
     result.pad.yMm = -pcbIUScale.IUTomm(position.y);
     result.pad.orientationDeg = pad->GetOrientation().AsDegrees();
@@ -513,6 +661,7 @@ RawPadsOnNetResult padsOnNetRaw(const std::string& projectPath, const std::strin
             padPosition.footprintRef = footprint->GetReference().ToStdString();
             padPosition.padNumber = pad->GetNumber().ToStdString();
             padPosition.netName = netName;
+            padPosition.pinType = pad->GetPinType().ToStdString();
             padPosition.xMm = pcbIUScale.IUTomm(position.x);
             // Y flip: see the identical comment in resolvePinRaw().
             padPosition.yMm = -pcbIUScale.IUTomm(position.y);
@@ -577,6 +726,7 @@ RawPadsOnNetResult allPadsRaw(const std::string& projectPath, const std::string&
             padPosition.footprintRef = footprint->GetReference().ToStdString();
             padPosition.padNumber = pad->GetNumber().ToStdString();
             padPosition.netName = pad->GetNetname().ToStdString();
+            padPosition.pinType = pad->GetPinType().ToStdString();
             padPosition.xMm = pcbIUScale.IUTomm(position.x);
             padPosition.yMm = -pcbIUScale.IUTomm(position.y);
             padPosition.orientationDeg = pad->GetOrientation().AsDegrees();
@@ -603,12 +753,7 @@ RawAllTracksResult allTracksRaw(const std::string& projectPath, const std::strin
     RawAllTracksResult result;
     result.ok = true;
     const VECTOR2I auxOrigin = board->GetDesignSettings().GetAuxOrigin();
-    for (PCB_TRACK* track : board->Tracks()) {
-        if (track->Type() != PCB_TRACE_T) {
-            continue; // see tracksOnNetRaw()'s own comment: vias/arcs excluded
-        }
-        const VECTOR2I start = track->GetStart() - auxOrigin;
-        const VECTOR2I end = track->GetEnd() - auxOrigin;
+    const auto appendSegment = [&](PCB_TRACK* track, const VECTOR2I& start, const VECTOR2I& end) {
         TrackSegment segment;
         segment.startXMm = pcbIUScale.IUTomm(start.x);
         segment.startYMm = -pcbIUScale.IUTomm(start.y);
@@ -617,6 +762,48 @@ RawAllTracksResult allTracksRaw(const std::string& projectPath, const std::strin
         segment.widthMm = pcbIUScale.IUTomm(track->GetWidth());
         segment.copperLayerName = board->GetLayerName(track->GetLayer()).ToStdString();
         result.tracks.emplace_back(track->GetNetname().ToStdString(), std::move(segment));
+    };
+
+    for (PCB_TRACK* track : board->Tracks()) {
+        if (track->Type() == PCB_TRACE_T) {
+            appendSegment(track, track->GetStart() - auxOrigin, track->GetEnd() - auxOrigin);
+            continue;
+        }
+        if (track->Type() != PCB_ARC_T) {
+            continue; // Vias are returned by throughHolesRaw(), with their layer-spanning identity.
+        }
+
+        // Activity propagation needs the routed centreline, not merely the straight portions of a
+        // route. Flatten an arc finely enough that distance and direction remain visually smooth.
+        // Keep the exact KiCad endpoints so adjacent traces/vias still share bit-identical graph
+        // nodes; only the interior subdivision points are rounded back to KiCad integer units.
+        PCB_ARC* arc = static_cast<PCB_ARC*>(track);
+        const VECTOR2I center = arc->GetCenter();
+        const VECTOR2I exactStart = arc->GetStart();
+        const VECTOR2I exactEnd = arc->GetEnd();
+        const double sweep = arc->GetAngle().AsRadians();
+        const double radius = arc->GetRadius();
+        if (!std::isfinite(sweep) || !std::isfinite(radius) || radius <= 0) {
+            appendSegment(track, exactStart - auxOrigin, exactEnd - auxOrigin);
+            continue;
+        }
+        constexpr double maxStepRadians = M_PI / 36.0; // five degrees
+        const int pieceCount = std::max(1, static_cast<int>(std::ceil(std::abs(sweep) / maxStepRadians)));
+        const double startAngle = std::atan2(static_cast<double>(exactStart.y - center.y),
+                                             static_cast<double>(exactStart.x - center.x));
+        VECTOR2I previous = exactStart;
+        for (int piece = 1; piece <= pieceCount; ++piece) {
+            VECTOR2I current;
+            if (piece == pieceCount) {
+                current = exactEnd;
+            } else {
+                const double angle = startAngle + sweep * static_cast<double>(piece) / pieceCount;
+                current = VECTOR2I(static_cast<int>(std::llround(center.x + radius * std::cos(angle))),
+                                   static_cast<int>(std::llround(center.y + radius * std::sin(angle))));
+            }
+            appendSegment(track, previous - auxOrigin, current - auxOrigin);
+            previous = current;
+        }
     }
     return result;
 }
@@ -661,6 +848,114 @@ RawZonesResult zonesRaw(const std::string& projectPath, const std::string& board
                 result.zones.push_back(std::move(zoneInfo));
             }
         }
+    }
+    return result;
+}
+
+RawBoardLayersResult boardLayersRaw(const std::string& projectPath, const std::string& boardPath) {
+    std::string error;
+    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    if (!loaded) return _failBoardLayers(std::move(error));
+
+    RawBoardLayersResult result;
+    result.ok = true;
+    BOARD* board = loaded->board;
+    for (PCB_LAYER_ID layer : board->GetEnabledLayers().UIOrder()) {
+        result.layers.push_back(BoardLayerInfo{
+            board->GetLayerName(layer).ToStdString(),
+            IsCopperLayer(layer),
+            layer == F_Mask || layer == B_Mask,
+        });
+    }
+    return result;
+}
+
+RawBoardLayerGeometryResult boardLayerGeometryRaw(const std::string& projectPath,
+                                                    const std::string& boardPath,
+                                                    const std::string& layerName) {
+    std::string error;
+    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    if (!loaded) return _failBoardLayerGeometry(std::move(error));
+    BOARD* board = loaded->board;
+
+    std::optional<PCB_LAYER_ID> requestedLayer;
+    for (PCB_LAYER_ID candidate : board->GetEnabledLayers().Seq()) {
+        if (board->GetLayerName(candidate).ToStdString() == layerName) {
+            requestedLayer = candidate;
+            break;
+        }
+    }
+    if (!requestedLayer) {
+        return _failBoardLayerGeometry("Board layer is not enabled: " + layerName);
+    }
+
+    const PCB_LAYER_ID layer = *requestedLayer;
+    const VECTOR2I auxOrigin = board->GetDesignSettings().GetAuxOrigin();
+    const int maxError = board->GetDesignSettings().m_MaxError;
+    RawBoardLayerGeometryResult result;
+    result.ok = true;
+    result.geometry.layer = BoardLayerInfo{layerName, IsCopperLayer(layer),
+                                            layer == F_Mask || layer == B_Mask};
+
+    SHAPE_POLY_SET boardOutline;
+    bool haveOutline = board->GetBoardPolygonOutlines(boardOutline, false, nullptr, false, false);
+    if (!haveOutline) {
+        std::vector<PCB_SHAPE*> boardEdgeShapes;
+        for (BOARD_ITEM* drawing : board->Drawings()) {
+            if (!PCB_SHAPE::ClassOf(drawing)) continue;
+            PCB_SHAPE* shape = static_cast<PCB_SHAPE*>(drawing);
+            if (shape->GetLayer() == Edge_Cuts) boardEdgeShapes.push_back(shape);
+        }
+        boardOutline.RemoveAllContours();
+        haveOutline = !boardEdgeShapes.empty() &&
+            ConvertOutlineToPolygon(boardEdgeShapes, boardOutline, maxError,
+                                    board->GetOutlinesChainingEpsilon(), true, nullptr, false);
+    }
+    if (haveOutline) {
+        _forEachPolygonLoop(boardOutline, auxOrigin, [&](PolygonLoop loop) {
+            result.geometry.boardOutline.push_back(std::move(loop));
+        });
+    }
+
+    if (IsCopperLayer(layer)) {
+        for (PCB_TRACK* track : board->Tracks()) {
+            if (!track->IsOnLayer(layer)) continue;
+            SHAPE_POLY_SET polygons;
+            track->TransformShapeToPolygon(polygons, layer, 0, maxError, ERROR_INSIDE);
+            _appendCopperPolygons(polygons, auxOrigin, track->GetNetname().ToStdString(), layerName,
+                                  false, result.geometry.copper);
+        }
+        for (FOOTPRINT* footprint : board->Footprints()) {
+            for (PAD* pad : footprint->Pads()) {
+                if (!pad->FlashLayer(layer)) continue;
+                SHAPE_POLY_SET polygons;
+                pad->TransformShapeToPolygon(polygons, layer, 0, maxError, ERROR_INSIDE);
+                _appendCopperPolygons(polygons, auxOrigin, pad->GetNetname().ToStdString(), layerName,
+                                      false, result.geometry.copper,
+                                      footprint->GetReference().ToStdString(),
+                                      pad->GetNumber().ToStdString());
+            }
+            for (ZONE* zone : footprint->Zones()) {
+                if (!zone->GetLayerSet().Contains(layer)) continue;
+                SHAPE_POLY_SET polygons;
+                zone->TransformSolidAreasShapesToPolygon(layer, polygons);
+                _appendCopperPolygons(polygons, auxOrigin, zone->GetNetname().ToStdString(), layerName,
+                                      true, result.geometry.copper);
+            }
+        }
+        for (ZONE* zone : board->Zones()) {
+            if (!zone->GetLayerSet().Contains(layer)) continue;
+            SHAPE_POLY_SET polygons;
+            zone->TransformSolidAreasShapesToPolygon(layer, polygons);
+            _appendCopperPolygons(polygons, auxOrigin, zone->GetNetname().ToStdString(), layerName,
+                                  true, result.geometry.copper);
+        }
+    } else {
+        SHAPE_POLY_SET contours;
+        board->ConvertBrdLayerToPolygonalContours(layer, contours);
+        _forEachPolygonLoop(contours, auxOrigin, [&](PolygonLoop loop) {
+            result.geometry.contours.push_back(std::move(loop));
+        });
     }
     return result;
 }
@@ -721,7 +1016,7 @@ RawBoardGeometryResult boardGeometryRaw(const std::string& projectPath, const st
             SHAPE_POLY_SET polygons;
             track->TransformShapeToPolygon(polygons, layer, 0, maxError, ERROR_INSIDE);
             _appendCopperPolygons(polygons, auxOrigin, track->GetNetname().ToStdString(), layerName,
-                                  result.geometry.copper);
+                                  false, result.geometry.copper);
         }
 
         for (FOOTPRINT* footprint : board->Footprints()) {
@@ -732,7 +1027,8 @@ RawBoardGeometryResult boardGeometryRaw(const std::string& projectPath, const st
                 SHAPE_POLY_SET polygons;
                 pad->TransformShapeToPolygon(polygons, layer, 0, maxError, ERROR_INSIDE);
                 _appendCopperPolygons(polygons, auxOrigin, pad->GetNetname().ToStdString(), layerName,
-                                      result.geometry.copper);
+                                      false, result.geometry.copper, footprint->GetReference().ToStdString(),
+                                      pad->GetNumber().ToStdString());
             }
             for (ZONE* zone : footprint->Zones()) {
                 if (!zone->GetLayerSet().Contains(layer)) {
@@ -741,7 +1037,7 @@ RawBoardGeometryResult boardGeometryRaw(const std::string& projectPath, const st
                 SHAPE_POLY_SET polygons;
                 zone->TransformSolidAreasShapesToPolygon(layer, polygons);
                 _appendCopperPolygons(polygons, auxOrigin, zone->GetNetname().ToStdString(), layerName,
-                                      result.geometry.copper);
+                                      true, result.geometry.copper);
             }
         }
 
@@ -752,7 +1048,7 @@ RawBoardGeometryResult boardGeometryRaw(const std::string& projectPath, const st
             SHAPE_POLY_SET polygons;
             zone->TransformSolidAreasShapesToPolygon(layer, polygons);
             _appendCopperPolygons(polygons, auxOrigin, zone->GetNetname().ToStdString(), layerName,
-                                  result.geometry.copper);
+                                  true, result.geometry.copper);
         }
     }
 
@@ -767,6 +1063,70 @@ RawBoardGeometryResult boardGeometryRaw(const std::string& projectPath, const st
     _forEachPolygonLoop(backMask, auxOrigin, [&](PolygonLoop loop) {
         result.geometry.backMaskOpenings.push_back(std::move(loop));
     });
+
+    // Keep footprint ownership while asking KiCad itself to expand every glyph and stroked shape.
+    // ConvertBrdLayerToPolygonalContours normally combines both sources into one anonymous set;
+    // splitting the same operations here lets the UI mute only silk belonging to an uninvolved
+    // component. Board-level artwork deliberately keeps an empty owner.
+    const auto appendSilkscreen = [&](PCB_LAYER_ID layer, std::vector<SilkscreenPolygon>& output) {
+        for (const FOOTPRINT* footprint : board->Footprints()) {
+            SHAPE_POLY_SET polygons;
+            footprint->TransformFPShapesToPolySet(polygons, layer, 0, maxError, ERROR_INSIDE,
+                                                   true, true, false);
+            const std::string reference = footprint->GetReference().ToStdString();
+            _forEachPolygonLoop(polygons, auxOrigin, [&](PolygonLoop loop) {
+                output.push_back(SilkscreenPolygon{reference, std::move(loop)});
+            });
+        }
+
+        SHAPE_POLY_SET boardPolygons;
+        for (const BOARD_ITEM* item : board->Drawings()) {
+            if (!item->IsOnLayer(layer)) continue;
+            switch (item->Type()) {
+            case PCB_SHAPE_T:
+                static_cast<const PCB_SHAPE*>(item)->TransformShapeToPolygon(
+                        boardPolygons, layer, 0, maxError, ERROR_INSIDE);
+                break;
+            case PCB_BARCODE_T:
+                static_cast<const PCB_BARCODE*>(item)->TransformShapeToPolygon(
+                        boardPolygons, layer, 0, maxError, ERROR_INSIDE);
+                break;
+            case PCB_FIELD_T:
+            case PCB_TEXT_T:
+                static_cast<const PCB_TEXT*>(item)->TransformTextToPolySet(
+                        boardPolygons, 0, maxError, ERROR_INSIDE);
+                break;
+            case PCB_TEXTBOX_T: {
+                const PCB_TEXTBOX* textbox = static_cast<const PCB_TEXTBOX*>(item);
+                textbox->PCB_SHAPE::TransformShapeToPolygon(
+                        boardPolygons, layer, 0, maxError, ERROR_INSIDE);
+                textbox->TransformTextToPolySet(boardPolygons, 0, maxError, ERROR_INSIDE);
+                break;
+            }
+            case PCB_TABLE_T:
+                static_cast<const PCB_TABLE*>(item)->TransformGraphicItemsToPolySet(
+                        boardPolygons, maxError, ERROR_INSIDE, nullptr);
+                break;
+            case PCB_DIM_ALIGNED_T:
+            case PCB_DIM_CENTER_T:
+            case PCB_DIM_RADIAL_T:
+            case PCB_DIM_ORTHOGONAL_T:
+            case PCB_DIM_LEADER_T: {
+                const PCB_DIMENSION_BASE* dimension = static_cast<const PCB_DIMENSION_BASE*>(item);
+                dimension->TransformShapeToPolygon(boardPolygons, layer, 0, maxError, ERROR_INSIDE);
+                dimension->TransformTextToPolySet(boardPolygons, 0, maxError, ERROR_INSIDE);
+                break;
+            }
+            default:
+                break;
+            }
+        }
+        _forEachPolygonLoop(boardPolygons, auxOrigin, [&](PolygonLoop loop) {
+            output.push_back(SilkscreenPolygon{"", std::move(loop)});
+        });
+    };
+    appendSilkscreen(F_SilkS, result.geometry.frontSilkscreen);
+    appendSilkscreen(B_SilkS, result.geometry.backSilkscreen);
 
     return result;
 }
@@ -850,15 +1210,57 @@ RawLayerColorsResult layerColorsRaw(const std::string& projectPath, const std::s
 
     RawLayerColorsResult result;
     result.ok = true;
-    const BOARD_STACKUP& stackup = board->GetDesignSettings().GetStackupDescriptor();
-    for (const BOARD_STACKUP_ITEM* item : stackup.GetList()) {
-        if (!item->IsEnabled() || item->GetType() != BS_ITEM_TYPE_COPPER) {
+    for (PCB_LAYER_ID layer : board->GetEnabledLayers().UIOrder()) {
+        LayerColor layerColor;
+        layerColor.name = board->GetLayerName(layer).ToStdString();
+        layerColor.hex = colorSettings->GetColor(layer).ToHexString().ToStdString();
+        result.colors.push_back(std::move(layerColor));
+    }
+    return result;
+}
+
+RawNetColorsResult netColorsRaw(const std::string& projectPath, const std::string& boardPath) {
+    std::string error;
+    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    if (!loaded) {
+        return _failNetColors(std::move(error));
+    }
+    BOARD* board = loaded->board;
+    PROJECT* project = board->GetProject();
+    if (project == nullptr) {
+        return _failNetColors("Board has no linked project -- net colors require a sibling .kicad_pro");
+    }
+
+    // Resolve pattern/label/composite net classes before asking each net for its effective class,
+    // matching KiCad's board-loader and PCB painter path.
+    board->SynchronizeNetsAndNetClasses(/* aResetTrackAndViaSizes = */ false);
+    const std::shared_ptr<NET_SETTINGS>& settings = project->GetProjectFile().NetSettings();
+    if (!settings) {
+        return _failNetColors("Project has no net settings");
+    }
+    const auto& explicitColors = settings->GetNetColorAssignments();
+
+    RawNetColorsResult result;
+    result.ok = true;
+    for (NETINFO_ITEM* net : board->GetNetInfo()) {
+        if (net->GetNetCode() == NETINFO_LIST::UNCONNECTED) {
             continue;
         }
-        LayerColor layerColor;
-        layerColor.name = board->GetLayerName(item->GetBrdLayerId()).ToStdString();
-        layerColor.hex = colorSettings->GetColor(item->GetBrdLayerId()).ToHexString().ToStdString();
-        result.colors.push_back(std::move(layerColor));
+
+        const wxString& name = net->GetNetname();
+        KIGFX::COLOR4D color = KIGFX::COLOR4D::UNSPECIFIED;
+        if (const auto it = explicitColors.find(name);
+            it != explicitColors.end() && it->second != KIGFX::COLOR4D::UNSPECIFIED) {
+            color = it->second;
+        } else if (const NETCLASS* netClass = net->GetNetClass();
+                   netClass != nullptr && netClass->HasPcbColor()) {
+            color = netClass->GetPcbColor();
+        }
+
+        if (color != KIGFX::COLOR4D::UNSPECIFIED) {
+            result.colors.push_back(NetColor{.name = name.ToStdString(),
+                                              .hex = color.ToHexString().ToStdString()});
+        }
     }
     return result;
 }
@@ -934,6 +1336,7 @@ RawFootprintsResult footprintsRaw(const std::string& projectPath, const std::str
             pin.number = pad->GetNumber().ToStdString();
             pin.function = pad->GetPinFunction().ToStdString();
             pin.netName = pad->GetNetname().ToStdString();
+            pin.pinType = pad->GetPinType().ToStdString();
             info.pins.push_back(std::move(pin));
         }
         result.footprints.push_back(std::move(info));
@@ -1084,7 +1487,8 @@ RawComponentModelExportResult exportComponentModelsRaw(const std::string& projec
         result.result.triangles.reserve(rawTriangles.size());
         for (const STEP_COMPONENT_TRIANGLE& t : rawTriangles) {
             result.result.triangles.push_back(ComponentTriangle{
-                    t.ax, t.ay, t.az, t.bx, t.by, t.bz, t.cx, t.cy, t.cz, t.r, t.g, t.b, t.a});
+                    t.ax, t.ay, t.az, t.bx, t.by, t.bz, t.cx, t.cy, t.cz, t.r, t.g, t.b, t.a,
+                    t.footprintReference});
         }
         result.result.topCopperZMm = exporter.GetTopCopperZ();
     }

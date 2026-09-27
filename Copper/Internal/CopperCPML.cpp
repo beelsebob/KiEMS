@@ -4,7 +4,7 @@
 #include <array>
 #include <cmath>
 
-#include "tools/constants.h"
+#include "CopperPhysicalConstants.hpp"
 
 namespace copper {
 
@@ -55,25 +55,25 @@ struct BaseGrading {
     double dl = 0;
 };
 
-BaseGrading computeBaseGrading(Operator& op, std::uint32_t pmlDepthCells, int axis, const unsigned int pos[3]) {
+BaseGrading computeBaseGrading(CopperOperator& op, std::uint32_t pmlDepthCells, int axis, const unsigned int pos[3]) {
     BaseGrading g;
     if (pmlDepthCells == 0) {
         return g;
     }
-    const auto totalLines = static_cast<unsigned int>(op.GetNumberOfLines(axis, true));
+    const auto totalLines = static_cast<unsigned int>(op.numberOfLines(axis));
     if (pos[axis] <= pmlDepthCells) {
         g.inPML = true;
         g.lower = true;
-        g.width = (op.GetDiscLine(axis, pmlDepthCells) - op.GetDiscLine(axis, 0)) * op.GetGridDelta();
-        g.depth = g.width - (op.GetDiscLine(axis, pos[axis]) - op.GetDiscLine(axis, 0)) * op.GetGridDelta();
+        g.width = (op.discLine(axis, pmlDepthCells) - op.discLine(axis, 0)) * op.gridDeltaMetres();
+        g.depth = g.width - (op.discLine(axis, pos[axis]) - op.discLine(axis, 0)) * op.gridDeltaMetres();
         g.dl = g.width / pmlDepthCells;
     } else if (pos[axis] >= totalLines - 1 - pmlDepthCells) {
         g.inPML = true;
         g.lower = false;
-        g.width = (op.GetDiscLine(axis, totalLines - 1) - op.GetDiscLine(axis, totalLines - pmlDepthCells - 1)) *
-                   op.GetGridDelta();
+        g.width = (op.discLine(axis, totalLines - 1) - op.discLine(axis, totalLines - pmlDepthCells - 1)) *
+                   op.gridDeltaMetres();
         g.depth =
-            g.width - (op.GetDiscLine(axis, totalLines - 1) - op.GetDiscLine(axis, pos[axis])) * op.GetGridDelta();
+            g.width - (op.discLine(axis, totalLines - 1) - op.discLine(axis, pos[axis])) * op.gridDeltaMetres();
         g.dl = g.width / pmlDepthCells;
     }
     return g;
@@ -84,13 +84,13 @@ BaseGrading computeBaseGrading(Operator& op, std::uint32_t pmlDepthCells, int ax
 /// mirroring the second half of CalcGradingKappa(), since this is Yee-staggering geometry shared by
 /// both UPML and CPML, not specific to either. `axis` is the grading axis; `ny` is the field
 /// component axis being updated.
-Grading finishGrading(const BaseGrading& base, Operator& op, int axis, const unsigned int pos[3], bool isVSide,
+Grading finishGrading(const BaseGrading& base, CopperOperator& op, int axis, const unsigned int pos[3], bool isVSide,
                        int ny, double alphaMax) {
     if (!base.inPML) {
         return {0, 0};
     }
     double depth = base.depth;
-    const double half = op.GetEdgeLength(axis, pos) / 2;
+    const double half = op.edgeLength(axis, pos) / 2;
     const bool matches = (axis == ny);
     if (base.lower) {
         if (isVSide) {
@@ -122,11 +122,11 @@ Grading finishGrading(const BaseGrading& base, Operator& op, int axis, const uns
     if (depth <= 0) {
         return {0, 0};
     }
-    const double sigma = defaultSigmaGrading(depth, base.dl, base.width, Z0);
+    const double sigma = defaultSigmaGrading(depth, base.dl, base.width, physical::impedance0);
     return {sigma, sigma + alphaGrading(depth, base.width, alphaMax)};
 }
 
-void calcGrading(Operator& op, std::uint32_t pmlDepthCells, int ny, const unsigned int pos[3], bool isVSide,
+void calcGrading(CopperOperator& op, std::uint32_t pmlDepthCells, int ny, const unsigned int pos[3], bool isVSide,
                   double alphaMax, Grading out[3]) {
     for (int axis = 0; axis < 3; ++axis) {
         const BaseGrading base = computeBaseGrading(op, pmlDepthCells, axis, pos);
@@ -145,14 +145,14 @@ void computeBC(const Grading& g, double dT, float& b, float& c) {
         c = 0.0F;
         return;
     }
-    const double bd = std::exp(-sigmaEff * dT / EPS0);
+    const double bd = std::exp(-sigmaEff * dT / physical::epsilon0);
     b = static_cast<float>(bd);
     c = static_cast<float>(g.sigma * (bd - 1.0) / sigmaEff);
 }
 
 } // namespace
 
-std::vector<CopperCPMLShell> buildCPMLShells(Operator& op, double alphaMax, std::uint32_t pmlDepthCells) {
+std::vector<CopperCPMLShell> buildCPMLShells(CopperOperator& op, double alphaMax, std::uint32_t pmlDepthCells) {
     std::vector<CopperCPMLShell> shells;
     if (pmlDepthCells == 0) {
         return shells;
@@ -161,9 +161,9 @@ std::vector<CopperCPMLShell> buildCPMLShells(Operator& op, double alphaMax, std:
     // domainN{x,y,z}, not n{x,y,z} -- "ny" specifically is already the field-component-axis
     // parameter name used throughout this file's own grading helpers (calcGrading() et al.), and the
     // per-cell loop below needs its own local `ny` with that same meaning.
-    const auto domainNx = static_cast<std::uint32_t>(op.GetNumberOfLines(0, true));
-    const auto domainNy = static_cast<std::uint32_t>(op.GetNumberOfLines(1, true));
-    const auto domainNz = static_cast<std::uint32_t>(op.GetNumberOfLines(2, true));
+    const auto domainNx = static_cast<std::uint32_t>(op.numberOfLines(0));
+    const auto domainNy = static_cast<std::uint32_t>(op.numberOfLines(1));
+    const auto domainNz = static_cast<std::uint32_t>(op.numberOfLines(2));
     // kiems's own grid generation (grid_gen.cpp's _extendPMLBand()/GridGeneratorAxis::
     // compileGrid()) always reserves at least pmlDepthCells dedicated cells on every face -- this
     // should never actually trigger, but a shell narrower than the domain it claims to span would
@@ -229,7 +229,7 @@ std::vector<CopperCPMLShell> buildCPMLShells(Operator& op, double alphaMax, std:
             shell.psiH1[axis].assign(localCellCount, 0.0F);
         }
 
-        const double dT = op.GetTimestep();
+        const double dT = op.timestepSeconds();
         unsigned int pos[3];
         for (unsigned int lz = 0; lz < shell.dims.nz; ++lz) {
             pos[2] = lz + shell.startZ;

@@ -37,6 +37,7 @@
 #include <CSPropMetal.h>
 #include <CSPropProbeBox.h>
 #include <CSPrimBox.h>
+#include <CSPrimLinPoly.h>
 #include <CSPrimPolygon.h>
 #include <CSRectGrid.h>
 #include <ContinuousStructure.h>
@@ -48,7 +49,7 @@
 #include "Internal/CopperExcitation.hpp"
 #include "tools/constants.h" // EPS0/MUE0, for Phase 4c's independent cross-check of estimateEnergy()
 #include "Internal/CopperOpenEMSAccess.hpp"
-#include "Internal/CopperPML.hpp"
+#include "Internal/CopperOperator.hpp"
 #include "Internal/CopperProbes.hpp"
 #include "Internal/CopperYeeGrid.hpp"
 
@@ -176,6 +177,52 @@ ContinuousStructure* buildPecPaintFixture() {
     return csx;
 }
 
+/// Regression fixture for a real bug: CSPrimPolygon/CSPrimLinPoly::IsInside() quick-rejects against
+/// its own cached m_BoundBox member (see CSPrimPolygon::IsInside()'s own "m_BoundBox[2*n]>Coord[n]"
+/// checks), which is populated *only* by ContinuousStructure::Update() (called as a side effect of
+/// openEMS::SetupFDTD() -- see CopperOperator's own constructor doc comment for why it now calls
+/// csx.Update() itself unconditionally, which is exactly what this fixture exists to prove matters).
+/// Deliberately different from buildPecPaintFixture()'s own zero-thickness, domain-boundary-elevation
+/// polygon: that one's PEC-painting effect is masked by the domain's own outer PEC boundary condition
+/// being applied at the exact same location, so it stays bit-exact whether or not the polygon paints
+/// anything at all -- confirmed empirically (temporarily disabling CopperOperator's own csx.Update()
+/// call left Phase 0c's own comparison at 0 mismatches). This fixture instead extrudes a real,
+/// volumetric copper trace (CSPrimLinPoly, matching how kiems's own gerber-derived traces are built --
+/// see libkiems/kiems/csx_helpers.cpp's own addLinPoly()) entirely in the domain's *interior*, with
+/// Open (MUR) boundaries on every face, so the trace's own PEC painting is the only source of any
+/// non-background coefficient anywhere in the grid -- if IsInside() silently never matches, every
+/// cell reads back as plain vacuum instead, a difference this fixture's own comparison can actually see.
+ContinuousStructure* buildInteriorLinPolyTraceFixture() {
+    auto* csx = new ContinuousStructure();
+    CSRectGrid* grid = csx->GetGrid();
+    grid->SetDeltaUnit(1e-3);
+    for (int axis = 0; axis < 3; ++axis) {
+        for (int i = 0; i <= 8; ++i) {
+            grid->AddDiscLine(axis, static_cast<double>(i));
+        }
+    }
+
+    auto* metal = new CSPropMetal(csx->GetParameterSet());
+    metal->SetName("interior_trace_metal");
+    csx->AddProperty(metal);
+    auto* trace = new CSPrimLinPoly(metal->GetParameterSet(), metal);
+    trace->ClearCoords();
+    trace->AddCoord(2.0);
+    trace->AddCoord(2.0);
+    trace->AddCoord(6.0);
+    trace->AddCoord(2.0);
+    trace->AddCoord(6.0);
+    trace->AddCoord(6.0);
+    trace->AddCoord(2.0);
+    trace->AddCoord(6.0);
+    trace->SetNormDir(2);
+    trace->SetElevation(3.0); // well clear of the z=0/z=8 domain boundaries
+    trace->SetLength(2.0);    // extrudes to z=5.0 -- a real volumetric slab, not a bare sheet
+    trace->SetPriority(10);
+
+    return csx;
+}
+
 /// TEMPORARY diagnostic fixture: same PEC vacuum cavity shape as buildPecCavityNoExcitation(), but
 /// at the real Keyboard Hub board's own length scale -- SetDeltaUnit(1e-6) (1 micron, not 1mm) and
 /// 50-native-unit (50 micron) cell spacing, matching that board's own near-port cell size -- to
@@ -193,27 +240,6 @@ ContinuousStructure* buildPecPaintFixture() {
     grid->AddDiscLine(2, 0.0);
     grid->AddDiscLine(2, 50.0);
     grid->AddDiscLine(2, 100.0);
-    return csx;
-}
-
-/// A wider vacuum box (40 lines in x, instead of buildPecCavityNoExcitation()'s 10) with PML on the
-/// x-min/x-max faces and PEC everywhere else, no excitation box -- used for Phase 3's CPU-vs-GPU PML
-/// parity check. Needs to be wide enough that Operator_Ext_UPML::Create_UPML doesn't fall back to
-/// PEC (its own guard requires the combined PML depth on an axis to be strictly less than that
-/// axis's own line count; 8+8=16 against 40 lines leaves a comfortable margin).
-ContinuousStructure* buildPmlCavityNoExcitation() {
-    auto* csx = new ContinuousStructure();
-    CSRectGrid* grid = csx->GetGrid();
-    grid->SetDeltaUnit(1e-3);
-    for (int i = 0; i <= 40; ++i) {
-        grid->AddDiscLine(0, static_cast<double>(i));
-    }
-    for (int i = 0; i <= 10; ++i) {
-        grid->AddDiscLine(1, static_cast<double>(i));
-    }
-    grid->AddDiscLine(2, 0.0);
-    grid->AddDiscLine(2, 1.0);
-    grid->AddDiscLine(2, 2.0);
     return csx;
 }
 
@@ -293,6 +319,41 @@ ContinuousStructure* buildProbeFixture() {
     iBox->SetCoord(3, 7.0);
     iBox->SetCoord(4, 0.5);
     iBox->SetCoord(5, 0.5);
+
+    return csx;
+}
+
+/// buildPecCavityNoExcitation()'s same domain, plus a single-cell PARALLEL lumped R/C element
+/// oriented along z, spanning the same single (5,5,0) cell buildPecCavityNoExcitation's own
+/// hand-seeded-impulse fixtures use -- exercises CopperOperator::computeParallelLumpedElements()'s
+/// EC_C/EC_G-folding path against the real Operator_Ext_LumpedRLC's own PARALLEL branch.
+ContinuousStructure* buildParallelLumpedFixture() {
+    auto* csx = new ContinuousStructure();
+    CSRectGrid* grid = csx->GetGrid();
+    grid->SetDeltaUnit(1e-3);
+    for (int i = 0; i <= 10; ++i) {
+        grid->AddDiscLine(0, static_cast<double>(i));
+        grid->AddDiscLine(1, static_cast<double>(i));
+    }
+    grid->AddDiscLine(2, 0.0);
+    grid->AddDiscLine(2, 1.0);
+    grid->AddDiscLine(2, 2.0);
+
+    auto* lumped = new CSPropLumpedElement(csx->GetParameterSet());
+    lumped->SetName("test_parallel");
+    lumped->SetDirection(2);
+    lumped->SetLEtype(CSPropLumpedElement::PARALLEL);
+    lumped->SetCaps(true);
+    lumped->SetResistance(75.0);
+    lumped->SetCapacity(2e-12);
+    csx->AddProperty(lumped);
+    auto* box = new CSPrimBox(lumped->GetParameterSet(), lumped);
+    box->SetCoord(0, 5.0);
+    box->SetCoord(1, 5.0);
+    box->SetCoord(2, 5.0);
+    box->SetCoord(3, 5.0);
+    box->SetCoord(4, 0.0);
+    box->SetCoord(5, 1.0);
 
     return csx;
 }
@@ -393,6 +454,264 @@ int main() {
         }
         std::printf("Phase 0b: CalcPEC paint cache matches legacy lookup (%u/%u/%u PEC edges)\n",
                     paintedMetal[0], paintedMetal[1], paintedMetal[2]);
+
+        // --- Phase 0c: CopperOperator vs. the real Operator on this richer fixture -- overlapping
+        // metal box, metal polygon, and material box at different priorities, exercising the
+        // rasterization pass's actual material/PEC resolution (Phase 1b's own tinyVacuumGrid fixture
+        // has no CSPropMaterial/CSPropMetal primitives at all, so it never touches that path). ---
+        {
+            copper::CopperOperator::Config config;
+            for (auto& side : config.boundary) {
+                side = copper::CopperOperator::BoundaryType::PEC;
+            }
+            config.f0 = 2.5e9;
+            config.fc = 2.5e9;
+            config.maxTimesteps = 10;
+            copper::CopperOperator newPecOp(*buildPecPaintFixture(), config);
+
+            if (newPecOp.dims().nx != pecOp->GetNumberOfLines(0) || newPecOp.dims().ny != pecOp->GetNumberOfLines(1) ||
+                newPecOp.dims().nz != pecOp->GetNumberOfLines(2)) {
+                fail("Phase 0c: CopperOperator dims don't match the real Operator's own for the richer fixture");
+            }
+            std::size_t mismatches = 0;
+            float maxAbsDiff = 0.0F;
+            for (unsigned int axis = 0; axis < 3; ++axis) {
+                for (unsigned int z = 0; z < newPecOp.dims().nz; ++z) {
+                    for (unsigned int y = 0; y < newPecOp.dims().ny; ++y) {
+                        for (unsigned int x = 0; x < newPecOp.dims().nx; ++x) {
+                            const std::uint32_t idx = copper::copperGridIndex(newPecOp.dims(), x, y, z);
+                            const auto& g = newPecOp.grid();
+                            const float refVV = pecOp->GetVV(axis, x, y, z);
+                            const float refVI = pecOp->GetVI(axis, x, y, z);
+                            const float refII = pecOp->GetII(axis, x, y, z);
+                            const float refIV = pecOp->GetIV(axis, x, y, z);
+                            maxAbsDiff = std::max({maxAbsDiff, std::fabs(g.vv[axis][idx] - refVV),
+                                                    std::fabs(g.ii[axis][idx] - refII)});
+                            if (g.vv[axis][idx] != refVV || g.ii[axis][idx] != refII ||
+                                std::fabs(g.vi[axis][idx] - refVI) > 1e-4F * std::max(std::fabs(refVI), 1.0F) ||
+                                std::fabs(g.iv[axis][idx] - refIV) > 1e-4F * std::max(std::fabs(refIV), 1.0F)) {
+                                ++mismatches;
+                                if (mismatches <= 10) {
+                                    std::printf("  Phase 0c mismatch axis=%u (%u,%u,%u): vv %f vs %f | vi %e vs %e | "
+                                                "ii %f vs %f | iv %e vs %e\n",
+                                                axis, x, y, z, static_cast<double>(g.vv[axis][idx]),
+                                                static_cast<double>(refVV), static_cast<double>(g.vi[axis][idx]),
+                                                static_cast<double>(refVI), static_cast<double>(g.ii[axis][idx]),
+                                                static_cast<double>(refII), static_cast<double>(g.iv[axis][idx]),
+                                                static_cast<double>(refIV));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            std::printf("Phase 0c: coefficient comparison over %ux%ux%u cells x 3 axes, max|diff| = %e, %zu "
+                        "mismatch(es)\n",
+                        newPecOp.dims().nx, newPecOp.dims().ny, newPecOp.dims().nz, static_cast<double>(maxAbsDiff),
+                        mismatches);
+            if (mismatches > 0) {
+                fail("Phase 0c: CopperOperator's material/PEC resolution diverges from the real Operator's own on "
+                     "the richer fixture");
+            }
+        }
+
+        // --- Phase 0cc: CopperOperator vs. the real Operator on an interior, volumetric
+        // CSPrimLinPoly trace -- see buildInteriorLinPolyTraceFixture()'s own doc comment for why
+        // Phase 0c's own polygon fixture doesn't actually exercise this (its polygon sits exactly on
+        // the domain's own PEC boundary, masking the difference). MUR on every face here specifically
+        // so the trace's own PEC painting is the *only* source of any non-vacuum coefficient. ---
+        {
+            copper::CopperOpenEMS linPolyFdtd;
+            linPolyFdtd.SetCSX(buildInteriorLinPolyTraceFixture());
+            linPolyFdtd.SetGaussExcite(2.5e9, 2.5e9);
+            for (int side = 0; side < 6; ++side) {
+                linPolyFdtd.Set_BC_Type(side, 2); // MUR
+            }
+            linPolyFdtd.SetNumberOfTimeSteps(10);
+            if (linPolyFdtd.SetupFDTD() != 0) {
+                fail("Phase 0cc fixture: openEMS::SetupFDTD() returned non-zero");
+            }
+            Operator* linPolyOp = linPolyFdtd.GetOperatorForGPU();
+            if (linPolyOp == nullptr) {
+                fail("Phase 0cc fixture: GetOperatorForGPU() returned null");
+            }
+
+            copper::CopperOperator::Config config; // boundary stays Open (MUR) on every face
+            config.f0 = 2.5e9;
+            config.fc = 2.5e9;
+            config.maxTimesteps = 10;
+            copper::CopperOperator newLinPolyOp(*buildInteriorLinPolyTraceFixture(), config);
+
+            if (newLinPolyOp.dims().nx != linPolyOp->GetNumberOfLines(0) ||
+                newLinPolyOp.dims().ny != linPolyOp->GetNumberOfLines(1) ||
+                newLinPolyOp.dims().nz != linPolyOp->GetNumberOfLines(2)) {
+                fail("Phase 0cc: CopperOperator dims don't match the real Operator's own for the LinPoly fixture");
+            }
+            // Deliberately excludes the outermost line on every axis: real openEMS's own MUR boundary
+            // type (2) zeroes vv/vi right at the domain edge itself (MUR's classic one-way-wave
+            // update replaces the standard leapfrog update there entirely, applied by a separate
+            // mechanism this class doesn't reimplement -- see CopperOperator::BoundaryType's own doc
+            // comment for why `Open` here deliberately leaves the *host medium* (vacuum) coefficients
+            // untouched instead: kiems's own real CPML shells assume exactly that, additively
+            // correcting a real, un-zeroed vacuum medium -- see CopperCPML.hpp's own top comment).
+            // That's an intentional, pre-existing architectural difference at the outer boundary
+            // faces, not a bug -- confirmed separately by inspection, not something this fixture is
+            // meant to catch. Restricting to the interior isolates just the trace's own PEC painting,
+            // which is what this fixture actually exists to regression-test.
+            std::size_t mismatches = 0;
+            std::size_t nonVacuumCount = 0;
+            float maxAbsDiff = 0.0F;
+            for (unsigned int axis = 0; axis < 3; ++axis) {
+                for (unsigned int z = 1; z + 1 < newLinPolyOp.dims().nz; ++z) {
+                    for (unsigned int y = 1; y + 1 < newLinPolyOp.dims().ny; ++y) {
+                        for (unsigned int x = 1; x + 1 < newLinPolyOp.dims().nx; ++x) {
+                            const std::uint32_t idx = copper::copperGridIndex(newLinPolyOp.dims(), x, y, z);
+                            const auto& g = newLinPolyOp.grid();
+                            const float refVV = linPolyOp->GetVV(axis, x, y, z);
+                            const float refVI = linPolyOp->GetVI(axis, x, y, z);
+                            const float refII = linPolyOp->GetII(axis, x, y, z);
+                            const float refIV = linPolyOp->GetIV(axis, x, y, z);
+                            if (refVV == 0.0F) {
+                                ++nonVacuumCount; // vv==0 is PEC's own signature (vacuum vv is exactly
+                                                    // 1.0; vacuum vi is a nonzero capacitance term, not
+                                                    // a "vacuum means zero" signal, so only vv counts)
+                            }
+                            maxAbsDiff = std::max({maxAbsDiff, std::fabs(g.vv[axis][idx] - refVV),
+                                                    std::fabs(g.ii[axis][idx] - refII)});
+                            if (g.vv[axis][idx] != refVV || g.ii[axis][idx] != refII ||
+                                std::fabs(g.vi[axis][idx] - refVI) > 1e-4F * std::max(std::fabs(refVI), 1.0F) ||
+                                std::fabs(g.iv[axis][idx] - refIV) > 1e-4F * std::max(std::fabs(refIV), 1.0F)) {
+                                ++mismatches;
+                                if (mismatches <= 15) {
+                                    std::printf("  Phase 0cc mismatch axis=%u (%u,%u,%u): vv %f vs %f | vi %e vs "
+                                                "%e | ii %f vs %f | iv %e vs %e\n",
+                                                axis, x, y, z, static_cast<double>(g.vv[axis][idx]),
+                                                static_cast<double>(refVV), static_cast<double>(g.vi[axis][idx]),
+                                                static_cast<double>(refVI), static_cast<double>(g.ii[axis][idx]),
+                                                static_cast<double>(refII), static_cast<double>(g.iv[axis][idx]),
+                                                static_cast<double>(refIV));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            std::printf("Phase 0cc: interior LinPoly trace coefficient comparison over %ux%ux%u cells x 3 axes, "
+                        "%zu non-vacuum cell(s), max|diff| = %e, %zu mismatch(es)\n",
+                        newLinPolyOp.dims().nx, newLinPolyOp.dims().ny, newLinPolyOp.dims().nz, nonVacuumCount,
+                        static_cast<double>(maxAbsDiff), mismatches);
+            if (nonVacuumCount == 0) {
+                fail("Phase 0cc: real Operator's own PEC painting never touched anything -- fixture geometry looks "
+                     "wrong, this test isn't actually checking what it claims to");
+            }
+            if (mismatches > 0) {
+                fail("Phase 0cc: CopperOperator's material/PEC resolution diverges from the real Operator's own on "
+                     "the interior LinPoly trace fixture");
+            }
+        }
+
+        // --- Phase 0d: CopperOperator's PARALLEL lumped-element EC_C/EC_G folding vs. the real
+        // Operator_Ext_LumpedRLC's own PARALLEL branch. ---
+        {
+            copper::CopperOpenEMS lumpedFdtd;
+            lumpedFdtd.SetCSX(buildParallelLumpedFixture());
+            lumpedFdtd.SetGaussExcite(2.5e9, 2.5e9);
+            for (int side = 0; side < 6; ++side) {
+                lumpedFdtd.Set_BC_Type(side, 0);
+            }
+            lumpedFdtd.SetNumberOfTimeSteps(10);
+            if (lumpedFdtd.SetupFDTD() != 0) {
+                fail("Phase 0d fixture: openEMS::SetupFDTD() returned non-zero");
+            }
+            Operator* lumpedOp = lumpedFdtd.GetOperatorForGPU();
+            if (lumpedOp == nullptr) {
+                fail("Phase 0d fixture: GetOperatorForGPU() returned null");
+            }
+
+            copper::CopperOperator::Config config;
+            for (auto& side : config.boundary) {
+                side = copper::CopperOperator::BoundaryType::PEC;
+            }
+            config.f0 = 2.5e9;
+            config.fc = 2.5e9;
+            config.maxTimesteps = 10;
+            copper::CopperOperator newLumpedOp(*buildParallelLumpedFixture(), config);
+
+            const float refVV = lumpedOp->GetVV(2, 5, 5, 0);
+            const float refVI = lumpedOp->GetVI(2, 5, 5, 0);
+            const std::uint32_t idx = copper::copperGridIndex(newLumpedOp.dims(), 5, 5, 0);
+            const float newVV = newLumpedOp.grid().vv[2][idx];
+            const float newVI = newLumpedOp.grid().vi[2][idx];
+            std::printf("Phase 0d: lumped cell vv %f vs %f | vi %e vs %e\n", static_cast<double>(newVV),
+                        static_cast<double>(refVV), static_cast<double>(newVI), static_cast<double>(refVI));
+            if (refVV == 1.0F && refVI > 0.0F && static_cast<double>(refVI) == std::round(static_cast<double>(refVI))) {
+                fail("Phase 0d fixture: real Operator's own vv/vi at the lumped cell look like plain vacuum -- "
+                     "the PARALLEL element never took effect, so this test isn't exercising anything");
+            }
+            if (newVV != refVV || std::fabs(newVI - refVI) > 1e-4F * std::max(std::fabs(refVI), 1.0F)) {
+                fail("Phase 0d: CopperOperator's PARALLEL lumped-element folding diverges from the real "
+                     "Operator_Ext_LumpedRLC's own");
+            }
+        }
+
+        // --- Phase 0e: CopperOperator's snapToMesh/snapBox2Mesh vs. the real Operator's own, using
+        // the probe fixture's own voltage (SnapToMesh) and current (SnapBox2Mesh, SnapMethod=1)
+        // boxes. ---
+        {
+            copper::CopperOpenEMS probeSnapFdtd;
+            probeSnapFdtd.SetCSX(buildProbeFixture());
+            probeSnapFdtd.SetGaussExcite(2.5e9, 2.5e9);
+            for (int side = 0; side < 6; ++side) {
+                probeSnapFdtd.Set_BC_Type(side, 0);
+            }
+            probeSnapFdtd.SetNumberOfTimeSteps(10);
+            if (probeSnapFdtd.SetupFDTD() != 0) {
+                fail("Phase 0e fixture: openEMS::SetupFDTD() returned non-zero");
+            }
+            Operator* probeSnapOp = probeSnapFdtd.GetOperatorForGPU();
+
+            copper::CopperOperator::Config config;
+            for (auto& side : config.boundary) {
+                side = copper::CopperOperator::BoundaryType::PEC;
+            }
+            config.f0 = 2.5e9;
+            config.fc = 2.5e9;
+            config.maxTimesteps = 10;
+            copper::CopperOperator newProbeSnapOp(*buildProbeFixture(), config);
+
+            // Voltage probe box: (5,5,5,5,0,1) -- SnapToMesh, primary mesh.
+            const double vStart[3] = {5.0, 5.0, 0.0};
+            unsigned int refVStart[3], newVStart[3];
+            bool refInside[3], newInside[3];
+            const bool refOk = probeSnapOp->SnapToMesh(vStart, refVStart, false, false, refInside);
+            const bool newOk = newProbeSnapOp.snapToMesh(vStart, newVStart, false, refInside);
+            if (refOk != newOk || refVStart[0] != newVStart[0] || refVStart[1] != newVStart[1] ||
+                refVStart[2] != newVStart[2]) {
+                fail("Phase 0e: CopperOperator::snapToMesh diverges from the real Operator::SnapToMesh");
+            }
+            (void)newInside;
+
+            // Current probe box: (3,7,3,7,0.5,0.5) -- SnapBox2Mesh, SnapMethod=1 (expand outward).
+            const double iStart[3] = {3.0, 3.0, 0.5};
+            const double iStop[3] = {7.0, 7.0, 0.5};
+            unsigned int refIStart[3], refIStop[3], newIStart[3], newIStop[3];
+            const int refDim = probeSnapOp->SnapBox2Mesh(iStart, iStop, refIStart, refIStop, true, false, 1);
+            const int newDim = newProbeSnapOp.snapBox2Mesh(iStart, iStop, newIStart, newIStop, true, 1);
+            if (refDim != newDim) {
+                fail("Phase 0e: CopperOperator::snapBox2Mesh's own dimension count diverges from the real "
+                     "Operator::SnapBox2Mesh's");
+            }
+            for (int n = 0; n < 3; ++n) {
+                if (refIStart[n] != newIStart[n] || refIStop[n] != newIStop[n]) {
+                    fail("Phase 0e: CopperOperator::snapBox2Mesh's snapped indices diverge from the real "
+                         "Operator::SnapBox2Mesh's");
+                }
+            }
+            std::printf("Phase 0e: snapToMesh/snapBox2Mesh match the real Operator's own (voltage box -> "
+                        "%u,%u,%u; current box -> %u,%u,%u .. %u,%u,%u)\n",
+                        newVStart[0], newVStart[1], newVStart[2], newIStart[0], newIStart[1], newIStart[2],
+                        newIStop[0], newIStop[1], newIStop[2]);
+        }
     }
 
     const unsigned int nx = op->GetNumberOfLines(0);
@@ -481,6 +800,105 @@ int main() {
         fail("excited cell's amplitude isn't a sane nonzero value");
     }
 
+    // --- Phase 1b: CopperOperator (the from-scratch openEMS-removal mesh/coefficient engine) vs.
+    // the real openEMS Operator, on an independent copy of the identical fixture geometry. This is
+    // the oracle check the openEMS-removal plan's own Phase 2 verification strategy calls for:
+    // openEMS stays linked, test-only, purely to prove the new engine matches it before anything
+    // downstream is ever pointed at CopperOperator instead.
+    {
+        copper::CopperOperator::Config config;
+        for (auto& side : config.boundary) {
+            side = copper::CopperOperator::BoundaryType::PEC;
+        }
+        config.f0 = 2.5e9;
+        config.fc = 2.5e9;
+        config.maxTimesteps = 150;
+        copper::CopperOperator newOp(*buildTinyVacuumGrid(), config);
+
+        if (newOp.dims().nx != nx || newOp.dims().ny != ny || newOp.dims().nz != nz) {
+            fail("Phase 1b: CopperOperator dims don't match the real Operator's own GetNumberOfLines");
+        }
+        const double dTRatio = newOp.timestepSeconds() / op->GetTimestep();
+        std::printf("Phase 1b: CopperOperator dT = %e s, real Operator dT = %e s (ratio %f)\n",
+                    newOp.timestepSeconds(), op->GetTimestep(), dTRatio);
+        if (!std::isfinite(dTRatio) || std::fabs(dTRatio - 1.0) > 1e-6) {
+            fail("Phase 1b: CopperOperator's own CalcTimestep_Var3 port doesn't match the real Operator's timestep");
+        }
+
+        std::size_t coeffMismatches = 0;
+        std::size_t printedMismatches = 0;
+        float maxAbsDiff = 0.0F;
+        for (unsigned int axis = 0; axis < 3; ++axis) {
+            for (unsigned int z = 0; z < nz; ++z) {
+                for (unsigned int y = 0; y < ny; ++y) {
+                    for (unsigned int x = 0; x < nx; ++x) {
+                        const std::uint32_t idx = copper::copperGridIndex(newOp.dims(), x, y, z);
+                        const float refVV = op->GetVV(axis, x, y, z);
+                        const float refVI = op->GetVI(axis, x, y, z);
+                        const float refII = op->GetII(axis, x, y, z);
+                        const float refIV = op->GetIV(axis, x, y, z);
+                        const auto& g = newOp.grid();
+                        maxAbsDiff = std::max({maxAbsDiff, std::fabs(g.vv[axis][idx] - refVV),
+                                                std::fabs(g.vi[axis][idx] - refVI), std::fabs(g.ii[axis][idx] - refII),
+                                                std::fabs(g.iv[axis][idx] - refIV)});
+                        bool mismatch = false;
+                        if (g.vv[axis][idx] != refVV || g.ii[axis][idx] != refII) {
+                            ++coeffMismatches;
+                            mismatch = true;
+                        }
+                        // vi/iv compared with tolerance (not exact): the real Operator accumulates
+                        // EC_C/EC_G/EC_L/EC_R and dT through a different (but mathematically
+                        // equivalent) sequence of double-precision operations than this from-scratch
+                        // port, so float-rounding differences at the last bit or two are expected.
+                        if (std::fabs(g.vi[axis][idx] - refVI) > 1e-4F * std::max(std::fabs(refVI), 1.0F) ||
+                            std::fabs(g.iv[axis][idx] - refIV) > 1e-4F * std::max(std::fabs(refIV), 1.0F)) {
+                            ++coeffMismatches;
+                            mismatch = true;
+                        }
+                        if (mismatch && printedMismatches < 20) {
+                            std::printf("  mismatch axis=%u (%u,%u,%u): vv %f vs %f | vi %e vs %e | ii %f vs %f | "
+                                        "iv %e vs %e\n",
+                                        axis, x, y, z, static_cast<double>(g.vv[axis][idx]), static_cast<double>(refVV),
+                                        static_cast<double>(g.vi[axis][idx]), static_cast<double>(refVI),
+                                        static_cast<double>(g.ii[axis][idx]), static_cast<double>(refII),
+                                        static_cast<double>(g.iv[axis][idx]), static_cast<double>(refIV));
+                            ++printedMismatches;
+                        }
+                    }
+                }
+            }
+        }
+        std::printf("Phase 1b: coefficient comparison over %u cells x 3 axes, max|diff| = %e, %zu mismatch(es)\n",
+                    nx * ny * nz, static_cast<double>(maxAbsDiff), coeffMismatches);
+        if (coeffMismatches > 0) {
+            fail("Phase 1b: CopperOperator's vv/vi/ii/iv coefficients diverge from the real Operator's own");
+        }
+
+        if (newOp.excitation().voltageCells.size() != excitation.voltageCells.size()) {
+            fail("Phase 1b: CopperOperator found a different number of excited cells than the real "
+                 "Operator_Ext_Excitation");
+        }
+        if (newOp.excitation().voltageSignal.size() != excitation.voltageSignal.size()) {
+            fail("Phase 1b: CopperOperator's Gaussian pulse signal length doesn't match the real Excitation's own");
+        }
+        float maxSignalDiff = 0.0F;
+        for (std::size_t i = 0; i < excitation.voltageSignal.size(); ++i) {
+            maxSignalDiff = std::max(maxSignalDiff, std::fabs(newOp.excitation().voltageSignal[i] - excitation.voltageSignal[i]));
+        }
+        std::printf("Phase 1b: excitation signal max|diff| = %e over %zu samples\n", static_cast<double>(maxSignalDiff),
+                    excitation.voltageSignal.size());
+        if (maxSignalDiff > 1e-6F) {
+            fail("Phase 1b: CopperOperator's own CalcGaussianPulsExcitation port diverges from the real Excitation's");
+        }
+        const copper::CopperExcitationCell& newCell = newOp.excitation().voltageCells.front();
+        if (newCell.x != cell.x || newCell.y != cell.y || newCell.z != cell.z || newCell.axis != cell.axis ||
+            std::fabs(newCell.amplitude - cell.amplitude) > 1e-4F * std::fabs(cell.amplitude)) {
+            fail("Phase 1b: CopperOperator's excited cell doesn't match the real Operator_Ext_Excitation's own");
+        }
+        std::printf("Phase 1b: CopperOperator matches the real openEMS Operator (dims, timestep, "
+                    "vv/vi/ii/iv, excitation)\n");
+    }
+
     // --- Phase 4a: Metal excitation kernel vs. the real CPU openEMS Engine, on the *same* grid and
     // *same* real excitation `fdtd`/`op`/`grid`/`excitation` already built above for Phase 0/1 --
     // its engine hasn't been stepped yet, so it's still a fresh, valid CPU reference here. No hand
@@ -495,7 +913,7 @@ int main() {
         if (cpuEngine == nullptr) {
             fail("Phase 4a: CopperOpenEMS::GetEngineForCPU() returned null");
         }
-        copper::CopperEngine gpuEngine(grid, {}, excitation);
+        copper::CopperEngine gpuEngine(grid, excitation);
 
         const std::uint32_t steps = 100;
         gpuEngine.run(steps);
@@ -622,112 +1040,17 @@ int main() {
         }
     }
 
-    // --- Phase 3: Metal PML boundary kernels vs. the real CPU openEMS Engine (PML enabled). ---
-    // Same CPU-vs-GPU parity methodology as Phase 2, but now with PML on the x-min/x-max faces
-    // instead of PEC everywhere. If pml_pre_e/pml_post_e/pml_pre_h/pml_post_h didn't faithfully
-    // reproduce Engine_Ext_UPML's own flux recursion, this diverges from the CPU engine as soon as
-    // the seeded impulse (placed inside the x-min PML shell itself) is touched by it. This is a
-    // strictly stronger check than the Copper implementation plan's own "reflected energy within an
-    // order of magnitude of PML_8's ~1e-6" pass criterion -- exact field parity with the real PML
-    // implementation implies correct reflection behavior, not just roughly-right magnitude.
-    {
-        copper::CopperOpenEMS pmlFdtd;
-        pmlFdtd.SetCSX(buildPmlCavityNoExcitation());
-        pmlFdtd.SetGaussExcite(2.5e9, 2.5e9);
-        pmlFdtd.Set_BC_PML(0, 8); // x-min PML, 8 cells deep
-        pmlFdtd.Set_BC_PML(1, 8); // x-max PML, 8 cells deep
-        pmlFdtd.Set_BC_Type(2, 0);
-        pmlFdtd.Set_BC_Type(3, 0);
-        pmlFdtd.Set_BC_Type(4, 0);
-        pmlFdtd.Set_BC_Type(5, 0);
-        pmlFdtd.SetNumberOfTimeSteps(30);
-        if (pmlFdtd.SetupFDTD() != 0) {
-            fail("Phase 3 fixture: openEMS::SetupFDTD() returned non-zero");
-        }
-
-        Operator* pmlOp = pmlFdtd.GetOperatorForGPU();
-        Engine* pmlCpuEngine = pmlFdtd.GetEngineForCPU();
-        if (pmlOp == nullptr || pmlCpuEngine == nullptr) {
-            fail("Phase 3 fixture: GetOperatorForGPU()/GetEngineForCPU() returned null");
-        }
-
-        const copper::CopperYeeGrid pmlGrid = copper::buildYeeGrid(*pmlOp);
-        const std::vector<copper::CopperPMLShell> pmlShells = copper::buildPMLShells(*pmlOp);
-        if (pmlShells.size() != 2) {
-            fail("Phase 3 fixture: expected exactly 2 PML shells (x-min, x-max) -- the fixture's grid "
-                 "might be too small and fallen back to PEC (see Create_UPML's own size guard)");
-        }
-        copper::CopperEngine gpuEngine(pmlGrid, pmlShells);
-
-        // Seeded at x=6, inside the x-min PML shell's own depth-8 box -- so the run exercises the
-        // PML sandwich kernels directly on the seeded cell, not just eventual propagation into them.
-        const std::uint32_t seedX = 6, seedY = 5, seedZ = 1;
-        const float seedValue = 1.0F;
-        gpuEngine.writeFieldCell(copper::CopperEngine::Field::Ez, seedX, seedY, seedZ, seedValue);
-        pmlCpuEngine->SetVolt(2, seedX, seedY, seedZ, seedValue);
-
-        const std::uint32_t steps = 20;
-        gpuEngine.run(steps);
-        pmlCpuEngine->IterateTS(steps);
-
-        const copper::CopperEngine::Field fields[6] = {
-            copper::CopperEngine::Field::Ex, copper::CopperEngine::Field::Ey, copper::CopperEngine::Field::Ez,
-            copper::CopperEngine::Field::Hx, copper::CopperEngine::Field::Hy, copper::CopperEngine::Field::Hz,
-        };
-        const unsigned int axisForField[6] = {0, 1, 2, 0, 1, 2};
-        bool anyNonzero = false;
-        float maxAbsDiff = 0.0F;
-        float maxAbsValue = 0.0F;
-        for (int f = 0; f < 6; ++f) {
-            const bool isH = f >= 3;
-            const std::vector<float> gpuField = gpuEngine.readField(fields[f]);
-            for (std::uint32_t z = 0; z < pmlGrid.dims.nz; ++z) {
-                for (std::uint32_t y = 0; y < pmlGrid.dims.ny; ++y) {
-                    for (std::uint32_t x = 0; x < pmlGrid.dims.nx; ++x) {
-                        const float cpuValue = isH ? pmlCpuEngine->GetCurr(axisForField[f], x, y, z)
-                                                    : pmlCpuEngine->GetVolt(axisForField[f], x, y, z);
-                        const std::uint32_t idx = copper::copperGridIndex(pmlGrid.dims, x, y, z);
-                        const float gpuValue = gpuField[idx];
-                        maxAbsDiff = std::max(maxAbsDiff, std::fabs(gpuValue - cpuValue));
-                        maxAbsValue = std::max(maxAbsValue, std::fabs(cpuValue));
-                        if (cpuValue != 0.0F) {
-                            anyNonzero = true;
-                        }
-                    }
-                }
-            }
-        }
-        std::printf("Phase 3: after %u steps (PML on x-min/x-max, %zu shell(s)), max|GPU-CPU| = %e "
-                    "(max|CPU field| = %e)\n",
-                    steps, pmlShells.size(), static_cast<double>(maxAbsDiff), static_cast<double>(maxAbsValue));
-        if (!anyNonzero) {
-            fail("Phase 3: CPU reference engine's fields are all still zero -- the seeded impulse never propagated");
-        }
-        // A looser tolerance than Phase 2's: the PML recursion does several extra multiply-adds per
-        // axis per stage, so float-rounding error compounds a bit faster over the same step count.
-        const float tolerance = 1e-4F * std::max(maxAbsValue, 1.0F);
-        if (maxAbsDiff > tolerance) {
-            fail("Phase 3: GPU PML field values diverge from the real CPU openEMS engine beyond float-rounding "
-                 "tolerance");
-        }
-    }
-
     // --- Phase 3b: buildCPMLShells()'s own CFS coefficients are well-formed. ---
     // See Internal/CopperCPML.hpp's own top comment: real CPML (Roden & Gedney 2000, derived here
     // from Taflove & Hagness 3rd ed. eq. 7.93-7.110) is a *structurally different* formulation from
     // openEMS's own UPML (Section 7.8's "EC-FDTD" tensor/ADE approach) -- not a generalization of
-    // it -- so there is no reference CPU implementation to diff against the way Phase 3's own
-    // buildPMLShells() check has (openEMS itself has no CPML). What this phase *can* verify from the
+    // it -- so there is no reference CPU implementation to diff against. What this phase verifies from the
     // formula alone (eq. 7.99/7.102, kappa=1): b[w] = exp(-(sigma_w+alpha_w)*dT/EPS0) is a decaying
     // exponential of a non-negative exponent, so it's bounded to (0,1] for every physically real
     // sigma/alpha/dT; c[w] = sigma_w*(b[w]-1)/(sigma_w+alpha_w) is a product of a non-negative
     // fraction (sigma_w/(sigma_w+alpha_w) in [0,1]) and a non-positive term (b[w]-1 in [-1,0]), so
     // it's bounded to [-1,0]. Fixture uses MUR on every face, never Set_BC_PML() -- buildCPMLShells()
-    // no longer discovers its own shells from an actual Operator_Ext_UPML extension at all (see
-    // CopperCPML.hpp's own top comment for why: openEMS unconditionally overwrites grid.vv/vi/ii/iv
-    // at PML cells the moment Set_BC_PML() is ever called, regardless of which algorithm the caller
-    // actually wants), so there's no buildPMLShells() reference to diff shell geometry against here
-    // any more either -- this phase now only checks buildCPMLShells()'s own coefficients are
+    // builds its shell geometry directly, so this phase checks buildCPMLShells()'s own coefficients are
     // well-formed and it built the expected 6 (one per face; the whole domain, unlike Phase 3's own
     // thin-in-Z fixture, is large enough on every axis for a uniform 6-face shell).
     {
@@ -748,8 +1071,13 @@ int main() {
 
         constexpr std::uint32_t kPmlDepthCellsForTest = 8;
         const double alphaMax = 2 * M_PI * 100e6 * EPS0; // matches runFDTDPortOnGPU's own default
+        copper::CopperOperator::Config cpmlConfig; // boundary stays Open (MUR) on every face
+        cpmlConfig.f0 = 2.5e9;
+        cpmlConfig.fc = 2.5e9;
+        cpmlConfig.maxTimesteps = 30;
+        copper::CopperOperator cpmlNewOp(*buildCpmlCavityNoExcitation(), cpmlConfig);
         const std::vector<copper::CopperCPMLShell> cpmlShells =
-            copper::buildCPMLShells(*cpmlOp, alphaMax, kPmlDepthCellsForTest);
+            copper::buildCPMLShells(cpmlNewOp, alphaMax, kPmlDepthCellsForTest);
         if (cpmlShells.size() != 6) {
             fail("Phase 3b: expected exactly 6 CPML shells (one per domain face)");
         }
@@ -808,14 +1136,19 @@ int main() {
         }
 
         constexpr std::uint32_t kPmlDepthCellsForTest = 8;
-        const copper::CopperYeeGrid cpmlRunGrid = copper::buildYeeGrid(*cpmlRunOp);
+        copper::CopperOperator::Config cpmlRunConfig; // boundary stays Open (MUR) on every face
+        cpmlRunConfig.f0 = 2.5e9;
+        cpmlRunConfig.fc = 2.5e9;
+        cpmlRunConfig.maxTimesteps = 30;
+        copper::CopperOperator cpmlRunNewOp(*buildCpmlCavityNoExcitation(), cpmlRunConfig);
+        const copper::CopperYeeGrid& cpmlRunGrid = cpmlRunNewOp.grid();
         const double alphaMax = 2 * M_PI * 100e6 * EPS0;
         const std::vector<copper::CopperCPMLShell> cpmlRunShells =
-            copper::buildCPMLShells(*cpmlRunOp, alphaMax, kPmlDepthCellsForTest);
+            copper::buildCPMLShells(cpmlRunNewOp, alphaMax, kPmlDepthCellsForTest);
         if (cpmlRunShells.size() != 6) {
             fail("Phase 3c fixture: expected exactly 6 CPML shells (one per domain face)");
         }
-        copper::CopperEngine cpmlEngine(cpmlRunGrid, {}, {}, cpmlRunShells);
+        copper::CopperEngine cpmlEngine(cpmlRunGrid, {}, cpmlRunShells);
 
         // Inside the x-min shell's own depth-8 box, comfortably interior on Y/Z (only one shell's own
         // correction should apply here, matching the original single-face-PML seed's own intent) --
@@ -871,15 +1204,22 @@ int main() {
             fail("Phase 4b fixture: openEMS::SetupFDTD() returned non-zero");
         }
 
-        Operator* probeOp = probeFdtd.GetOperatorForGPU();
         Engine* probeCpuEngine = probeFdtd.GetEngineForCPU();
-        if (probeOp == nullptr || probeCpuEngine == nullptr) {
-            fail("Phase 4b fixture: GetOperatorForGPU()/GetEngineForCPU() returned null");
+        if (probeCpuEngine == nullptr) {
+            fail("Phase 4b fixture: GetEngineForCPU() returned null");
         }
 
-        const copper::CopperYeeGrid probeGrid = copper::buildYeeGrid(*probeOp);
-        const copper::CopperExcitation probeExcitation = copper::buildExcitation(*probeOp);
-        const std::vector<copper::CopperProbe> probes = copper::discoverProbes(*probeCsx, *probeOp);
+        copper::CopperOperator::Config probeConfig;
+        for (int side = 0; side < 6; ++side) {
+            probeConfig.boundary[static_cast<std::size_t>(side)] = copper::CopperOperator::BoundaryType::PEC;
+        }
+        probeConfig.f0 = 2.5e9;
+        probeConfig.fc = 2.5e9;
+        probeConfig.maxTimesteps = 150;
+        copper::CopperOperator probeNewOp(*buildProbeFixture(), probeConfig);
+        const copper::CopperYeeGrid& probeGrid = probeNewOp.grid();
+        const copper::CopperExcitation& probeExcitation = probeNewOp.excitation();
+        const std::vector<copper::CopperProbe> probes = copper::discoverProbes(*probeCsx, probeNewOp);
         if (probes.size() != 2) {
             fail("Phase 4b: expected exactly 2 discovered probes (voltage + current)");
         }
@@ -896,7 +1236,7 @@ int main() {
             fail("Phase 4b: didn't discover exactly one voltage and one current probe");
         }
 
-        copper::CopperEngine gpuEngine(probeGrid, {}, probeExcitation);
+        copper::CopperEngine gpuEngine(probeGrid, probeExcitation);
         const std::filesystem::path tmpDir = std::filesystem::temp_directory_path();
         const std::filesystem::path voltagePath = tmpDir / voltageProbe->name;
         const std::filesystem::path currentPath = tmpDir / currentProbe->name;
@@ -1014,7 +1354,7 @@ int main() {
         // readField()'s own full-array copies, not vDSP_svesq against GPU-shared memory), so a bug
         // in either implementation is very unlikely to cancel out and pass both.
         {
-            copper::CopperEngine engine(energyGrid, {}, energyExcitation);
+            copper::CopperEngine engine(energyGrid, energyExcitation);
             engine.run(20); // real steps, not just a seeded impulse, so both E and H are nonzero
             const double fastEnergy = engine.estimateEnergy();
 
@@ -1047,7 +1387,7 @@ int main() {
         // engine's field state identical to a plain run(N) -- not run() the full requested step
         // count regardless of what the sampler returns.
         {
-            copper::CopperEngine stoppedEarly(energyGrid, {}, energyExcitation);
+            copper::CopperEngine stoppedEarly(energyGrid, energyExcitation);
             std::uint32_t callCount = 0;
             stoppedEarly.runWithProbeSampling(50, [&](std::uint32_t) -> bool {
                 ++callCount;
@@ -1057,7 +1397,7 @@ int main() {
                 fail("Phase 4c: runWithProbeSampling() didn't stop as soon as the sampler returned false");
             }
 
-            copper::CopperEngine ranSeven(energyGrid, {}, energyExcitation);
+            copper::CopperEngine ranSeven(energyGrid, energyExcitation);
             ranSeven.run(7);
 
             bool fieldsMatch = true;

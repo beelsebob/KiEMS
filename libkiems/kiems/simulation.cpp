@@ -16,12 +16,12 @@
 #include <spawn.h>
 #include <sys/wait.h>
 
-#include <clipper2/clipper.h>
 #include <nlohmann/json.hpp>
 
 #include "constants.hpp"
 #include "csx_grid_utils.hpp"
-#include "libkicad_query.hpp"
+#include "../../libkicad/libkicad.hpp"
+#include "board_slicing.hpp"
 #include "logging.hpp"
 
 extern char** environ;
@@ -84,7 +84,7 @@ bool _pointInPolygon(double x, double y, const std::vector<Position>& polygon) {
 
 // Shortest distance from (x, y) to the polyline formed by `polygon`'s edges (treated as a closed
 // loop) -- same algorithm as board_slicing.cpp's file-local _distancePointToPolyline, just against
-// Position rather than Clipper2Lib::Point64 (this file never touches Clipper2 types directly).
+// Position keeps this geometry in the same double-precision coordinate space as the board model.
 double _distanceToPolygonBoundary(double x, double y, const std::vector<Position>& polygon) {
     double best = std::numeric_limits<double>::infinity();
     for (std::size_t i = 0, j = polygon.size() - 1; i < polygon.size(); j = i++) {
@@ -118,13 +118,13 @@ bool _viaIntersectsOutline(double x, double y, double diameter, const std::vecto
 }
 
 std::expected<std::pair<double, double>, std::string> _boardOrigin(const PathsConfig& paths) {
-    auto geometry = libkicad_query::boardGeometry(paths, "Loading board outline for via placement");
+    auto geometry = libkicad::boardGeometry(paths.kicadBoardPaths());
     if (!geometry) {
         return std::unexpected(std::move(geometry).error());
     }
     double xMin = std::numeric_limits<double>::infinity();
     double yMin = std::numeric_limits<double>::infinity();
-    for (const libkicad_query::PolygonLoop& loop : geometry->outline) {
+    for (const libkicad::PolygonLoop& loop : geometry->outline) {
         for (const auto& [xMm, yMm] : loop.pointsMm) {
             const double x = xMm / 1000.0 / constants::baseUnit * constants::unitMultiplier;
             const double y = yMm / 1000.0 / constants::baseUnit * constants::unitMultiplier;
@@ -199,47 +199,41 @@ std::pair<std::vector<double>, std::vector<double>> _viaPolygon(double x1, doubl
     return {xs, ys};
 }
 
-Clipper2Lib::Path64 _xyToPath64(const std::vector<double>& xs, const std::vector<double>& ys) {
-    Clipper2Lib::Path64 path;
+Polygon _xyToPolygon(const std::vector<double>& xs, const std::vector<double>& ys) {
+    Polygon path;
     path.reserve(xs.size());
     for (std::size_t i = 0; i < xs.size(); ++i) {
-        path.emplace_back(static_cast<std::int64_t>(std::llround(xs[i])), static_cast<std::int64_t>(std::llround(ys[i])));
+        path.emplace_back(xs[i], ys[i]);
     }
     return path;
 }
 
-std::pair<std::vector<double>, std::vector<double>> _path64ToXY(const Clipper2Lib::Path64& path) {
+std::pair<std::vector<double>, std::vector<double>> _polygonToXY(const Polygon& path) {
     std::vector<double> xs;
     std::vector<double> ys;
     xs.reserve(path.size());
     ys.reserve(path.size());
-    for (const auto& pt : path) {
-        xs.push_back(static_cast<double>(pt.x));
-        ys.push_back(static_cast<double>(pt.y));
+    for (const Position& pt : path) {
+        xs.push_back(pt.x());
+        ys.push_back(pt.y());
     }
     return {xs, ys};
 }
 
 /// Clips a via cross-section polygon (xs/ys, as produced by _viaPolygon) to the sliced board's own
-/// outline via Clipper2 intersection -- a real via kept because its disc merely *reaches* the cutout
+/// outline via polygon intersection -- a real via kept because its disc merely *reaches* the cutout
 /// boundary (see _viaIntersectsOutline's own doc comment) would otherwise be added at its full,
 /// uncropped geometric extent, sticking out past the simulation's own domain past the hull-padding
 /// trim line. Usually a single loop; can (rarely) come back as more than one if the outline's own
 /// boundary is concave enough to split the via's disc into disjoint pieces.
 std::vector<std::pair<std::vector<double>, std::vector<double>>> _clipPolygonToOutline(
     const std::vector<double>& xs, const std::vector<double>& ys, const std::vector<Position>& outline) {
-    const Clipper2Lib::Path64 subject = _xyToPath64(xs, ys);
-    Clipper2Lib::Path64 clip;
-    clip.reserve(outline.size());
-    for (const auto& p : outline) {
-        clip.emplace_back(static_cast<std::int64_t>(std::llround(p.x())), static_cast<std::int64_t>(std::llround(p.y())));
-    }
-    const Clipper2Lib::Paths64 result =
-        Clipper2Lib::Intersect(Clipper2Lib::Paths64{subject}, Clipper2Lib::Paths64{clip}, Clipper2Lib::FillRule::NonZero);
+    const Polygon subject = _xyToPolygon(xs, ys);
+    const PolygonSet result = intersectPolygons({subject}, {outline});
     std::vector<std::pair<std::vector<double>, std::vector<double>>> loops;
     loops.reserve(result.size());
     for (const auto& loop : result) {
-        loops.push_back(_path64ToXY(loop));
+        loops.push_back(_polygonToXY(loop));
     }
     return loops;
 }
@@ -248,7 +242,7 @@ std::vector<std::pair<std::vector<double>, std::vector<double>>> _clipPolygonToO
 
 Simulation::Simulation(SimulationConfig& simConfig, const EMSConfig& config, const RunOptions& options,
                         const PathsConfig& paths)
-    : _csx(new ContinuousStructure()),
+    : _csx(std::make_unique<ContinuousStructure>()),
       _grid(nullptr),
       _simConfig(simConfig),
       _config(config),
@@ -258,8 +252,6 @@ Simulation::Simulation(SimulationConfig& simConfig, const EMSConfig& config, con
       _viaMaterial(nullptr),
       _viaFillingMaterial(nullptr),
       _npthVoidMaterial(nullptr) {
-    _fdtd.SetNumberOfTimeSteps(static_cast<unsigned int>(_config.maxSteps()));
-    _fdtd.SetCSX(_csx);
     _grid = _csx->GetGrid();
     _grid->SetDeltaUnit(constants::baseUnit / constants::unitMultiplier);
 
@@ -270,11 +262,39 @@ Simulation::Simulation(SimulationConfig& simConfig, const EMSConfig& config, con
 }
 
 std::expected<void, std::string> Simulation::sliceBoard() {
-    auto result = sliceBoardForSimulation(_simConfig, _config, _paths);
+    logInfo("Slicing board for " + _simConfig.name());
+    auto geometry = libkicad::boardGeometry(_paths.kicadBoardPaths());
+    if (!geometry) {
+        return std::unexpected(std::move(geometry).error());
+    }
+    auto copper = classifyCopperForSimulation(_simConfig, *geometry, _paths);
+    if (!copper) {
+        return std::unexpected(std::move(copper).error());
+    }
+
+    auto origin = boardBoundsInSimulationUnits(*geometry);
+    if (!origin) {
+        return std::unexpected(std::move(origin).error());
+    }
+    // Best-effort: if the KiCad hole query fails, slicing/stitching just proceed without this data
+    // rather than failing the whole slice over it (the same as if the board genuinely had none).
+    std::vector<ViaHole> existingVias;
+    if (auto vias = getVias(_paths, origin->xMin, origin->yMin); vias) {
+        existingVias = std::move(*vias);
+    }
+    std::vector<NPTHHole> npthHoles;
+    if (auto holes = getNPTHHoles(_paths, origin->xMin, origin->yMin); holes) {
+        npthHoles = std::move(*holes);
+    }
+
+    const SlicingConfig slicing = SlicingConfig::from(_simConfig, _config);
+    auto result = sliceBoardForSimulation(slicing, *geometry, copper->involved,
+                                           copper->geometryOnly, copper->ground, existingVias, npthHoles);
     if (!result) {
         return std::unexpected(result.error());
     }
     _slicedBoard = std::move(*result);
+    restrictLumpedComponentsToCutout(_simConfig, _slicedBoard);
     return {};
 }
 
@@ -313,7 +333,6 @@ std::expected<void, std::string> Simulation::populateGeometry() {
     if (_options.exportField.has_value()) {
         addDumpBoxes();
     }
-    setBoundaryConditions(true);
     if (auto result = addVias(); !result) {
         return std::unexpected(result.error());
     }
@@ -384,24 +403,24 @@ void Simulation::addPortGrid() {
             logError("Port has no defined position or rotation, skipping");
             return;
         }
-        const double angle = *portConfig.direction() / 360.0 * 2 * M_PI;
         const std::string ap = "PORT" + std::to_string(_gridGen->addApertures().size() + 1);
-        const double w = portConfig.width();
-        const double h = portConfig.length();
-        const double width = w * std::round(std::cos(angle)) - h * std::round(std::sin(angle));
-        const double height = w * std::round(std::sin(angle)) + h * std::round(std::cos(angle));
-
-        const auto [posX, posY] = *portConfig.position();
+        const PortGridFootprint footprint = portGridFootprint(portConfig);
         // portConfig.position() is already in the same absolute, Edge_Cuts-bounding-box-relative
-        // frame GridGenerator::generate() re-origins its own gerber-parsed trace/pad positions into
+        // frame as the sliced copper consumed by GridGenerator::generate()
         // (see port_resolution.cpp's _edgeCutsOrigin()/_padPositionInSimFrame() and
-        // gerber_composite.hpp's BoundingBox doc comment) -- adding _gridGen->xmin()/ymin() here
+        // CopperUtils/polygon_geometry.hpp's BoundingBox doc comment) -- adding _gridGen->xmin()/ymin() here
         // (SlicedBoard::xMin/yMin, itself already an absolute coordinate in that same frame) would
         // double-count the offset and place this density pad millions of sim units away from the
         // real port, discarded once compileGrid() clips lines outside the real domain.
-        _gridGen->addPads().emplace_back(ap, NetName("PORT"), Position(posX + width / 2, posY));
+        // ApertureRect is centred on Pad::pos(). The former `posX + width / 2` placement shifted
+        // every density hint off its real pad, while the signed cardinal rotation formula could
+        // also produce a negative aperture dimension. On a small pad that meant the resistor box
+        // and the locally-dense part of the mesh did not coincide, so an absorb-only port could be
+        // present in CSX yet fail to make a reliable electrical connection. Use the same centred,
+        // positive axis-aligned envelope as addResistivePort().
+        _gridGen->addPads().emplace_back(ap, NetName("PORT"), Position(footprint.centerX, footprint.centerY));
         _gridGen->addApertures().insert_or_assign(
-            ap, Aperture("", std::make_shared<ApertureRect>(width, height)));
+            ap, Aperture("", std::make_shared<ApertureRect>(footprint.width, footprint.height)));
     }
 }
 
@@ -449,42 +468,14 @@ void Simulation::addLumpedComponentGrid() {
 }
 
 void Simulation::addGrid() {
-    _gridGen = std::make_unique<GridGenerator>(_config, _slicedBoard.xMin, _slicedBoard.yMin, _slicedBoard.width,
-                                                _slicedBoard.height, _slicedBoard.cutoutLoops);
+    _gridGen = std::make_unique<GridGenerator>(_config, _slicedBoard.bounds.xMin, _slicedBoard.bounds.yMin,
+                                                _slicedBoard.bounds.xMax - _slicedBoard.bounds.xMin,
+                                                _slicedBoard.bounds.yMax - _slicedBoard.bounds.yMin,
+                                                _slicedBoard.cutoutLoops, _slicedBoard.layerCopperLoops);
     addPortGrid();
     addLumpedComponentGrid();
     logInfo("Compiling grid");
-    // Best-effort: ground's own copper, and any GeometryOnly-level ("Included in Simulation", as
-    // opposed to full "Simulation Net" -- see NetInclusionLevel's own doc comment) involved-nets
-    // entries, get exactly the same edge-aware density treatment as a fully involved net (see
-    // GridGenerator::generate()'s own doc comment for why -- a wide-open pour stays coarse, dense
-    // via stitching naturally drives itself fine, the same self-modulation already used for signal
-    // nets). A resolution failure here (e.g. a net-class ground selector that doesn't currently
-    // exist on the board) shouldn't fail the whole grid generation over what is, in the end, a
-    // mesh-accuracy enhancement, not a hard requirement -- falls back to this function's own
-    // pre-existing behavior for whichever net that failure was on (covered only by the coarse
-    // whole-board pass).
-    std::vector<std::string> additionalDensityNets;
-    if (auto resolved = libkicad_query::resolveGroundNetNames(_paths, _simConfig.groundNet()); resolved) {
-        additionalDensityNets = std::move(*resolved);
-    } else {
-        logWarning("Could not resolve ground_net for grid density, ground copper will use the coarse "
-                   "background mesh only: " +
-                   resolved.error());
-    }
-    for (const InvolvedNetConfig& entry : _simConfig.involvedNets()) {
-        if (entry.inclusionLevel() != NetInclusionLevel::GeometryOnly) {
-            continue;
-        }
-        if (auto resolved = libkicad_query::resolveInvolvedNetNames(_paths, entry); resolved) {
-            additionalDensityNets.insert(additionalDensityNets.end(), resolved->begin(), resolved->end());
-        } else {
-            logWarning("Could not resolve a geometry-only involved_nets entry for grid density, its own "
-                       "copper will use the coarse background mesh only: " +
-                       resolved.error());
-        }
-    }
-    _gridGen->generate(*_grid, _simConfig, _paths, additionalDensityNets);
+    _gridGen->generate(*_grid, _simConfig, _paths);
     printGridStats();
 }
 
@@ -729,8 +720,8 @@ std::expected<void, std::string> Simulation::addResistivePort(PortConfig& portCo
 }
 
 void Simulation::addPlane(double zHeight) {
-    addBox(*_planeMaterial, {_slicedBoard.xMin, _slicedBoard.yMin, zHeight},
-           {_slicedBoard.xMin + _slicedBoard.width, _slicedBoard.yMin + _slicedBoard.height, zHeight}, 10);
+    addBox(*_planeMaterial, {_slicedBoard.bounds.xMin, _slicedBoard.bounds.yMin, zHeight},
+           {_slicedBoard.bounds.xMax, _slicedBoard.bounds.yMax, zHeight}, 10);
 }
 
 void Simulation::addSubstrates() {
@@ -738,9 +729,8 @@ void Simulation::addSubstrates() {
     double offset = 0;
     const auto substrates = _config.getSubstrates();
     for (std::size_t i = 0; i < substrates.size(); ++i) {
-        addBox(*_substrateMaterials[i], {_slicedBoard.xMin, _slicedBoard.yMin, offset},
-               {_slicedBoard.xMin + _slicedBoard.width, _slicedBoard.yMin + _slicedBoard.height,
-                offset - substrates[i].thickness()},
+        addBox(*_substrateMaterials[i], {_slicedBoard.bounds.xMin, _slicedBoard.bounds.yMin, offset},
+               {_slicedBoard.bounds.xMax, _slicedBoard.bounds.yMax, offset - substrates[i].thickness()},
                -static_cast<std::int32_t>(i) - 1);
         logDebug("Added substrate from " + std::to_string(offset) + " to " +
                  std::to_string(offset - substrates[i].thickness()));
@@ -888,7 +878,7 @@ void Simulation::addVia(double xPos, double yPos, double x2Pos, double y2Pos, do
             addLinPoly(material, xs, ys, axisIndex("z"), -thickness, thickness, priority);
             return;
         }
-        // A degenerate (<3-point) loop can fall out of Clipper2's intersection at a boundary that
+        // A degenerate (<3-point) loop can fall out of the intersection at a boundary that
         // grazes the via's disc only tangentially -- skipped rather than fed to addLinPoly, which
         // expects a genuine polygon.
         for (const auto& [loopXs, loopYs] : _clipPolygonToOutline(xs, ys, _slicedBoard.outline)) {
@@ -936,8 +926,8 @@ void Simulation::addSingleDumpBox(const std::string& name, double z) {
     logDebug("Adding dump box at " + std::to_string(z));
     CSPropDumpBox* dump = addDump(*_csx, name, {1, 1, 1});
     const double margin = _config.grid().margin().xy();
-    addBox(*dump, {_slicedBoard.xMin - margin, _slicedBoard.yMin - margin, z},
-           {_slicedBoard.xMin + _slicedBoard.width + margin, _slicedBoard.yMin + _slicedBoard.height + margin, z});
+    addBox(*dump, {_slicedBoard.bounds.xMin - margin, _slicedBoard.bounds.yMin - margin, z},
+           {_slicedBoard.bounds.xMax + margin, _slicedBoard.bounds.yMax + margin, z});
 }
 
 void Simulation::addDumpBoxes() {
@@ -986,60 +976,6 @@ void Simulation::addDumpBoxes() {
     }
 }
 
-void Simulation::setBoundaryConditions(bool pml) {
-    // Copper's own CPML must never see openEMS's own PML boundary condition active: Set_BC_PML()
-    // makes openEMS create an Operator_Ext_UPML extension per face, and Operator::CalcECOperator()
-    // unconditionally calls BuildExtension() on every extension it creates -- regardless of which
-    // algorithm the *caller* (Copper) will actually use -- overwriting grid.vv/vi/ii/iv at every PML
-    // cell with UPML's own graded, absorbing coefficients before Copper ever reads them. CPML's own
-    // additive psi correction assumes those coefficients still represent the real (vacuum) host
-    // medium (see Copper/Internal/CopperCPML.hpp's own top comment) -- stacked on top of UPML's
-    // already-absorbing ones instead, it's two independent, incompatible PML formulations layered on
-    // the same cells. Confirmed in practice: a real board's first NaN traced to exactly this (a PML
-    // cell's own grid.vi reading ~1e-11, eleven orders of magnitude off the ~217 a genuine vacuum
-    // cell reads, and reproducible with plain UPML -- no CPML at all -- disabled).
-    const bool cpmlActive =
-        _options.backend == FDTDBackend::CopperGPU && _options.pmlKind == PMLKind::CPML;
-    if (pml && !cpmlActive) {
-        logInfo("Adding perfectly matched layer boundary condition");
-        // See constants::pmlDepthCells's own doc comment for why 16, not openEMS's own PML_8
-        // default -- and GridGenerator's own outermost-cell regrading, which keeps this many cells
-        // on each face smoothly, predictably sized rather than whatever the general-purpose mesh
-        // densification produced there.
-        for (std::int32_t i = 0; i < 6; ++i) {
-            _fdtd.Set_BC_PML(i, constants::pmlDepthCells);
-        }
-        return;
-    }
-    if (pml) {
-        // cpmlActive: MUR at the true domain edge is fine here -- Copper's own CPML shells (built
-        // directly from constants::pmlDepthCells, not from any openEMS extension -- see
-        // buildCPMLShells()'s own doc comment) provide the real absorption well before a wave ever
-        // reaches this boundary; by design, whatever residual energy MUR itself reflects should be
-        // negligible.
-        logInfo("Adding MUR boundary condition (Copper's own CPML provides the real PML absorption "
-                 "for this run -- openEMS's own PML boundary condition must stay off, see this "
-                 "function's own comment)");
-    } else {
-        logInfo("Adding MUR boundary condition");
-    }
-    for (std::int32_t i = 0; i < 6; ++i) {
-        _fdtd.Set_BC_Type(i, 2); // 2 == MUR, matching ['PEC','PMC','MUR'].index('MUR')
-    }
-}
-
-void Simulation::setExcitation() {
-    const Frequency& freq = _config.frequency();
-    logDebug("Setting excitation to gaussian pulse from " + std::to_string(freq.start()) + " to " +
-             std::to_string(freq.stop()));
-    _fdtd.SetGaussExcite((freq.start() + freq.stop()) / 2, (freq.stop() - freq.start()) / 2);
-}
-
-void Simulation::setSinusExcitation(double freq) {
-    logDebug("Setting excitation to sine at " + std::to_string(freq));
-    _fdtd.SetSinusExcite(freq);
-}
-
 std::expected<void, std::string> Simulation::run(std::int32_t excitedPortNumber) {
     logInfo("Starting simulation");
     const std::filesystem::path simPath = _paths.simulationDir / _simConfig.name() / std::to_string(excitedPortNumber);
@@ -1051,19 +987,13 @@ std::expected<void, std::string> Simulation::run(std::int32_t excitedPortNumber)
 
     // job.json carries just enough for a freshly-spawned worker to reconstruct an equivalent
     // Simulation on its own (it shares no memory with this process): where to reload the already-
-    // saved geometry from, and which port to excite. Everything else (grid/via/frequency/maxSteps)
-    // the worker re-derives itself from paths.configFile, exactly as this process did -- except
-    // simConfig.ports(), which isn't (de)serialized (see PortConfig's own doc comment) and must be
-    // rebuilt fresh via importStackup()+resolveSimulationPorts(), both of which shell out through
-    // kicadQueryHelperPath -- so that path is threaded through here too, rather than each worker
-    // re-deriving it the way main.cpp's own resolveKicadCli()/executableDir() do.
+    // saved geometry from, and which port to excite.
     const std::filesystem::path jobPath = simPath / "job.json";
     nlohmann::json job;
     job["config_path"] = _paths.configFile.string();
     job["simulation_name"] = _simConfig.name();
     job["excited_port"] = excitedPortNumber;
     job["oversampling"] = _options.oversampling;
-    job["kicad_query_helper_path"] = _paths.kicadQueryHelperPath.string();
     {
         std::ofstream jobFile(jobPath);
         if (!jobFile) {
@@ -1105,8 +1035,7 @@ std::expected<void, std::string> Simulation::run(std::int32_t excitedPortNumber)
     return {};
 }
 
-std::expected<void, std::string> Simulation::setupFDTDOperator(std::int32_t excitedPortNumber) {
-    const std::filesystem::path cwd = std::filesystem::current_path();
+std::expected<void, std::string> Simulation::prepareRunDirectory(std::int32_t excitedPortNumber) {
     const std::filesystem::path simPath = _paths.simulationDir / _simConfig.name() / std::to_string(excitedPortNumber);
     std::error_code dirEc;
     std::filesystem::create_directories(simPath, dirEc);
@@ -1115,27 +1044,6 @@ std::expected<void, std::string> Simulation::setupFDTDOperator(std::int32_t exci
     }
     std::filesystem::current_path(simPath);
 
-    _fdtd.SetOverSampling(_options.oversampling);
-
-    const auto setupStart = std::chrono::steady_clock::now();
-    const int rc = _fdtd.SetupFDTD();
-    const double setupSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - setupStart).count();
-    logInfo("openEMS::SetupFDTD() took " + std::to_string(setupSeconds) + "s");
-    if (rc != 0) {
-        std::filesystem::current_path(cwd);
-        return std::unexpected("Run: Setup failed, error code: " + std::to_string(rc));
-    }
-    return {};
-}
-
-std::expected<void, std::string> Simulation::runFDTDInPlace(std::int32_t excitedPortNumber) {
-    const std::filesystem::path cwd = std::filesystem::current_path();
-    if (auto result = setupFDTDOperator(excitedPortNumber); !result) {
-        return result;
-    }
-    _fdtd.RunFDTD();
-
-    std::filesystem::current_path(cwd);
     return {};
 }
 

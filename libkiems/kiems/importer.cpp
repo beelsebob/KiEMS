@@ -5,7 +5,7 @@
 
 #include "config.hpp"
 #include "constants.hpp"
-#include "libkicad_query.hpp"
+#include "../../libkicad/libkicad.hpp"
 #include "logging.hpp"
 
 namespace kiems {
@@ -16,8 +16,8 @@ using namespace kiems::constants;
 
 namespace {
 
-template <typename Hole>
-void _setHoleCapsule(Hole& destination, double xMm, double yMm, double widthMm, double heightMm,
+template <typename HoleT>
+void _setHoleCapsule(HoleT& destination, double xMm, double yMm, double widthMm, double heightMm,
                      double orientationDeg, double originX, double originY) {
     const auto toSimUnits = [](double mm) { return mm / 1000 / baseUnit * unitMultiplier; };
     const double centerX = toSimUnits(xMm) - originX;
@@ -69,16 +69,21 @@ std::expected<void, std::string> exportKicadPcb(const PathsConfig& paths, const 
 }
 
 std::expected<std::vector<ViaHole>, std::string> getVias(const PathsConfig& paths, double originX, double originY) {
-    auto source = libkicad_query::throughHoles(paths, "Reading plated holes from KiCad board");
+    auto source = libkicad::throughHoles(paths.kicadBoardPaths());
     if (!source) return std::unexpected(std::move(source).error());
     std::vector<ViaHole> vias;
     vias.reserve(source->size());
-    for (const libkicad_query::ThroughHole& hole : *source) {
+    for (const libkicad::ThroughHole& hole : *source) {
         NPTHHole capsule;
         _setHoleCapsule(capsule, hole.xMm, hole.yMm, hole.drillWidthMm, hole.drillHeightMm,
                         hole.orientationDeg, originX, originY);
-        vias.push_back(ViaHole{.x = capsule.x1, .y = capsule.y1, .x2 = capsule.x2,
-                               .y2 = capsule.y2, .diameter = capsule.diameter});
+        ViaHole via;
+        via.x = capsule.x1;
+        via.y = capsule.y1;
+        via.x2 = capsule.x2;
+        via.y2 = capsule.y2;
+        via.diameter = capsule.diameter;
+        vias.push_back(via);
     }
     logDebug("Found " + std::to_string(vias.size()) + " vias");
     return vias;
@@ -86,11 +91,11 @@ std::expected<std::vector<ViaHole>, std::string> getVias(const PathsConfig& path
 
 std::expected<std::vector<NPTHHole>, std::string> getNPTHHoles(const PathsConfig& paths, double originX,
                                                                   double originY) {
-    auto source = libkicad_query::nonPlatedHoles(paths, "Reading non-plated holes from KiCad board");
+    auto source = libkicad::nonPlatedHoles(paths.kicadBoardPaths());
     if (!source) return std::unexpected(std::move(source).error());
     std::vector<NPTHHole> holes;
     holes.reserve(source->size());
-    for (const libkicad_query::NonPlatedHole& sourceHole : *source) {
+    for (const libkicad::NonPlatedHole& sourceHole : *source) {
         NPTHHole hole;
         _setHoleCapsule(hole, sourceHole.xMm, sourceHole.yMm, sourceHole.drillWidthMm,
                         sourceHole.drillHeightMm, sourceHole.orientationDeg, originX, originY);
@@ -101,13 +106,12 @@ std::expected<std::vector<NPTHHole>, std::string> getNPTHHoles(const PathsConfig
 }
 
 std::expected<void, std::string> importStackup(const PathsConfig& paths, EMSConfig& config) {
-    // Queries the live board's own Board Setup > Board Stackup data (via libkicad_query, which
-    // shells out to libkicad_smoketest -- see its module comment) rather than a hand-maintained
+    // Queries the live board's own Board Setup > Board Stackup data via libkicad rather than a hand-maintained
     // stackup.json: the board file is the actual source of truth, and keeping a second,
     // easily-stale copy of the same data in sync by hand was never anything but a workaround for
     // not having this query available yet. Requires fab/board.kicad_pcb (persisted by
-    // exportKicadPcb()), exactly like port_resolution.cpp's own libkicad_query calls.
-    auto stackupResult = libkicad_query::stackup(paths, "Reading board stackup");
+    // exportKicadPcb()), exactly like port_resolution.cpp's own ki calls.
+    auto stackupResult = libkicad::stackup(paths.kicadBoardPaths());
     if (!stackupResult) {
         return std::unexpected(stackupResult.error());
     }
@@ -115,12 +119,12 @@ std::expected<void, std::string> importStackup(const PathsConfig& paths, EMSConf
     std::vector<LayerConfig> layers;
     layers.reserve(stackupResult->size());
     for (const auto& layer : *stackupResult) {
-        if (layer.kind == libkicad_query::StackupLayerKind::Copper) {
+        if (layer.kind == libkicad::StackupLayerKind::Copper) {
             layers.emplace_back(LayerKind::Metal, layer.name, layer.thicknessMm);
-        } else if (layer.kind == libkicad_query::StackupLayerKind::SolderMaskTop) {
+        } else if (layer.kind == libkicad::StackupLayerKind::SolderMaskTop) {
             layers.emplace_back(LayerKind::SolderMaskTop, layer.name, layer.thicknessMm, layer.epsilonR,
                                  layer.lossTangent);
-        } else if (layer.kind == libkicad_query::StackupLayerKind::SolderMaskBottom) {
+        } else if (layer.kind == libkicad::StackupLayerKind::SolderMaskBottom) {
             layers.emplace_back(LayerKind::SolderMaskBottom, layer.name, layer.thicknessMm, layer.epsilonR,
                                  layer.lossTangent);
         } else {

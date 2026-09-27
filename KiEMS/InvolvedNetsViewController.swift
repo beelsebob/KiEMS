@@ -34,7 +34,7 @@ private final class InvolvedNetsNode: NSObject {
 /// with its own start time/duration/phase (impedance/reference-plane and start time/duration/phase
 /// are mutually exclusive per row -- a net row shows the former blank the latter, a pin row the
 /// reverse -- see viewFor tableColumn). net_class/footprint+pin InvolvedNetConfig entries resolve
-/// down to individual net names, the same semantics as kiems::libkicad_query::
+/// down to individual net names, the same semantics as libkicad's
 /// resolveInvolvedNetNames on the C++ side, just recomputed here in Swift from data this app already
 /// has a query for (KicadBoardBridge.footprints(), which carries each pin's net name) rather than
 /// adding a new bridge round trip purely for this.
@@ -274,8 +274,8 @@ final class InvolvedNetsViewController: NSViewController {
         // specifically about what's actively simulated, not raw geometry, so they're excluded here
         // entirely (the underlying config entry itself is untouched -- this only affects this view).
         let entries = sim.involvedNets.filter { $0.inclusionLevel == .simulationNet }.map { entry -> InvolvedNetSnapshot in
-            // .probe==false entries are absorb-only (setPinAbsorbOnly()) -- a real termination, but
-            // never a measured probe, so they're excluded here for the same "this summary is
+            // .probe==false entries are unmeasured Absorbing choices (either absorb-only or an
+            // explicit no-port override) -- never a measured probe, so they're excluded here for the same "this summary is
             // specifically about active ports/probes/excitation" reason GeometryOnly nets are above.
             let probed = entry.probedPins.filter(\.probe)
                 .map { (footprint: $0.footprintReference, pin: $0.pin, absorbSignal: $0.absorbSignal) }
@@ -289,13 +289,10 @@ final class InvolvedNetsViewController: NSViewController {
             ExcitationSnapshot(footprintReference: $0.footprintReference, pin: $0.pin, isMain: $0.isMain,
                                 startTime: $0.startTime, duration: $0.duration, phaseDegrees: $0.phaseDegrees)
         }
-        let helperPath = AppPaths.kicadQueryHelperPath
-
-        // Net-class resolution (and even just fetching footprints() for the pin lookup) is a real
-        // subprocess round trip -- kept off the main thread, same as every other board query.
+        // Board parsing can still be substantial, so keep it off the main thread even though
+        // libkicad now performs it in-process.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let footprints = (try? KicadBoardBridge.footprints(
-                forBoard: kicadPcbPath, kicadQueryHelperPath: helperPath)) ?? []
+            let footprints = (try? KicadBoardBridge.footprints(forBoard: kicadPcbPath)) ?? []
             var netForPin: [String: String] = [:]
             var pinInfoForKey: [String: KicadFootprintPin] = [:]
             for footprint in footprints {
@@ -323,7 +320,7 @@ final class InvolvedNetsViewController: NSViewController {
                 case .netClass:
                     if let netClass = entry.netClass,
                        let nets = try? KicadBoardBridge.netsInNetClass(
-                           forBoard: kicadPcbPath, netClass: netClass, kicadQueryHelperPath: helperPath) {
+                           forBoard: kicadPcbPath, netClass: netClass) {
                         for net in nets { record(net, from: entry) }
                     }
                 case .footprintPin:

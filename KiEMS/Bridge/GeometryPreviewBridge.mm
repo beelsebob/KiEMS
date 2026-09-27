@@ -1,10 +1,15 @@
 #import "GeometryPreviewBridge.h"
 #import "GeometryPreviewBridge+Private.h"
 
+#include <dispatch/dispatch.h>
+
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <string>
@@ -19,7 +24,7 @@
 #include "kiems/config.hpp"
 #include "kiems/constants.hpp"
 #include "kiems/importer.hpp"
-#include "kiems/libkicad_query.hpp"
+#include "libkicad/libkicad.hpp"
 #include "logging.hpp"
 #include "kiems/paths_config.hpp"
 
@@ -35,21 +40,21 @@ CGPoint toCGPoint(const kiems::Position& position) {
     return CGPointMake(position.x(), position.y());
 }
 
-// Matches port_resolution.cpp's own (private) _mmToSimUnits exactly -- kiems::libkicad_query's
-// results (like every other libkicad_query position) come back in millimetres, board-auxiliary-
+// Matches port_resolution.cpp's own (private) _mmToSimUnits exactly -- kiems::ki's
+// results (like every other ki position) come back in millimetres, board-auxiliary-
 // origin-relative; this pipeline's own native frame is simulation units, further re-origined to the
 // board's Edge_Cuts bounding box (see getVias()'s own doc comment) -- the bounding-box shift still
 // needs applying by the caller, this just handles the unit conversion.
 double mmToSimUnits(double mm) { return mm / 1000.0 / kiems::constants::baseUnit * kiems::constants::unitMultiplier; }
 
 std::expected<std::pair<double, double>, std::string> boardOrigin(const PathsConfig& paths) {
-    auto geometry = kiems::libkicad_query::boardGeometry(paths, "Loading board outline for geometry preview");
+    auto geometry = libkicad::boardGeometry(paths.kicadBoardPaths());
     if (!geometry) {
         return std::unexpected(std::move(geometry).error());
     }
     double xMin = std::numeric_limits<double>::infinity();
     double yMin = std::numeric_limits<double>::infinity();
-    for (const kiems::libkicad_query::PolygonLoop& loop : geometry->outline) {
+    for (const libkicad::PolygonLoop& loop : geometry->outline) {
         for (const auto& [xMm, yMm] : loop.pointsMm) {
             xMin = std::min(xMin, mmToSimUnits(xMm));
             yMin = std::min(yMin, mmToSimUnits(yMm));
@@ -59,6 +64,30 @@ std::expected<std::pair<double, double>, std::string> boardOrigin(const PathsCon
         return std::unexpected("KiCad board geometry has no usable Edge.Cuts points");
     }
     return std::pair{xMin, yMin};
+}
+
+Polygon previewPolygonLoop(const libkicad::PolygonLoop& loop, double originX, double originY) {
+    Polygon path;
+    path.reserve(loop.pointsMm.size());
+    for (const auto& [xMm, yMm] : loop.pointsMm) {
+        path.emplace_back(mmToSimUnits(xMm) - originX, mmToSimUnits(yMm) - originY);
+    }
+    const bool shouldBePositive = !loop.hole;
+    if (path.size() >= 3 && isPositive(path) != shouldBePositive) {
+        std::reverse(path.begin(), path.end());
+    }
+    return path;
+}
+
+PolygonSet previewPolygonLoops(const std::vector<libkicad::PolygonLoop>& loops,
+                               double originX, double originY) {
+    PolygonSet result;
+    result.reserve(loops.size());
+    for (const auto& loop : loops) {
+        Polygon path = previewPolygonLoop(loop, originX, originY);
+        if (path.size() >= 3) result.push_back(std::move(path));
+    }
+    return result;
 }
 
 // A real via's *actual* copper pad is already drawn separately, as part of that layer's copper
@@ -88,14 +117,13 @@ struct RealHoleSize {
 };
 
 // Queries the board's real through-holes (vias and through-hole footprint pads alike -- see
-// kiems::libkicad_query::ThroughHole's own doc comment) once per geometry build, converting
-// each into this preview's frame. Best-effort: an empty result (query failure, or just an older
-// libkicad_smoketest that doesn't support the command yet) leaves every via falling back to
+// libkicad::ThroughHole's own doc comment) once per geometry build, converting
+// each into this preview's frame. Best-effort: an empty result leaves every via falling back to
 // kPreviewViaAnnularRingMarginSimUnits instead, not a hard error -- the ring is a cosmetic preview
 // detail, never worth failing the whole geometry step over.
 std::vector<RealHoleSize> buildRealHoleSizes(const kiems::PathsConfig& paths, double originX, double originY) {
     std::vector<RealHoleSize> sizes;
-    auto holesResult = kiems::libkicad_query::throughHoles(paths, "Reading real via/pad sizes");
+    auto holesResult = libkicad::throughHoles(paths.kicadBoardPaths());
     if (!holesResult) {
         return sizes;
     }
@@ -248,15 +276,15 @@ std::vector<std::string> includedFootprintReferences(const SimulationConfig& sim
 }
 
 // Result of exportComponentTriangles(): the real, colored mesh plus every diagnostic KiCad's own
-// exporter reported building it (see kiems::libkicad_query::ComponentModelExportResult's own
+// exporter reported building it (see libkicad::ComponentModelExportResult's own
 // doc comment) -- surfaced to the caller so "the mesh is missing/wrong" is distinguishable from
 // "this specific component's 3D model file couldn't be resolved," rather than both collapsing to a
 // silent empty result.
 struct ComponentExportOutcome {
-    std::vector<kiems::libkicad_query::ComponentTriangle> triangles;
+    std::vector<libkicad::ComponentTriangle> triangles;
     std::vector<std::string> messages;
     // The board's real top-copper mounting surface Z, in the same mm frame `triangles`' own
-    // vertices are in -- see kiems::libkicad_query::ComponentModelExportResult::topCopperZMm's
+    // vertices are in -- see libkicad::ComponentModelExportResult::topCopperZMm's
     // own doc comment. 0 (a no-op offset) whenever `triangles` is empty too, so a caller doesn't
     // need to separately guard against using a meaningless default.
     double topCopperZMm = 0;
@@ -286,10 +314,19 @@ ComponentExportOutcome exportComponentTriangles(const PathsConfig& paths, const 
     }
     // Still written to disk as an incidental debug artifact (see exportComponentModels()'s own doc
     // comment) -- not read back here, the colored mesh comes straight from the query's own result.
-    const std::filesystem::path outPath = paths.fabDir / "geometry_preview_components.stl";
+    // A whole-board preview queries the source board directly and has no fabDir. A relative path
+    // there makes a GUI launch try to write in `/`, so the exporter fails and returns no mesh.
+    std::filesystem::path artifactDir = paths.fabDir;
+    if (artifactDir.empty()) {
+        std::error_code error;
+        artifactDir = std::filesystem::temp_directory_path(error);
+        if (error) artifactDir = "/tmp";
+    }
+    const std::size_t artifactKey = std::hash<std::string>{}(paths.fabBoardFile.string() + "\n" + refsCsv);
+    const std::filesystem::path outPath =
+        artifactDir / ("kiems_geometry_preview_components_" + std::to_string(artifactKey) + ".stl");
     logInfo("GeometryPreview: exporting component models for [" + refsCsv + "]");
-    auto exportResult = kiems::libkicad_query::exportComponentModels(paths, refsCsv, outPath.string(),
-                                                                             "Rendering component 3D models");
+    auto exportResult = libkicad::exportComponentModels(paths.kicadBoardPaths(), refsCsv, outPath.string());
     if (!exportResult) {
         logWarning("GeometryPreview: exportComponentModels failed: " + exportResult.error());
         return {};
@@ -312,11 +349,38 @@ ComponentExportOutcome exportComponentTriangles(const PathsConfig& paths, const 
 
 @implementation EMSGeometryTriangle
 - (instancetype)initWithA:(CGPoint)a b:(CGPoint)b c:(CGPoint)c {
+    return [self initWithA:a b:b c:c color:simd_make_double4(0, 0, 0, 0) opacity:1.0
+                      kind:EMSGeometryTriangleKindGeneric netName:nil footprintReference:nil padNumber:nil];
+}
+
+- (instancetype)initWithA:(CGPoint)a b:(CGPoint)b c:(CGPoint)c color:(simd_double4)color {
+    return [self initWithA:a b:b c:c color:color opacity:1.0 kind:EMSGeometryTriangleKindGeneric
+                   netName:nil footprintReference:nil padNumber:nil];
+}
+
+- (instancetype)initWithA:(CGPoint)a b:(CGPoint)b c:(CGPoint)c
+                     color:(simd_double4)color opacity:(double)opacity {
+    return [self initWithA:a b:b c:c color:color opacity:opacity kind:EMSGeometryTriangleKindGeneric
+                   netName:nil footprintReference:nil padNumber:nil];
+}
+
+- (instancetype)initWithA:(CGPoint)a b:(CGPoint)b c:(CGPoint)c
+                     color:(simd_double4)color opacity:(double)opacity
+                      kind:(EMSGeometryTriangleKind)kind
+                   netName:(nullable NSString*)netName
+        footprintReference:(nullable NSString*)footprintReference
+                 padNumber:(nullable NSString*)padNumber {
     self = [super init];
     if (self) {
         _a = a;
         _b = b;
         _c = c;
+        _color = color;
+        _opacity = opacity;
+        _kind = kind;
+        _netName = [netName copy];
+        _footprintReference = [footprintReference copy];
+        _padNumber = [padNumber copy];
     }
     return self;
 }
@@ -324,6 +388,11 @@ ComponentExportOutcome exportComponentTriangles(const PathsConfig& paths, const 
 
 
 @implementation EMSGeometryLayer
++ (instancetype)placeholderWithName:(NSString*)name hexColor:(nullable NSString*)hexColor z:(double)z {
+    EMSGeometryLayer* layer = [[self alloc] initWithName:name triangles:@[] hexColor:hexColor z:z];
+    layer->_geometryGenerated = NO;
+    return layer;
+}
 - (instancetype)initWithName:(NSString*)name
                     triangles:(NSArray<EMSGeometryTriangle*>*)triangles
                     hexColor:(nullable NSString*)hexColor
@@ -334,8 +403,13 @@ ComponentExportOutcome exportComponentTriangles(const PathsConfig& paths, const 
         _triangles = [triangles copy];
         _hexColor = [hexColor copy];
         _z = z;
+        _geometryGenerated = YES;
     }
     return self;
+}
+- (void)replaceTriangles:(NSArray<EMSGeometryTriangle*>*)triangles {
+    _triangles = [triangles copy];
+    _geometryGenerated = YES;
 }
 @end
 
@@ -345,7 +419,8 @@ ComponentExportOutcome exportComponentTriangles(const PathsConfig& paths, const 
                      ringPosition:(CGPoint)ringPosition
                     ringPosition2:(CGPoint)ringPosition2
                          diameter:(double)diameter
-              annularRingDiameter:(double)annularRingDiameter {
+              annularRingDiameter:(double)annularRingDiameter
+                          netName:(NSString* _Nullable)netName {
     self = [super init];
     if (self) {
         _position = position;
@@ -354,6 +429,23 @@ ComponentExportOutcome exportComponentTriangles(const PathsConfig& paths, const 
         _ringPosition2 = ringPosition2;
         _diameter = diameter;
         _annularRingDiameter = annularRingDiameter;
+        _netName = [netName copy];
+    }
+    return self;
+}
+@end
+
+@implementation EMSGeometryTrackSegment
+- (instancetype)initWithNetName:(NSString*)netName
+                        layerName:(NSString*)layerName
+                            start:(CGPoint)start
+                              end:(CGPoint)end {
+    self = [super init];
+    if (self) {
+        _netName = [netName copy];
+        _layerName = [layerName copy];
+        _start = start;
+        _end = end;
     }
     return self;
 }
@@ -379,12 +471,25 @@ ComponentExportOutcome exportComponentTriangles(const PathsConfig& paths, const 
 
 @implementation EMSGeometryComponentTriangle
 - (instancetype)initWithA:(simd_double3)a b:(simd_double3)b c:(simd_double3)c color:(simd_double4)color {
+    return [self initWithA:a b:b c:c color:color netName:nil footprintReference:nil];
+}
+
+- (instancetype)initWithA:(simd_double3)a b:(simd_double3)b c:(simd_double3)c
+                     color:(simd_double4)color netName:(nullable NSString*)netName {
+    return [self initWithA:a b:b c:c color:color netName:netName footprintReference:nil];
+}
+
+- (instancetype)initWithA:(simd_double3)a b:(simd_double3)b c:(simd_double3)c
+                     color:(simd_double4)color netName:(nullable NSString*)netName
+        footprintReference:(nullable NSString*)footprintReference {
     self = [super init];
     if (self) {
         _a = a;
         _b = b;
         _c = c;
         _color = color;
+        _netName = [netName copy];
+        _footprintReference = [footprintReference copy];
     }
     return self;
 }
@@ -427,10 +532,12 @@ ComponentExportOutcome exportComponentTriangles(const PathsConfig& paths, const 
 
 @implementation EMSGeometryPreview
 - (instancetype)initWithLayers:(NSArray<EMSGeometryLayer*>*)layers
+                     wholeBoard:(BOOL)wholeBoard
                   topSolderMask:(EMSGeometryLayer* _Nullable)topSolderMask
                bottomSolderMask:(EMSGeometryLayer* _Nullable)bottomSolderMask
                         outline:(NSArray<NSValue*>*)outline
                            vias:(NSArray<EMSGeometryVia*>*)vias
+                  trackSegments:(NSArray<EMSGeometryTrackSegment*>*)trackSegments
               failedViaAttempts:(NSArray<NSValue*>*)failedViaAttempts
                           ports:(NSArray<EMSGeometryPort*>*)ports
                 viaMeshTriangles:(NSArray<EMSGeometryComponentTriangle*>*)viaMeshTriangles
@@ -457,11 +564,13 @@ ComponentExportOutcome exportComponentTriangles(const PathsConfig& paths, const 
                          height:(double)height {
     self = [super init];
     if (self) {
+        _wholeBoard = wholeBoard;
         _layers = [layers copy];
         _topSolderMask = topSolderMask;
         _bottomSolderMask = bottomSolderMask;
         _outline = [outline copy];
         _vias = [vias copy];
+        _trackSegments = [trackSegments copy];
         _failedViaAttempts = [failedViaAttempts copy];
         _ports = [ports copy];
         _viaMeshTriangles = [viaMeshTriangles copy];
@@ -489,6 +598,43 @@ ComponentExportOutcome exportComponentTriangles(const PathsConfig& paths, const 
     }
     return self;
 }
+- (void)mergeLoadedPreview:(EMSGeometryPreview*)preview {
+    NSMutableDictionary<NSString*, EMSGeometryLayer*>* incoming = [NSMutableDictionary dictionary];
+    for (EMSGeometryLayer* layer in preview.layers) incoming[layer.name] = layer;
+    for (EMSGeometryLayer* layer in _layers) {
+        EMSGeometryLayer* loaded = incoming[layer.name];
+        if (loaded != nil && loaded.geometryGenerated) [layer replaceTriangles:loaded.triangles];
+    }
+    _topSolderMask = preview.topSolderMask;
+    _bottomSolderMask = preview.bottomSolderMask;
+    _outline = [preview.outline copy];
+    _vias = [preview.vias copy];
+    _trackSegments = [preview.trackSegments copy];
+    _failedViaAttempts = [preview.failedViaAttempts copy];
+    _ports = [preview.ports copy];
+    _viaMeshTriangles = [preview.viaMeshTriangles copy];
+    _componentMeshTriangles = [preview.componentMeshTriangles copy];
+    _renderedComponentReferences = [preview.renderedComponentReferences copy];
+    _componentModelExportMessages = [preview.componentModelExportMessages copy];
+    _gridLinesX = [preview.gridLinesX copy];
+    _gridLinesY = [preview.gridLinesY copy];
+    _gridLinesZ = [preview.gridLinesZ copy];
+    _gridPlaneExcludingX = preview.gridPlaneExcludingX;
+    _gridPlaneExcludingY = preview.gridPlaneExcludingY;
+    _gridPlaneExcludingZ = preview.gridPlaneExcludingZ;
+    _gridMaterials = [preview.gridMaterials copy];
+    _gridLayers = [preview.gridLayers copy];
+    _pmlInnerXMin = preview.pmlInnerXMin;
+    _pmlInnerXMax = preview.pmlInnerXMax;
+    _pmlInnerYMin = preview.pmlInnerYMin;
+    _pmlInnerYMax = preview.pmlInnerYMax;
+    _pmlInnerZMin = preview.pmlInnerZMin;
+    _pmlInnerZMax = preview.pmlInnerZMax;
+    _xMin = preview.xMin;
+    _yMin = preview.yMin;
+    _width = preview.width;
+    _height = preview.height;
+}
 @end
 
 namespace {
@@ -500,15 +646,17 @@ namespace {
 // function that could be forward-declared -- these helpers are only ever called from
 // buildGeometryPreview() just below anyway, so this is also exactly where they're used.
 
-// A consistent copper/gold tone for every via's own barrel tube and annular rings, regardless of
-// layer -- matches the old flat-marker preview's own gold "stroke" color. Real per-layer color
+// A consistent ENIG-like gold tone for every via's own barrel tube and annular rings, regardless of
+// layer. The muted red/blue-balanced #C69B3C avoids the pure-yellow appearance of the old #EBB500
+// flat-marker stroke while still reading as exposed gold-plated copper under the PBR lighting.
+// Real per-layer color
 // matching (each ring tinted like that specific layer's own assigned UI color) isn't attempted:
 // real via copper is coppery regardless of what arbitrary display color a layer's been assigned, and
 // this file has no hex-color-string parser to reuse for it (see EMSGeometryLayer.hexColor, parsed
 // only on the Swift side today).
-constexpr double kViaCopperR = 0xEB / 255.0;
-constexpr double kViaCopperG = 0xB5 / 255.0;
-constexpr double kViaCopperB = 0x00 / 255.0;
+constexpr double kViaCopperR = 0xC6 / 255.0;
+constexpr double kViaCopperG = 0x9B / 255.0;
+constexpr double kViaCopperB = 0x3C / 255.0;
 
 // How finely a via's own round/capsule cross-section is tessellated -- matches GeometryView.swift's
 // own circleSegments (20) for a plain round via (segmentsPerHalf*2 total boundary points).
@@ -572,13 +720,16 @@ std::vector<CGPoint> capsuleBoundaryPoints(double x1, double y1, double x2, doub
 /// back-faces -- see GeometryView.swift's own doc comment on why real depth test/write is enough on
 /// its own), so no attempt is made to orient these consistently outward.
 void appendTubeQuad(CGPoint a, CGPoint b, double zTop, double zBottom, simd_double4 color,
+                     NSString* _Nullable netName,
                      NSMutableArray<EMSGeometryComponentTriangle*>* triangles) {
     const simd_double3 aTop = simd_make_double3(a.x, a.y, zTop);
     const simd_double3 bTop = simd_make_double3(b.x, b.y, zTop);
     const simd_double3 aBottom = simd_make_double3(a.x, a.y, zBottom);
     const simd_double3 bBottom = simd_make_double3(b.x, b.y, zBottom);
-    [triangles addObject:[[EMSGeometryComponentTriangle alloc] initWithA:aTop b:bTop c:aBottom color:color]];
-    [triangles addObject:[[EMSGeometryComponentTriangle alloc] initWithA:bTop b:bBottom c:aBottom color:color]];
+    [triangles addObject:[[EMSGeometryComponentTriangle alloc]
+                             initWithA:aTop b:bTop c:aBottom color:color netName:netName]];
+    [triangles addObject:[[EMSGeometryComponentTriangle alloc]
+                             initWithA:bTop b:bBottom c:aBottom color:color netName:netName]];
 }
 
 /// Appends two triangles forming one flat quad of an annular-ring washer at a fixed `z`, between
@@ -586,13 +737,141 @@ void appendTubeQuad(CGPoint a, CGPoint b, double zTop, double zBottom, simd_doub
 /// capsuleBoundaryPoints()'s own doc comment for why `outerA`/`outerB`/`innerA`/`innerB` are safe to
 /// connect directly by shared index without any twist.
 void appendAnnulusQuad(CGPoint outerA, CGPoint outerB, CGPoint innerA, CGPoint innerB, double z, simd_double4 color,
+                       NSString* _Nullable netName,
                        NSMutableArray<EMSGeometryComponentTriangle*>* triangles) {
     const simd_double3 oa = simd_make_double3(outerA.x, outerA.y, z);
     const simd_double3 ob = simd_make_double3(outerB.x, outerB.y, z);
     const simd_double3 ia = simd_make_double3(innerA.x, innerA.y, z);
     const simd_double3 ib = simd_make_double3(innerB.x, innerB.y, z);
-    [triangles addObject:[[EMSGeometryComponentTriangle alloc] initWithA:oa b:ob c:ia color:color]];
-    [triangles addObject:[[EMSGeometryComponentTriangle alloc] initWithA:ob b:ib c:ia color:color]];
+    [triangles addObject:[[EMSGeometryComponentTriangle alloc]
+                             initWithA:oa b:ob c:ia color:color netName:netName]];
+    [triangles addObject:[[EMSGeometryComponentTriangle alloc]
+                             initWithA:ob b:ib c:ia color:color netName:netName]];
+}
+
+struct IndexedHoleCutout {
+    PolygonSet polygons;
+    BoundingBox<double> bounds;
+};
+
+BoundingBox<double> polygonSetBounds(const PolygonSet& polygons) {
+    BoundingBox<double> result;
+    for (const Polygon& polygon : polygons) {
+        const BoundingBox<double> polygonBounds = bounds(polygon);
+        result.xMin = std::min(result.xMin, polygonBounds.xMin);
+        result.xMax = std::max(result.xMax, polygonBounds.xMax);
+        result.yMin = std::min(result.yMin, polygonBounds.yMin);
+        result.yMax = std::max(result.yMax, polygonBounds.yMax);
+    }
+    return result;
+}
+
+BoundingBox<double> capsuleBounds(CGPoint a, CGPoint b, double radius) {
+    BoundingBox<double> result;
+    result.xMin = std::min(a.x, b.x) - radius;
+    result.xMax = std::max(a.x, b.x) + radius;
+    result.yMin = std::min(a.y, b.y) - radius;
+    result.yMax = std::max(a.y, b.y) + radius;
+    return result;
+}
+
+bool boundsOverlap(const BoundingBox<double>& a, const BoundingBox<double>& b) {
+    return a.xMin <= b.xMax && a.xMax >= b.xMin && a.yMin <= b.yMax && a.yMax >= b.yMin;
+}
+
+std::vector<std::size_t> overlappingCutoutIndices(const std::vector<IndexedHoleCutout>& cutouts,
+                                                   const BoundingBox<double>& target) {
+    std::vector<std::size_t> result;
+    for (std::size_t i = 0; i < cutouts.size(); ++i) {
+        if (boundsOverlap(cutouts[i].bounds, target)) result.push_back(i);
+    }
+    return result;
+}
+
+std::vector<std::size_t> overlappingCutoutIndices(const std::vector<IndexedHoleCutout>& cutouts,
+                                                   const PolygonSet& targets) {
+    std::vector<BoundingBox<double>> targetBounds;
+    targetBounds.reserve(targets.size());
+    for (const Polygon& target : targets) {
+        // A negative loop is a void within a positive shell, not copper that needs drilling.
+        if (target.size() >= 3 && isPositive(target)) targetBounds.push_back(bounds(target));
+    }
+    // Preserve the standalone-clockwise behavior supported by the polygon adapter.
+    if (targetBounds.empty()) {
+        for (const Polygon& target : targets) {
+            if (target.size() >= 3) targetBounds.push_back(bounds(target));
+        }
+    }
+
+    std::vector<std::size_t> result;
+    for (std::size_t i = 0; i < cutouts.size(); ++i) {
+        if (std::any_of(targetBounds.begin(), targetBounds.end(), [&](const BoundingBox<double>& target) {
+                return boundsOverlap(cutouts[i].bounds, target);
+            })) {
+            result.push_back(i);
+        }
+    }
+    return result;
+}
+
+PolygonSet gatherCutouts(const std::vector<IndexedHoleCutout>& cutouts,
+                         const std::vector<std::size_t>& indices) {
+    PolygonSet result;
+    std::size_t loopCount = 0;
+    for (const std::size_t index : indices) loopCount += cutouts[index].polygons.size();
+    result.reserve(loopCount);
+    for (const std::size_t index : indices) {
+        result.insert(result.end(), cutouts[index].polygons.begin(), cutouts[index].polygons.end());
+    }
+    return result;
+}
+
+struct WholeBoardCopperGroup {
+    std::string key;
+    std::string netName;
+    std::string footprintReference;
+    std::string padNumber;
+    EMSGeometryTriangleKind kind = EMSGeometryTriangleKindTrace;
+    PolygonSet rawPolygons;
+    std::vector<Triangle> triangles;
+    std::string error;
+};
+
+void buildWholeBoardCopperGroup(WholeBoardCopperGroup& group, const std::string& layerName,
+                                const std::vector<IndexedHoleCutout>& platedHoleCutouts,
+                                const PolygonSet& allPlatedHoleCutouts, double tessellationTolerance) {
+    try {
+        // A single positive KiCad contour is already a valid composited polygon. Larger groups use
+        // GEOS's disjoint-subset union, which identifies disconnected pad/track clusters and only
+        // overlays members that can interact.
+        PolygonSet visibleCopper =
+            group.rawPolygons.size() == 1 && isPositive(group.rawPolygons.front())
+                ? group.rawPolygons
+                : unionDisjointSubsets(group.rawPolygons);
+
+        if (!platedHoleCutouts.empty() && !visibleCopper.empty()) {
+            // Compare against every source copper shell rather than the enclosing box of a whole,
+            // potentially board-spanning net. A drill can affect the union only if it can affect at
+            // least one of its inputs, so this tighter filter cannot discard a real intersection.
+            const std::vector<std::size_t> candidates =
+                overlappingCutoutIndices(platedHoleCutouts, group.rawPolygons);
+            if (!candidates.empty()) {
+                PolygonSet localCutouts;
+                const PolygonSet* clip = &allPlatedHoleCutouts;
+                if (candidates.size() != platedHoleCutouts.size()) {
+                    localCutouts = gatherCutouts(platedHoleCutouts, candidates);
+                    if (candidates.size() > 1) localCutouts = unionDisjointSubsets(localCutouts);
+                    clip = &localCutouts;
+                }
+                visibleCopper = differenceCompositedPolygons(visibleCopper, *clip);
+            }
+        }
+
+        group.triangles =
+            triangulateComposited(visibleCopper, tessellationTolerance, layerName + " (" + group.netName + ")");
+    } catch (const std::exception& exception) {
+        group.error = exception.what();
+    }
 }
 
 /// Real 3D geometry for one via -- see EMSGeometryPreview.viaMeshTriangles' own doc comment for what
@@ -600,9 +879,12 @@ void appendAnnulusQuad(CGPoint outerA, CGPoint outerB, CGPoint innerA, CGPoint i
 /// stackup order) -- every via is treated as reaching every layer (see viaHolePolygons' own comment
 /// in board_slicing.cpp for why that's the simplifying assumption already in force everywhere else a
 /// via is modeled in this codebase), so the tube spans metalOffsets' own full range and a ring is
-/// added at every one of its entries, not just some.
+/// added at every one of its entries, not just some. When `ringCutouts` is supplied, the flat ring
+/// surfaces are polygon-triangulated after subtracting the spatially-selected drills that can touch
+/// it, so a neighbouring via can punch through a large mounting-hole annulus as it does in KiCad.
 void appendViaMesh(const EMSGeometryVia* via, const std::vector<double>& metalOffsets,
-                    NSMutableArray<EMSGeometryComponentTriangle*>* triangles) {
+                    NSMutableArray<EMSGeometryComponentTriangle*>* triangles,
+                    const PolygonSet* ringCutouts = nullptr, double tessellationTolerance = 0) {
     const double holeRadius = via.diameter / 2;
     if (holeRadius <= 0 || metalOffsets.empty()) {
         return;
@@ -618,7 +900,8 @@ void appendViaMesh(const EMSGeometryVia* via, const std::vector<double>& metalOf
 
     // Open (uncapped) barrel tube at the drilled hole diameter, spanning the board's full Z extent.
     for (std::size_t i = 0; i < n; ++i) {
-        appendTubeQuad(holeBoundary[i], holeBoundary[(i + 1) % n], zTop, zBottom, color, triangles);
+        appendTubeQuad(holeBoundary[i], holeBoundary[(i + 1) % n], zTop, zBottom, color,
+                       via.netName, triangles);
     }
 
     // Annular-ring washer at every metal layer -- skipped entirely if the ring isn't actually wider
@@ -628,14 +911,39 @@ void appendViaMesh(const EMSGeometryVia* via, const std::vector<double>& metalOf
     if (ringRadius <= holeRadius) {
         return;
     }
+
+    if (ringCutouts != nullptr) {
+        const Polygon ringCenterline = {
+            {via.ringPosition.x, via.ringPosition.y},
+            {via.ringPosition2.x, via.ringPosition2.y},
+        };
+        const PolygonSet outerRing = bufferOpenPaths({ringCenterline}, ringRadius, tessellationTolerance);
+        const PolygonSet visibleRing = differenceCompositedPolygons(outerRing, *ringCutouts);
+        const std::vector<Triangle> ringTriangles =
+            triangulateComposited(visibleRing, tessellationTolerance, "whole-board via annular ring");
+        for (const double layerZ : metalOffsets) {
+            const double z = layerZ + kViaRingZEpsilonSimUnits;
+            for (const Triangle& triangle : ringTriangles) {
+                [triangles addObject:[[EMSGeometryComponentTriangle alloc]
+                                         initWithA:simd_make_double3(triangle.a.x(), triangle.a.y(), z)
+                                                 b:simd_make_double3(triangle.b.x(), triangle.b.y(), z)
+                                             c:simd_make_double3(triangle.c.x(), triangle.c.y(), z)
+                                             color:color
+                                           netName:via.netName]];
+            }
+        }
+        return;
+    }
+
     const std::vector<CGPoint> ringBoundary =
-        capsuleBoundaryPoints(via.position.x, via.position.y, via.position2.x, via.position2.y, ringRadius,
+        capsuleBoundaryPoints(via.ringPosition.x, via.ringPosition.y,
+                               via.ringPosition2.x, via.ringPosition2.y, ringRadius,
                                kViaBoundarySegmentsPerHalf);
     for (const double layerZ : metalOffsets) {
         const double z = layerZ + kViaRingZEpsilonSimUnits;
         for (std::size_t i = 0; i < n; ++i) {
             appendAnnulusQuad(ringBoundary[i], ringBoundary[(i + 1) % n], holeBoundary[i], holeBoundary[(i + 1) % n],
-                               z, color, triangles);
+                               z, color, via.netName, triangles);
         }
     }
 }
@@ -799,10 +1107,10 @@ MaterialGridBuffers buildMaterialGrid(const SlicedBoard& sliced, const Simulatio
     kiems::ComputedGridLines displayGrid = grid;
     // GridGenerator keeps these diagnostic X/Y bounds local to the sliced-board origin, whereas
     // its real grid lines and all CSXCAD geometry are absolute in that frame.
-    displayGrid.pmlInnerXMin += sliced.xMin;
-    displayGrid.pmlInnerXMax += sliced.xMin;
-    displayGrid.pmlInnerYMin += sliced.yMin;
-    displayGrid.pmlInnerYMax += sliced.yMin;
+    displayGrid.pmlInnerXMin += sliced.bounds.xMin;
+    displayGrid.pmlInnerXMax += sliced.bounds.xMin;
+    displayGrid.pmlInnerYMin += sliced.bounds.yMin;
+    displayGrid.pmlInnerYMax += sliced.bounds.yMin;
 
     GridMaterialColors colors(config);
     MaterialGridBuffers result;
@@ -844,7 +1152,7 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
     // fatal to the geometry step itself, it just leaves every layer's hexColor nil, which callers
     // fall back to their own default palette for.
     std::unordered_map<std::string, std::string> colorsByLayerName;
-    if (auto colorsResult = kiems::libkicad_query::layerColors(paths, "Reading layer colors"); colorsResult) {
+    if (auto colorsResult = libkicad::layerColors(paths.kicadBoardPaths()); colorsResult) {
         for (const auto& layerColor : *colorsResult) {
             colorsByLayerName.emplace(layerColor.name, layerColor.hex);
         }
@@ -870,7 +1178,7 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
             }
         }
     }
-    NSMutableArray<EMSGeometryLayer*>* layers = [NSMutableArray arrayWithCapacity:sliced.previewLayerTriangles.size()];
+    NSMutableArray<EMSGeometryLayer*>* layers = [NSMutableArray arrayWithCapacity:sliced.previewLayerTriangles.size() + 2];
     for (std::size_t layerIndex = 0; layerIndex < sliced.previewLayerTriangles.size(); ++layerIndex) {
         NSString* layerName = layerIndex < metals.size()
                                    ? @(metals[layerIndex].name().c_str())
@@ -918,7 +1226,8 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
                                                         ringPosition:point
                                                        ringPosition2:point
                                                             diameter:via.diameter
-                                                annularRingDiameter:via.annularRingDiameter]];
+                                                annularRingDiameter:via.annularRingDiameter
+                                                             netName:nil]];
     }
 
     // Real board vias (from the KiCad board) -- kept only where they still overlap this
@@ -950,8 +1259,7 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
                 // one, matching how KiCad itself reports a through-hole's position. Falls back to a
                 // flat margin over platingThickness (see kPreviewViaAnnularRingMarginSimUnits's own
                 // comment), with the ring sharing the hole's own centerline (so a single radius, as
-                // before), only if no real size was found for this specific via -- normally just a
-                // missing/stale libkicad_smoketest, not something a real board hits.
+                // before), only if no real size was found for this specific via.
                 const CGPoint holePos = CGPointMake(via.x, via.y);
                 const CGPoint holePos2 = CGPointMake(via.x2, via.y2);
                 CGPoint ringPos = holePos;
@@ -976,7 +1284,8 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
                                                                 ringPosition:ringPos
                                                                ringPosition2:ringPos2
                                                                     diameter:via.diameter
-                                                        annularRingDiameter:outerDiameter]];
+                                                        annularRingDiameter:outerDiameter
+                                                                     netName:nil]];
             }
         }
     }
@@ -990,12 +1299,24 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
         appendViaMesh(via, metalOffsets, viaTriangles);
     }
 
+    // Absorbing pins only have meaning inside the region actually sent to the simulator.  Keep
+    // using the complete cutout here (rather than `outline`, which is only its largest loop), so
+    // markers are also hidden correctly for disjoint hulls and holes.  Probe markers retain their
+    // existing whole-board behaviour.
+    const PolygonSet cutout = sliced.cutoutLoops.empty() ? PolygonSet{sliced.outline} : sliced.cutoutLoops;
     NSMutableArray<EMSGeometryPort*>* ports = [NSMutableArray arrayWithCapacity:simConfig.ports().size()];
     for (const auto& port : simConfig.ports()) {
-        if (!port.position().has_value()) {
+        // SimulationNet resolution creates pad-port candidates even when a pin is neither loaded,
+        // excited nor measured. They are bookkeeping for later excitation/pair resolution, not a
+        // visible indicator. Only expose ports that represent a real action selected by the user.
+        if (!port.position().has_value() ||
+            !(port.absorbSignal() || port.excite() || port.probe() || port.isTraceProbe())) {
             continue;
         }
         const auto [x, y] = *port.position();
+        if (port.absorbSignal() && !containsPoint(cutout, Position{x, y})) {
+            continue;
+        }
         [ports addObject:[[EMSGeometryPort alloc] initWithName:@(port.name().c_str())
                                                           position:CGPointMake(x, y)
                                                              width:port.width()
@@ -1052,7 +1373,9 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
                                   initWithA:toSim(triangle.ax, triangle.ay, triangle.az)
                                           b:toSim(triangle.bx, triangle.by, triangle.bz)
                                           c:toSim(triangle.cx, triangle.cy, triangle.cz)
-                                      color:simd_make_double4(triangle.r, triangle.g, triangle.b, triangle.a)]];
+                                      color:simd_make_double4(triangle.r, triangle.g, triangle.b, triangle.a)
+                                    netName:nil
+                         footprintReference:@(triangle.footprintReference.c_str())]];
             }
         } else {
             logWarning("GeometryPreview: board outline query failed, skipping component model "
@@ -1068,7 +1391,7 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
     // etc, none of which subtract this offset) is placed in too. No translation needed here.
     // pmlInner* is the one exception -- it's diagnostic-only (see GridGeneratorAxis::pmlInnerMin()'s
     // own doc comment) and deliberately stays local/offset-subtracted at the source, so it still
-    // needs sliced.xMin/yMin added back below.
+    // needs sliced.bounds.xMin/yMin added back below.
     NSMutableArray<NSNumber*>* gridLinesX = [NSMutableArray array];
     NSMutableArray<NSNumber*>* gridLinesY = [NSMutableArray array];
     NSMutableArray<NSNumber*>* gridLinesZ = [NSMutableArray array];
@@ -1137,10 +1460,12 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
         gridLines ? buildMaterialGrid(sliced, simConfig, scaledConfig, paths, *gridLines) : MaterialGridBuffers{};
 
     return [[EMSGeometryPreview alloc] initWithLayers:layers
+                                           wholeBoard:NO
                                           topSolderMask:topSolderMask
                                        bottomSolderMask:bottomSolderMask
                                                 outline:outline
                                                    vias:vias
+                                          trackSegments:@[]
                                       failedViaAttempts:failedViaAttempts
                                                   ports:ports
                                        viaMeshTriangles:viaTriangles
@@ -1155,14 +1480,672 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
                                    gridPlaneExcludingZ:materialGrid.excludingZ
                                          gridMaterials:materialGrid.materials
                                             gridLayers:materialGrid.layers
-                                           pmlInnerXMin:gridLines ? gridLines->pmlInnerXMin + sliced.xMin : 0
-                                           pmlInnerXMax:gridLines ? gridLines->pmlInnerXMax + sliced.xMin : 0
-                                           pmlInnerYMin:gridLines ? gridLines->pmlInnerYMin + sliced.yMin : 0
-                                           pmlInnerYMax:gridLines ? gridLines->pmlInnerYMax + sliced.yMin : 0
+                                           pmlInnerXMin:gridLines ? gridLines->pmlInnerXMin + sliced.bounds.xMin : 0
+                                           pmlInnerXMax:gridLines ? gridLines->pmlInnerXMax + sliced.bounds.xMin : 0
+                                           pmlInnerYMin:gridLines ? gridLines->pmlInnerYMin + sliced.bounds.yMin : 0
+                                           pmlInnerYMax:gridLines ? gridLines->pmlInnerYMax + sliced.bounds.yMin : 0
                                            pmlInnerZMin:gridLines ? gridLines->pmlInnerZMin : 0
                                            pmlInnerZMax:gridLines ? gridLines->pmlInnerZMax : 0
-                                                   xMin:sliced.xMin
-                                                   yMin:sliced.yMin
-                                                  width:sliced.width
-                                                 height:sliced.height];
+                                                   xMin:sliced.bounds.xMin
+                                                   yMin:sliced.bounds.yMin
+                                                  width:sliced.bounds.xMax - sliced.bounds.xMin
+                                                 height:sliced.bounds.yMax - sliced.bounds.yMin];
+}
+
+namespace {
+
+// Default tessellation coarseness for the whole-board preview -- there's no SimulationConfig here
+// to read a real SlicingConfig::pixelSize from, so this just matches that field's own default (5,
+// at constants::unitMultiplier sim-units/micron): plenty fine for a cosmetic board preview, same
+// as every sliced-board preview already gets when a simulation hasn't overridden pixelSize itself.
+constexpr double kWholeBoardTessellationToleranceSimUnits = 5.0 * kiems::constants::unitMultiplier;
+
+// Mirrors board_slicing.cpp's own (private) _polygonLoopToPolygon/_copperOnLayer exactly -- small
+// enough, and different enough in what they're fed (every net's own copper across the whole board,
+// not one SimulationConfig's already-cutout-clipped composite), that duplicating them here reads
+// more clearly than exporting board_slicing.cpp's own internals just for this one caller.
+Polygon wholeBoardPolygonLoopToPolygon(const libkicad::PolygonLoop& loop, double originX, double originY) {
+    return previewPolygonLoop(loop, originX, originY);
+}
+
+std::optional<simd_double4> previewColorFromHex(const std::string& hex) {
+    if ((hex.size() != 7 && hex.size() != 9) || hex.front() != '#') return std::nullopt;
+    try {
+        const auto channel = [&](std::size_t offset) {
+            return static_cast<double>(std::stoul(hex.substr(offset, 2), nullptr, 16)) / 255.0;
+        };
+        return simd_make_double4(channel(1), channel(3), channel(5), hex.size() == 9 ? channel(7) : 1.0);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::unordered_map<std::string, simd_double4> previewNetColors(const kiems::PathsConfig& paths) {
+    std::unordered_map<std::string, simd_double4> colorsByNetName;
+    // libkicad resolves KiCad's two project-file colour sources with the PCB editor's precedence:
+    // explicit net colour, then effective net-class colour. Nets with neither deliberately remain
+    // absent so GeometryView falls back to the copper layer's own theme colour.
+    if (auto colorsResult = libkicad::netColors(paths.kicadBoardPaths()); colorsResult) {
+        for (const auto& netColor : *colorsResult) {
+            if (auto color = previewColorFromHex(netColor.hex)) {
+                colorsByNetName.emplace(netColor.name, *color);
+            }
+        }
+    } else {
+        logWarning("GeometryPreview: net color query failed, falling back to layer colors: " +
+                   colorsResult.error());
+    }
+    return colorsByNetName;
+}
+
+} // namespace
+
+namespace {
+
+struct PreviewLayerPlacement {
+    std::unordered_map<std::string, double> zByName;
+    double top = 0;
+    double bottom = 0;
+};
+
+PreviewLayerPlacement previewLayerPlacement(const kiems::PathsConfig& paths) {
+    PreviewLayerPlacement result;
+    kiems::EMSConfig config;
+    if (!kiems::importStackup(paths, config)) return result;
+    double z = 0;
+    for (const auto& layer : config.layers()) {
+        if (layer.kind() == kiems::LayerKind::Substrate) z -= layer.thickness();
+        if (layer.kind() == kiems::LayerKind::Metal) result.zByName[layer.name()] = z;
+    }
+    result.bottom = z;
+    return result;
+}
+
+double displayZForLayer(const std::string& name, const PreviewLayerPlacement& placement) {
+    if (const auto found = placement.zByName.find(name); found != placement.zByName.end()) {
+        return found->second;
+    }
+    // Give mask a small, explicit display separation behind its adjacent copper. This is large
+    // enough to remain distinct in the depth buffer at whole-board scale, unlike the earlier
+    // coplanar/depth-comparison approach, while still being visually negligible (100 simulation
+    // units = 10 microns).
+    constexpr double displayLayerSeparation = 100.0;
+    if (name == "F.Mask") {
+        if (const auto copper = placement.zByName.find("F.Cu"); copper != placement.zByName.end()) {
+            return copper->second - displayLayerSeparation;
+        }
+        return placement.top - displayLayerSeparation;
+    }
+    if (name == "B.Mask") {
+        if (const auto copper = placement.zByName.find("B.Cu"); copper != placement.zByName.end()) {
+            return copper->second - displayLayerSeparation;
+        }
+        return placement.bottom - displayLayerSeparation;
+    }
+    if (name.starts_with("B.")) return placement.bottom - 20.0;
+    if (name.starts_with("F.")) return placement.top + 20.0;
+    return (placement.top + placement.bottom) / 2.0;
+}
+
+struct PreviewOutlineFrame {
+    double originX = 0;
+    double originY = 0;
+    double width = 1;
+    double height = 1;
+    NSMutableArray<NSValue*>* points = [NSMutableArray array];
+};
+
+PreviewOutlineFrame previewOutlineFrame(const std::vector<libkicad::PolygonLoop>& loops) {
+    PreviewOutlineFrame frame;
+    double minX = std::numeric_limits<double>::infinity();
+    double minY = std::numeric_limits<double>::infinity();
+    double maxX = -std::numeric_limits<double>::infinity();
+    double maxY = -std::numeric_limits<double>::infinity();
+    for (const auto& loop : loops) {
+        for (const auto& [xMm, yMm] : loop.pointsMm) {
+            const double x = mmToSimUnits(xMm);
+            const double y = mmToSimUnits(yMm);
+            minX = std::min(minX, x); minY = std::min(minY, y);
+            maxX = std::max(maxX, x); maxY = std::max(maxY, y);
+        }
+    }
+    if (!std::isfinite(minX)) return frame;
+    frame.originX = minX;
+    frame.originY = minY;
+    frame.width = std::max(1.0, maxX - minX);
+    frame.height = std::max(1.0, maxY - minY);
+    const libkicad::PolygonLoop* outer = nullptr;
+    for (const auto& loop : loops) if (!loop.hole) { outer = &loop; break; }
+    if (outer == nullptr && !loops.empty()) outer = &loops.front();
+    if (outer != nullptr) {
+        for (const auto& [xMm, yMm] : outer->pointsMm) {
+            [frame.points addObject:[NSValue valueWithPoint:NSMakePoint(
+                mmToSimUnits(xMm) - minX, mmToSimUnits(yMm) - minY)]];
+        }
+    }
+    return frame;
+}
+
+} // namespace
+
+std::expected<EMSGeometryPreview*, std::string> buildBoardLayerCatalogPreview(
+    const kiems::PathsConfig& paths, bool wholeBoard) {
+    auto catalog = libkicad::boardLayers(paths.kicadBoardPaths());
+    if (!catalog) return std::unexpected(std::move(catalog).error());
+    auto edge = libkicad::boardLayerGeometry(paths.kicadBoardPaths(), "Edge.Cuts");
+    if (!edge) return std::unexpected(std::move(edge).error());
+    const PreviewOutlineFrame frame = previewOutlineFrame(edge->boardOutline);
+    const PreviewLayerPlacement placement = previewLayerPlacement(paths);
+
+    std::unordered_map<std::string, std::string> colors;
+    if (auto result = libkicad::layerColors(paths.kicadBoardPaths()); result) {
+        for (const auto& color : *result) colors[color.name] = color.hex;
+    }
+    NSMutableArray<EMSGeometryLayer*>* layers = [NSMutableArray arrayWithCapacity:catalog->size()];
+    for (const auto& info : *catalog) {
+        NSString* hex = nil;
+        if (const auto found = colors.find(info.name); found != colors.end()) hex = @(found->second.c_str());
+        [layers addObject:[EMSGeometryLayer placeholderWithName:@(info.name.c_str())
+                                                        hexColor:hex
+                                                               z:displayZForLayer(info.name, placement)]];
+    }
+    return [[EMSGeometryPreview alloc] initWithLayers:layers wholeBoard:wholeBoard
+        topSolderMask:nil bottomSolderMask:nil outline:frame.points vias:@[] trackSegments:@[]
+        failedViaAttempts:@[] ports:@[] viaMeshTriangles:@[] componentMeshTriangles:@[]
+        renderedComponentReferences:@[] componentModelExportMessages:@[] gridLinesX:@[] gridLinesY:@[]
+        gridLinesZ:@[] gridPlaneExcludingX:nil gridPlaneExcludingY:nil gridPlaneExcludingZ:nil
+        gridMaterials:@[] gridLayers:@[] pmlInnerXMin:0 pmlInnerXMax:0 pmlInnerYMin:0 pmlInnerYMax:0
+        pmlInnerZMin:0 pmlInnerZMax:0 xMin:0 yMin:0 width:frame.width height:frame.height];
+}
+
+static std::expected<EMSGeometryLayer*, std::string> buildBoardLayerPreviewImpl(
+    const kiems::PathsConfig& paths, const std::string& layerName,
+    const PolygonSet* clip, double tessellationTolerance) {
+    auto result = libkicad::boardLayerGeometry(paths.kicadBoardPaths(), layerName);
+    if (!result) return std::unexpected(std::move(result).error());
+    const PreviewOutlineFrame frame = previewOutlineFrame(result->boardOutline);
+    const PreviewLayerPlacement placement = previewLayerPlacement(paths);
+    NSString* hex = nil;
+    if (auto colors = libkicad::layerColors(paths.kicadBoardPaths()); colors) {
+        for (const auto& color : *colors) if (color.name == layerName) { hex = @(color.hex.c_str()); break; }
+    }
+    const std::unordered_map<std::string, simd_double4> colorsByNetName = previewNetColors(paths);
+
+    NSMutableArray<EMSGeometryTriangle*>* triangles = [NSMutableArray array];
+    if (result->layer.copper) {
+        for (const auto& polygon : result->copper) {
+            Polygon path = wholeBoardPolygonLoopToPolygon(polygon.loop, frame.originX, frame.originY);
+            if (path.size() < 3) continue;
+            PolygonSet shape{path};
+            if (clip != nullptr) shape = intersectPolygons(shape, *clip);
+            const auto mesh = triangulateComposited(shape, tessellationTolerance, layerName);
+            const bool pin = !polygon.footprintRef.empty();
+            const EMSGeometryTriangleKind kind = polygon.zone ? EMSGeometryTriangleKindZone
+                                                    : pin ? EMSGeometryTriangleKindPin
+                                                          : EMSGeometryTriangleKindTrace;
+            // Alpha zero is GeometryView's "no override" sentinel. This exactly matches the Setup
+            // board preview: configured net colour wins, then configured net-class colour (already
+            // resolved by libkicad), with the layer colour as the fallback.
+            simd_double4 color = simd_make_double4(0, 0, 0, 0);
+            if (const auto colorIt = colorsByNetName.find(polygon.netName); colorIt != colorsByNetName.end()) {
+                color = colorIt->second;
+            }
+            for (const auto& triangle : mesh) {
+                [triangles addObject:[[EMSGeometryTriangle alloc]
+                    initWithA:toCGPoint(triangle.a) b:toCGPoint(triangle.b) c:toCGPoint(triangle.c)
+                    color:color opacity:polygon.zone ? 0.7 : 1.0 kind:kind
+                    netName:polygon.netName.empty() ? nil : @(polygon.netName.c_str())
+                    footprintReference:polygon.footprintRef.empty() ? nil : @(polygon.footprintRef.c_str())
+                    padNumber:polygon.padNumber.empty() ? nil : @(polygon.padNumber.c_str())]];
+            }
+        }
+    } else {
+        const PolygonSet shapes = previewPolygonLoops(result->contours, frame.originX, frame.originY);
+        PolygonSet coverage = shapes;
+        if (result->layer.solderMask) {
+            const PolygonSet outline = previewPolygonLoops(result->boardOutline, frame.originX, frame.originY);
+            coverage = differencePolygons(outline, unionPolygons(shapes));
+
+        }
+        if (clip != nullptr) coverage = intersectPolygons(coverage, *clip);
+        const auto mesh = triangulateComposited(coverage, tessellationTolerance, layerName);
+        for (const auto& triangle : mesh) {
+            [triangles addObject:[[EMSGeometryTriangle alloc] initWithA:toCGPoint(triangle.a)
+                b:toCGPoint(triangle.b) c:toCGPoint(triangle.c)
+                color:simd_make_double4(0, 0, 0, 0) opacity:result->layer.solderMask ? 0.45 : 1.0]];
+        }
+    }
+    return [[EMSGeometryLayer alloc] initWithName:@(layerName.c_str()) triangles:triangles
+        hexColor:hex z:displayZForLayer(layerName, placement)];
+}
+
+std::expected<EMSGeometryLayer*, std::string> buildBoardLayerPreview(
+    const kiems::PathsConfig& paths, const std::string& layerName) {
+    return buildBoardLayerPreviewImpl(paths, layerName, nullptr,
+                                      kWholeBoardTessellationToleranceSimUnits);
+}
+
+std::expected<EMSGeometryLayer*, std::string> buildSlicedBoardLayerPreview(
+    const kiems::PathsConfig& paths, const std::string& layerName,
+    const kiems::SlicedBoard& sliced, double tessellationTolerance) {
+    const PolygonSet clip = sliced.cutoutLoops.empty() ? PolygonSet{sliced.outline} : sliced.cutoutLoops;
+    return buildBoardLayerPreviewImpl(paths, layerName, &clip, tessellationTolerance);
+}
+
+std::expected<EMSGeometryPreview*, std::string> buildWholeBoardPreview(const kiems::PathsConfig& paths) {
+    const auto previewStartedAt = std::chrono::steady_clock::now();
+    auto geometryResult = libkicad::boardGeometry(paths.kicadBoardPaths());
+    if (!geometryResult) return std::unexpected(std::move(geometryResult).error());
+    const libkicad::BoardGeometry& geometry = *geometryResult;
+
+    auto boundsResult = kiems::boardBoundsInSimulationUnits(geometry);
+    if (!boundsResult) return std::unexpected(std::move(boundsResult).error());
+    const double originX = boundsResult->xMin;
+    const double originY = boundsResult->yMin;
+
+    // Only used here to get real, correctly-scaled per-layer Z offsets (LayerConfig's own
+    // constructor already converts thicknessMm to simulation units -- see its own doc comment) the
+    // exact same way the real FDTD geometry places them (kiems::Simulation::addGerbers()) -- not
+    // for anything sliced/simulated. A throwaway config, never a real SimulationConfig's own.
+    kiems::EMSConfig stackupConfig;
+    if (auto stackupImported = kiems::importStackup(paths, stackupConfig); !stackupImported) {
+        return std::unexpected(std::move(stackupImported).error());
+    }
+
+    std::unordered_map<std::string, std::string> colorsByLayerName;
+    if (auto colorsResult = libkicad::layerColors(paths.kicadBoardPaths()); colorsResult) {
+        for (const auto& layerColor : *colorsResult) {
+            colorsByLayerName.emplace(layerColor.name, layerColor.hex);
+        }
+    }
+
+    const std::unordered_map<std::string, simd_double4> colorsByNetName = previewNetColors(paths);
+
+    const std::vector<kiems::LayerConfig> metals = stackupConfig.getMetals();
+    std::vector<double> metalOffsets;
+    {
+        double offset = 0;
+        for (const auto& layer : stackupConfig.layers()) {
+            if (layer.kind() == kiems::LayerKind::Substrate) {
+                offset -= layer.thickness();
+            } else if (layer.kind() == kiems::LayerKind::Metal) {
+                metalOffsets.push_back(offset);
+            }
+        }
+    }
+
+    // Resolve plated holes before triangulating the copper.  The via mesh deliberately has an
+    // open centre, but without also removing that drill shape from the independently-rendered
+    // zone/pad/track polygons, translucent zone copper remains visible through the opening.
+    // Preserve each cutout separately for cheap bounds filtering, plus one shared union for copper
+    // groups spanning the whole board, so the visible board agrees with the barrel/ring geometry
+    // below without rebuilding the entire drill geometry for every via and small copper group.
+    NSMutableArray<EMSGeometryVia*>* vias = [NSMutableArray array];
+    NSMutableArray<EMSGeometryComponentTriangle*>* viaTriangles = [NSMutableArray array];
+    std::vector<IndexedHoleCutout> platedHoleCutouts;
+    PolygonSet allPlatedHoleCutouts;
+    if (auto holes = libkicad::throughHoles(paths.kicadBoardPaths()); holes) {
+        platedHoleCutouts.reserve(holes->size());
+        for (const auto& hole : *holes) {
+            const double cx = mmToSimUnits(hole.xMm) - originX;
+            const double cy = mmToSimUnits(hole.yMm) - originY;
+            const double drillLong = mmToSimUnits(std::max(hole.drillWidthMm, hole.drillHeightMm));
+            const double drillShort = mmToSimUnits(std::min(hole.drillWidthMm, hole.drillHeightMm));
+            const double padLong = mmToSimUnits(std::max(hole.padWidthMm, hole.padHeightMm));
+            const double padShort = mmToSimUnits(std::min(hole.padWidthMm, hole.padHeightMm));
+            double angle = -hole.orientationDeg * M_PI / 180.0;
+            if (hole.drillHeightMm > hole.drillWidthMm) angle -= M_PI / 2.0;
+            const double ux = std::cos(angle);
+            const double uy = std::sin(angle);
+            const double drillHalfLine = std::max(0.0, (drillLong - drillShort) / 2.0);
+            const double padHalfLine = std::max(0.0, (padLong - padShort) / 2.0);
+            const CGPoint p1 = CGPointMake(cx - ux * drillHalfLine, cy - uy * drillHalfLine);
+            const CGPoint p2 = CGPointMake(cx + ux * drillHalfLine, cy + uy * drillHalfLine);
+            const CGPoint r1 = CGPointMake(cx - ux * padHalfLine, cy - uy * padHalfLine);
+            const CGPoint r2 = CGPointMake(cx + ux * padHalfLine, cy + uy * padHalfLine);
+
+            const PolygonSet cutout = bufferOpenPaths(
+                {{{p1.x, p1.y}, {p2.x, p2.y}}}, drillShort / 2.0,
+                kWholeBoardTessellationToleranceSimUnits);
+            allPlatedHoleCutouts.insert(allPlatedHoleCutouts.end(), cutout.begin(), cutout.end());
+            platedHoleCutouts.push_back({cutout, polygonSetBounds(cutout)});
+
+            EMSGeometryVia* via = [[EMSGeometryVia alloc] initWithPosition:p1 position2:p2
+                                                              ringPosition:r1 ringPosition2:r2
+                                                                   diameter:drillShort
+                                                        annularRingDiameter:padShort
+                                                                     netName:hole.netName.empty()
+                                                                         ? nil
+                                                                         : @(hole.netName.c_str())];
+            [vias addObject:via];
+        }
+        allPlatedHoleCutouts = unionDisjointSubsets(allPlatedHoleCutouts);
+        for (std::size_t viaIndex = 0; viaIndex < vias.count; ++viaIndex) {
+            EMSGeometryVia* via = vias[viaIndex];
+            const double ringRadius = via.annularRingDiameter / 2;
+            const BoundingBox<double> ringBounds =
+                capsuleBounds(via.ringPosition, via.ringPosition2, ringRadius);
+            std::vector<std::size_t> candidates = overlappingCutoutIndices(platedHoleCutouts, ringBounds);
+            const bool intersectsAnotherHole =
+                std::any_of(candidates.begin(), candidates.end(),
+                            [viaIndex](const std::size_t candidate) { return candidate != viaIndex; });
+            if (!intersectsAnotherHole) {
+                // The overwhelmingly common case: appendViaMesh's direct annulus quads already
+                // leave this via's own drilled centre open, so avoid GEOS altogether.
+                appendViaMesh(via, metalOffsets, viaTriangles);
+                continue;
+            }
+            if (std::find(candidates.begin(), candidates.end(), viaIndex) == candidates.end()) {
+                candidates.push_back(viaIndex);
+            }
+            const PolygonSet localCutouts = unionDisjointSubsets(gatherCutouts(platedHoleCutouts, candidates));
+            appendViaMesh(via, metalOffsets, viaTriangles, &localCutouts,
+                          kWholeBoardTessellationToleranceSimUnits);
+        }
+    } else {
+        logWarning("GeometryPreview: plated-hole query failed, copper drill cutouts omitted: " +
+                   holes.error());
+    }
+
+    NSMutableArray<EMSGeometryLayer*>* layers = [NSMutableArray arrayWithCapacity:metals.size()];
+    for (std::size_t layerIndex = 0; layerIndex < metals.size(); ++layerIndex) {
+        const std::string& layerName = metals[layerIndex].name();
+
+        // Grouped by net (not unioned across the whole layer the way buildGeometryPreview's own
+        // per-layer triangulation is) so each net's own copper can be triangulated, and colored,
+        // separately -- see EMSGeometryTriangle.color's own doc comment for why that identity has
+        // to survive past triangulation rather than collapsing into one flat per-layer color.
+        std::unordered_map<std::string, WholeBoardCopperGroup> groupsByIdentity;
+        for (const libkicad::CopperPolygon& polygon : geometry.copper) {
+            if (polygon.copperLayerName != layerName) continue;
+            Polygon path = wholeBoardPolygonLoopToPolygon(polygon.loop, originX, originY);
+            if (path.size() >= 3) {
+                const bool isPin = !polygon.zone && !polygon.footprintRef.empty();
+                const EMSGeometryTriangleKind kind = polygon.zone ? EMSGeometryTriangleKindZone
+                                                     : isPin ? EMSGeometryTriangleKindPin
+                                                             : EMSGeometryTriangleKindTrace;
+                const std::string key = polygon.zone
+                    ? "zone\x1f" + polygon.netName
+                    : isPin
+                        ? "pin\x1f" + polygon.footprintRef + "\x1f" + polygon.padNumber
+                        : "trace\x1f" + polygon.netName;
+                WholeBoardCopperGroup& group = groupsByIdentity[key];
+                group.key = key;
+                group.netName = polygon.netName;
+                group.footprintReference = polygon.footprintRef;
+                group.padNumber = polygon.padNumber;
+                group.kind = kind;
+                group.rawPolygons.push_back(std::move(path));
+            }
+        }
+
+        NSString* hexColor = nil;
+        if (const auto colorIt = colorsByLayerName.find(layerName); colorIt != colorsByLayerName.end()) {
+            hexColor = @(colorIt->second.c_str());
+        }
+
+        std::vector<WholeBoardCopperGroup> copperGroups;
+        copperGroups.reserve(groupsByIdentity.size());
+        for (auto& entry : groupsByIdentity) {
+            copperGroups.push_back(std::move(entry.second));
+        }
+        // Equal-depth ID fragments use lessEqual, so later geometry wins. Make pads win over
+        // tracks where their copper overlaps, while zones remain the lowest-priority hit.
+        const auto pickingPriority = [](EMSGeometryTriangleKind kind) {
+            switch (kind) {
+                case EMSGeometryTriangleKindZone: return 0;
+                case EMSGeometryTriangleKindTrace: return 1;
+                case EMSGeometryTriangleKindPin: return 2;
+                default: return -1;
+            }
+        };
+        std::sort(copperGroups.begin(), copperGroups.end(), [&](const auto& lhs, const auto& rhs) {
+            const int lhsPriority = pickingPriority(lhs.kind);
+            const int rhsPriority = pickingPriority(rhs.kind);
+            return lhsPriority == rhsPriority ? lhs.key < rhs.key : lhsPriority < rhsPriority;
+        });
+
+        // GEOS re-entrant contexts are thread-local in polygon_geometry.cpp. Each task writes only
+        // its own result slot; Cocoa object creation remains on this calling thread below.
+        WholeBoardCopperGroup* groupData = copperGroups.data();
+        const std::string* layerNameForTasks = &layerName;
+        const std::vector<IndexedHoleCutout>* cutoutsForTasks = &platedHoleCutouts;
+        const PolygonSet* allCutoutsForTasks = &allPlatedHoleCutouts;
+        dispatch_apply(copperGroups.size(), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+                       ^(std::size_t index) {
+            buildWholeBoardCopperGroup(groupData[index], *layerNameForTasks, *cutoutsForTasks,
+                                       *allCutoutsForTasks, kWholeBoardTessellationToleranceSimUnits);
+        });
+
+        NSMutableArray<EMSGeometryTriangle*>* layerTriangles = [NSMutableArray array];
+        for (const WholeBoardCopperGroup& group : copperGroups) {
+            if (!group.error.empty()) {
+                return std::unexpected("Building " + layerName + " copper: " + group.error);
+            }
+            const bool isZone = group.kind == EMSGeometryTriangleKindZone;
+            // Alpha zero is GeometryView's "no override" sentinel: any net without a configured
+            // net/net-class color therefore falls back to this copper layer's own theme color.
+            simd_double4 color = simd_make_double4(0, 0, 0, 0);
+            if (const auto colorIt = colorsByNetName.find(group.netName); colorIt != colorsByNetName.end()) {
+                color = colorIt->second;
+            }
+            NSString* netName = group.netName.empty() ? nil : @(group.netName.c_str());
+            NSString* footprintReference = group.footprintReference.empty()
+                ? nil : @(group.footprintReference.c_str());
+            NSString* padNumber = group.padNumber.empty() ? nil : @(group.padNumber.c_str());
+            for (const auto& triangle : group.triangles) {
+                [layerTriangles addObject:[[EMSGeometryTriangle alloc] initWithA:toCGPoint(triangle.a)
+                                                                                  b:toCGPoint(triangle.b)
+                                                                                  c:toCGPoint(triangle.c)
+                                                                              color:color
+                                                                            opacity:isZone ? 0.7 : 1.0
+                                                                               kind:group.kind
+                                                                            netName:netName
+                                                                 footprintReference:footprintReference
+                                                                          padNumber:padNumber]];
+            }
+        }
+        const double layerZ = layerIndex < metalOffsets.size() ? metalOffsets[layerIndex] : 0;
+        [layers addObject:[[EMSGeometryLayer alloc] initWithName:@(layerName.c_str())
+                                                          triangles:layerTriangles
+                                                          hexColor:hexColor
+                                                                  z:layerZ]];
+    }
+
+    // Build the complete board's solder-mask coverage from its Edge.Cuts shape minus KiCad's mask
+    // openings. The configuration screen uses the same flat mask-layer representation as a
+    // simulation preview; these layers are display geometry only.
+    const PolygonSet boardOutline = previewPolygonLoops(geometry.outline, originX, originY);
+    double totalSubstrateThickness = 0;
+    for (const auto& layer : stackupConfig.getSubstrates()) totalSubstrateThickness += layer.thickness();
+    EMSGeometryLayer* topSolderMask = nil;
+    EMSGeometryLayer* bottomSolderMask = nil;
+    for (const auto& mask : stackupConfig.getSolderMasks()) {
+        const bool isTop = mask.kind() == kiems::LayerKind::SolderMaskTop;
+        const PolygonSet openings = previewPolygonLoops(
+            isTop ? geometry.frontMaskOpenings : geometry.backMaskOpenings, originX, originY);
+        const PolygonSet coverage = differencePolygons(boardOutline, unionPolygons(openings));
+        const std::vector<Triangle> maskTriangles = triangulateComposited(
+            coverage, kWholeBoardTessellationToleranceSimUnits, isTop ? "F.Mask" : "B.Mask");
+        NSMutableArray<EMSGeometryTriangle*>* triangles =
+            [NSMutableArray arrayWithCapacity:maskTriangles.size()];
+        for (const auto& triangle : maskTriangles) {
+            [triangles addObject:[[EMSGeometryTriangle alloc] initWithA:toCGPoint(triangle.a)
+                                                                      b:toCGPoint(triangle.b)
+                                                                      c:toCGPoint(triangle.c)]];
+        }
+        const double z = isTop ? mask.thickness() : -totalSubstrateThickness - mask.thickness();
+        EMSGeometryLayer* layer = [[EMSGeometryLayer alloc] initWithName:@(mask.name().c_str())
+                                                               triangles:triangles hexColor:nil z:z];
+        if (isTop) topSolderMask = layer;
+        else bottomSolderMask = layer;
+    }
+
+    // KiCad has already expanded every text glyph and stroked board/footprint graphic into these
+    // contours. Keep each side as a real layer so it gets its own legend visibility control.
+    const auto appendSilkscreenLayer = [&](const std::vector<libkicad::SilkscreenPolygon>& polygons,
+                                            NSString* name, double z) {
+        std::map<std::string, PolygonSet> polygonsByFootprint;
+        for (const auto& polygon : polygons) {
+            Polygon path = wholeBoardPolygonLoopToPolygon(polygon.loop, originX, originY);
+            if (path.size() >= 3) polygonsByFootprint[polygon.footprintRef].push_back(std::move(path));
+        }
+        NSMutableArray<EMSGeometryTriangle*>* silkTriangles = [NSMutableArray array];
+        const simd_double4 white = simd_make_double4(0.92, 0.92, 0.88, 1.0);
+        for (auto& [footprintReference, rawPolygons] : polygonsByFootprint) {
+            const PolygonSet unioned = rawPolygons.size() == 1 && isPositive(rawPolygons.front())
+                ? rawPolygons
+                : unionDisjointSubsets(rawPolygons);
+            const std::vector<Triangle> triangles = triangulateComposited(
+                unioned, kWholeBoardTessellationToleranceSimUnits, name.UTF8String);
+            NSString* reference = footprintReference.empty() ? nil : @(footprintReference.c_str());
+            for (const auto& triangle : triangles) {
+                [silkTriangles addObject:[[EMSGeometryTriangle alloc]
+                    initWithA:toCGPoint(triangle.a) b:toCGPoint(triangle.b) c:toCGPoint(triangle.c)
+                         color:white opacity:1.0 kind:EMSGeometryTriangleKindGeneric netName:nil
+            footprintReference:reference padNumber:nil]];
+            }
+        }
+        [layers addObject:[[EMSGeometryLayer alloc] initWithName:name triangles:silkTriangles
+                                                        hexColor:@"#EBEBE0" z:z]];
+    };
+    double topMaskThickness = 0;
+    double bottomMaskThickness = 0;
+    for (const auto& mask : stackupConfig.getSolderMasks()) {
+        if (mask.kind() == kiems::LayerKind::SolderMaskTop) topMaskThickness = mask.thickness();
+        if (mask.kind() == kiems::LayerKind::SolderMaskBottom) bottomMaskThickness = mask.thickness();
+    }
+    const double silkOffset = 20.0; // 2 microns clear of the outer solder-mask face.
+    appendSilkscreenLayer(geometry.frontSilkscreen, @"F.Silkscreen",
+                           (metalOffsets.empty() ? 0 : metalOffsets.front()) + topMaskThickness + silkOffset);
+    appendSilkscreenLayer(geometry.backSilkscreen, @"B.Silkscreen",
+                           (metalOffsets.empty() ? 0 : metalOffsets.back()) - bottomMaskThickness - silkOffset);
+
+    // Cosmetic reference outline only -- picks the board's own outer boundary loop, ignoring any
+    // interior Edge.Cuts cutout loops (a board with a physical hole in it), unlike the layer
+    // triangulation above (which correctly includes every loop, outer and interior holes alike, via
+    // triangulate()'s own hole handling).
+    const libkicad::PolygonLoop* outerLoop = nullptr;
+    for (const libkicad::PolygonLoop& loop : geometry.outline) {
+        if (!loop.hole) {
+            outerLoop = &loop;
+            break;
+        }
+    }
+    if (outerLoop == nullptr && !geometry.outline.empty()) {
+        outerLoop = &geometry.outline.front();
+    }
+    NSMutableArray<NSValue*>* outline = [NSMutableArray array];
+    if (outerLoop != nullptr) {
+        for (const auto& [xMm, yMm] : outerLoop->pointsMm) {
+            const double x = mmToSimUnits(xMm) - originX;
+            const double y = mmToSimUnits(yMm) - originY;
+            [outline addObject:[NSValue valueWithPoint:NSMakePoint(x, y)]];
+        }
+    }
+
+    // Real 3D models of *every* footprint on the board -- unlike buildGeometryPreview's own
+    // includedFootprintReferences() (just this simulation's auto-discovered lumped components),
+    // there's no simulation here to narrow the list at all. Best-effort throughout, same as
+    // buildGeometryPreview's own identically-shaped block: a query/export failure just leaves these
+    // three arrays empty rather than failing the whole whole-board preview.
+    NSMutableArray<NSString*>* renderedRefs = [NSMutableArray array];
+    NSMutableArray<EMSGeometryComponentTriangle*>* componentTriangles = [NSMutableArray array];
+    NSMutableArray<NSString*>* componentModelExportMessages = [NSMutableArray array];
+    {
+        std::vector<std::string> refs;
+        if (auto footprintsResult = libkicad::footprints(paths.kicadBoardPaths());
+            footprintsResult) {
+            refs.reserve(footprintsResult->size());
+            for (const auto& footprint : *footprintsResult) {
+                refs.push_back(footprint.reference);
+                [renderedRefs addObject:@(footprint.reference.c_str())];
+            }
+        } else {
+            logWarning("GeometryPreview: footprint listing failed, skipping whole-board component model "
+                       "export: " + footprintsResult.error());
+        }
+        const ComponentExportOutcome outcome = exportComponentTriangles(paths, refs);
+        for (const auto& message : outcome.messages) {
+            [componentModelExportMessages addObject:@(message.c_str())];
+        }
+        componentTriangles = [NSMutableArray arrayWithCapacity:outcome.triangles.size()];
+        // Same re-basing as buildGeometryPreview's own identical block -- see its doc comment for
+        // why Z needs topCopperZMm subtracted (libkicad's own Z=0 is board-bottom-copper, not this
+        // preview's "board top always 0" convention) while X/Y only need originX/originY.
+        const double topCopperZSim = mmToSimUnits(outcome.topCopperZMm);
+        const auto toSim = [&](double xMm, double yMm, double zMm) {
+            return simd_make_double3(mmToSimUnits(xMm) - originX, mmToSimUnits(yMm) - originY,
+                                      mmToSimUnits(zMm) - topCopperZSim);
+        };
+        for (const auto& triangle : outcome.triangles) {
+            [componentTriangles addObject:[[EMSGeometryComponentTriangle alloc]
+                                               initWithA:toSim(triangle.ax, triangle.ay, triangle.az)
+                                                       b:toSim(triangle.bx, triangle.by, triangle.bz)
+                                                       c:toSim(triangle.cx, triangle.cy, triangle.cz)
+                                                   color:simd_make_double4(triangle.r, triangle.g, triangle.b,
+                                                                            triangle.a)
+                                                 netName:nil
+                                      footprintReference:@(triangle.footprintReference.c_str())]];
+        }
+    }
+
+    // Real routed-track topology (including libkicad's flattened arc pieces) -- see
+    // EMSGeometryTrackSegment's own doc comment. Used by
+    // GeometryView's board-activity overlay to build a real pin/via/trace graph (Dijkstra edges
+    // weighted by each segment's own physical length) rather than approximating "distance along the
+    // copper" from triangulated fill geometry alone.
+    NSMutableArray<EMSGeometryTrackSegment*>* trackSegments = [NSMutableArray array];
+    if (auto tracksResult = libkicad::allTracks(paths.kicadBoardPaths()); tracksResult) {
+        trackSegments = [NSMutableArray arrayWithCapacity:tracksResult->size()];
+        for (const auto& [netName, segment] : *tracksResult) {
+            const CGPoint start = CGPointMake(mmToSimUnits(segment.startXMm) - originX,
+                                               mmToSimUnits(segment.startYMm) - originY);
+            const CGPoint end = CGPointMake(mmToSimUnits(segment.endXMm) - originX,
+                                             mmToSimUnits(segment.endYMm) - originY);
+            [trackSegments addObject:[[EMSGeometryTrackSegment alloc] initWithNetName:@(netName.c_str())
+                                                                              layerName:@(segment.copperLayerName.c_str())
+                                                                                  start:start
+                                                                                    end:end]];
+        }
+    } else {
+        logWarning("GeometryPreview: whole-board track query failed, board-activity overlay will fall back to "
+                   "triangulated fill geometry: " + tracksResult.error());
+    }
+
+    EMSGeometryPreview* preview = [[EMSGeometryPreview alloc] initWithLayers:layers
+                                           wholeBoard:YES
+                                          topSolderMask:topSolderMask
+                                       bottomSolderMask:bottomSolderMask
+                                                outline:outline
+                                                   vias:vias
+                                          trackSegments:trackSegments
+                                      failedViaAttempts:@[]
+                                                  ports:@[]
+                                       viaMeshTriangles:viaTriangles
+                                 componentMeshTriangles:componentTriangles
+                           renderedComponentReferences:renderedRefs
+                          componentModelExportMessages:componentModelExportMessages
+                                             gridLinesX:@[]
+                                             gridLinesY:@[]
+                                             gridLinesZ:@[]
+                                   gridPlaneExcludingX:nil
+                                   gridPlaneExcludingY:nil
+                                   gridPlaneExcludingZ:nil
+                                         gridMaterials:@[]
+                                            gridLayers:@[]
+                                           pmlInnerXMin:0
+                                           pmlInnerXMax:0
+                                           pmlInnerYMin:0
+                                           pmlInnerYMax:0
+                                           pmlInnerZMin:0
+                                           pmlInnerZMax:0
+                                                   xMin:0
+                                                   yMin:0
+                                                  width:boundsResult->xMax - boundsResult->xMin
+                                                 height:boundsResult->yMax - boundsResult->yMin];
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - previewStartedAt).count();
+    logInfo() << "Whole-board preview built in " << elapsedMs << " ms";
+    return preview;
 }

@@ -1,8 +1,9 @@
 // The one function copper_fdtd_worker (and any other future caller outside Copper.framework
 // itself) actually needs: run one excited port's FDTD pass entirely on the GPU, given an
-// already-set-up `openEMS`/`ContinuousStructure` pair, and hand back the resulting probe data.
+// a `ContinuousStructure`, and hand back the resulting probe data.
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -10,19 +11,35 @@
 #include <string>
 #include <vector>
 
-// Deliberately forward-declared, not #included -- this header must be includable from a
-// translation unit that already has the *installed* (`<openEMS/openems.h>`,
-// `<CSXCAD/ContinuousStructure.h>`) header forms in scope (e.g. copper_fdtd_worker/main.cpp, via
-// libkiems's own simulation.hpp), while runFDTDPortOnGPU's own *implementation*
-// (CopperFDTDRunner.cpp) uses the flat/source-checkout forms every other Copper/Internal/ header
-// does (see Copper/Internal/CopperOpenEMSAccess.hpp's file comment for why the two forms can never
-// appear together in one translation unit). A forward declaration is compatible with both sides,
-// since a caller passing a reference through only ever needs *some* complete type to exist
-// somewhere, not specifically the one this header would otherwise pull in.
-class openEMS;
+// Deliberately forward-declared, not #included, so callers do not inherit CSXCAD's large public
+// header surface merely to pass their geometry into Copper.
 class ContinuousStructure;
 
 namespace copper {
+
+/// Plain, Copper-native config CopperOperator needs to build its mesh/coefficients -- the caller
+/// builds this directly from state it already has (e.g. kiems::Simulation's own boundaryIsPEC()/
+/// maxTimesteps()/excitationF0()/excitationFc() accessors) instead of this file reading it back off
+/// an already-built, real openEMS Operator/Excitation. That indirection used to be the only reason
+/// runFDTDPortOnGPU/OnCPU required `fdtd` to have already been through a full, genuine
+/// `openEMS::SetupFDTD()` call -- confirmed in practice to roughly double per-port setup time on a
+/// real board, since SetupFDTD() redundantly computes the exact same mesh/material/PEC coefficients
+/// CopperOperator was about to compute itself, and the result was thrown away except for these 3
+/// values.
+///
+/// `boundaryIsPEC[i]` (face order 0=xmin,1=xmax,2=ymin,3=ymax,4=zmin,5=zmax, matching openEMS's own
+/// Set_BC_Type/Set_BC_PML side numbering) true means PEC, false means "everything else" (MUR or
+/// PML/CPML -- a CPML shell, built separately, provides the real absorption regardless, see
+/// Internal/CopperOperator.hpp's own CopperOperator::BoundaryType doc comment). `f0`/`fc` are the
+/// Gaussian pulse's own center frequency/half-bandwidth, Hz (openEMS::SetGaussExcite's own
+/// convention). `maxTimesteps` clamps the excitation signal length (openEMS::SetNumberOfTimeSteps's
+/// own convention).
+struct CopperFDTDPortConfig {
+    std::array<bool, 6> boundaryIsPEC = {false, false, false, false, false, false};
+    double f0 = 0.0;
+    double fc = 0.0;
+    std::uint32_t maxTimesteps = 0;
+};
 
 /// Opt-in request to persist this run's field-frame time series to disk in the field frame-series
 /// format (see docs/field_frame_series_format.md and FieldFrameSeriesWriter.hpp). When present, the
@@ -48,19 +65,6 @@ struct FieldFrameSeriesRequest {
 /// this file's own comment above), so nothing it declares can appear in this public boundary header
 /// without reintroducing the exact clash forward-declaring openEMS/ContinuousStructure avoids.
 enum class CopperProbeKind { Voltage, Current };
-
-/// Which PML formulation to use -- see Internal/CopperCPML.hpp's own doc comment for why plain UPML
-/// (openEMS's own original formulation) can numerically diverge on long runs, and why real CFS-PML
-/// (Roden & Gedney 2000) fixes that structurally rather than just delaying it. CPML is this enum's
-/// own default (see runFDTDPortOnGPU's own `boundaryKind` parameter below); a previous, incorrect
-/// attempt at CPML here (which generalized openEMS's own UPML coefficients directly, rather than
-/// implementing CPML's actual auxiliary-convolution formula) was replaced after read-through of the
-/// real Taflove & Hagness/Roden-Gedney derivation showed it was a structurally different medium --
-/// re-validate against a real board's own worst-case late-time-instability scenario before trusting
-/// this in production. UPML stays available (still exactly openEMS's own formula, untouched) for
-/// comparison/fallback. Kept a plain enum here (not buried inside CopperPML.hpp) so a caller
-/// selecting it doesn't need to know anything about how either is actually computed.
-enum class CopperBoundaryKind { UPML, CPML };
 
 /// `2*pi*lowFrequencyHz*EPS0` -- the value runFDTDPortOnGPU()'s own `cpmlAlphaMax` parameter expects
 /// for a simulation whose own frequency sweep floor is `lowFrequencyHz`, matching the formula its
@@ -166,10 +170,8 @@ struct CopperFDTDRunResult {
 };
 
 /// Which major stage of runFDTDPortOnGPU a CopperFDTDProgress report describes. `Setup` covers
-/// everything before the timestep loop starts, including the *caller's* own
-/// kiems::Simulation::setupFDTDOperator() (openEMS's own SetupFDTD()/CalcECOperator(), which
-/// dominates setup cost -- confirmed in practice to take ~300s on a real board -- but is a single
-/// opaque call with no intermediate progress to report, hence Setup only ever reports
+/// Copper operator construction before the timestep loop starts. It has no useful intermediate
+/// progress estimate, hence Setup only ever reports
 /// currentStep 0 then 1 of 1, not finer sub-steps that would just be fabricated precision).
 /// `Postprocessing` is never reported by runFDTDPortOnGPU itself (S-parameter computation happens
 /// entirely outside Copper, in kiems's own Postprocessor) -- it exists here purely so a host
@@ -187,10 +189,13 @@ enum class CopperFDTDPhase { Setup, FDTDRun, Postprocessing };
 /// unlike energyChangeDB (relative to this run's own peak), this is meaningful to compare against
 /// the stdout log line's own "Energy: ~%.2e" figure, but not across different boards/excitations. 0
 /// outside the FDTDRun phase, same as energyChangeDB.
-/// `duringExcitation` is `globalTimestep < excitation signal length` -- true while the excitation
-/// pulse itself is still being injected into the domain, false once it's finished and the run is
-/// just observing decay (or the excitation was empty/instantaneous to begin with). Always false
-/// outside the FDTDRun phase.
+/// `duringExcitation` is true while the precomputed Gaussian pulse is being injected. Always false
+/// outside the FDTDRun phase. `simulationTimeSeconds` is the physical FDTD time at `currentStep`
+/// (`currentStep * CopperYeeGrid::timestepSeconds`), not elapsed wall-clock time. The two duration
+/// duration fields expose the exact X-axis landmarks known before stepping starts: the full pulse
+/// buffer and the maximum configured run time. `excitationF0Hz`/`excitationFcHz` expose the exact
+/// modulated-Gaussian parameters so a UI can render magnitude continuously instead of reducing the
+/// pulse to a misleading hard boundary. All values are 0 outside the FDTDRun phase.
 struct CopperFDTDProgress {
     CopperFDTDPhase phase = CopperFDTDPhase::Setup;
     std::uint32_t currentStep = 0;
@@ -199,6 +204,11 @@ struct CopperFDTDProgress {
     double targetEnergyChangeDB = 0.0;
     double absoluteEnergy = 0.0;
     bool duringExcitation = false;
+    double simulationTimeSeconds = 0.0;
+    double excitationEndTimeSeconds = 0.0;
+    double plannedSimulationTimeSeconds = 0.0;
+    double excitationF0Hz = 0.0;
+    double excitationFcHz = 0.0;
 };
 
 using CopperFDTDProgressCallback = std::function<void(const CopperFDTDProgress&)>;
@@ -207,9 +217,10 @@ using CopperFDTDProgressCallback = std::function<void(const CopperFDTDProgress&)
 /// CPU one) and returns every discovered probe's full sample set in `CopperFDTDRunResult::probes` --
 /// a pure computation, no disk I/O of its own (see CopperProbeResult::data() above for a caller that
 /// wants openEMS-format file content, matching what the real CPU `openEMS::RunFDTD()` would have
-/// produced). `fdtd` must already have had `openEMS::SetupFDTD()` run on it (see
-/// kiems::Simulation::setupFDTDOperator()) -- this never calls SetupFDTD() itself, and never
-/// touches the process's current working directory.
+/// produced). `portConfig` supplies everything CopperOperator needs to build the mesh/coefficients
+/// itself (see CopperFDTDPortConfig's own doc comment) -- `fdtd` does not need
+/// `openEMS::SetupFDTD()` to have run on it; this never calls SetupFDTD() itself or touches the process's current
+/// working directory.
 ///
 /// `onProgress`, if given, is invoked with a CopperFDTDProgress once entering Setup, once leaving
 /// it, and periodically throughout FDTDRun (the same >4s wall-clock cadence the energy-decay check
@@ -217,18 +228,13 @@ using CopperFDTDProgressCallback = std::function<void(const CopperFDTDProgress&)
 /// since nothing new is known between checks). Leave it as the default (empty) to get plain stdout
 /// progress printing instead.
 ///
-/// `boundaryKind` defaults to CPML -- see CopperBoundaryKind's own doc comment for why (fixes
-/// UPML's late-time numerical instability on long runs; validated against a real board's own
-/// worst-case failure scenario). Pass CopperBoundaryKind::UPML explicitly for openEMS's own original
-/// formulation instead. `cpmlAlphaMax` is only meaningful when `boundaryKind` is CPML -- CPML's own
-/// alpha (CFS) parameter, in S/m (see Internal/CopperCPML.hpp's own doc comment); defaults to
+/// `cpmlAlphaMax` is CPML's alpha (CFS) parameter, in S/m (see Internal/CopperCPML.hpp); defaults to
 /// `2*pi*100MHz*EPS0`, matching this codebase's own real boards' lowest excited frequency to date --
 /// a caller whose simulation's own frequency sweep floor differs should pass
 /// `cpmlAlphaMaxForFrequency(f_low)` for that simulation's own configured start frequency instead
 /// (see that function's own doc comment for why leaving this at the generic default under-damps a
 /// simulation whose own sweep floor is well below 100MHz, producing exactly the late-time-growing
-/// energy CPML exists to prevent). `pmlDepthCells` is only meaningful when `boundaryKind` is
-/// CPML -- see Internal/CopperCPML.hpp's own top comment for why a CPML run must never have called
+/// energy CPML exists to prevent). See Internal/CopperCPML.hpp for why a run must never have called
 /// openEMS's own Set_BC_PML() (the caller is responsible for that; this is just told the depth it
 /// would otherwise have passed there, in cells, uniform on all 6 faces) and instead computes its own
 /// shell geometry directly from this value. Defaults to 16, matching kiems::constants::
@@ -244,9 +250,24 @@ using CopperFDTDProgressCallback = std::function<void(const CopperFDTDProgress&)
 /// `fieldFrameSeries`, if given, persists every captured field frame to disk instead of retaining
 /// the frames in memory (see FieldFrameSeriesRequest's own doc comment). Left at the default
 /// (nullopt) preserves the original in-memory CopperFDTDRunResult::fieldSnapshot behaviour.
-CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
+CopperFDTDRunResult runFDTDPortOnGPU(ContinuousStructure& csx, const CopperFDTDPortConfig& portConfig,
                                       const CopperFDTDProgressCallback& onProgress = {},
-                                      CopperBoundaryKind boundaryKind = CopperBoundaryKind::CPML,
+                                      double cpmlAlphaMax = -1.0, std::uint32_t pmlDepthCells = 16,
+                                      const std::function<bool()>& isCancelled = {},
+                                      const std::optional<FieldFrameSeriesRequest>& fieldFrameSeries = std::nullopt);
+
+/// The CPU twin of runFDTDPortOnGPU() above -- identical setup, identical per-timestep probe
+/// sampling/progress/cancellation/field-capture behavior, and the exact same parameter meanings
+/// (see runFDTDPortOnGPU's own doc comments for every one of them), differing only in which
+/// Internal/CopperEngine.hpp `Backend` actually runs the leapfrog loop (`Backend::CPU` here vs.
+/// `Backend::Metal` there -- see that enum's own doc comment for why the two produce results
+/// matching to float-rounding tolerance, not a behavioral difference). Exists so
+/// kiems_fdtd_worker (the process RunOptions::backend == FDTDBackend::OpenEMSCPU spawns) can run
+/// on Copper's own CPU engine instead of openEMS's real `Engine`/`RunFDTD()` -- see
+/// kiems::Simulation's own doc comments for why that real CPU stepping loop is no longer used by
+/// anything in this codebase.
+CopperFDTDRunResult runFDTDPortOnCPU(ContinuousStructure& csx, const CopperFDTDPortConfig& portConfig,
+                                      const CopperFDTDProgressCallback& onProgress = {},
                                       double cpmlAlphaMax = -1.0, std::uint32_t pmlDepthCells = 16,
                                       const std::function<bool()>& isCancelled = {},
                                       const std::optional<FieldFrameSeriesRequest>& fieldFrameSeries = std::nullopt);
@@ -261,10 +282,10 @@ CopperFDTDRunResult runFDTDPortOnGPU(openEMS& fdtd, ContinuousStructure& csx,
 /// comparing against a real openEMS CPU run isn't practical -- see this function's own .cpp for the
 /// exact file layout. Returns an error string on failure (mirrors CopperFDTDRunResult's own contract,
 /// but this has no probes/field-snapshot payload of its own -- everything of interest is on disk).
-std::string dumpEarlyFrames(openEMS& fdtd, ContinuousStructure& csx, const std::filesystem::path& outputDir,
-                             std::uint32_t frameCount = 100, std::uint32_t marginCells = 25,
-                             CopperBoundaryKind boundaryKind = CopperBoundaryKind::CPML,
-                             double cpmlAlphaMax = -1.0, std::uint32_t pmlDepthCells = 16);
+std::string dumpEarlyFrames(ContinuousStructure& csx, const CopperFDTDPortConfig& portConfig,
+                             const std::filesystem::path& outputDir, std::uint32_t frameCount = 100,
+                             std::uint32_t marginCells = 25, double cpmlAlphaMax = -1.0,
+                             std::uint32_t pmlDepthCells = 16);
 
 /// A second one-off diagnostic, even more targeted than dumpEarlyFrames(): instead of just before/
 /// after field snapshots, prints every *intermediate* term of the update formula -- the raw neighbor
@@ -278,8 +299,8 @@ std::string dumpEarlyFrames(openEMS& fdtd, ContinuousStructure& csx, const std::
 /// (plain text, not a binary file -- the whole point is a bounded amount of output a human or an
 /// agent can read directly). Returns an error string on failure, matching dumpEarlyFrames()'s own
 /// contract.
-std::string dumpDetailedTrace(openEMS& fdtd, ContinuousStructure& csx, std::uint32_t stepCount = 4,
-                               std::uint32_t boxSide = 4, CopperBoundaryKind boundaryKind = CopperBoundaryKind::CPML,
+std::string dumpDetailedTrace(ContinuousStructure& csx, const CopperFDTDPortConfig& portConfig,
+                               std::uint32_t stepCount = 4, std::uint32_t boxSide = 4,
                                double cpmlAlphaMax = -1.0, std::uint32_t pmlDepthCells = 16);
 
 } // namespace copper

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 
 namespace kiems {
@@ -21,13 +22,18 @@ std::string _trim(const std::string& s) {
 }
 
 // Strips a trailing unit word (case-insensitive) matching `unitLetter`, if present. 'R' additionally
-// accepts the UTF-8 Ohm sign (0xCE 0xA9) and the word "ohm"/"ohms" -- KiCad resistor values commonly
-// use any of "R", "Ω", "ohm". 'H'/'F' only ever appear as the bare letter in KiCad's own convention.
+// accepts both Unicode spellings commonly used for ohms: U+03A9 GREEK CAPITAL LETTER OMEGA and
+// U+2126 OHM SIGN, plus the word "ohm"/"ohms". 'H'/'F' only ever appear as the bare letter in
+// KiCad's own convention.
 std::string _stripUnitWord(const std::string& s, char unitLetter) {
     if (unitLetter == 'R') {
-        constexpr char kOhmSign[] = "\xCE\xA9"; // UTF-8 for U+03A9 GREEK CAPITAL LETTER OMEGA
-        if (s.size() >= 2 && s.compare(s.size() - 2, 2, kOhmSign) == 0) {
+        constexpr char kGreekOmega[] = "\xCE\xA9"; // U+03A9 GREEK CAPITAL LETTER OMEGA
+        constexpr char kOhmSign[] = "\xE2\x84\xA6"; // U+2126 OHM SIGN
+        if (s.size() >= 2 && s.compare(s.size() - 2, 2, kGreekOmega) == 0) {
             return s.substr(0, s.size() - 2);
+        }
+        if (s.size() >= 3 && s.compare(s.size() - 3, 3, kOhmSign) == 0) {
+            return s.substr(0, s.size() - 3);
         }
         auto lower = s;
         std::transform(lower.begin(), lower.end(), lower.begin(),
@@ -76,9 +82,24 @@ double _markerMultiplier(char c, bool allowBareUnit) {
 
 bool _isMarkerChar(char c, bool allowBareUnit) { return _markerMultiplier(c, allowBareUnit) != 0.0 || c == 'R'; }
 
+// The trailing-unit-word letter _stripUnitWord() looks for -- 'R' additionally accepts the UTF-8
+// Ohm sign and "ohm"/"ohms" (see that function's own doc comment), 'H'/'F' only ever appear as the
+// bare letter in KiCad's own convention.
+char _unitLetter(ComponentUnit unit) {
+    switch (unit) {
+    case ComponentUnit::Resistance:
+        return 'R';
+    case ComponentUnit::Inductance:
+        return 'H';
+    case ComponentUnit::Capacitance:
+        return 'F';
+    }
+}
+
 } // namespace
 
-std::optional<double> parseComponentValue(const std::string& raw, char unitLetter) {
+std::optional<double> parseComponentValue(const std::string& raw, ComponentUnit unit) {
+    const char unitLetter = _unitLetter(unit);
     std::string s = _trim(raw);
     if (s.empty()) {
         return std::nullopt;
@@ -134,6 +155,20 @@ std::optional<double> parseComponentValue(const std::string& raw, char unitLette
         return std::nullopt;
     }
     return value * multiplier;
+}
+
+std::optional<double> parseSensibleComponentValue(const std::string& raw, ComponentUnit unit) {
+    const std::optional<double> parsed = parseComponentValue(raw, unit);
+    if (!parsed.has_value() || !std::isfinite(*parsed) || *parsed < 0.0) {
+        return std::nullopt;
+    }
+    if (*parsed == 0.0) {
+        // "0 ohm" is the conventional value marking for a real conductive jumper, not an absent
+        // component. Ordinary chip jumpers are commonly in the low tens of milliohms; 10 mOhm is
+        // a conservative generic substitute when the board carries no exact part specification.
+        return unit == ComponentUnit::Resistance ? std::optional<double>(0.01) : std::nullopt;
+    }
+    return parsed;
 }
 
 } // namespace kiems

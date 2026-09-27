@@ -2,15 +2,53 @@
 
 #include <fstream>
 
+#include "logging.hpp"
+
 namespace kiems {
 
+using namespace Cu;
+
 std::expected<SimulationGeometry, std::string> generateGeometry(const SimulationData<SimulationStage::Configured>& data,
-                                                                  const EMSConfig& config, const PathsConfig& paths) {
+                                                                  const EMSConfig& config, const PathsConfig& paths,
+                                                                  const GeometryProcessingProgressCallback& onProgress) {
     // sliceBoardForSimulation() is a plain, pure function -- no Simulation/CSXCAD/openEMS object
-    // needed just to slice a board (see board_slicing.hpp).
-    auto sliced = sliceBoardForSimulation(data.configuration(), config, paths);
+    // needed just to slice a board (see board_slicing.hpp). The board load and net-name resolution
+    // it needs (classifyCopperForSimulation()) are the only IO in this pipeline stage.
+    logInfo("Slicing board for " + data.configuration().name());
+    auto geometry = libkicad::boardGeometry(paths.kicadBoardPaths());
+    if (!geometry) {
+        return std::unexpected(std::move(geometry).error());
+    }
+    auto copper = classifyCopperForSimulation(data.configuration(), *geometry, paths);
+    if (!copper) {
+        return std::unexpected(std::move(copper).error());
+    }
+
+    auto origin = boardBoundsInSimulationUnits(*geometry);
+    if (!origin) {
+        return std::unexpected(std::move(origin).error());
+    }
+    // Best-effort: if the KiCad hole query fails, slicing/stitching just proceed without this data
+    // rather than failing the whole slice over it (the same as if the board genuinely had none).
+    std::vector<ViaHole> existingVias;
+    if (auto vias = getVias(paths, origin->xMin, origin->yMin); vias) {
+        existingVias = std::move(*vias);
+    }
+    std::vector<NPTHHole> npthHoles;
+    if (auto holes = getNPTHHoles(paths, origin->xMin, origin->yMin); holes) {
+        npthHoles = std::move(*holes);
+    }
+
+    const SlicingConfig slicing = SlicingConfig::from(data.configuration(), config);
+    auto sliced = sliceBoardForSimulation(slicing, *geometry, copper->involved,
+                                           copper->geometryOnly, copper->ground, existingVias, npthHoles,
+                                           onProgress);
     if (!sliced) {
         return std::unexpected(sliced.error());
+    }
+    restrictLumpedComponentsToCutout(data.configuration(), *sliced);
+    if (onProgress) {
+        onProgress({GeometryProcessingPhase::Finishing, 0, 1});
     }
     return SimulationGeometry{std::move(*sliced)};
 }
@@ -40,10 +78,8 @@ std::expected<SimulationResults, std::string> generateResults(const SimulationDa
         }
         const auto excitedPortIndex = static_cast<std::int32_t>(index);
 
-        // A fresh, independent Simulation per excited port -- same reason generateGrid()'s own is
-        // thrown away rather than shared: openEMS's SetCSX()/Reset() give a freshly-constructed
-        // openEMS object exclusive ownership of its ContinuousStructure (see Simulation's own _csx
-        // doc comment), so each excited port needs its own, never one shared across ports. `data`
+        // A fresh, independent Simulation per excited port so each run owns its mutable
+        // ContinuousStructure and configured ports, never sharing them across runs. `data`
         // itself is only ever read here, never mutated, so the same SimulationGeometry/
         // SimulationGrid gets reused for every port with no encode/decode step anywhere.
         Simulation sim(data.configuration(), config, options, paths);
@@ -52,7 +88,6 @@ std::expected<SimulationResults, std::string> generateResults(const SimulationDa
         if (auto result = sim.populateGeometry(); !result) {
             return std::unexpected(result.error());
         }
-        sim.setExcitation();
         sim.setupPorts(excitedPortIndex);
         auto runResult = portRunner ? portRunner(sim, excitedPortIndex) : sim.run(excitedPortIndex);
         if (!runResult) {
@@ -141,6 +176,8 @@ std::expected<SimulationData<SimulationStage::Grid>, std::string> loadSimulation
     } catch (const nlohmann::json::exception& error) {
         return std::unexpected("Malformed " + file.string() + ": " + std::string(error.what()));
     }
+
+    restrictLumpedComponentsToCutout(configuration, geometry.slicedBoard);
 
     const SimulationData<SimulationStage::Configured> configured(configuration);
     const SimulationData<SimulationStage::Geometry> geometryData(configured, std::move(geometry));

@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var jobsWindowController: JobsWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Document.removeStaleScratchDirectories()
         NSApp.mainMenu = buildMainMenu()
     }
 

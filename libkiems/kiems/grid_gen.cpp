@@ -13,7 +13,7 @@
 #include "config.hpp"
 #include "constants.hpp"
 #include "csx_grid_utils.hpp"
-#include "libkicad_query.hpp"
+#include "../../libkicad/libkicad.hpp"
 #include "logging.hpp"
 
 namespace kiems {
@@ -488,35 +488,15 @@ public:
             region.min = std::max(region.min, _trustedMin);
             region.max = std::min(region.max, _trustedMax);
 
-            // Diagnostic: dump every segment (trace or pad-contour -- addLinesFromPads() feeds pad
-            // contours through this same function) whose own region overlaps a hardcoded coordinate
-            // watch window, so a specific dense patch found via the axis gap dump can be traced back
-            // to the exact geometry (and its classification) responsible.
-            constexpr double kWatchMin = 1400000.0;
-            constexpr double kWatchMax = 1450000.0;
-            const bool watch = _axis == "x" && region.max >= kWatchMin && region.min <= kWatchMax;
-            auto logWatch = [&](const char* category) {
-                if (!watch) return;
-                logInfo("### Grid Generator: WATCH [" + _axis + "] " + category + " region=[" +
-                         std::to_string(region.min) + "," + std::to_string(region.max) + "] from seg start=(" +
-                         std::to_string(seg.start().x()) + "," + std::to_string(seg.start().y()) + ") stop=(" +
-                         std::to_string(seg.stop().x()) + "," + std::to_string(seg.stop().y()) + ") width=" +
-                         std::to_string(seg.width()) + " mode=" + std::to_string(static_cast<int>(seg.mode())) +
-                         " normal=" + std::to_string(seg.normal()) + " ###");
-            };
-
             if (seg.mode() != PlotMode::Linear) {
                 _diagonal.push_back(region);
-                logWatch("diagonal(non-linear)");
                 continue;
             }
 
             if ((ang < deg5 && _axis == "x") || (ang > M_PI / 2 - deg5 && _axis == "y")) {
                 _perpendicular.push_back(region);
-                logWatch("perpendicular");
             } else if ((ang < deg5 && _axis == "y") || (ang > M_PI / 2 - deg5 && _axis == "x")) {
                 _parallel.push_back(region);
-                logWatch("parallel");
                 if (seg.width() != 0 || seg.normal()) {
                     _edgeCells.emplace_back(region.min - 2 * w3, region.min + w3, slenOaxis + 1, region.min);
                 }
@@ -525,7 +505,6 @@ public:
                 }
             } else {
                 _diagonal.push_back(region);
-                logWatch("diagonal");
             }
         }
     }
@@ -668,16 +647,12 @@ public:
 
         resolveEdgeRegions();
         std::vector<double> grid;
-        // The mesh's own core extent is simply the real sliced board's own extent (+ margin,
-        // already baked into `_board` by the constructor) -- not reconstructed from trace/pad/
-        // region classification. An earlier version of this reconstructed it from wherever
-        // involved-net copper happened to land (`Grid::margin().fromTrace()`, since removed): a
-        // real board's own gerbers showed that heuristic can undershoot the true board size
-        // arbitrarily, even with every relevant net (including ground) correctly included, because
-        // it only sees per-segment local extents, not "this net's copper happens to reach every
-        // corner of the board." A too-small core extent isn't just an inefficiency -- it leaves
-        // GridGenerator's own PML band (appended just beyond it) wrapping around real, still-
-        // simulated copper instead of strictly outside it, a severe, fast-onset FDTD divergence.
+        // `_board` is the minimum outer extent (sliced board + configured vacuum margin). It must
+        // not itself be passed through Region's generic two-sided densifier: that algorithm treats
+        // both margin boundaries as constrained neighbours and can make cells shrink again while
+        // moving away from the board merely to meet the artificial outer endpoint. Density is
+        // generated only through the real sliced-board extent below; exterior padding is rebuilt
+        // one-way afterward.
         _board.min += offset;
         _board.max += offset;
 
@@ -685,10 +660,9 @@ public:
             grid.push_back(reg.min);
             grid.push_back(reg.max);
         }
-
+        grid.push_back(_trustedMin);
+        grid.push_back(_trustedMax);
         const std::vector<double> edgeGrid = grid;
-        grid.push_back(_board.min);
-        grid.push_back(_board.max);
 
         _mergeRegions(_parallel, gridSize);
         _mergeRegions(_perpendicular, gridPerp);
@@ -754,21 +728,15 @@ public:
         }
         grid = _dedupGrid(grid, gridMin, edgeGrid);
 
-        grid = _board.densifyRegionGrid(grid, _grid.max(), gridMin, cellRatio);
+        const Region slicedBoardRegion(_trustedMin, _trustedMax);
+        grid = slicedBoardRegion.densifyRegionGrid(grid, _grid.max(), gridMin, cellRatio);
         grid = _dedupGrid(grid, gridMin, edgeGrid);
-        // Nothing above clips a region's own density-placed lines to `_board`'s own span --
-        // addLinesFromTrace()'s per-segment Region spans that segment's own local extent, and while
-        // generate()'s own inBounds() filter now requires *both* trace-segment endpoints to pass
-        // (see its own call site's doc comment for why the old either-endpoint version let a single
-        // long segment place density arbitrarily far into open vacuum), a *pad* only ever tests one
-        // point to begin with, and a still-accepted segment's own edge-cell buffer band (addLinesFrom
-        // Trace()'s `w3` expansion) can reach a little past that segment's own true endpoint.
-        // Removing anything outside [_board.min, _board.max] here, once, after every density source
-        // has already contributed, is the one place that actually guarantees the mesh never extends
-        // past the real simulated board regardless of which net/mechanism introduced a stray line.
-        grid.erase(std::remove_if(grid.begin(), grid.end(),
-                                   [this](double line) { return line < _board.min || line > _board.max; }),
-                   grid.end());
+        // Delete every line the general density passes may have placed beyond the cut board, then
+        // construct the vacuum region from scratch. This makes the intended ordering explicit:
+        // cut geometry -> mesh cut geometry -> monotonically expanding padding -> uniform CPML.
+        grid = grid_detail::rebuildExteriorPadding(std::move(grid), _trustedMin, _trustedMax,
+                                                    _board.min, _board.max, _grid.max(), cellRatio,
+                                                    gridMin / 2.0);
         // _dedupGrid() sorts internally, so grid is already sorted here -- front()/back() are the
         // core mesh's own extent, before _extendPMLBand() appends the PML band beyond it. Captured
         // in the same coordinate space compileGrid()'s own returned lines end up in (see
@@ -779,11 +747,11 @@ public:
         }
         logInfo("### Grid Generator: " + _axis + " axis core mesh extent = [" + std::to_string(_pmlInnerMin) +
                  ", " + std::to_string(_pmlInnerMax) + "] ###");
-        grid = _extendPMLBand(std::move(grid), constants::pmlDepthCells);
+        grid = grid_detail::appendUniformPMLCells(std::move(grid), constants::pmlDepthCells);
 
         // `grid` is in the same absolute, Edge_Cuts-bounding-box-relative frame as every geometry
         // primitive this Simulation adds (addSubstrates()/addGerbers()/addMslPort()/addVias() all
-        // place things directly from _slicedBoard.xMin/yMin, never offset) -- the real CSRectGrid
+        // place things directly from _slicedBoard.bounds.xMin/yMin, never offset) -- the real CSRectGrid
         // added here must stay in that same absolute frame too, or every single primitive ends up
         // with zero overlap against the mesh (confirmed: openEMS reported every primitive in the
         // whole simulation, including Substrate boxes spanning the entire domain, as "unused", and
@@ -922,8 +890,8 @@ double pointSegmentDistance(const Position& p, const Position& a, const Position
 /// polygon set: a hole loop's opposite winding doesn't need to be identified explicitly
 /// -- ray-casting parity naturally flips back to "outside" once a ray has crossed into and back out
 /// of a hole, and a genuinely separate, disjoint outer loop just contributes its own independent
-/// crossings the same way. Deliberately not Clipper2Lib::PointInPolygon: boolean operations and
-/// fixed-point coordinates are not needed here, so a plain membership test on the same
+/// crossings the same way. Deliberately independent of the geometry backend: a plain membership
+/// test on the same
 /// double-precision Position data already produced from KiCad avoids an unnecessary coordinate
 /// conversion.
 bool pointInPolygonSet(const Position& p, const std::vector<std::vector<Position>>& loops) {
@@ -941,23 +909,6 @@ bool pointInPolygonSet(const Position& p, const std::vector<std::vector<Position
         }
     }
     return inside;
-}
-
-/// Signed shoelace area, summed across every loop -- an outer loop and a hole loop wound oppositely
-/// (standard Clipper2Lib convention) contribute with opposite sign, so this returns the polygon
-/// set's own true net area regardless of how many outer/hole loops it has. Diagnostic use only (see
-/// generate()'s own logging) -- comparing this against the loops' combined bounding-box area is a
-/// quick way to tell whether a "cutout" shape is genuinely a narrow/sparse ribbon (area << bbox
-/// area, expected for a padded trace route) or has ballooned to fill most of its own bounding box.
-double polygonSetArea(const std::vector<std::vector<Position>>& loops) {
-    double area = 0;
-    for (const std::vector<Position>& loop : loops) {
-        const std::size_t n = loop.size();
-        for (std::size_t i = 0, j = n - 1; i < n; j = i++) {
-            area += loop[j].x() * loop[i].y() - loop[i].x() * loop[j].y();
-        }
-    }
-    return std::abs(area) / 2.0;
 }
 
 /// True if `p` is inside the polygon set `loops` (see pointInPolygonSet()), or within `tolerance`
@@ -987,9 +938,185 @@ bool inPolygonSetWithTolerance(const Position& p, const std::vector<std::vector<
 
 } // namespace
 
+std::vector<TraceSegment> grid_detail::copperBoundarySegments(
+    const std::vector<Cu::PolygonSet>& layerCopperLoops) {
+    std::vector<TraceSegment> result;
+    for (const Cu::PolygonSet& layer : layerCopperLoops) {
+        for (const Cu::Polygon& loop : layer) {
+            if (loop.size() < 2) continue;
+            for (std::size_t i = 0, j = loop.size() - 1; i < loop.size(); j = i++) {
+                if (loop[j].x() == loop[i].x() && loop[j].y() == loop[i].y()) continue;
+                result.emplace_back(loop[j], loop[i], "", 0.0);
+            }
+        }
+    }
+    return result;
+}
+
+std::vector<TraceSegment> grid_detail::clipTraceSegmentsToCutout(
+    const std::vector<TraceSegment>& segments,
+    const std::vector<std::vector<Position>>& cutoutLoops,
+    double boundaryTolerance) {
+    if (cutoutLoops.empty()) return segments;
+
+    constexpr double kParameterEpsilon = 1e-10;
+    auto cross = [](double ax, double ay, double bx, double by) { return ax * by - ay * bx; };
+    std::vector<TraceSegment> clipped;
+    for (const TraceSegment& segment : segments) {
+        const Position& a = segment.start();
+        const Position& b = segment.stop();
+        const double rx = b.x() - a.x();
+        const double ry = b.y() - a.y();
+        std::vector<double> parameters = {0.0, 1.0};
+        for (const std::vector<Position>& loop : cutoutLoops) {
+            if (loop.size() < 2) continue;
+            for (std::size_t i = 0, j = loop.size() - 1; i < loop.size(); j = i++) {
+                const Position& c = loop[j];
+                const Position& d = loop[i];
+                const double sx = d.x() - c.x();
+                const double sy = d.y() - c.y();
+                const double denominator = cross(rx, ry, sx, sy);
+                if (std::abs(denominator) <= kParameterEpsilon) continue;
+                const double cax = c.x() - a.x();
+                const double cay = c.y() - a.y();
+                const double t = cross(cax, cay, sx, sy) / denominator;
+                const double u = cross(cax, cay, rx, ry) / denominator;
+                if (t >= -kParameterEpsilon && t <= 1.0 + kParameterEpsilon &&
+                    u >= -kParameterEpsilon && u <= 1.0 + kParameterEpsilon) {
+                    parameters.push_back(std::clamp(t, 0.0, 1.0));
+                }
+            }
+        }
+        std::sort(parameters.begin(), parameters.end());
+        parameters.erase(std::unique(parameters.begin(), parameters.end(), [](double lhs, double rhs) {
+                             return std::abs(lhs - rhs) <= kParameterEpsilon;
+                         }), parameters.end());
+        auto interpolate = [&](double t) { return Position(a.x() + t * rx, a.y() + t * ry); };
+        for (std::size_t i = 0; i + 1 < parameters.size(); ++i) {
+            const double t0 = parameters[i];
+            const double t1 = parameters[i + 1];
+            if (t1 - t0 <= kParameterEpsilon ||
+                !inPolygonSetWithTolerance(interpolate((t0 + t1) * 0.5), cutoutLoops, boundaryTolerance)) {
+                continue;
+            }
+            clipped.emplace_back(interpolate(t0), interpolate(t1), segment.aperture(), segment.width(),
+                                 segment.mode(), segment.normal());
+        }
+    }
+    return clipped;
+}
+
+std::vector<double> grid_detail::growGridBoundaryCellsToSize(std::vector<double> lines,
+                                                              double targetCellSize,
+                                                              double maximumCellRatio) {
+    std::sort(lines.begin(), lines.end());
+    if (lines.size() < 2 || targetCellSize <= 0 || maximumCellRatio <= 1) return lines;
+
+    auto transitionWidths = [&](double initialWidth) {
+        std::vector<double> widths;
+        double width = initialWidth;
+        constexpr std::size_t kMaximumTransitionCells = 1024;
+        while (width > 0 && width < targetCellSize && widths.size() < kMaximumTransitionCells) {
+            width = std::min(targetCellSize, width * maximumCellRatio);
+            widths.push_back(width);
+        }
+        return widths;
+    };
+
+    const std::vector<double> lowWidths = transitionWidths(lines[1] - lines[0]);
+    std::vector<double> lowLines;
+    lowLines.reserve(lowWidths.size());
+    double lowPosition = lines.front();
+    for (const double width : lowWidths) {
+        lowPosition -= width;
+        lowLines.push_back(lowPosition);
+    }
+    lines.insert(lines.begin(), lowLines.rbegin(), lowLines.rend());
+
+    // The original high boundary remains at `lines.size() - lowLines.size() - 1`; prepending does
+    // not change its adjacent width, so using the final two original values before appending is safe.
+    const std::size_t originalHighIndex = lines.size() - 1;
+    const std::vector<double> highWidths =
+        transitionWidths(lines[originalHighIndex] - lines[originalHighIndex - 1]);
+    double highPosition = lines.back();
+    for (const double width : highWidths) {
+        highPosition += width;
+        lines.push_back(highPosition);
+    }
+    return lines;
+}
+
+std::vector<double> grid_detail::rebuildExteriorPadding(std::vector<double> lines, double contentMin,
+                                                         double contentMax, double minimumDomainMin,
+                                                         double minimumDomainMax, double targetCellSize,
+                                                         double maximumCellRatio,
+                                                         double minimumBoundaryCellSize) {
+    if (contentMax <= contentMin || targetCellSize <= 0 || maximumCellRatio <= 1) return lines;
+
+    std::sort(lines.begin(), lines.end());
+    lines.erase(std::remove_if(lines.begin(), lines.end(), [&](double line) {
+                    if (line < contentMin || line > contentMax) return true;
+                    // The sliced-board boundary is an indispensable domain boundary. If an
+                    // independently protected copper/edge line is nearly coincident with it,
+                    // keeping both creates a microscopic cell that dominates the CFL timestep and
+                    // seeds dozens of tiny outward transition cells. Snap that unresolvable feature
+                    // to the board boundary by dropping the interior line before inserting the
+                    // authoritative endpoint below.
+                    if (line > contentMin && line - contentMin < minimumBoundaryCellSize) return true;
+                    if (line < contentMax && contentMax - line < minimumBoundaryCellSize) return true;
+                    return false;
+                }),
+                lines.end());
+    lines.push_back(contentMin);
+    lines.push_back(contentMax);
+    std::sort(lines.begin(), lines.end());
+    lines.erase(std::unique(lines.begin(), lines.end()), lines.end());
+    if (lines.size() < 2) return lines;
+
+    constexpr std::size_t kMaximumPaddingCellsPerSide = 1000000;
+    auto outwardWidths = [&](double initialWidth, double distanceRequired) {
+        std::vector<double> widths;
+        double width = initialWidth > 0 ? initialWidth : targetCellSize;
+        double distance = 0;
+        while ((distance < distanceRequired || width < targetCellSize) &&
+               widths.size() < kMaximumPaddingCellsPerSide) {
+            width = std::min(targetCellSize, width * maximumCellRatio);
+            widths.push_back(width);
+            distance += width;
+        }
+        return widths;
+    };
+
+    const std::vector<double> lowWidths =
+        outwardWidths(lines[1] - lines[0], std::max(0.0, contentMin - minimumDomainMin));
+    std::vector<double> lowLines;
+    lowLines.reserve(lowWidths.size());
+    double lowPosition = lines.front();
+    for (const double width : lowWidths) {
+        lowPosition -= width;
+        lowLines.push_back(lowPosition);
+    }
+    lines.insert(lines.begin(), lowLines.rbegin(), lowLines.rend());
+
+    const std::vector<double> highWidths =
+        outwardWidths(lines[lines.size() - 1] - lines[lines.size() - 2],
+                      std::max(0.0, minimumDomainMax - contentMax));
+    double highPosition = lines.back();
+    for (const double width : highWidths) {
+        highPosition += width;
+        lines.push_back(highPosition);
+    }
+    return lines;
+}
+
+std::vector<double> grid_detail::appendUniformPMLCells(std::vector<double> lines, std::int32_t cellCount) {
+    return _extendPMLBand(std::move(lines), cellCount);
+}
+
 struct GridGenerator::Impl {
     Impl(const EMSConfig& config, double boardXMin, double boardYMin, double boardWidth, double boardHeight,
-         const std::vector<std::vector<Position>>& boardCutout)
+         const std::vector<std::vector<Position>>& boardCutout,
+         const std::vector<Cu::PolygonSet>& layerCopperLoops)
         : x("x", Region(-config.grid().margin().xy(), boardWidth + config.grid().margin().xy()), config.grid(),
              boardXMin, boardXMin + boardWidth),
           y("y", Region(-config.grid().margin().xy(), boardHeight + config.grid().margin().xy()), config.grid(),
@@ -999,6 +1126,7 @@ struct GridGenerator::Impl {
           ymin(boardYMin),
           ymax(boardYMin + boardHeight),
           _boardCutout(boardCutout),
+          _layerCopperLoops(layerCopperLoops),
           _config(config) {}
 
     std::vector<std::int32_t> _generateZ() {
@@ -1058,6 +1186,7 @@ struct GridGenerator::Impl {
         zLines = Region(zmax, margin).densifyRegionGrid(zLines, gridMax, gridMin, cellRatio);
         zLines = Region(offset - margin, zmin).densifyRegionGrid(zLines, gridMax, gridMin, cellRatio);
         zLines = _dedupGrid(zLines, gridMin, {});
+        zLines = grid_detail::growGridBoundaryCellsToSize(std::move(zLines), gridMax, cellRatio);
         // Captured *after* the margin above is fully densified but *before* _extendPMLBand() below
         // appends the genuinely-dedicated PML cells -- i.e. "board + real margin," exactly mirroring
         // GridGeneratorAxis::compileGrid()'s own pmlInnerMin/Max capture for X/Y (a few hundred
@@ -1090,7 +1219,7 @@ struct GridGenerator::Impl {
         // own absorbing-boundary ones in every substrate layer within 16 cells of either Z face --
         // every one of them except the thick middle layer, which was the entire pattern behind the
         // vi/vv "collapse" this was traced back from.
-        zLines = _extendPMLBand(std::move(zLines), constants::pmlDepthCells);
+        zLines = grid_detail::appendUniformPMLCells(std::move(zLines), constants::pmlDepthCells);
 
         {
             // _dedupGrid() sorts internally, so zLines is already sorted here -- one entry per
@@ -1115,207 +1244,72 @@ struct GridGenerator::Impl {
         return result;
     }
 
-    CSRectGrid& generate(CSRectGrid& grid, const SimulationConfig& simConfig, const PathsConfig& paths,
-                        const std::vector<std::string>& additionalDensityNets) {
-        auto geometryResult = libkicad_query::boardGeometry(paths, "Loading board geometry for grid generation");
-        if (!geometryResult) {
-            logError(geometryResult.error());
-            std::exit(1);
-        }
-        const libkicad_query::BoardGeometry& geometry = *geometryResult;
-        double originX = std::numeric_limits<double>::infinity();
-        double originY = std::numeric_limits<double>::infinity();
-        for (const libkicad_query::PolygonLoop& loop : geometry.outline) {
-            for (const auto& [xMm, yMm] : loop.pointsMm) {
-                const double xPosition = xMm / 1000.0 / constants::baseUnit * constants::unitMultiplier;
-                const double yPosition = yMm / 1000.0 / constants::baseUnit * constants::unitMultiplier;
-                originX = std::min(originX, xPosition);
-                originY = std::min(originY, yPosition);
-            }
-        }
-        if (!std::isfinite(originX) || !std::isfinite(originY)) {
-            logError("KiCad board geometry has no usable Edge.Cuts points");
-            std::exit(1);
-        }
-        auto pointFromMm = [&](double xMm, double yMm) {
-            return Position(xMm / 1000.0 / constants::baseUnit * constants::unitMultiplier - originX,
-                            yMm / 1000.0 / constants::baseUnit * constants::unitMultiplier - originY);
-        };
+    CSRectGrid& generate(CSRectGrid& grid, const SimulationConfig& simConfig, const PathsConfig& paths) {
+        // The Boolean result from board slicing is the source of truth. In particular, do not reopen
+        // the original board to derive ordinary density: even clipping those old hints afterward can
+        // preserve line positions demanded only by copper that the hull cut removed.
+        const std::vector<TraceSegment> copperSegments =
+            grid_detail::copperBoundarySegments(_layerCopperLoops);
+        x.addLinesFromTrace(copperSegments);
+        y.addLinesFromTrace(copperSegments);
+        logInfo("### Grid Generator: density from " + std::to_string(copperSegments.size()) +
+                " post-cut copper boundary segment(s) ###");
 
-        auto allTracksResult = libkicad_query::allTracks(paths, "Loading board tracks for grid generation");
-        if (!allTracksResult) {
-            logError(allTracksResult.error());
-            std::exit(1);
-        }
-        // "Nets of interest" for mesh-DENSITY placement purposes are this simulation's own resolved
-        // involved nets (see SimulationConfig::resolvedNets()'s own doc comment, populated by
-        // resolveSimulationPorts()) plus `additionalDensityNets` (ground plus any GeometryOnly-level
-        // involved-nets entries -- see this class's own generate()'s doc comment in grid_gen.hpp for
-        // why they get exactly the same treatment, not a separate mechanism: their own edge/pad
-        // density naturally self-modulates with that net's own local complexity, wide open pour vs
-        // dense stitching). The mesh's core-boundary (domain SIZE) is floored directly from the
-        // sliced board's own extent below, independent of either list.
-        // NetName normalizes KiCad's escaped hierarchical names before comparison.
-        std::vector<NetName> nets;
-        for (const std::string& net : simConfig.resolvedNets()) {
-            nets.emplace_back(net);
-        }
-        for (const std::string& net : additionalDensityNets) {
-            const NetName name(net);
-            if (std::find(nets.begin(), nets.end(), name) == nets.end()) {
-                nets.push_back(name);
+        // Synthetic ports and component bridges are created after board slicing, so add their own
+        // contours explicitly. All real board pads are already represented in layerCopperLoops.
+        const std::vector<NetName> syntheticPadNets = {NetName("PORT"), NetName("LUMPEDBRIDGE")};
+        x.addLinesFromPads(addPads, syntheticPadNets, addApertures);
+        y.addLinesFromPads(addPads, syntheticPadNets, addApertures);
+
+        // Net identity is needed only for the differential-pair coupling-gap refinement. Build the
+        // requested set first; simulations without differential pairs never reopen the source board
+        // during grid generation at all.
+        std::set<NetName> differentialNets;
+        for (const InvolvedNetConfig& entry : simConfig.involvedNets()) {
+            if (entry.kind() == NetSelectorKind::Net && entry.net().has_value() &&
+                entry.simulateAsDifferentialPair() && entry.differentialPairPartner().has_value()) {
+                differentialNets.emplace(*entry.net());
+                differentialNets.emplace(*entry.differentialPairPartner());
             }
-        }
-        {
-            std::string netsList;
-            for (const auto& n : nets) {
-                if (!netsList.empty()) {
-                    netsList += ", ";
-                }
-                netsList += n.unescaped();
-            }
-            logInfo("### Grid Generator: mesh-sizing nets = [" + netsList + "] ###");
         }
 
-        // gbr.traceForNet()/gbr.pads() match purely by net *name*, with no geometric restriction to
-        // this simulation's own sliced-board region -- fine on a gerber file that only ever contains
-        // one board, but a net name (especially a common one like "GND") isn't unique across a
-        // shared multi-DUT panel where several unrelated test coupons sit on the same physical
-        // board/gerber files. Without this filter, copper from a totally different coupon elsewhere
-        // on the panel gets pulled into this simulation's own mesh-*density* placement (the core
-        // extent itself is fixed from the sliced board's own real size regardless -- see
-        // compileGrid() -- so a stray far-away pad can no longer balloon the overall domain the way
-        // it once could; this filter now only guards against wasted density mesh lines outside the
-        // simulated region entirely). `filterMargin` reuses the grid's own configured margin as the
-        // tolerance for "close enough to the board to legitimately matter" -- the same distance the
-        // config already says is worth meshing past the board's own edge.
-        const double filterMargin = _config.grid().margin().xy();
-        const double filterXMin = xmin - filterMargin;
-        const double filterXMax = xmax + filterMargin;
-        const double filterYMin = ymin - filterMargin;
-        const double filterYMax = ymax + filterMargin;
-        // The bbox check is a cheap pre-filter only (generously padded by filterMargin, same as
-        // before); the real test is inPolygonSetWithTolerance() against _boardCutout (SlicedBoard's
-        // own true cutout shape -- every loop of it, generally non-rectangular and possibly
-        // disjoint/holed, since it follows the involved nets' real inflated footprint, per
-        // board_slicing.cpp's own InflatePaths() step, not their bounding box). Without the polygon
-        // test, ground/GeometryOnly-level copper anywhere within the bbox but outside the actual
-        // cutout got densified as if it were real simulated geometry, even directly over open vacuum
-        // -- e.g. a via far from the involved nets but still inside their bounding rectangle. Using
-        // the full loop set (not just outline's single largest loop) matters here specifically: a
-        // single-loop test would wrongly treat every other disjoint cutout region, and any genuine
-        // hole inside the largest one, as outside-or-inside respectively -- either way densifying
-        // regions that aren't actually part of the simulated geometry.
-        //
-        // The polygon test's own tolerance is a tiny numerical-fuzz epsilon, deliberately NOT
-        // filterMargin -- filterMargin is the mesh's own "how far past the board is still worth a
-        // regular (non-PML) grid" distance, a completely different concept from "how far past a
-        // trace's own copper is still legitimately that trace." The latter is already answered by
-        // sim.hullPadding(), baked into _boardCutout's own shape by board_slicing.cpp; reusing
-        // filterMargin here on top of that double-counted it, letting vacuum several mm beyond the
-        // already-padded cutout boundary (up to filterMargin away from *any* point on that boundary,
-        // not just the part nearest in the perpendicular direction) still count as real
-        // density-driving geometry -- confirmed on a real board where accepted _parallel regions
-        // reached all the way to within a few hundred sim-units of the outer margin/PML boundary,
-        // ~5.9mm past the true cutout's own edge, entirely inside this now-removed tolerance band.
-        constexpr double kPolygonToleranceSimUnits = 10.0; // 1 micron -- tessellation/rounding fuzz only.
-        std::size_t bboxRejected = 0;
-        std::size_t polygonRejected = 0;
-        std::size_t bothPassed = 0;
-        auto inBounds = [&](const Position& p) {
-            if (p.x() < filterXMin || p.x() > filterXMax || p.y() < filterYMin || p.y() > filterYMax) {
-                ++bboxRejected;
-                return false;
-            }
-            if (!inPolygonSetWithTolerance(p, _boardCutout, kPolygonToleranceSimUnits)) {
-                ++polygonRejected;
-                return false;
-            }
-            ++bothPassed;
-            return true;
-        };
-        {
-            std::size_t cutoutPoints = 0;
-            for (const auto& loop : _boardCutout) {
-                cutoutPoints += loop.size();
-            }
-            const double bboxArea = (filterXMax - filterXMin) * (filterYMax - filterYMin);
-            const double cutoutArea = polygonSetArea(_boardCutout);
-            logInfo("### Grid Generator: cutout polygon filter = " + std::to_string(_boardCutout.size()) +
-                     " loop(s), " + std::to_string(cutoutPoints) + " point(s) total, bbox=[" +
-                     std::to_string(filterXMin) + "," + std::to_string(filterXMax) + "]x[" +
-                     std::to_string(filterYMin) + "," + std::to_string(filterYMax) + "], bboxArea=" +
-                     std::to_string(bboxArea) + ", cutoutArea=" + std::to_string(cutoutArea) + " (" +
-                     std::to_string(bboxArea > 0 ? 100.0 * cutoutArea / bboxArea : 0.0) + "% of bbox) ###");
-        }
-
-        logInfo("### Grid Generator: load KiCad copper geometry ###");
-        // Retained (net name -> every routed centerline segment) purely for
-        // the differential-pair coupling-gap pass below -- addLinesFromTrace() itself has no concept
-        // of net identity (see its own doc comment), so this is the only point in this function where
-        // "these segments belong to net X" is still known.
         std::unordered_map<NetName, std::vector<TraceSegment>, NetNameHash> segmentsByNet;
-        std::size_t acceptedSegments = 0;
-        std::size_t rejectedSegments = 0;
-        auto isSelectedNet = [&](const NetName& net) {
-            return std::find(nets.begin(), nets.end(), net) != nets.end();
-        };
-
-        for (const auto& [rawNetName, track] : *allTracksResult) {
-            const NetName net(rawNetName);
-            if (!isSelectedNet(net)) {
-                continue;
+        if (!differentialNets.empty()) {
+            auto geometryResult = libkicad::boardGeometry(paths.kicadBoardPaths());
+            auto allTracksResult = libkicad::allTracks(paths.kicadBoardPaths());
+            if (!geometryResult || !allTracksResult) {
+                logError(!geometryResult ? geometryResult.error() : allTracksResult.error());
+                std::exit(1);
             }
-            const Position start = pointFromMm(track.startXMm, track.startYMm);
-            const Position stop = pointFromMm(track.endXMm, track.endYMm);
-            if (inBounds(start) && inBounds(stop)) {
-                const double width = track.widthMm / 1000.0 / constants::baseUnit * constants::unitMultiplier;
-                TraceSegment segment(start, stop, "", width);
-                x.addLinesFromTrace({segment});
-                y.addLinesFromTrace({segment});
-                segmentsByNet[net].push_back(std::move(segment));
-                ++acceptedSegments;
-            } else {
-                ++rejectedSegments;
-            }
-        }
-
-        std::size_t acceptedBoundarySegments = 0;
-        std::size_t rejectedBoundarySegments = 0;
-        for (const libkicad_query::CopperPolygon& polygon : geometry.copper) {
-            if (!isSelectedNet(NetName(polygon.netName)) || polygon.loop.pointsMm.size() < 3) {
-                continue;
-            }
-            std::vector<TraceSegment> boundary;
-            for (std::size_t i = 0; i < polygon.loop.pointsMm.size(); ++i) {
-                const auto& [startX, startY] = polygon.loop.pointsMm[i];
-                const auto& [stopX, stopY] = polygon.loop.pointsMm[(i + 1) % polygon.loop.pointsMm.size()];
-                const Position start = pointFromMm(startX, startY);
-                const Position stop = pointFromMm(stopX, stopY);
-                if (inBounds(start) && inBounds(stop)) {
-                    boundary.emplace_back(start, stop, "", 0.0);
-                    ++acceptedBoundarySegments;
-                } else {
-                    ++rejectedBoundarySegments;
+            double originX = std::numeric_limits<double>::infinity();
+            double originY = std::numeric_limits<double>::infinity();
+            for (const libkicad::PolygonLoop& loop : geometryResult->outline) {
+                for (const auto& [xMm, yMm] : loop.pointsMm) {
+                    originX = std::min(originX, xMm / 1000.0 / constants::baseUnit * constants::unitMultiplier);
+                    originY = std::min(originY, yMm / 1000.0 / constants::baseUnit * constants::unitMultiplier);
                 }
             }
-            x.addLinesFromTrace(boundary);
-            y.addLinesFromTrace(boundary);
+            if (!std::isfinite(originX) || !std::isfinite(originY)) {
+                logError("KiCad board geometry has no usable Edge.Cuts points");
+                std::exit(1);
+            }
+            constexpr double kPolygonToleranceSimUnits = 10.0;
+            for (const auto& [rawNetName, track] : *allTracksResult) {
+                const NetName net(rawNetName);
+                if (!differentialNets.contains(net)) continue;
+                const auto pointFromMm = [&](double xMm, double yMm) {
+                    return Position(xMm / 1000.0 / constants::baseUnit * constants::unitMultiplier - originX,
+                                    yMm / 1000.0 / constants::baseUnit * constants::unitMultiplier - originY);
+                };
+                const double width = track.widthMm / 1000.0 / constants::baseUnit * constants::unitMultiplier;
+                auto pieces = grid_detail::clipTraceSegmentsToCutout(
+                    {TraceSegment(pointFromMm(track.startXMm, track.startYMm),
+                                  pointFromMm(track.endXMm, track.endYMm), "", width)},
+                    _boardCutout, kPolygonToleranceSimUnits);
+                auto& destination = segmentsByNet[net];
+                destination.insert(destination.end(), pieces.begin(), pieces.end());
+            }
         }
-
-        std::vector<NetName> padNets = nets;
-        padNets.push_back(NetName("PORT"));
-        x.addLinesFromPads(addPads, padNets, addApertures);
-        y.addLinesFromPads(addPads, padNets, addApertures);
-
-        logInfo("### Grid Generator: inBounds filter accepted " + std::to_string(acceptedSegments) + "/" +
-                 std::to_string(acceptedSegments + rejectedSegments) + " routed centerline segment(s), " +
-                 std::to_string(acceptedBoundarySegments) + "/" +
-                 std::to_string(acceptedBoundarySegments + rejectedBoundarySegments) +
-                 " copper-boundary segment(s) ###");
-        logInfo("### Grid Generator: inBounds() point-level breakdown: " + std::to_string(bothPassed) +
-                 " passed both bbox+polygon, " + std::to_string(bboxRejected) + " rejected by bbox, " +
-                 std::to_string(polygonRejected) + " passed bbox but rejected by polygon ###");
 
         // Differential pairs get an extra densification pass beyond ordinary per-trace edge/optimal
         // handling -- see GridGeneratorAxis::addLinesFromDifferentialPair()'s own doc comment for why
@@ -1369,12 +1363,15 @@ struct GridGenerator::Impl {
     double _pmlInnerZMin = 0;
     double _pmlInnerZMax = 0;
     std::vector<std::vector<Position>> _boardCutout;
+    const std::vector<Cu::PolygonSet>& _layerCopperLoops;
     const EMSConfig& _config;
 };
 
 GridGenerator::GridGenerator(const EMSConfig& config, double boardXMin, double boardYMin, double boardWidth,
-                              double boardHeight, const std::vector<std::vector<Position>>& boardCutout)
-    : _impl(std::make_unique<Impl>(config, boardXMin, boardYMin, boardWidth, boardHeight, boardCutout)) {}
+                              double boardHeight, const std::vector<std::vector<Position>>& boardCutout,
+                              const std::vector<Cu::PolygonSet>& layerCopperLoops)
+    : _impl(std::make_unique<Impl>(config, boardXMin, boardYMin, boardWidth, boardHeight, boardCutout,
+                                   layerCopperLoops)) {}
 GridGenerator::~GridGenerator() = default;
 
 std::vector<Pad>& GridGenerator::addPads() { return _impl->addPads; }
@@ -1390,9 +1387,8 @@ double GridGenerator::pmlInnerYMax() const { return _impl->y.pmlInnerMax(); }
 double GridGenerator::pmlInnerZMin() const { return _impl->_pmlInnerZMin; }
 double GridGenerator::pmlInnerZMax() const { return _impl->_pmlInnerZMax; }
 
-CSRectGrid& GridGenerator::generate(CSRectGrid& grid, const SimulationConfig& simConfig, const PathsConfig& paths,
-                                     const std::vector<std::string>& additionalDensityNets) {
-    return _impl->generate(grid, simConfig, paths, additionalDensityNets);
+CSRectGrid& GridGenerator::generate(CSRectGrid& grid, const SimulationConfig& simConfig, const PathsConfig& paths) {
+    return _impl->generate(grid, simConfig, paths);
 }
 
 } // namespace kiems

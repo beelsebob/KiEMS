@@ -5,12 +5,8 @@
 // failure convention, same exit-code convention -- Simulation::run() itself can't tell which
 // backend actually produced a given simulation directory's output.
 //
-// IMPORTANT: this file includes kiems/simulation.hpp (and therefore the *installed*
-// <openEMS/openems.h>/<CSXCAD/ContinuousStructure.h> header forms) -- it must never also include
-// any Copper/Internal/ header directly, which all use the flat/source-checkout forms instead (see
-// Copper/Internal/CopperOpenEMSAccess.hpp's file comment). The only Copper entry point this file
-// touches is CopperFDTDRunner.h, deliberately declared with only forward-declared
-// openEMS/ContinuousStructure types for exactly this reason.
+// This worker stays on Copper's public boundary: simulation.hpp supplies the complete CSXCAD type,
+// while CopperFDTDRunner.h only forward-declares it. No Copper/Internal headers are needed here.
 
 #include <cstdlib>
 #include <fstream>
@@ -65,12 +61,10 @@ int main(int argc, char** argv) {
     std::filesystem::path configPath;
     std::string simName;
     std::int32_t excitedPort = 0;
-    std::filesystem::path kicadQueryHelperPath;
     try {
         configPath = job.at("config_path").get<std::string>();
         simName = job.at("simulation_name").get<std::string>();
         excitedPort = job.at("excited_port").get<std::int32_t>();
-        kicadQueryHelperPath = job.at("kicad_query_helper_path").get<std::string>();
     } catch (const nlohmann::json::exception& error) {
         writeError(simPath, std::string("Malformed job file: ") + error.what());
         return EXIT_FAILURE;
@@ -86,13 +80,7 @@ int main(int argc, char** argv) {
     }
     EMSConfig config = std::move(*configResult);
 
-    // No kicad-cli/worker paths needed -- this process never exports gerbers or spawns a further
-    // worker, it only reloads the geometry a prior stage already saved to disk. kicadQueryHelperPath
-    // *is* needed though: simConfig.ports() isn't (de)serialized (see PortConfig's own doc comment
-    // in config.hpp), so it must be rebuilt fresh below via importStackup()+resolveSimulationPorts(),
-    // exactly like main.cpp's own -s/-p path does, using the same helper path the spawning process
-    // already resolved (passed through job.json rather than re-derived here).
-    const PathsConfig paths = PathsConfig::forConfigFile(configPath, "", kicadQueryHelperPath, "");
+    const PathsConfig paths = PathsConfig::forConfigFile(configPath, "", "");
 
     if (auto result = importStackup(paths, config); !result) {
         writeError(simPath, result.error());
@@ -117,15 +105,8 @@ int main(int argc, char** argv) {
 
     // Deserializes the exact same SimulationData<Grid> (sliced board + placed grid lines -- see
     // simulation_data.hpp) GeometryResult::build()/load() would have in memory in-process -- this
-    // worker is a genuinely separate process, so a file is the only way to get it. Rebuilding this
-    // Simulation's ContinuousStructure from that (populateGeometry(), including its own
-    // setBoundaryConditions(true)) happens on *this* freshly-constructed Simulation's own `_fdtd`,
-    // not a reload of some other object's state -- unlike the old geometry.xml round trip (which
-    // only ever restored `_csx`, leaving `_fdtd`'s separate boundary-condition state at openEMS's
-    // own PEC default -- see kiems_fdtd_worker/main.cpp's own identical fix, which is what
-    // first caught this: CopperPML's own shell discovery came back empty for a real board despite
-    // the geometry step's own PML log line), there's no second, explicit setBoundaryConditions()
-    // call needed here.
+    // worker is a genuinely separate process, so a file is the only way to get it. This rebuilds
+    // the worker's own ContinuousStructure directly from that cached geometry and grid.
     auto simDataResult = loadSimulationData(*simConfig, simulationDataFile(paths, simName));
     if (!simDataResult) {
         writeError(simPath, simDataResult.error());
@@ -139,26 +120,27 @@ int main(int argc, char** argv) {
         writeError(simPath, result.error());
         return EXIT_FAILURE;
     }
-    simulation.setExcitation();
     simulation.setupPorts(excitedPort);
 
-    // setupFDTDOperator() chdirs into this port's simulation directory (and stays there on success
+    // prepareRunDirectory() chdirs into this port's simulation directory (and stays there on success
     // -- see its own doc comment) so the Copper run's probe files land in the same place the real
     // CPU worker's would have.
     const std::filesystem::path cwd = std::filesystem::current_path();
-    if (auto result = simulation.setupFDTDOperator(excitedPort); !result) {
+    if (auto result = simulation.prepareRunDirectory(excitedPort); !result) {
         writeError(simPath, result.error());
         return EXIT_FAILURE;
     }
 
     const std::filesystem::path probeDir = std::filesystem::current_path();
-    // pmlDepthCells passed explicitly (matching kiems::constants::pmlDepthCells, the same
-    // value Simulation::setBoundaryConditions() used -- or, for a CPML run, deliberately did *not*
-    // pass to openEMS's own Set_BC_PML() -- see that function's own comment) rather than relying on
-    // runFDTDPortOnGPU()'s own default staying in sync with it.
+    // Pass pmlDepthCells explicitly so Copper and GridGenerator use the same CPML shell depth.
     const double cpmlAlphaMax = copper::cpmlAlphaMaxForFrequency(simulation.config().frequency().start());
+    copper::CopperFDTDPortConfig portConfig;
+    portConfig.boundaryIsPEC = simulation.boundaryIsPEC();
+    portConfig.f0 = simulation.excitationF0();
+    portConfig.fc = simulation.excitationFc();
+    portConfig.maxTimesteps = simulation.maxTimesteps();
     const copper::CopperFDTDRunResult gpuResult = copper::runFDTDPortOnGPU(
-        simulation.fdtdEngine(), simulation.csx(), {}, copper::CopperBoundaryKind::CPML, cpmlAlphaMax,
+        simulation.csx(), portConfig, {}, cpmlAlphaMax,
         kiems::constants::pmlDepthCells);
     std::filesystem::current_path(cwd);
     if (!gpuResult.success) {

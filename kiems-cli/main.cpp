@@ -34,11 +34,9 @@
 #include "kiems/simulation.hpp"
 #include "kiems/simulation_result.hpp"
 
-// Forward-declare-only boundary header (see its own file comment) -- safe to include alongside
-// every kiems header above despite those using the *installed* CSXCAD/openEMS forms and
-// Copper's own internals using the flat/source-checkout forms, for exactly the same reason
-// copper_fdtd_worker/main.cpp can: this header never exposes a complete openEMS/ContinuousStructure
-// definition itself. This is what lets the CLI run Copper's GPU engine in-process (see
+// Forward-declare-only boundary header (see its own file comment) -- it keeps Copper's private
+// implementation details out of the CLI while accepting libkiems's CSXCAD geometry. This lets the
+// CLI run Copper's GPU engine in-process (see
 // runGPUPortInProcess() below) instead of posix_spawning copper_fdtd_worker as a separate process --
 // the CLI links Copper.framework directly (see the Xcode project's own build settings), while
 // libkiems itself still never does.
@@ -83,9 +81,6 @@ void printUsage() {
                  "  -d, --debug                Enable debug logging\n"
                  "  -l, --log LEVEL            Set log level (DEBUG, INFO, WARNING, ERROR)\n"
                  "  --backend {cpu,gpu}        [s] FDTD engine: openEMS CPU (default) or Copper GPU\n"
-                 "  --pml {upml,cpml}          [s] GPU boundary: CPML (default, fixes UPML's late-time\n"
-                 "                                 numerical instability on very long runs -- see\n"
-                 "                                 PMLKind's own doc comment) or openEMS's own UPML\n"
                  "  --dump-early-frames DIR    [s] Diagnostic only, GPU backend: instead of a normal run,\n"
                  "                                 step the first N timesteps one at a time, writing raw\n"
                  "                                 field components + coupling coefficients (cropped to a\n"
@@ -221,18 +216,6 @@ Arguments parseArguments(int argc, char** argv, DumpOptions& dumpOptions) {
                 std::cerr << "argument --backend: invalid choice: '" << tokens[i] << "'\n";
                 printUsageAndExit(2);
             }
-        } else if (tok == "--pml") {
-            if (++i >= tokens.size()) {
-                missingValue(tok);
-            }
-            if (tokens[i] == "upml") {
-                args.setPmlKind(PMLKind::UPML);
-            } else if (tokens[i] == "cpml") {
-                args.setPmlKind(PMLKind::CPML);
-            } else {
-                std::cerr << "argument --pml: invalid choice: '" << tokens[i] << "'\n";
-                printUsageAndExit(2);
-            }
         } else if (tok == "--dump-early-frames") {
             if (++i >= tokens.size()) {
                 missingValue(tok);
@@ -319,10 +302,8 @@ std::filesystem::path resolveKicadCli() {
 }
 
 // Absolute path to the currently-running executable's own directory, via the macOS-specific
-// _NSGetExecutablePath API -- libkicad_smoketest is always a sibling build product in the same
-// BUILT_PRODUCTS_DIR as this CLI. Only the CLI does this "sibling of self" resolution; the library
-// itself takes the helper's path as an explicit PathsConfig field (see libkicad_query.hpp) so a
-// sandboxed GUI app can point it at a bundled copy instead.
+// _NSGetExecutablePath API. Worker executables are sibling build products in the same
+// BUILT_PRODUCTS_DIR as this CLI.
 std::filesystem::path executableDir() {
     std::array<char, 4096> buffer{};
     std::uint32_t size = static_cast<std::uint32_t>(buffer.size());
@@ -439,23 +420,25 @@ void printCopperProgress(const copper::CopperFDTDProgress& progress) {
 /// RunOptions::backend == FDTDBackend::CopperGPU -- runs Copper's GPU engine directly in this
 /// process instead of the default sim.run(excitedPortNumber), which posix_spawns a separate worker.
 /// By the time generateResults() (simulation_data.hpp) hands `sim` to this callback, it has already
-/// had adoptSlicedBoard()/adoptGridLines()/populateGeometry() (which includes its own
-/// setBoundaryConditions(true)) /setExcitation()/setupPorts() called on it -- this only needs to
-/// do the FDTD-specific part (setupFDTDOperator()/runFDTDPortOnGPU()), mirroring
+/// had adoptSlicedBoard()/adoptGridLines()/populateGeometry()/setupPorts() called on it -- this only needs to
+/// do the FDTD-specific part (prepareRunDirectory()/runFDTDPortOnGPU()), mirroring
 /// copper_fdtd_worker/main.cpp's own sequence; the only difference is *where* it runs: here, in the
 /// CLI's own process, rather than a spawned child's.
-std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32_t excitedPortNumber,
-                                                       PMLKind pmlKind) {
+std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32_t excitedPortNumber) {
     const std::filesystem::path cwd = std::filesystem::current_path();
-    if (auto result = sim.setupFDTDOperator(excitedPortNumber); !result) {
+    if (auto result = sim.prepareRunDirectory(excitedPortNumber); !result) {
         return std::unexpected(result.error());
     }
     const std::filesystem::path probeDir = std::filesystem::current_path();
-    const copper::CopperBoundaryKind boundaryKind =
-        pmlKind == PMLKind::CPML ? copper::CopperBoundaryKind::CPML : copper::CopperBoundaryKind::UPML;
     const double cpmlAlphaMax = copper::cpmlAlphaMaxForFrequency(sim.config().frequency().start());
-    const copper::CopperFDTDRunResult gpuResult = copper::runFDTDPortOnGPU(
-        sim.fdtdEngine(), sim.csx(), printCopperProgress, boundaryKind, cpmlAlphaMax, constants::pmlDepthCells);
+    copper::CopperFDTDPortConfig portConfig;
+    portConfig.boundaryIsPEC = sim.boundaryIsPEC();
+    portConfig.f0 = sim.excitationF0();
+    portConfig.fc = sim.excitationFc();
+    portConfig.maxTimesteps = sim.maxTimesteps();
+    const copper::CopperFDTDRunResult gpuResult =
+        copper::runFDTDPortOnGPU(sim.csx(), portConfig, printCopperProgress, cpmlAlphaMax,
+                                  constants::pmlDepthCells);
     std::filesystem::current_path(cwd);
     if (!gpuResult.success) {
         return std::unexpected(gpuResult.errorMessage);
@@ -475,26 +458,29 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     return {};
 }
 
-/// --dump-early-frames/--dump-detailed-trace's own FDTDPortRunner -- same setupFDTDOperator()/
+/// --dump-early-frames/--dump-detailed-trace's own FDTDPortRunner -- same prepareRunDirectory()/
 /// cwd-restore shape as runGPUPortInProcess() above, but calls copper::dumpEarlyFrames() and/or
 /// copper::dumpDetailedTrace() instead of copper::runFDTDPortOnGPU(): a one-off diagnostic capture,
 /// not a normal run, so there are no probe files to write afterward. dumpEarlyFrames() writes into
 /// `dumpOptions.dir`/port<excitedPortNumber>/ so a multi-port config doesn't clobber one port's dump
 /// with another's; dumpDetailedTrace() just prints to stdout, no directory needed.
 std::expected<void, std::string> dumpGPUPortInProcess(Simulation& sim, std::int32_t excitedPortNumber,
-                                                        PMLKind pmlKind, const DumpOptions& dumpOptions) {
+                                                        const DumpOptions& dumpOptions) {
     const std::filesystem::path cwd = std::filesystem::current_path();
-    if (auto result = sim.setupFDTDOperator(excitedPortNumber); !result) {
+    if (auto result = sim.prepareRunDirectory(excitedPortNumber); !result) {
         return std::unexpected(result.error());
     }
-    const copper::CopperBoundaryKind boundaryKind =
-        pmlKind == PMLKind::CPML ? copper::CopperBoundaryKind::CPML : copper::CopperBoundaryKind::UPML;
     const double cpmlAlphaMax = copper::cpmlAlphaMaxForFrequency(sim.config().frequency().start());
+    copper::CopperFDTDPortConfig portConfig;
+    portConfig.boundaryIsPEC = sim.boundaryIsPEC();
+    portConfig.f0 = sim.excitationF0();
+    portConfig.fc = sim.excitationFc();
+    portConfig.maxTimesteps = sim.maxTimesteps();
     if (dumpOptions.dir.has_value()) {
         const std::filesystem::path portDir = *dumpOptions.dir / ("port" + std::to_string(excitedPortNumber));
         const std::string error =
-            copper::dumpEarlyFrames(sim.fdtdEngine(), sim.csx(), portDir, dumpOptions.frameCount,
-                                     dumpOptions.marginCells, boundaryKind, cpmlAlphaMax, constants::pmlDepthCells);
+            copper::dumpEarlyFrames(sim.csx(), portConfig, portDir, dumpOptions.frameCount,
+                                     dumpOptions.marginCells, cpmlAlphaMax, constants::pmlDepthCells);
         if (!error.empty()) {
             std::filesystem::current_path(cwd);
             return std::unexpected(error);
@@ -503,8 +489,8 @@ std::expected<void, std::string> dumpGPUPortInProcess(Simulation& sim, std::int3
     if (dumpOptions.detailedTrace) {
         std::fprintf(stdout, "Copper: dumpDetailedTrace for excited port %d\n", excitedPortNumber);
         const std::string error =
-            copper::dumpDetailedTrace(sim.fdtdEngine(), sim.csx(), dumpOptions.traceSteps, dumpOptions.traceBoxSide,
-                                       boundaryKind, cpmlAlphaMax, constants::pmlDepthCells);
+            copper::dumpDetailedTrace(sim.csx(), portConfig, dumpOptions.traceSteps,
+                                       dumpOptions.traceBoxSide, cpmlAlphaMax, constants::pmlDepthCells);
         if (!error.empty()) {
             std::filesystem::current_path(cwd);
             return std::unexpected(error);
@@ -536,10 +522,9 @@ int main(int argc, char** argv) {
         args.setOutput(configDir / args.output());
     }
 
-    const PathsConfig paths =
-        PathsConfig::forConfigFile(cfgPath, resolveKicadCli(), executableDir() / "libkicad_smoketest",
-                                    executableDir() / "kiems_fdtd_worker",
-                                    executableDir() / "copper_fdtd_worker");
+    const PathsConfig paths = PathsConfig::forConfigFile(cfgPath, resolveKicadCli(),
+                                                          executableDir() / "kiems_fdtd_worker",
+                                                          executableDir() / "copper_fdtd_worker");
 
     if (args.input().extension() == ".kicad_pcb") {
         if (auto result = exportKicadPcb(paths, args.input()); !result) {
@@ -586,7 +571,6 @@ int main(int argc, char** argv) {
     options.transparent = args.transparent();
     options.plotPhase = args.plotPhase();
     options.backend = args.backend();
-    options.pmlKind = args.pmlKind();
     // --dump-early-frames/--dump-detailed-trace only exist on Copper's GPU engine -- silently
     // forcing the backend here (rather than requiring --backend gpu too) keeps either one-off
     // diagnostic invocation to a single flag.
@@ -628,20 +612,17 @@ int main(int argc, char** argv) {
         // comment for why, and why libkiems itself still never depends on Copper) rather than
         // posix_spawning copper_fdtd_worker -- the whole point being live progress reporting through
         // this process's own stdout, not a separate process's.
-        const PMLKind pmlKind = options.pmlKind;
         auto result =
             options.backend != FDTDBackend::CopperGPU
                 ? SimulationResult::run(*geometryResult, options)
                 : (dumpRequested
                        ? SimulationResult::run(*geometryResult, options,
-                                                [pmlKind, &dumpOptions](Simulation& sim,
-                                                                        std::int32_t excitedPortNumber) {
-                                                    return dumpGPUPortInProcess(sim, excitedPortNumber, pmlKind,
-                                                                                 dumpOptions);
+                                                [&dumpOptions](Simulation& sim, std::int32_t excitedPortNumber) {
+                                                    return dumpGPUPortInProcess(sim, excitedPortNumber, dumpOptions);
                                                 })
                        : SimulationResult::run(*geometryResult, options,
-                                                [pmlKind](Simulation& sim, std::int32_t excitedPortNumber) {
-                                                    return runGPUPortInProcess(sim, excitedPortNumber, pmlKind);
+                                                [](Simulation& sim, std::int32_t excitedPortNumber) {
+                                                    return runGPUPortInProcess(sim, excitedPortNumber);
                                                 }));
         if (!result) {
             logError(result.error());

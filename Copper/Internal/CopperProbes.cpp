@@ -15,7 +15,7 @@ namespace {
 /// min/max order first (Operator::SnapBox2Mesh's own behavior). That's deliberate on openEMS's
 /// part: CalcVoltageIntegral's sign convention depends on start[n] vs stop[n] still encoding the
 /// box's original direction, not just its extent.
-CopperProbe discoverVoltageProbe(Operator& op, CSPropProbeBox& pb, CSPrimBox& box) {
+CopperProbe discoverVoltageProbe(CopperOperator& op, CSPropProbeBox& pb, CSPrimBox& box) {
     double dstart[3], dstop[3];
     for (int n = 0; n < 3; ++n) {
         dstart[n] = box.GetCoord(2 * n);
@@ -27,8 +27,8 @@ CopperProbe discoverVoltageProbe(Operator& op, CSPropProbeBox& pb, CSPrimBox& bo
     probe.type = CopperProbeType::Voltage;
     probe.weight = pb.GetWeighting();
 
-    op.SnapToMesh(dstart, probe.start, /*dualMesh=*/false, /*fullMesh=*/false, nullptr);
-    op.SnapToMesh(dstop, probe.stop, /*dualMesh=*/false, /*fullMesh=*/false, nullptr);
+    op.snapToMesh(dstart, probe.start, /*dualMesh=*/false, nullptr);
+    op.snapToMesh(dstop, probe.stop, /*dualMesh=*/false, nullptr);
     return probe;
 }
 
@@ -40,7 +40,7 @@ CopperProbe discoverVoltageProbe(Operator& op, CSPropProbeBox& pb, CSPrimBox& bo
 /// direction (see csx_helpers.cpp's addProbe), so only that branch is ported here -- the
 /// auto-infer-from-a-2D-box branch openEMS falls back to when no normal direction is given isn't
 /// something kiems's own probe construction ever exercises.
-CopperProbe discoverCurrentProbe(Operator& op, CSPropProbeBox& pb, CSPrimBox& box) {
+CopperProbe discoverCurrentProbe(CopperOperator& op, CSPropProbeBox& pb, CSPrimBox& box) {
     double dstart[3], dstop[3];
     for (int n = 0; n < 3; ++n) {
         dstart[n] = box.GetCoord(2 * n);
@@ -53,8 +53,8 @@ CopperProbe discoverCurrentProbe(Operator& op, CSPropProbeBox& pb, CSPrimBox& bo
     probe.weight = pb.GetWeighting();
     probe.normalDir = pb.GetNormalDir();
 
-    op.SnapBox2Mesh(dstart, dstop, probe.start, probe.stop, /*dualMesh=*/true, /*fullMesh=*/false,
-                     /*SnapMethod=*/1, probe.startInside, probe.stopInside);
+    op.snapBox2Mesh(dstart, dstop, probe.start, probe.stop, /*dualMesh=*/true, /*snapMethod=*/1, probe.startInside,
+                     probe.stopInside);
 
     if (probe.normalDir >= 0 && probe.normalDir <= 2) {
         for (int n = 0; n < 3; ++n) {
@@ -68,11 +68,11 @@ CopperProbe discoverCurrentProbe(Operator& op, CSPropProbeBox& pb, CSPrimBox& bo
             // which the first may have just decremented. Ported exactly, not "cleaned up", because
             // that's what processcurrent.cpp itself does (see CopperProbes.hpp's file comment on why
             // this file favors verbatim porting over an obviously-equivalent rewrite).
-            if (op.GetDiscLine(n, probe.start[n], true) > dstart[n] && probe.start[n] > 0) {
+            if (op.discLine(n, probe.start[n], true) > dstart[n] && probe.start[n] > 0) {
                 --probe.start[n];
             }
-            if (op.GetDiscLine(n, probe.start[n], true) < dstart[n] &&
-                probe.stop[n] < op.GetNumberOfLines(n) - 1) {
+            if (op.discLine(n, probe.start[n], true) < dstart[n] &&
+                probe.stop[n] < op.numberOfLines(n) - 1) {
                 ++probe.stop[n];
             }
         }
@@ -82,7 +82,7 @@ CopperProbe discoverCurrentProbe(Operator& op, CSPropProbeBox& pb, CSPrimBox& bo
 
 } // namespace
 
-std::vector<CopperProbe> discoverProbes(ContinuousStructure& csx, Operator& op) {
+std::vector<CopperProbe> discoverProbes(ContinuousStructure& csx, CopperOperator& op) {
     std::vector<CopperProbe> probes;
     for (CSProperties* prop : csx.GetPropertyByType(CSProperties::PROBEBOX)) {
         auto* pb = prop->ToProbeBox();

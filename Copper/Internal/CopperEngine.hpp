@@ -1,4 +1,5 @@
-// Drives the Metal FDTD leapfrog loop.
+// Drives the FDTD leapfrog loop, on either of two backends (Backend::Metal or Backend::CPU -- see
+// CopperEngine::Backend below) sharing one public interface and one field-buffer layout.
 #pragma once
 
 #include <cstdint>
@@ -8,31 +9,43 @@
 
 #include "CopperCPML.hpp"
 #include "CopperExcitation.hpp"
-#include "CopperPML.hpp"
 #include "CopperYeeGrid.hpp"
 
 namespace copper {
 
-/// Interior E/H update kernels, plus an optional set of PML boundary shells -- either `pmlShells`
-/// (classic UPML, Phase 3 -- see CopperPML.hpp) or `cpmlShells` (real CFS-PML -- see CopperCPML.hpp),
-/// mutually exclusive in practice (a run picks one CopperBoundaryKind), though nothing stops a
-/// caller passing both -- plus optional excitation injection (Phase 4 -- see CopperExcitation.hpp).
-/// A PEC-only run (neither shell list) needs no extra state or update pass. An unexcited run (no
+/// Forward-declared here, defined in CopperEngineBackend.hpp -- the interface CopperEngine's two
+/// backends (Metal/CopperEngine.mm, CPU/CopperCPUEngine.cpp) implement. Kept out of this header
+/// (rather than a nested type) so neither Metal nor CPU-backend-specific state ever needs to appear
+/// here -- plain C++ callers only ever see the pimpl pointer below.
+class EngineBackend;
+
+/// Interior E/H update kernels, plus optional CFS-PML boundary shells (see CopperCPML.hpp) and
+/// optional excitation injection (see CopperExcitation.hpp). A PEC-only run (no shell list) needs
+/// no extra state or update pass. An unexcited run (no
 /// `excitation` cells) never dispatches the excitation kernels at all -- the fields just stay at
 /// their seeded/zero initial condition, which is what Phase 2/3's own verification fixtures rely on.
 ///
 /// Pure-C++ public interface (pimpl) so plain C++ callers (e.g. Copper_smoketest) don't need to
-/// become Objective-C++ themselves just to use this -- CopperEngine.mm's implementation is where
-/// all the actual Metal/Objective-C API usage lives.
+/// become Objective-C++ themselves just to use this -- CopperEngine.mm holds the only Metal/
+/// Objective-C API usage (the Backend::Metal implementation); CopperCPUEngine.cpp is plain C++
+/// (the Backend::CPU implementation); CopperEngine.cpp itself just forwards to whichever one the
+/// constructor picked.
 class CopperEngine {
 public:
-    /// Uploads `grid`'s coefficients (and each `pmlShells`/`cpmlShells`/`excitation` entry's, if any)
-    /// to the GPU and zero-initializes every E/H field and auxiliary PML state buffer (matching
-    /// FDTD's own E=H=0 initial condition). Throws std::runtime_error if no Metal device is available
-    /// or the shader library fails to load/compile.
-    explicit CopperEngine(const CopperYeeGrid& grid, const std::vector<CopperPMLShell>& pmlShells = {},
-                          const CopperExcitation& excitation = {},
-                          const std::vector<CopperCPMLShell>& cpmlShells = {});
+    /// Which implementation actually runs the leapfrog loop -- both share the exact same field-buffer
+    /// layout (flat, x-fastest, copperGridIndex()-indexed) and produce results matching to
+    /// float-rounding tolerance (see CopperTests' own CopperCPUEngineParityTests), so this is a pure
+    /// implementation-strategy choice, not a behavioral one. `Metal` (the default, preserving every
+    /// existing caller's behavior) needs a working Metal device; `CPU` needs none, at some throughput
+    /// cost -- see CopperCPUEngine.cpp's own file comment for the tradeoffs.
+    enum class Backend { Metal, CPU };
+
+    /// Initializes `grid`'s coefficients (and each `cpmlShells`/`excitation` entry's, if any) into
+    /// the chosen backend and zero-initializes every E/H field and auxiliary PML state
+    /// buffer (matching FDTD's own E=H=0 initial condition). Throws std::runtime_error if `backend`
+    /// is Metal and no Metal device is available or the shader library fails to load/compile.
+    explicit CopperEngine(const CopperYeeGrid& grid, const CopperExcitation& excitation = {},
+                          const std::vector<CopperCPMLShell>& cpmlShells = {}, Backend backend = Backend::Metal);
     ~CopperEngine();
 
     CopperEngine(const CopperEngine&) = delete;
@@ -57,8 +70,8 @@ public:
     using ProbeSampler = std::function<bool(std::uint32_t globalTimestep)>;
 
     /// Invoked once per iteration, between that iteration's voltage (E) update and its current (H)
-    /// update -- i.e. after apply_excitation_e has landed and is CPU-visible, before pml_pre_h/
-    /// update_h_interior have even been encoded. Mirrors exactly where openEMS's own Engine::IterateTS
+    /// update -- i.e. after apply_excitation_e has landed and is CPU-visible, before
+    /// update_h_interior has been encoded. Mirrors exactly where openEMS's own Engine::IterateTS
     /// calls Apply2Voltages() (engine.cpp): after UpdateVoltages()/DoPostVoltageUpdates(), before
     /// DoPreCurrentUpdates()/UpdateCurrents(). A lumped-element lumped-RLC correction (or any other
     /// per-timestep voltage-domain extension) *must* land here, not after the current update -- the
@@ -133,9 +146,12 @@ public:
 
     const CopperGridDims& dims() const;
 
+    /// Current GPU-resident allocation size in bytes (MTLDevice::currentAllocatedSize) -- 0 for the
+    /// CPU backend. Diagnostic only: see EngineBackend::currentAllocatedMetalBytes()'s own comment.
+    std::size_t currentAllocatedMetalBytes() const;
+
 private:
-    struct Impl;
-    std::unique_ptr<Impl> _impl;
+    std::unique_ptr<EngineBackend> _backend;
 };
 
 } // namespace copper

@@ -9,6 +9,58 @@ private final class ResultsDocumentStackView: NSStackView {
     override var isFlipped: Bool { true }
 }
 
+/// A compact disclosure row for one results graph. Keeping the graph as an arranged subview means
+/// hiding it also collapses its fixed chart height, instead of leaving a blank 220-point hole.
+private final class DisclosureGraphView: NSStackView {
+    private let disclosureButton: NSButton
+    private let titleLabel: NSTextField
+    private let graph: NSView
+
+    init(title: String, graph: NSView) {
+        disclosureButton = NSButton(title: "", target: nil, action: nil)
+        titleLabel = NSTextField(labelWithString: title)
+        self.graph = graph
+        super.init(frame: .zero)
+
+        translatesAutoresizingMaskIntoConstraints = false
+        orientation = .vertical
+        alignment = .leading
+        spacing = 6
+
+        disclosureButton.setButtonType(.onOff)
+        disclosureButton.bezelStyle = .disclosure
+        disclosureButton.state = .on
+        disclosureButton.target = self
+        disclosureButton.action = #selector(toggleGraph)
+        disclosureButton.translatesAutoresizingMaskIntoConstraints = false
+
+        titleLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        titleLabel.textColor = .labelColor
+
+        let header = NSStackView(views: [disclosureButton, titleLabel])
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 4
+
+        addArrangedSubview(header)
+        addArrangedSubview(graph)
+        NSLayoutConstraint.activate([
+            header.leadingAnchor.constraint(equalTo: leadingAnchor),
+            graph.leadingAnchor.constraint(equalTo: leadingAnchor),
+            graph.trailingAnchor.constraint(equalTo: trailingAnchor),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    @objc private func toggleGraph() {
+        graph.isHidden = disclosureButton.state != .on
+    }
+}
+
 /// Which group of charts is currently shown -- an NSSegmentedControl lets the user switch between
 /// them; only categories with at least one section to show ever appear (see showCategories).
 private enum ResultsCategory: CaseIterable {
@@ -16,7 +68,6 @@ private enum ResultsCategory: CaseIterable {
     case eyeDiagrams
     case impedance
     case smith
-    case diffPairs
     case traceDelays
     case probes
 
@@ -26,7 +77,6 @@ private enum ResultsCategory: CaseIterable {
         case .eyeDiagrams: return "Eye diagrams"
         case .impedance: return "Impedance"
         case .smith: return "Smith"
-        case .diffPairs: return "Differential Pairs"
         case .traceDelays: return "Trace Delays"
         case .probes: return "Probes"
         }
@@ -52,29 +102,12 @@ final class SimulationResultsViewController: NSViewController {
     /// is true (the excitation pulse is still actively being injected, as opposed to the run just
     /// observing decay afterward) -- see that property's own doc comment.
     private let excitationIcon = NSImageView()
-    /// Shows the energy-decay end-criteria's current value against its own dB target while setup or
-    /// the FDTD run is in progress -- see EMSPipelineProgress's own energyChangeDB/
-    /// targetEnergyChangeDB doc comment. It starts pegged at the default target during setup, then
-    /// uses the real target once the first timestep report arrives. `n/10` divisions, where n is
-    /// the target itself (e.g. 60dB -> 6 divisions).
-    private let energyLevelIndicator = NSLevelIndicator()
-    private let energyLevelLabel = NSTextField(labelWithString: "")
-    private let energyMeterStack = NSStackView()
-    private static let defaultEnergyDecayTargetDB = 60.0
+    private let energyHistoryChart = MultiCurveLineChartView()
     private let categoryControl = NSSegmentedControl()
     private let scrollView = NSScrollView()
     private let stack = ResultsDocumentStackView()
 
-    // NSLevelIndicator's doubleValue, unlike NSProgressIndicator's, isn't animatable through the
-    // standard `.animator()` proxy -- setting it that way just jumps instantly, no interpolation.
-    // setLevelIndicatorValue(_:animated:) below drives it manually on a repeating Timer instead; this
-    // is the in-flight one, invalidated/replaced every time a new target value comes in so rapid
-    // progress ticks don't pile up competing animations.
-    private var levelIndicatorAnimation: Timer?
-    // The time-estimate label collapses out of ProgressStatusView's stack during indeterminate
-    // setup, so it cannot remain the level indicator's positional anchor in that phase.
-    private var energyBelowProgressBarConstraint: NSLayoutConstraint!
-    private var energyBelowTimeEstimateConstraint: NSLayoutConstraint!
+    private var progressGroupToEnergyChartConstraint: NSLayoutConstraint!
 
     private var errors: [Int: String] = [:]
     private var runningIndices: Set<Int> = []
@@ -94,6 +127,15 @@ final class SimulationResultsViewController: NSViewController {
     // Latest known time-remaining text per simulation, mirroring latestProgress's own "so
     // refreshDisplay() can restore state on re-selection" role.
     private var timeEstimateText: [Int: String] = [:]
+    private struct EnergyHistorySample {
+        let timeNanoseconds: Double
+        let relativeEnergyDB: Double
+    }
+    /// One live excitation at a time per simulation. A later port starts its physical time at zero,
+    /// so its setup report clears the previous port's curve rather than joining unrelated runs.
+    private var energyHistory: [Int: [EnergyHistorySample]] = [:]
+    private var energyHistoryFullRunNanoseconds: [Int: Double] = [:]
+    private var energyHistoryExcitationBands: [Int: ChartXIntensityBand] = [:]
     private var currentIndex: Int?
     private var availableCategories: [ResultsCategory] = []
     private var selectedCategory: ResultsCategory = .sParameters
@@ -145,34 +187,9 @@ final class SimulationResultsViewController: NSViewController {
         excitationIcon.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(excitationIcon)
 
-        energyLevelIndicator.levelIndicatorStyle = .discreteCapacity
-        energyLevelIndicator.minValue = 0
-        // Replaced with the real dB target as soon as the first Simulation-phase progress report
-        // arrives. Counts down: shows dB *remaining* until the target, not dB decayed so far.
-        energyLevelIndicator.maxValue = Self.defaultEnergyDecayTargetDB
-        // warningValue/criticalValue left at their own (max-exceeding) defaults, deliberately -- with
-        // the countdown direction above, NSLevelIndicator's usual "getting low is bad" semantics would
-        // actually point the wrong way here too (getting low means getting *close to done*), so
-        // there's still no "this is bad, turn it red" threshold that makes sense to set.
-        energyLevelIndicator.isEditable = false
-        energyLevelIndicator.translatesAutoresizingMaskIntoConstraints = false
-
-        energyLevelLabel.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
-        energyLevelLabel.textColor = .secondaryLabelColor
-
-        energyMeterStack.orientation = .horizontal
-        energyMeterStack.alignment = .centerY
-        energyMeterStack.spacing = 8
-        energyMeterStack.addArrangedSubview(energyLevelIndicator)
-        energyMeterStack.addArrangedSubview(energyLevelLabel)
-        energyMeterStack.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(energyMeterStack)
-
-        energyBelowProgressBarConstraint = energyMeterStack.topAnchor.constraint(
-            equalTo: progressStatus.progressBar.bottomAnchor, constant: 12)
-        energyBelowTimeEstimateConstraint = energyMeterStack.topAnchor.constraint(
-            equalTo: progressStatus.timeEstimateLabel.bottomAnchor, constant: 12)
-        energyBelowTimeEstimateConstraint.isActive = true
+        energyHistoryChart.configure(yAxisLabel: "Relative energy [dB]")
+        energyHistoryChart.isHidden = true
+        container.addSubview(energyHistoryChart)
 
         categoryControl.segmentStyle = .texturedRounded
         categoryControl.target = self
@@ -199,6 +216,12 @@ final class SimulationResultsViewController: NSViewController {
         scrollView.isHidden = true
         container.addSubview(scrollView)
 
+        let preferredEnergyChartWidth = energyHistoryChart.widthAnchor.constraint(equalToConstant: 520)
+        preferredEnergyChartWidth.priority = .defaultHigh
+        let progressGroupGuide = NSLayoutGuide()
+        container.addLayoutGuide(progressGroupGuide)
+        progressGroupToEnergyChartConstraint = progressGroupGuide.bottomAnchor.constraint(
+            equalTo: energyHistoryChart.bottomAnchor)
         NSLayoutConstraint.activate([
             categoryControl.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
             categoryControl.centerXAnchor.constraint(equalTo: container.centerXAnchor),
@@ -214,14 +237,22 @@ final class SimulationResultsViewController: NSViewController {
             progressStatus.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             progressStatus.bottomAnchor.constraint(equalTo: container.bottomAnchor),
 
+            // When the chart is visible this guide centres the complete progress composition,
+            // rather than the status rows alone with the chart hanging below the midpoint.
+            progressGroupGuide.topAnchor.constraint(equalTo: progressStatus.contentTopAnchor),
+            progressGroupGuide.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+
             excitationIcon.trailingAnchor.constraint(equalTo: progressStatus.progressBar.leadingAnchor, constant: -8),
             excitationIcon.centerYAnchor.constraint(equalTo: progressStatus.progressBar.centerYAnchor),
             excitationIcon.widthAnchor.constraint(equalToConstant: 16),
             excitationIcon.heightAnchor.constraint(equalToConstant: 16),
 
-            energyMeterStack.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            energyLevelIndicator.widthAnchor.constraint(equalToConstant: 240),
-            energyLevelIndicator.heightAnchor.constraint(equalToConstant: 16),
+            energyHistoryChart.topAnchor.constraint(equalTo: progressStatus.timeEstimateLabel.bottomAnchor,
+                                                    constant: 12),
+            energyHistoryChart.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            energyHistoryChart.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor, constant: 24),
+            energyHistoryChart.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -24),
+            preferredEnergyChartWidth,
         ])
 
         view = container
@@ -272,50 +303,25 @@ final class SimulationResultsViewController: NSViewController {
         }
     }
 
-    /// Manually interpolates energyLevelIndicator's doubleValue over ~0.2s -- see
-    /// levelIndicatorAnimation's own doc comment for why this can't just use `.animator()` the way
-    /// progressStatus's own progress bar does. `animated: false` snaps immediately, which also cancels any interpolation
-    /// already in flight (so a phase-boundary reset can't be fought by a stale animation still
-    /// chasing the previous phase's final value).
-    private func setLevelIndicatorValue(_ target: Double, animated: Bool) {
-        levelIndicatorAnimation?.invalidate()
-        guard animated else {
-            energyLevelIndicator.doubleValue = target
-            updateEnergyLevelLabel()
-            return
+    private func updateProgressGroupCentering() {
+        let includesChart = !energyHistoryChart.isHidden
+        progressGroupToEnergyChartConstraint.isActive = false
+        if includesChart {
+            progressStatus.setUsesDefaultVerticalCentering(false)
+            progressGroupToEnergyChartConstraint.isActive = true
+        } else {
+            progressStatus.setUsesDefaultVerticalCentering(true)
         }
-        let start = energyLevelIndicator.doubleValue
-        let duration = 0.2
-        let startTime = Date()
-        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
-            guard let self else { timer.invalidate(); return }
-            let t = min(1, Date().timeIntervalSince(startTime) / duration)
-            energyLevelIndicator.doubleValue = start + (target - start) * t
-            updateEnergyLevelLabel()
-            if t >= 1 { timer.invalidate() }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        levelIndicatorAnimation = timer
     }
 
-    private func updateEnergyLevelLabel() {
-        energyLevelLabel.stringValue = String(
-            format: "%.0f/%.0f dB", energyLevelIndicator.doubleValue, energyLevelIndicator.maxValue)
-    }
-
-    private func positionEnergyLevelIndicatorForSetup(_ isSettingUp: Bool) {
-        energyBelowTimeEstimateConstraint.isActive = false
-        energyBelowProgressBarConstraint.isActive = false
-        (isSettingUp ? energyBelowProgressBarConstraint : energyBelowTimeEstimateConstraint).isActive = true
-    }
-
-    /// `animated` smooths just the progress bar's/level indicator's own doubleValue transitions --
+    /// `animated` smooths the progress bar's own doubleValue transitions --
     /// meant for live ticks from progressReceived() (small, incremental deltas within the same
     /// simulation), not for the other call sites (selection changes, run start/finish), where the
     /// value can jump to represent an unrelated simulation's own progress and animating that jump
     /// would be misleading motion, not a smooth update.
     private func refreshDisplay(animated: Bool = false) {
         guard let currentIndex, let document, currentIndex < document.config.simulations.count else { return }
+        defer { updateProgressGroupCentering() }
         let name = document.config.simulations[currentIndex].name
         let pipeline = document.pipeline(forSimulationNamed: name)
         if let preview = pipeline.resultsPreview() {
@@ -325,14 +331,14 @@ final class SimulationResultsViewController: NSViewController {
             // previous session) would otherwise skip that and show them at their AppKit defaults,
             // stacked on top of the just-shown charts.
             excitationIcon.isHidden = true
-            energyMeterStack.isHidden = true
+            energyHistoryChart.isHidden = true
             showCategories(for: preview)
         } else if let error = errors[currentIndex] {
             categoryControl.isHidden = true
             scrollView.isHidden = true
             progressStatus.setState(.error(error))
             excitationIcon.isHidden = true
-            energyMeterStack.isHidden = true
+            energyHistoryChart.isHidden = true
         } else if runningIndices.contains(currentIndex) {
             categoryControl.isHidden = true
             scrollView.isHidden = true
@@ -363,25 +369,12 @@ final class SimulationResultsViewController: NSViewController {
                     : (timeEstimateText[currentIndex] ?? TimeRemainingFormatter.string(secondsRemaining: nil))),
                 animated: animated)
             excitationIcon.isHidden = !(progress?.phase == .simulation && (progress?.duringExcitation ?? false))
-            positionEnergyLevelIndicatorForSetup(isSettingUp)
             if isSettingUp {
-                energyLevelIndicator.maxValue = Self.defaultEnergyDecayTargetDB
-                energyLevelIndicator.numberOfMajorTickMarks =
-                    Int(Self.defaultEnergyDecayTargetDB / 10)
-                setLevelIndicatorValue(energyLevelIndicator.maxValue, animated: false)
-                energyMeterStack.isHidden = false
+                energyHistoryChart.isHidden = true
             } else if let progress, progress.phase == .simulation {
-                energyLevelIndicator.maxValue = max(progress.targetEnergyChangeDB, 1)
-                // n/10 divisions, per this level indicator's own design brief.
-                energyLevelIndicator.numberOfMajorTickMarks = max(1, Int(progress.targetEnergyChangeDB / 10))
-                // Counts down, not up: starts full (no decay yet) and drains toward 0 as
-                // energyChangeDB approaches its target -- i.e. remaining dB still to decay, not dB
-                // decayed so far.
-                let remainingDB = max(0, progress.targetEnergyChangeDB - progress.energyChangeDB)
-                setLevelIndicatorValue(remainingDB, animated: animated)
-                energyMeterStack.isHidden = false
+                updateEnergyHistoryChart(forSimulationIndex: currentIndex)
             } else {
-                energyMeterStack.isHidden = true
+                energyHistoryChart.isHidden = true
             }
         } else if (JobScheduler.shared.job(document: document, simulationName: name, kind: .simulation)
                 ?? JobScheduler.shared.job(document: document, simulationName: name,
@@ -393,13 +386,13 @@ final class SimulationResultsViewController: NSViewController {
             scrollView.isHidden = true
             progressStatus.setState(.queued("Waiting to start…", currentJob: JobScheduler.shared.jobs.first?.progressStatusInfo))
             excitationIcon.isHidden = true
-            energyMeterStack.isHidden = true
+            energyHistoryChart.isHidden = true
         } else {
             categoryControl.isHidden = true
             scrollView.isHidden = true
             progressStatus.setState(.hidden)
             excitationIcon.isHidden = true
-            energyMeterStack.isHidden = true
+            energyHistoryChart.isHidden = true
         }
     }
 
@@ -443,7 +436,6 @@ final class SimulationResultsViewController: NSViewController {
                 let reachedPhase = latestProgress[index]?.phase ?? .geometry
                 finishTracking(forSimulationIndex: index)
                 if pipeline.hasStage(.results) {
-                    document.updateChangeCount(.changeDone)
                     onRunFinished?(index, .simulation, true)
                 } else {
                     onRunCancelled?(index, reachedPhase)
@@ -467,17 +459,23 @@ final class SimulationResultsViewController: NSViewController {
         lastReportedPhase[index] = nil
         phaseStartTime[index] = nil
         timeEstimateText[index] = nil
-        // Immediate, not animated -- this run's own level indicator shouldn't leave a stale value
-        // behind for the next run to animate away from.
-        setLevelIndicatorValue(0, animated: false)
     }
 
     /// Common handler for every EMSPipelineProgress report from this simulation's own
     /// .geometryGeneration/.simulation jobs -- relayed outward via onProgressChanged (for the
     /// source-list row) and, if this is the currently-shown simulation, applied to this VC's own
-    /// progress bar/time estimate/level indicator too.
+    /// progress bar/time estimate and energy-history chart too.
     private func progressReceived(_ progress: EMSPipelineProgress, forSimulationIndex index: Int) {
         latestProgress[index] = progress
+        if progress.phase == .settingUp {
+            // Each excited port gets its own FDTD run and its own time origin. Do not connect the
+            // tail of the previous excitation's energy curve to the start of this one.
+            energyHistory[index] = []
+            energyHistoryFullRunNanoseconds[index] = nil
+            energyHistoryExcitationBands[index] = nil
+        } else if progress.phase == .simulation {
+            recordEnergyHistory(progress, forSimulationIndex: index)
+        }
         onProgressChanged?(index, progress)
         let name = simulationName(forIndex: index)
         let percent = Int((progress.fraction * 100).rounded())
@@ -522,6 +520,119 @@ final class SimulationResultsViewController: NSViewController {
         }
     }
 
+    private func recordEnergyHistory(_ progress: EMSPipelineProgress, forSimulationIndex index: Int) {
+        let timeNanoseconds = progress.simulationTimeSeconds * 1e9
+        guard timeNanoseconds.isFinite, timeNanoseconds >= 0, progress.energyChangeDB.isFinite else { return }
+
+        // Copper reports the positive magnitude of the decay from peak energy. Negating it gives
+        // the conventional logarithmic relative-energy scale: 0 dB at the peak, falling to -60 dB.
+        let relativeEnergyDB = max(-60, min(0, -progress.energyChangeDB))
+        if progress.plannedSimulationTimeSeconds.isFinite, progress.plannedSimulationTimeSeconds > 0 {
+            energyHistoryFullRunNanoseconds[index] = progress.plannedSimulationTimeSeconds * 1e9
+        }
+        if progress.excitationEndTimeSeconds.isFinite, progress.excitationEndTimeSeconds > 0,
+           progress.excitationF0Hz.isFinite, progress.excitationFcHz.isFinite,
+           progress.excitationFcHz > 0 {
+            let sampleCount = 512
+            let duration = progress.excitationEndTimeSeconds
+            let centreTime = 9 / (2 * Double.pi * progress.excitationFcHz)
+            let magnitudes = (0..<sampleCount).map { sampleIndex -> Double in
+                guard sampleIndex > 0 else { return 0 }
+                let time = duration * Double(sampleIndex) / Double(sampleCount - 1)
+                let carrier = cos(2 * Double.pi * progress.excitationF0Hz * (time - centreTime))
+                let envelopePosition = 2 * Double.pi * progress.excitationFcHz * time / 3 - 3
+                return abs(carrier * exp(-envelopePosition * envelopePosition))
+            }
+            energyHistoryExcitationBands[index] = ChartXIntensityBand(
+                startX: 0, endX: duration * 1e9, intensities: magnitudes)
+        }
+        var samples = energyHistory[index] ?? []
+        let sample = EnergyHistorySample(timeNanoseconds: timeNanoseconds, relativeEnergyDB: relativeEnergyDB)
+        if let last = samples.last {
+            if timeNanoseconds < last.timeNanoseconds {
+                // Defensive fallback for a new port whose setup update was coalesced by the job
+                // scheduler: physical time restarting still unambiguously marks a new run.
+                samples = [sample]
+            } else if timeNanoseconds == last.timeNanoseconds {
+                samples[samples.count - 1] = sample
+            } else {
+                samples.append(sample)
+            }
+        } else {
+            samples.append(sample)
+        }
+        energyHistory[index] = samples
+    }
+
+    private func updateEnergyHistoryChart(forSimulationIndex index: Int) {
+        let samples = energyHistory[index] ?? []
+        let times = samples.map(\.timeNanoseconds)
+        let rawValues = samples.map(\.relativeEnergyDB)
+        let observedTimeRange = max(0, (times.last ?? 0) - (times.first ?? 0))
+        let fullTimeRange = energyHistoryFullRunNanoseconds[index] ?? observedTimeRange
+        let averagedValues = Self.centredMovingAverage(
+            xValues: times, values: rawValues, windowWidth: fullTimeRange * 0.05)
+        energyHistoryChart.setStyledCurves(
+            xValuesGHz: times,
+            curves: [
+                ChartCurve(label: "Raw energy", values: rawValues, lineWidth: 0.5),
+                ChartCurve(label: "Rolling Average", values: averagedValues),
+            ],
+            minRange: (-60, 0),
+            xAxisMinRange: energyHistoryFullRunNanoseconds[index].map { (min: 0, max: $0) },
+            xIntensityBand: energyHistoryExcitationBands[index],
+            xAxisScale: .linear,
+            xAxisLabel: "Simulation time [ns]")
+        energyHistoryChart.isHidden = samples.isEmpty
+    }
+
+    /// Centred moving average over a window measured in X-axis units, rather than a fixed number
+    /// of samples. At either boundary, preserve a full symmetric sample window by edge-padding:
+    /// virtual samples before/after the series take the first/final value respectively. Thus the
+    /// filter remains centred instead of becoming progressively one-sided near a live edge.
+    private static func centredMovingAverage(xValues: [Double], values: [Double],
+                                              windowWidth: Double) -> [Double] {
+        guard !values.isEmpty, xValues.count == values.count,
+              windowWidth.isFinite, windowWidth > 0 else { return values }
+        var prefixSums = [Double](repeating: 0, count: values.count + 1)
+        for index in values.indices {
+            prefixSums[index + 1] = prefixSums[index] + values[index]
+        }
+
+        let halfWidth = windowWidth / 2
+        var lowerBound = values.startIndex
+        var upperBound = values.startIndex
+        return values.indices.map { index in
+            let windowMinimum = xValues[index] - halfWidth
+            let windowMaximum = xValues[index] + halfWidth
+            while lowerBound < values.endIndex, xValues[lowerBound] < windowMinimum {
+                lowerBound += 1
+            }
+            upperBound = max(upperBound, index)
+            while upperBound < values.endIndex, xValues[upperBound] <= windowMaximum {
+                upperBound += 1
+            }
+            let actualCount = upperBound - lowerBound
+            guard actualCount > 0 else { return values[index] }
+
+            let leftCount = index - lowerBound
+            let rightCount = upperBound - index - 1
+            var paddedLeftCount = 0
+            var paddedRightCount = 0
+            if windowMinimum < xValues[values.startIndex] {
+                paddedLeftCount = max(0, rightCount - leftCount)
+            }
+            if windowMaximum > xValues[values.index(before: values.endIndex)] {
+                paddedRightCount = max(0, leftCount - rightCount)
+            }
+
+            var sum = prefixSums[upperBound] - prefixSums[lowerBound]
+            sum += Double(paddedLeftCount) * values[values.startIndex]
+            sum += Double(paddedRightCount) * values[values.index(before: values.endIndex)]
+            return sum / Double(actualCount + paddedLeftCount + paddedRightCount)
+        }
+    }
+
     private func simulationName(forIndex index: Int) -> String {
         guard let document, index < document.config.simulations.count else { return "simulation \(index)" }
         return document.config.simulations[index].name
@@ -532,12 +643,16 @@ final class SimulationResultsViewController: NSViewController {
 
     private func showCategories(for preview: EMSResultsPreview) {
         var categories: [ResultsCategory] = []
-        if !preview.sParamSets.isEmpty { categories.append(.sParameters) }
+        let hasDifferentialSParameters = preview.diffPairs.contains { $0.sdd11Db != nil || $0.sdd21Db != nil }
+        let hasDifferentialImpedance = preview.diffPairs.contains {
+            $0.impedanceMagnitudeOhm != nil && $0.impedanceAngleDeg != nil
+        }
+        let hasDifferentialDelay = preview.diffPairs.contains { $0.nDelayNs != nil || $0.pDelayNs != nil }
+        if !preview.sParamSets.isEmpty || hasDifferentialSParameters { categories.append(.sParameters) }
         if !preview.eyeDiagrams.isEmpty { categories.append(.eyeDiagrams) }
-        if !preview.netImpedances.isEmpty { categories.append(.impedance) }
+        if !preview.netImpedances.isEmpty || hasDifferentialImpedance { categories.append(.impedance) }
         if !preview.smithCharts.isEmpty { categories.append(.smith) }
-        if !preview.diffPairs.isEmpty { categories.append(.diffPairs) }
-        if !preview.traces.isEmpty { categories.append(.traceDelays) }
+        if !preview.traces.isEmpty || hasDifferentialDelay { categories.append(.traceDelays) }
         if !preview.probes.isEmpty { categories.append(.probes) }
         availableCategories = categories
 
@@ -596,33 +711,68 @@ final class SimulationResultsViewController: NSViewController {
 
         switch category {
         case .sParameters:
-            return preview.sParamSets.map { set in
+            var sections = preview.sParamSets.map { set in
                 let magChart = MultiCurveLineChartView()
-                magChart.configure(yAxisLabel: "Magnitude [dB]")
+                magChart.configure(yAxisLabel: "Magnitude (dB)", showsLabel: false)
                 // Matches postprocess.cpp's own renderSParams ylim convention: always show at least
                 // -60..5dB, expanding further only if the data genuinely needs more room. Without
                 // this, a single numerically-unstable outlier point (typical near the edges of the
                 // excitation's frequency band, where the incident wave's own spectrum is weak enough
                 // that reflected/incident stops being a stable ratio) can dominate the auto-scaled
                 // range and visually flatten the physically meaningful part of the curve.
-                magChart.setCurves(xValuesGHz: freqGHz,
-                                    curves: set.curves.map {
-                                        (label: $0.outputPort == set.excitedPort ? "Returned to source" : $0.label,
-                                         values: $0.magnitudeDb.map(\.doubleValue))
-                                    },
-                                    minRange: (-60, 5))
+                let magnitudeCurves = set.curves.map { curve -> ChartCurve in
+                    if curve.outputPort == set.excitedPort {
+                        return ChartCurve(label: "Returned to Source", values: curve.magnitudeDb.map(\.doubleValue),
+                                          lineWidth: 0.5)
+                    }
+                    let label = curve.isReceived
+                        ? curve.label.replacingOccurrences(of: "Response at ", with: "Received at ")
+                        : curve.label
+                    return ChartCurve(label: label, values: curve.magnitudeDb.map(\.doubleValue),
+                                      lineWidth: curve.isReceived ? 1.5 : 0.5,
+                                      emphasized: curve.isReceived)
+                }
+                magChart.setStyledCurves(xValuesGHz: freqGHz, curves: magnitudeCurves,
+                                         minRange: (-60, 5))
 
                 let phaseChart = MultiCurveLineChartView()
-                phaseChart.configure(yAxisLabel: "Phase [°]")
-                phaseChart.setCurves(xValuesGHz: freqGHz,
-                                      curves: set.curves.map {
-                                          (label: $0.outputPort == set.excitedPort ? "Returned to source" : $0.label,
-                                           values: $0.phaseDeg.map(\.doubleValue))
-                                      })
+                phaseChart.configure(yAxisLabel: "Phase (°)", showsLabel: false)
+                let phaseCurves = set.curves.map { curve -> ChartCurve in
+                    if curve.outputPort == set.excitedPort {
+                        return ChartCurve(label: "Returned to Source", values: curve.phaseDeg.map(\.doubleValue),
+                                          lineWidth: 0.5)
+                    }
+                    let label = curve.isReceived
+                        ? curve.label.replacingOccurrences(of: "Response at ", with: "Received at ")
+                        : curve.label
+                    return ChartCurve(label: label, values: curve.phaseDeg.map(\.doubleValue),
+                                      lineWidth: curve.isReceived ? 1.5 : 0.5,
+                                      emphasized: curve.isReceived)
+                }
+                phaseChart.setStyledCurves(xValuesGHz: freqGHz, curves: phaseCurves)
 
-                return makeSection(title: "Excited Port: \(portDisplayName(index: set.excitedPort, preview: preview))",
-                                    content: [magChart, phaseChart])
+                return makeSection(
+                    title: "Excited Port: \(portDisplayName(index: set.excitedPort, preview: preview))",
+                    graphs: [("Magnitude (dB)", magChart), ("Phase (°)", phaseChart)])
             }
+            sections += preview.diffPairs.compactMap { pair in
+                var curves: [ChartCurve] = []
+                if let sdd11 = pair.sdd11Db {
+                    curves.append(ChartCurve(label: "Returned to Source", values: sdd11.map(\.doubleValue),
+                                             lineWidth: 0.5))
+                }
+                if let sdd21 = pair.sdd21Db {
+                    curves.append(ChartCurve(label: "Received", values: sdd21.map(\.doubleValue),
+                                             lineWidth: 1.5, emphasized: true))
+                }
+                guard !curves.isEmpty else { return nil }
+                let chart = MultiCurveLineChartView()
+                chart.configure(yAxisLabel: "Magnitude (dB)", showsLabel: false)
+                // Matches postprocess.cpp's own renderDiffPairSParams ylim convention.
+                chart.setStyledCurves(xValuesGHz: freqGHz, curves: curves, minRange: (-60, 5))
+                return makeSection(title: pair.name, graphs: [("Magnitude (dB)", chart)])
+            }
+            return sections
 
         case .eyeDiagrams:
             return preview.eyeDiagrams.map { eye in
@@ -631,7 +781,7 @@ final class SimulationResultsViewController: NSViewController {
                               traces: eye.traces.map { $0.map(\.doubleValue) })
                 let kind = eye.isDifferential ? "Differential received signal" : "Received signal"
                 let rate = String(format: "%.4g Gb/s", eye.bitRateGbps)
-                return makeSection(title: "\(eye.name) — \(kind), \(rate)", content: [chart])
+                return makeSection(title: "\(eye.name) — \(kind), \(rate)", graphs: [("Eye Diagram", chart)])
             }
 
         case .impedance:
@@ -639,13 +789,13 @@ final class SimulationResultsViewController: NSViewController {
             // trace probes -- see EMSResultsNetImpedance's own doc comment), not per absorbing port
             // -- an average line, a shaded min/max band across that net's own probes, and each
             // probe's own curve drawn thin underneath.
-            return preview.netImpedances.map { netImpedance in
+            var sections = preview.netImpedances.map { netImpedance in
                 let probeMagnitudes = netImpedance.probes.map { $0.magnitudeOhm.map(\.doubleValue) }
                 let probeAngles = netImpedance.probes.map { $0.angleDeg.map(\.doubleValue) }
                 let probeLabels = netImpedance.probes.indices.map { "Probe \($0 + 1)" }
 
                 let magnitudeChart = MultiCurveLineChartView()
-                magnitudeChart.configure(yAxisLabel: "Magnitude [Ω]")
+                magnitudeChart.configure(yAxisLabel: "Magnitude (Ω)", showsLabel: false)
                 let magStats = Self.averageAndBand(of: probeMagnitudes, count: freqGHz.count)
                 magnitudeChart.setBandedCurves(
                     xValuesGHz: freqGHz,
@@ -654,7 +804,7 @@ final class SimulationResultsViewController: NSViewController {
                     minRange: (0, 100), xAxisLabel: nil)
 
                 let angleChart = MultiCurveLineChartView()
-                angleChart.configure(yAxisLabel: "Angle [°]")
+                angleChart.configure(yAxisLabel: "Phase (°)", showsLabel: false)
                 let angleStats = Self.averageAndBand(of: probeAngles, count: freqGHz.count)
                 angleChart.setBandedCurves(
                     xValuesGHz: freqGHz,
@@ -664,59 +814,58 @@ final class SimulationResultsViewController: NSViewController {
 
                 // Matches postprocess.cpp's own two vertically stacked impedance subplots and its
                 // 0...100Ω / ±90° minimum display ranges.
-                return makeSection(title: "Net: \(netImpedance.netName)", content: [magnitudeChart, angleChart])
+                return makeSection(title: "Net: \(netImpedance.netName)",
+                                   graphs: [("Magnitude (Ω)", magnitudeChart), ("Phase (°)", angleChart)])
             }
+            sections += preview.diffPairs.compactMap { pair in
+                guard let mag = pair.impedanceMagnitudeOhm, let angle = pair.impedanceAngleDeg else { return nil }
+                let magnitudeChart = MultiCurveLineChartView()
+                magnitudeChart.configure(yAxisLabel: "Magnitude (Ω)", showsLabel: false)
+                // Differential impedance uses the wider 0...200Ω default from postprocess.cpp.
+                magnitudeChart.setCurves(
+                    xValuesGHz: freqGHz,
+                    curves: [(label: "|Z diff|", values: mag.map(\.doubleValue))],
+                    minRange: (0, 200), xAxisLabel: nil)
+
+                let phaseChart = MultiCurveLineChartView()
+                phaseChart.configure(yAxisLabel: "Phase (°)", showsLabel: false)
+                phaseChart.setCurves(
+                    xValuesGHz: freqGHz,
+                    curves: [(label: "Phase", values: angle.map(\.doubleValue))],
+                    minRange: (-90, 90))
+
+                return makeSection(title: pair.name,
+                                   graphs: [("Magnitude (Ω)", magnitudeChart), ("Phase (°)", phaseChart)])
+            }
+            return sections
 
         case .smith:
             return preview.smithCharts.map { smith in
                 let chart = SmithChartView()
                 chart.setData(port: smith.port, reGamma: smith.reGamma.map(\.doubleValue),
                                imGamma: smith.imGamma.map(\.doubleValue), vswrMarginGamma: smith.vswrMarginGamma)
-                return makeSection(title: "Port: \(portDisplayName(index: smith.port, preview: preview))", content: [chart])
-            }
-
-        case .diffPairs:
-            return preview.diffPairs.map { pair in
-                var content: [NSView] = []
-                if pair.sdd11Db != nil || pair.sdd21Db != nil {
-                    var curves: [(label: String, values: [Double])] = []
-                    if let sdd11 = pair.sdd11Db { curves.append((label: "SDD11", values: sdd11.map(\.doubleValue))) }
-                    if let sdd21 = pair.sdd21Db { curves.append((label: "SDD21", values: sdd21.map(\.doubleValue))) }
-                    let chart = MultiCurveLineChartView()
-                    chart.configure(yAxisLabel: "Magnitude [dB]")
-                    // Matches postprocess.cpp's own renderDiffPairSParams ylim convention.
-                    chart.setCurves(xValuesGHz: freqGHz, curves: curves, minRange: (-60, 5))
-                    content.append(chart)
-                }
-                if let mag = pair.impedanceMagnitudeOhm, let angle = pair.impedanceAngleDeg {
-                    let chart = DualAxisLineChartView()
-                    // Matches postprocess.cpp's own renderDiffImpedance ylim convention (0..200Ω, a
-                    // wider default window than single-ended impedance's 0..100Ω) / ±90°.
-                    chart.setData(xValuesGHz: freqGHz,
-                                   left: (label: "|Z diff| [Ω]", values: mag.map(\.doubleValue)),
-                                   right: (label: "Angle [°]", values: angle.map(\.doubleValue)),
-                                   leftMinRange: (0, 200), rightMinRange: (-90, 90))
-                    content.append(chart)
-                }
-                if pair.nDelayNs != nil || pair.pDelayNs != nil {
-                    var curves: [(label: String, values: [Double])] = []
-                    if let n = pair.nDelayNs { curves.append((label: "N", values: n.map(\.doubleValue))) }
-                    if let p = pair.pDelayNs { curves.append((label: "P", values: p.map(\.doubleValue))) }
-                    let chart = MultiCurveLineChartView()
-                    chart.configure(yAxisLabel: "Delay [ns]")
-                    chart.setCurves(xValuesGHz: freqGHz, curves: curves)
-                    content.append(chart)
-                }
-                return makeSection(title: pair.name, content: content)
+                return makeSection(title: "Port: \(portDisplayName(index: smith.port, preview: preview))",
+                                   graphs: [("Smith Chart", chart)])
             }
 
         case .traceDelays:
-            return preview.traces.map { trace in
+            var sections = preview.traces.map { trace in
                 let chart = MultiCurveLineChartView()
-                chart.configure(yAxisLabel: "Delay [ns]")
+                chart.configure(yAxisLabel: "Delay (ns)", showsLabel: false)
                 chart.setCurves(xValuesGHz: freqGHz, curves: [(label: trace.name, values: trace.delayNs.map(\.doubleValue))])
-                return makeSection(title: trace.name, content: [chart])
+                return makeSection(title: trace.name, graphs: [("Delay (ns)", chart)])
             }
+            sections += preview.diffPairs.compactMap { pair in
+                var curves: [(label: String, values: [Double])] = []
+                if let n = pair.nDelayNs { curves.append((label: "N", values: n.map(\.doubleValue))) }
+                if let p = pair.pDelayNs { curves.append((label: "P", values: p.map(\.doubleValue))) }
+                guard !curves.isEmpty else { return nil }
+                let chart = MultiCurveLineChartView()
+                chart.configure(yAxisLabel: "Delay (ns)", showsLabel: false)
+                chart.setCurves(xValuesGHz: freqGHz, curves: curves)
+                return makeSection(title: pair.name, graphs: [("Delay (ns)", chart)])
+            }
+            return sections
 
         case .probes:
             // A passive (non-absorbing) probe -- see kiems::PortConfig::absorbSignal()'s own
@@ -725,28 +874,37 @@ final class SimulationResultsViewController: NSViewController {
             // excited port that reached it.
             return preview.probes.map { probe in
                 let voltageChart = MultiCurveLineChartView()
-                voltageChart.configure(yAxisLabel: "|V| [V]")
+                voltageChart.configure(yAxisLabel: "Voltage (V)", showsLabel: false)
                 voltageChart.setCurves(
                     xValuesGHz: freqGHz,
                     curves: probe.curves.map { (label: "exc. port \($0.excitedPort + 1)", values: $0.voltageMagnitude.map(\.doubleValue)) })
 
                 let currentChart = MultiCurveLineChartView()
-                currentChart.configure(yAxisLabel: "|I| [A]")
+                currentChart.configure(yAxisLabel: "Current (A)", showsLabel: false)
+                let currentCurves = probe.curves.map {
+                    (label: "exc. port \($0.excitedPort + 1)", values: $0.currentMagnitude.map(\.doubleValue))
+                }
                 currentChart.setCurves(
                     xValuesGHz: freqGHz,
-                    curves: probe.curves.map { (label: "exc. port \($0.excitedPort + 1)", values: $0.currentMagnitude.map(\.doubleValue)) })
+                    curves: currentCurves,
+                    minRange: Self.nonnegativeMagnitudeRange(for: currentCurves.map { $0.values }))
 
-                return makeSection(title: "Probe: \(probe.name)", content: [voltageChart, currentChart])
+                return makeSection(title: "Probe: \(probe.name)",
+                                   graphs: [("Voltage (V)", voltageChart), ("Current (A)", currentChart)])
             }
         }
     }
 
-    private func makeSection(title: String, content: [NSView]) -> NSView {
-        let header = NSTextField(labelWithString: title)
-        header.font = .systemFont(ofSize: 13, weight: .semibold)
-        header.textColor = .labelColor
+    private func makeSection(title: String, graphs: [(title: String, view: NSView)]) -> NSView {
+        // Result headings frequently embed a net name inside surrounding context ("Net: …",
+        // "Excited Port: …", differential-pair labels, and eye/probe descriptions). Route the
+        // complete heading through the shared net-name renderer so KiCad sub/superscript,
+        // active-low overlines, and escaped slashes render consistently in every results category.
+        let header = NetNameView()
+        header.configure(name: title, font: .systemFont(ofSize: 13, weight: .semibold))
 
-        let rows = [header] + content
+        let disclosureGraphs: [NSView] = graphs.map { DisclosureGraphView(title: $0.title, graph: $0.view) }
+        let rows: [NSView] = [header] + disclosureGraphs
         let sectionStack = NSStackView(views: rows)
         sectionStack.translatesAutoresizingMaskIntoConstraints = false
         sectionStack.orientation = .vertical
@@ -765,6 +923,14 @@ final class SimulationResultsViewController: NSViewController {
 
     private func portDisplayName(index: Int, preview: EMSResultsPreview) -> String {
         preview.ports.first(where: { $0.index == index })?.name ?? "Port \(index + 1)"
+    }
+
+    /// A magnitude chart with one finite/distinct value should still communicate its scale. Anchor
+    /// it at zero and leave headroom above the largest measurement instead of tightly zooming into
+    /// a tiny interval around that value. The 0...1 fallback is only for an entirely-zero series.
+    private static func nonnegativeMagnitudeRange(for curves: [[Double]]) -> (min: Double, max: Double) {
+        let peak = curves.flatMap { $0 }.filter { $0.isFinite && $0 >= 0 }.max() ?? 0
+        return (0, peak > 0 ? peak * 1.2 : 1)
     }
 
     /// Elementwise average and min/max band across `curves` (one array per probe, all sharing the

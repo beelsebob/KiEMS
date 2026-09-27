@@ -1,6 +1,7 @@
 import Cocoa
 import CopperUtils
 import MetalKit
+import RememberRemember
 import simd
 
 /// Renders an EMSFieldSnapshot (the field/energy state Copper captured at the end of a completed
@@ -33,15 +34,13 @@ final class FieldView: MTKView, MTKViewDelegate {
             // progress tick, even though it now reuses the same underlying reader/decode cache
             // rather than reopening it -- see buildFieldSnapshot()'s own doc comment. Re-fitting the
             // camera on every one of those ticks would silently reset the zoom/pan out from under
-            // whoever's currently inspecting the view, and rescanning seriesOnBoardMaxEnergy from
-            // scratch would repeatedly re-decode frames this view has already scanned. Only reset
-            // either when the series itself actually changed (including the first time one is ever
-            // shown) -- done before rebuildVoxelGeometry() below, which is what actually extends the
-            // scan for whatever's new.
+            // whoever's currently inspecting the view. Preserve the normalization peak accumulated
+            // from frames already played for a same-series refresh, and reset it only for a genuinely
+            // different series.
             if !Self.isSameSeries(oldValue, fieldSnapshot) {
+                oldValue?.discardCachedFrameData()
                 hasFitCamera = false
                 seriesOnBoardMaxEnergy = 0
-                seriesOnBoardMaxEnergyScannedCount = 0
             }
             rebuildVoxelGeometry()
             needsDisplay = true
@@ -68,20 +67,12 @@ final class FieldView: MTKView, MTKViewDelegate {
         }
     }
 
-    /// How many frames ahead of `currentFrameIndex` to keep warm on disk -- deliberately more than
-    /// one on-disk HDF5 chunk's worth (the writer's own default is 8 frames/chunk; see
-    /// FieldFrameSeriesWriter's chunkFrames default and docs/field_frame_series_format.md) so that,
-    /// from anywhere within the chunk currently being displayed, the *next* chunk's decode has
-    /// already been kicked off well before playback actually reaches its boundary -- avoiding the
-    /// pause that used to happen every `chunkFrames`-th frame while that chunk was decoded
-    /// synchronously on demand. EMSFieldFrame.prefetch() itself is a cheap no-op once the target
-    /// chunk is already cached or already being prefetched, so calling this on every single frame
-    /// advance (not just once per chunk) costs effectively nothing.
-    private static let prefetchLookaheadFrames = 16
+    /// Keep exactly the next playback frame warm. The reader deliberately retains only the current
+    /// frame and this one prefetched frame, bounding memory independently of series duration.
+    private static let prefetchLookaheadFrames = 1
 
-    /// Kicks off (or no-ops, if already warm/in flight) an async decode of the on-disk chunk
-    /// containing a frame some way ahead of `currentFrameIndex` -- see prefetchLookaheadFrames' own
-    /// doc comment for why. Called whenever the displayed frame or the whole snapshot changes.
+    /// Kicks off (or no-ops, if already warm/in flight) an async decode of the next frame. Called
+    /// whenever the displayed frame or the whole snapshot changes.
     private func prefetchAhead() {
         guard let frames = fieldSnapshot?.frames, !frames.isEmpty else { return }
         let aheadIndex = min(currentFrameIndex + Self.prefetchLookaheadFrames, frames.count - 1)
@@ -98,6 +89,12 @@ final class FieldView: MTKView, MTKViewDelegate {
         currentFrameIndex = clampedIndex
         fieldSnapshot = snapshot
         isReplacingSnapshot = false
+    }
+
+    /// Drops large decoded buffers while retaining the current series/viewport so returning to the
+    /// viewer can stream the selected frame again without rebuilding the surrounding UI state.
+    func discardCachedFrameData() {
+        fieldSnapshot?.discardCachedFrameData()
     }
 
     override var acceptsFirstResponder: Bool { true }
@@ -123,7 +120,7 @@ final class FieldView: MTKView, MTKViewDelegate {
     /// these are issued as separate draw calls, sorted back-to-front by the *current* camera position
     /// every frame, rather than the whole overlay being one fixed-order draw call.
     private var overlayLayerDraws: [(z: Float, start: Int, count: Int)] = []
-    /// Vias/ports/outline -- appended after every layer's own range, always drawn last/on top (a
+    /// Vias/outline -- appended after every layer's own range, always drawn last/on top (a
     /// static simplification: these are thin reference markers nudged just beyond the topmost
     /// copper layer, not full-thickness fills, so getting their draw order wrong when the camera is
     /// below the board is a much smaller visual error than the layer-stack one this fixes).
@@ -149,20 +146,10 @@ final class FieldView: MTKView, MTKViewDelegate {
     private var voxelCachedMaxEnergy: Float = 0
 
     /// The on-board (voxelCachedZRange-restricted -- excludes the PML-dominated margin) energy peak
-    /// across every frame of the *current series* scanned so far, not just the currently-displayed
-    /// one. updateVoxelColors(forFrame:) normalizes every frame against this fixed value instead of
-    /// each frame's own peak, so a decaying signal visibly fades toward the floor color across
-    /// playback instead of being re-normalized back up to full brightness every single frame purely
-    /// because nothing bigger happens to be left in that one frame -- a per-frame scale made "the
-    /// pulse has fully died out" and "there's still a small stable near-port field" look identical
-    /// (both "maximally bright"), which is what actually prompted this change.
+    /// across frames displayed so far. Each frame extends this value as it streams in; the viewer no
+    /// longer decodes the whole series up front merely to choose a scale. Sequential playback still
+    /// makes a decaying signal visibly fade instead of renormalizing every frame to full brightness.
     private var seriesOnBoardMaxEnergy: Float = 0
-    /// How many of fieldSnapshot.frames (from the start) are already folded into
-    /// seriesOnBoardMaxEnergy -- extendSeriesOnBoardMaxEnergyScan(_:zRange:) uses this to extend the
-    /// scan by only the frames a live update just published, rather than rescanning frames whose
-    /// on-disk chunk may since have been evicted from the reader's own cache. Reset to 0 alongside
-    /// seriesOnBoardMaxEnergy whenever fieldSnapshot's didSet sees the series itself change.
-    private var seriesOnBoardMaxEnergyScannedCount = 0
     /// One entry per included Z layer, recording its own center Z and the instance range (within
     /// voxelGeometryBuffer/voxelColorBuffer) that draws it -- see draw()'s own doc comment for why
     /// these are issued as separate draw calls, sorted back-to-front by the current camera each
@@ -239,7 +226,7 @@ final class FieldView: MTKView, MTKViewDelegate {
                                                          vertexFunction: "field_voxel_vertex",
                                                          fragmentFunction: "field_voxel_fragment")
             // Always-pass, no-write -- originally added just for the overlay (a flat translucent
-            // reference plane whose source triangulation, Clipper2's own tessellation of copper
+            // reference plane whose source triangulation of copper
             // pours/traces via GeometryPreviewBridge, isn't guaranteed to be a perfectly
             // non-overlapping planar partition, so a real depth test fought over near-identical
             // depths), now shared by the voxel pass too -- see paintersDepthStencilState's own doc
@@ -453,7 +440,7 @@ final class FieldView: MTKView, MTKViewDelegate {
         let dy = Float(point.y - lastDragPoint.y)
         let sensitivity: Float = 0.01
         azimuth -= dx * sensitivity
-        elevation += dy * sensitivity
+        elevation -= dy * sensitivity
         self.lastDragPoint = point
         needsDisplay = true
     }
@@ -517,11 +504,9 @@ final class FieldView: MTKView, MTKViewDelegate {
 
     private static let overlayAlpha: Float = 0.5
     private static let overlayOutlineColor = SIMD4<Float>(0.7, 0.7, 0.7, overlayAlpha)
-    private static let overlayPortColor = SIMD4<Float>(0.2, 0.48, 0.98, overlayAlpha)
     // Same solder-mask green as GeometryView's own fixed solderMaskColor, just at this view's own
     // translucent overlayAlpha rather than fully opaque.
     private static let overlaySolderMaskColor = SIMD4<Float>(0.0, 0.35, 0.16, overlayAlpha)
-    private static let overlayCircleSegments = 16
 
     private func rebuildOverlayBuffers() {
         guard let device, let preview else {
@@ -550,7 +535,7 @@ final class FieldView: MTKView, MTKViewDelegate {
             topZ = zValues.max() ?? 0
             bottomZ = zValues.min() ?? 0
         }
-        // Vias/ports sit visibly above every copper layer, not coincident with the topmost one --
+        // The outline sits visibly above every copper layer, not coincident with the topmost one --
         // same z-fighting concern as the layers above, avoided with a small nudge (1% of board
         // thickness) rather than reusing the topmost layer's own Z exactly.
         let markerZ = topZ + max(topZ - bottomZ, 1) * 0.01
@@ -559,6 +544,10 @@ final class FieldView: MTKView, MTKViewDelegate {
         var layerDraws: [(z: Float, start: Int, count: Int)] = []
 
         for (index, layer) in preview.layers.enumerated() {
+            // Silkscreen is an optional diagnostic layer in the Geometry screen and starts there
+            // unchecked. The field viewer has no corresponding layer controls, so keep its overlay
+            // limited to the physical simulation stack it has always shown.
+            guard layer.name != "F.Silkscreen", layer.name != "B.Silkscreen" else { continue }
             let color = Self.overlayLayerColor(layer, index: index, total: preview.layers.count)
             let z = Float(layer.z)
             let start = positions.count
@@ -599,7 +588,7 @@ final class FieldView: MTKView, MTKViewDelegate {
         // Real 3D via geometry (open barrel tube + per-layer annular rings -- see
         // EMSGeometryPreview.viaMeshTriangles' own doc comment), each vertex keeping its own real Z
         // -- not the shared flat markerZ a single translucent disc used to sit at. Still part of this
-        // same always-drawn-last, no-real-depth-test marker batch as ports/outline below (see this
+        // same always-drawn-last, no-real-depth-test marker batch as the outline below (see this
         // function's own top comment on why: a real depth-tested via would get inconsistently
         // occluded by whichever dim voxel/layer triangles happen to be nearer the camera, when the
         // whole point of a marker here is staying reliably visible) -- only the *shape* drawn there
@@ -613,11 +602,6 @@ final class FieldView: MTKView, MTKViewDelegate {
             let color = SIMD4<Float>(Float(triangle.color.x), Float(triangle.color.y), Float(triangle.color.z),
                                        Self.overlayAlpha)
             colors.append(contentsOf: [color, color, color])
-        }
-        for port in preview.ports {
-            let radius = max(Float(port.width) / 2, 1)
-            Self.appendDisc(center: port.position, radius: CGFloat(radius), z: markerZ, color: Self.overlayPortColor,
-                             positions: &positions, colors: &colors)
         }
         // Outline, as a thin flat ribbon (a plain line primitive would need line-width support this
         // pipeline doesn't set up) -- two triangles per edge, a fixed board-space half-thickness
@@ -642,22 +626,6 @@ final class FieldView: MTKView, MTKViewDelegate {
             bytes: positions, length: MemoryLayout<Position3>.stride * positions.count)
         overlayColorBuffer = colors.isEmpty ? nil : device.makeBuffer(
             bytes: colors, length: MemoryLayout<SIMD4<Float>>.stride * colors.count)
-    }
-
-    private static func appendDisc(center: CGPoint, radius: CGFloat, z: Float, color: SIMD4<Float>,
-                                    positions: inout [Position3], colors: inout [SIMD4<Float>]) {
-        let cx = Float(center.x)
-        let cy = Float(center.y)
-        let r = Float(radius)
-        let centerVertex = Position3(cx, cy, z)
-        var previous = Position3(cx + r, cy, z)
-        for segment in 1...overlayCircleSegments {
-            let angle = Float(segment) / Float(overlayCircleSegments) * 2 * Float.pi
-            let current = Position3(cx + r * cos(angle), cy + r * sin(angle), z)
-            positions.append(contentsOf: [centerVertex, previous, current])
-            colors.append(contentsOf: [color, color, color])
-            previous = current
-        }
     }
 
     private static func appendRibbonSegment(from a: CGPoint, to b: CGPoint, halfThickness: CGFloat, z: Float,
@@ -728,38 +696,14 @@ final class FieldView: MTKView, MTKViewDelegate {
             + quad(3, 2, 6, 7) // +Y
     }()
 
-    // The energy-density color gradient, 5 stops -- exact colors/opacities as specified; the three
-    // middle stops' opacity isn't independently specified, so it's linearly interpolated between
-    // the two endpoints (25% at t=0, 75% at t=1) at each stop's own t, matching the same
-    // interpolation the renderer already does between stops for color.
-    private static let gradientStops: [(t: Float, color: (Float, Float, Float))] = [
-        (0.0, (0x2a / 255, 0x2e / 255, 0xac / 255)),
-        (0.5, (0xb8 / 255, 0x1f / 255, 0x3c / 255)),
-        (0.75, (0xf0 / 255, 0x7f / 255, 0x29 / 255)),
-        (0.875, (0xfa / 255, 0xa9 / 255, 0x14 / 255)),
-        (1.0, (0xf2 / 255, 0xce / 255, 0x30 / 255)),
-    ]
     private static let gradientAlphaAtZero: Float = 0.01
     private static let gradientAlphaAtOne: Float = 0.75
 
     private static func gradientColor(t: Float) -> SIMD4<Float> {
         let clamped = min(max(t, 0), 1)
-        var lower = gradientStops[0]
-        var upper = gradientStops[gradientStops.count - 1]
-        for i in 0..<(gradientStops.count - 1) {
-            if clamped >= gradientStops[i].t, clamped <= gradientStops[i + 1].t {
-                lower = gradientStops[i]
-                upper = gradientStops[i + 1]
-                break
-            }
-        }
-        let span = upper.t - lower.t
-        let localT = span > 0 ? (clamped - lower.t) / span : 0
-        let r = lower.color.0 + (upper.color.0 - lower.color.0) * localT
-        let g = lower.color.1 + (upper.color.1 - lower.color.1) * localT
-        let b = lower.color.2 + (upper.color.2 - lower.color.2) * localT
+        let rgb = EnergyColorMap.rgb(at: CGFloat(clamped))
         let alpha = gradientAlphaAtZero + (gradientAlphaAtOne - gradientAlphaAtZero) * clamped
-        return SIMD4(r, g, b, alpha)
+        return SIMD4(Float(rgb.red), Float(rgb.green), Float(rgb.blue), alpha)
     }
 
     /// Converts `n` Yee-grid sample *points* (one per E-field line along an axis -- see
@@ -894,40 +838,10 @@ final class FieldView: MTKView, MTKViewDelegate {
         voxelCachedNy = ny
         voxelCachedZRange = zStart...zEnd
         voxelCachedMaxEnergy = 0
-        extendSeriesOnBoardMaxEnergyScan(snapshot: snapshot, zRange: zStart...zEnd)
         Cu.logDebug("[FieldView] rebuildVoxelGeometry: built \(voxelInstanceCount) instances, "
             + "voxelGeometryBuffer=\(voxelGeometryBuffer != nil)")
 
         updateVoxelColors(forFrame: currentFrameIndex)
-    }
-
-    /// Extends seriesOnBoardMaxEnergy to cover every one of `snapshot.frames` not yet folded into it
-    /// (see seriesOnBoardMaxEnergyScannedCount's own doc comment), restricted to `zRange` the same
-    /// way updateVoxelColors(forFrame:) restricts its own per-cell walk -- excluding the PML/margin
-    /// cells outside the board keeps a handful of enormous boundary-adjacent values from swamping the
-    /// scale the same way snapshot.maxCellEnergy (a whole-grid, PML-included figure -- see its own
-    /// doc comment) would if used directly. Touches each newly-covered frame's cellEnergyData once, a
-    /// real decode -- for a fresh series this scans every already-published frame the first time it's
-    /// shown; for a live update to a series already on screen, only the frames published since the
-    /// last scan (the reader's own chunk cache from FieldFrameSeriesReader.hpp keeps this cheap
-    /// either way, per the earlier prefetch/reuse work).
-    private func extendSeriesOnBoardMaxEnergyScan(snapshot: EMSFieldSnapshot, zRange: ClosedRange<Int>) {
-        guard seriesOnBoardMaxEnergyScannedCount < snapshot.frames.count else { return }
-        let nx = Int(snapshot.nx)
-        let ny = Int(snapshot.ny)
-        let energyStride = nx * ny
-        let onBoardStart = zRange.lowerBound * energyStride
-        let onBoardEnd = (zRange.upperBound + 1) * energyStride
-        for index in seriesOnBoardMaxEnergyScannedCount..<snapshot.frames.count {
-            let cellEnergy = snapshot.frames[index].cellEnergyData.withUnsafeBytes { buffer -> [Float] in
-                Array(buffer.bindMemory(to: Float.self))
-            }
-            guard onBoardEnd <= cellEnergy.count else { continue }
-            if let frameMax = cellEnergy[onBoardStart..<onBoardEnd].max() {
-                seriesOnBoardMaxEnergy = max(seriesOnBoardMaxEnergy, frameMax)
-            }
-        }
-        seriesOnBoardMaxEnergyScannedCount = snapshot.frames.count
     }
 
     /// Recomputes just the per-instance color buffer for one playback frame, reusing the cell-grid
@@ -959,10 +873,14 @@ final class FieldView: MTKView, MTKViewDelegate {
             return
         }
 
-        // The scale is the on-board peak across *every* frame of this series (seriesOnBoardMaxEnergy,
-        // kept up to date by extendSeriesOnBoardMaxEnergyScan(_:zRange:) -- see its own doc comment
-        // for why this used to be derived from just the selected frame, and why that made a decayed,
-        // physically tiny residual field look identical to the original pulse at full brightness).
+        // Fold only this just-streamed frame into the stable on-board scale. Excluding the
+        // PML/margin cells keeps boundary-adjacent values from swamping the board visualization,
+        // while avoiding the old eager pass over every frame when the viewer opened.
+        let onBoardStart = zRange.lowerBound * energyStride
+        let onBoardEnd = (zRange.upperBound + 1) * energyStride
+        if let frameMax = cellEnergy[onBoardStart..<onBoardEnd].max() {
+            seriesOnBoardMaxEnergy = max(seriesOnBoardMaxEnergy, frameMax)
+        }
         let maxEnergy = seriesOnBoardMaxEnergy
         voxelCachedMaxEnergy = maxEnergy
         // 60dB below peak -- the same end-criteria dynamic-range convention already used

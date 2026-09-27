@@ -33,10 +33,14 @@ public final class DualAxisLineChartView: NSView {
     /// least that window regardless of the data's own extent.
     public func setData(xValuesGHz: [Double], left: (label: String, values: [Double]), right: (label: String, values: [Double]),
                          leftMinRange: (min: Double, max: Double)? = nil, rightMinRange: (min: Double, max: Double)? = nil,
-                         xAxisLabel: String? = "Frequency [GHz]") {
+                         xAxisScale: ChartXAxisScale = .logarithmic,
+                         xAxisLabel: String? = "Frequency [GHz]",
+                         leftYAxisLabel: String? = nil, rightYAxisLabel: String? = nil) {
         chart.setData(xValues: xValuesGHz, curves: [
             ChartCurve(label: left.label, values: left.values, axis: .left),
             ChartCurve(label: right.label, values: right.values, axis: .right, dashed: true),
-        ], leftAxisMinRange: leftMinRange, rightAxisMinRange: rightMinRange, xAxisLabel: xAxisLabel)
+        ], leftAxisMinRange: leftMinRange, rightAxisMinRange: rightMinRange,
+           xAxisScale: xAxisScale, xAxisLabel: xAxisLabel, leftYAxisLabel: leftYAxisLabel ?? left.label,
+           rightYAxisLabel: rightYAxisLabel ?? right.label)
     }
 }

@@ -6,6 +6,7 @@
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 
 #include "constants.hpp"
 #include "logging.hpp"
@@ -28,7 +29,7 @@ std::vector<std::string> _splitDot(const std::string& s) {
 
 // Pin identifiers stay std::string internally (KiCad pad "numbers" are frequently alphanumeric --
 // BGA designators like "A12", or a schematic pin name like "GND" -- and get passed as plain text to
-// the libkicad_smoketest subprocess either way), but a JSON config may write a purely numeric pin
+// libkicad as plain text), but a JSON config may write a purely numeric pin
 // as a bare integer (e.g. `"pin": 4`) rather than a quoted string, for a more natural-looking
 // config. Accept either.
 std::string _pinToString(const nlohmann::json& j) {
@@ -42,11 +43,47 @@ std::string _pinToString(const nlohmann::json& j) {
                               j.dump());
 }
 
+std::string _pinUri(const PortRef& ref) { return "pin://" + ref.footprint() + "/" + ref.pin(); }
+
+// Component refs and pin names never contain '/' in practice (KiCad refs like "U1", pin names
+// like "A12"/"GND"), so splitting on the first one unambiguously separates them.
+PortRef _parsePinUri(const std::string& uri) {
+    constexpr std::string_view kScheme = "pin://";
+    if (!uri.starts_with(kScheme)) {
+        throw std::runtime_error("Expected a \"pin://component-ref/pin-number\" reference, got \"" + uri + "\"");
+    }
+    const std::string rest = uri.substr(kScheme.size());
+    const auto slash = rest.find('/');
+    if (slash == std::string::npos) {
+        throw std::runtime_error("Malformed pin reference \"" + uri +
+                                  "\" -- expected \"pin://component-ref/pin-number\"");
+    }
+    PortRef ref;
+    ref.setFootprint(rest.substr(0, slash));
+    ref.setPin(rest.substr(slash + 1));
+    return ref;
+}
+
 } // namespace
 
 void PortConfig::scaleToSimulationUnits(std::int32_t unitMultiplier) {
     _width *= unitMultiplier;
     _length *= unitMultiplier;
+}
+
+PortGridFootprint portGridFootprint(const PortConfig& port) {
+    const double angle = *port.direction() / 360.0 * 2 * M_PI;
+    const auto [posX, posY] = *port.position();
+    const double widthDirX = -std::sin(angle);
+    const double widthDirY = std::cos(angle);
+    const double propDirX = std::cos(angle);
+    const double propDirY = std::sin(angle);
+    return {
+        posX,
+        posY,
+        std::abs(widthDirX) * port.width() + std::abs(propDirX) * port.length(),
+        std::abs(widthDirY) * port.width() + std::abs(propDirY) * port.length(),
+    };
 }
 
 void to_json(nlohmann::json& j, const PortRef& p) { j = nlohmann::json{{"footprint", p._footprint}, {"pin", p._pin}}; }
@@ -67,8 +104,8 @@ void from_json(const nlohmann::json& j, ExcludedPin& p) {
 
 void to_json(nlohmann::json& j, const ProbedPin& p) {
     j = nlohmann::json{{"footprint", p.footprint}, {"pin", p.pin}, {"absorb_signal", p.absorbSignal}};
-    // Written only when false -- an entry created before ProbedPin::probe existed (or one nobody's
-    // set as absorb-only) round-trips with no new key, same sparse convention as geometry_only.
+    // Written only when false -- both absorb-only and explicit no-port entries need that identity
+    // to round-trip; older reportable-probe entries keep the same sparse representation.
     if (!p.probe) {
         j["probe"] = false;
     }
@@ -89,6 +126,16 @@ void from_json(const nlohmann::json& j, PinDirectionOverride& p) {
     p.footprint = j.at("footprint").get<std::string>();
     p.pin = _pinToString(j.at("pin"));
     p.direction = j.at("direction").get<double>();
+}
+
+void to_json(nlohmann::json& j, const PinImpedanceOverride& p) {
+    j = nlohmann::json{{"footprint", p.footprint}, {"pin", p.pin}, {"impedance", p.impedance}};
+}
+
+void from_json(const nlohmann::json& j, PinImpedanceOverride& p) {
+    p.footprint = j.at("footprint").get<std::string>();
+    p.pin = _pinToString(j.at("pin"));
+    p.impedance = j.at("impedance").get<double>();
 }
 
 void to_json(nlohmann::json& j, const InvolvedNetConfig& p) {
@@ -143,6 +190,9 @@ void to_json(nlohmann::json& j, const InvolvedNetConfig& p) {
     }
     if (!p._pinDirectionOverrides.empty()) {
         j["pin_direction_overrides"] = p._pinDirectionOverrides;
+    }
+    if (!p._pinImpedanceOverrides.empty()) {
+        j["pin_impedance_overrides"] = p._pinImpedanceOverrides;
     }
 }
 
@@ -219,6 +269,12 @@ void from_json(const nlohmann::json& j, InvolvedNetConfig& p) {
             p._pinDirectionOverrides.push_back(override.get<PinDirectionOverride>());
         }
     }
+    p._pinImpedanceOverrides.clear();
+    if (j.contains("pin_impedance_overrides")) {
+        for (const auto& override : j.at("pin_impedance_overrides")) {
+            p._pinImpedanceOverrides.push_back(override.get<PinImpedanceOverride>());
+        }
+    }
 }
 
 void to_json(nlohmann::json& j, const GroundNetConfig& p) {
@@ -291,9 +347,36 @@ void from_json(const nlohmann::json& j, ExcitationConfig& p) {
     }
 }
 
+void to_json(nlohmann::json& j, const DiffPairNetMember& p) {
+    switch (p._kind) {
+        case DiffPairNetKind::NetClass:
+            j = "net-class://" + *p._netClass;
+            return;
+        case DiffPairNetKind::Net:
+            j = "net://" + *p._net;
+            return;
+    }
+}
+
+void from_json(const nlohmann::json& j, DiffPairNetMember& p) {
+    const std::string s = j.get<std::string>();
+    constexpr std::string_view kNetClassScheme = "net-class://";
+    constexpr std::string_view kNetScheme = "net://";
+    if (s.starts_with(kNetClassScheme)) {
+        p._kind = DiffPairNetKind::NetClass;
+        p._netClass = s.substr(kNetClassScheme.size());
+    } else if (s.starts_with(kNetScheme)) {
+        p._kind = DiffPairNetKind::Net;
+        p._net = s.substr(kNetScheme.size());
+    } else {
+        throw std::runtime_error("Expected \"net://name\" or \"net-class://name\", got \"" + s + "\"");
+    }
+}
+
 void DifferentialPairConfig::postInit() {
     if (!_name.has_value()) {
-        _name = _startP.footprint() + "." + _startP.pin() + "_" + _stopP.footprint() + "." + _stopP.pin();
+        _name = _positiveExcitation.footprint() + "." + _positiveExcitation.pin() + "_" + _positiveProbe.footprint() +
+                "." + _positiveProbe.pin();
     }
     auto check = [&](const char* field, const PortRef& ref) {
         if (!ref.resolvedIndex().has_value()) {
@@ -302,27 +385,31 @@ void DifferentialPairConfig::postInit() {
             _correct = false;
         }
     };
-    check("start_p", _startP);
-    check("stop_p", _stopP);
-    check("start_n", _startN);
-    check("stop_n", _stopN);
+    check("positive_excitation", _positiveExcitation);
+    check("positive_probe", _positiveProbe);
+    check("negative_excitation", _negativeExcitation);
+    check("negative_probe", _negativeProbe);
 }
 
 void to_json(nlohmann::json& j, const DifferentialPairConfig& p) {
     j = nlohmann::json{
-        {"start_p", p._startP},
-        {"stop_p", p._stopP},
-        {"start_n", p._startN},
-        {"stop_n", p._stopN},
+        {"positive_excitation", _pinUri(p._positiveExcitation)},
+        {"negative_excitation", _pinUri(p._negativeExcitation)},
+        {"positive_probe", _pinUri(p._positiveProbe)},
+        {"negative_probe", _pinUri(p._negativeProbe)},
+        {"positive_nets", p._positiveNets},
+        {"negative_nets", p._negativeNets},
         {"name", p._name.has_value() ? nlohmann::json(*p._name) : nlohmann::json(nullptr)},
     };
 }
 
 void from_json(const nlohmann::json& j, DifferentialPairConfig& p) {
-    p._startP = j.at("start_p").get<PortRef>();
-    p._stopP = j.at("stop_p").get<PortRef>();
-    p._startN = j.at("start_n").get<PortRef>();
-    p._stopN = j.at("stop_n").get<PortRef>();
+    p._positiveExcitation = _parsePinUri(j.at("positive_excitation").get<std::string>());
+    p._negativeExcitation = _parsePinUri(j.at("negative_excitation").get<std::string>());
+    p._positiveProbe = _parsePinUri(j.at("positive_probe").get<std::string>());
+    p._negativeProbe = _parsePinUri(j.at("negative_probe").get<std::string>());
+    p._positiveNets = j.value("positive_nets", std::vector<DiffPairNetMember>{});
+    p._negativeNets = j.value("negative_nets", std::vector<DiffPairNetMember>{});
     if (j.contains("name") && !j.at("name").is_null()) {
         p._name = j.at("name").get<std::string>();
     } else {
@@ -505,6 +592,9 @@ void to_json(nlohmann::json& j, const SimulationConfig& p) {
     if (p._eyeBitRate > 0) {
         j["eye_bit_rate"] = p._eyeBitRate;
     }
+    if (p._isDifferentialPair) {
+        j["is_differential_pair"] = true;
+    }
 }
 
 void from_json(const nlohmann::json& j, SimulationConfig& p) {
@@ -519,6 +609,7 @@ void from_json(const nlohmann::json& j, SimulationConfig& p) {
     p._viaEdgeDistance = j.value("via_edge_distance", def._viaEdgeDistance);
     p._viaSpacing = j.value("via_spacing", def._viaSpacing);
     p._eyeBitRate = j.value("eye_bit_rate", def._eyeBitRate);
+    p._isDifferentialPair = j.value("is_differential_pair", def._isDifferentialPair);
     p._excitations = j.value("excitations", std::vector<ExcitationConfig>{});
     p._traces = j.value("traces", std::vector<SingleEndedConfig>{});
     p._diffPairs = j.value("differential_pairs", std::vector<DifferentialPairConfig>{});

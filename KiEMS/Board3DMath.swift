@@ -27,6 +27,27 @@ struct Position3 {
 /// exactly matching `simd_float4x4`'s own layout), so this one's safe to use directly.
 struct FieldUniformsGPU {
     var viewProjection: simd_float4x4
+    var time: Float = 0
+}
+
+/// Per-frame inputs for GeometryView's physically based board-material shader. SIMD4 fields keep
+/// the Swift/Metal layout unambiguous while carrying world-space xyz values.
+struct GeometryPBRUniformsGPU {
+    var viewProjection: simd_float4x4
+    var cameraPosition: SIMD4<Float>
+    var lightDirection: SIMD4<Float>
+    /// Maps a fragment's world XY into the padded, board-space distance texture. Keeping this
+    /// independent of the visible camera means simulated copper remains a seed while off screen.
+    var regionWorldMin: SIMD2<Float> = .zero
+    var regionWorldInverseSize: SIMD2<Float> = .zero
+    /// Hull padding expressed in distance-texture pixels. Negative disables the region test.
+    var hullPaddingPixels: Float = -1
+}
+
+/// Projects board-space seed geometry into the padded distance-field texture.
+struct RegionSeedUniformsGPU {
+    var worldMin: SIMD2<Float>
+    var worldInverseSize: SIMD2<Float>
 }
 
 /// Right-handed view matrix: camera at `eye` looking toward `center`, `up` fixed as the reference

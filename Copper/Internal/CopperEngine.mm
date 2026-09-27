@@ -1,4 +1,4 @@
-#include "CopperEngine.hpp"
+#include "CopperEngineBackend.hpp"
 
 #include <stdexcept>
 
@@ -8,10 +8,7 @@
 
 #include "../Shaders/CopperShaderTypes.h"
 
-// Flat include, matching every other Copper/Internal/ file's openEMS-source-checkout convention
-// (see CopperOpenEMSAccess.hpp's own file comment) -- gets the real EPS0/MUE0 openEMS itself uses,
-// rather than a second, hand-copied pair of constants that could silently drift from them.
-#include "tools/constants.h"
+#include "CopperPhysicalConstants.hpp"
 
 namespace copper {
 
@@ -54,9 +51,7 @@ id<MTLBuffer> makeUploadedBuffer(id<MTLDevice> device, const std::vector<float>&
     return buffer;
 }
 
-// Concatenates a CopperPMLShell coefficient's 3 per-axis arrays into one axis-major buffer (axis n's
-// cell `idx` at `n*perAxisCount + idx`) -- see CopperShaderTypes.h's own comment on why the PML
-// kernels take one merged buffer per coefficient rather than 3 separate ones.
+// Concatenates a CPML shell coefficient's 3 per-axis arrays into one axis-major buffer.
 std::vector<float> concatAxes(const std::vector<float> (&perAxis)[3]) {
     std::vector<float> out;
     out.reserve(perAxis[0].size() + perAxis[1].size() + perAxis[2].size());
@@ -68,38 +63,44 @@ std::vector<float> concatAxes(const std::vector<float> (&perAxis)[3]) {
 
 } // namespace
 
-struct CopperEngine::Impl {
-    CopperGridDims dims;
-    id<MTLDevice> device;
-    id<MTLCommandQueue> queue;
-    id<MTLComputePipelineState> updateEPipeline;
-    id<MTLComputePipelineState> updateHPipeline;
-    id<MTLComputePipelineState> pmlPreEPipeline;
-    id<MTLComputePipelineState> pmlPostEPipeline;
-    id<MTLComputePipelineState> pmlPreHPipeline;
-    id<MTLComputePipelineState> pmlPostHPipeline;
-    id<MTLComputePipelineState> cpmlCorrectEPipeline;
-    id<MTLComputePipelineState> cpmlCorrectHPipeline;
+/// Backend::Metal -- the GPU leapfrog engine. See CopperCPUEngine.cpp's MetalEngineImpl-mirroring
+/// CPUEngineImpl for the CPU alternative; both implement copper::EngineBackend.
+class MetalEngineImpl final : public EngineBackend {
+public:
+    MetalEngineImpl(const CopperYeeGrid& grid, const CopperExcitation& excitation,
+                     const std::vector<CopperCPMLShell>& cpmlShells);
 
-    id<MTLBuffer> dimsBuffer;
-    id<MTLBuffer> eField[3];
-    id<MTLBuffer> hField[3];
-    id<MTLBuffer> vv[3];
-    id<MTLBuffer> vi[3];
-    id<MTLBuffer> ii[3];
-    id<MTLBuffer> iv[3];
+    void run(std::uint32_t steps) override;
+    void runWithProbeSampling(std::uint32_t steps, const CopperEngine::ProbeSampler& sampler,
+                               const CopperEngine::MidStepCorrection& midStepCorrection) override;
+    void readField(CopperEngine::Field field, std::vector<float>& destination) const override;
+    float readFieldCell(CopperEngine::Field field, std::uint32_t x, std::uint32_t y, std::uint32_t z) const override;
+    void writeFieldCell(CopperEngine::Field field, std::uint32_t x, std::uint32_t y, std::uint32_t z,
+                         float value) override;
+    double estimateEnergy() const override;
+    const CopperGridDims& dims() const override { return _dims; }
+    std::size_t currentAllocatedMetalBytes() const override {
+        return static_cast<std::size_t>(_device.currentAllocatedSize);
+    }
 
-    // One entry per CopperPMLShell (see CopperPML.hpp) -- empty for a PEC-only or CPML run.
-    struct PMLShellBuffers {
-        id<MTLBuffer> shellUniform;
-        id<MTLBuffer> vv, vvfo, vvfn; // axis-major merged, 3*localCellCount floats each
-        id<MTLBuffer> ii, iifo, iifn;
-        id<MTLBuffer> voltFlux, currFlux; // zero-initialized, same layout/size as vv et al.
-        MTLSize dispatchSize;
-    };
-    std::vector<PMLShellBuffers> pmlShells;
+private:
+    CopperGridDims _dims;
+    id<MTLDevice> _device;
+    id<MTLCommandQueue> _queue;
+    id<MTLComputePipelineState> _updateEPipeline;
+    id<MTLComputePipelineState> _updateHPipeline;
+    id<MTLComputePipelineState> _cpmlCorrectEPipeline;
+    id<MTLComputePipelineState> _cpmlCorrectHPipeline;
 
-    // One entry per CopperCPMLShell (see CopperCPML.hpp) -- empty for a PEC-only or UPML run.
+    id<MTLBuffer> _dimsBuffer;
+    id<MTLBuffer> _eField[3];
+    id<MTLBuffer> _hField[3];
+    id<MTLBuffer> _vv[3];
+    id<MTLBuffer> _vi[3];
+    id<MTLBuffer> _ii[3];
+    id<MTLBuffer> _iv[3];
+
+    // One entry per CopperCPMLShell (see CopperCPML.hpp) -- empty for a PEC-only run.
     struct CPMLShellBuffers {
         id<MTLBuffer> shellUniform;
         id<MTLBuffer> bE, cE; // axis-major merged by *grading* axis, 3*localCellCount floats each
@@ -108,17 +109,17 @@ struct CopperEngine::Impl {
         id<MTLBuffer> psiH0, psiH1;
         MTLSize dispatchSize;
     };
-    std::vector<CPMLShellBuffers> cpmlShells;
+    std::vector<CPMLShellBuffers> _cpmlShells;
 
     // Excitation (Phase 4 -- see CopperExcitation.hpp). Zero counts mean encodeIterationPhase simply
     // never dispatches the corresponding kernel -- an unexcited run stays at its E=H=0 (or
     // test-seeded, see writeFieldCell) initial condition, same as Phase 2/3.
-    id<MTLComputePipelineState> applyExcitationEPipeline;
-    id<MTLComputePipelineState> applyExcitationHPipeline;
-    id<MTLBuffer> voltageCells;  // CopperExcitationCellGPU[voltageCellCount]
-    id<MTLBuffer> currentCells;  // CopperExcitationCellGPU[currentCellCount]
-    id<MTLBuffer> voltageSignal; // float[signalLength]
-    id<MTLBuffer> currentSignal; // float[signalLength]
+    id<MTLComputePipelineState> _applyExcitationEPipeline;
+    id<MTLComputePipelineState> _applyExcitationHPipeline;
+    id<MTLBuffer> _voltageCells;  // CopperExcitationCellGPU[voltageCellCount]
+    id<MTLBuffer> _currentCells;  // CopperExcitationCellGPU[currentCellCount]
+    id<MTLBuffer> _voltageSignal; // float[signalLength]
+    id<MTLBuffer> _currentSignal; // float[signalLength]
     // CopperExcitationParamsGPU is bound via setBytes:length:atIndex:, not an MTLBuffer -- run()
     // encodes every iteration's commands on the CPU *before* any of them actually execute on the
     // GPU (that's what makes the batching work), so a single shared MTLBuffer mutated by CPU-side
@@ -128,13 +129,13 @@ struct CopperEngine::Impl {
     // bytes into the command buffer's own storage immediately at encode time, so each dispatch
     // keeps its own snapshot regardless of what a later encodeIterationPhase call does to the local
     // variable afterwards.
-    std::uint32_t voltageCellCount = 0;
-    std::uint32_t currentCellCount = 0;
-    std::uint32_t signalLength = 0;
-    double timestepSeconds = 0.0;      // needed to turn signalPeriodSeconds into a step count
-    double signalPeriodSeconds = 0.0;
-    std::uint32_t currentTimestep = 0; // persists across run()/runWithProbeSampling() calls, mirrors
-                                        // Engine::numTS exactly (including *when* it increments)
+    std::uint32_t _voltageCellCount = 0;
+    std::uint32_t _currentCellCount = 0;
+    std::uint32_t _signalLength = 0;
+    double _timestepSeconds = 0.0;      // needed to turn signalPeriodSeconds into a step count
+    double _signalPeriodSeconds = 0.0;
+    std::uint32_t _currentTimestep = 0; // persists across run()/runWithProbeSampling() calls, mirrors
+                                         // Engine::numTS exactly (including *when* it increments)
 
     enum class IterationPhase { Full, Voltage, Current };
 
@@ -144,21 +145,20 @@ struct CopperEngine::Impl {
     void encodeIterationPhase(id<MTLComputeCommandEncoder> encoder, IterationPhase phase);
 };
 
-CopperEngine::CopperEngine(const CopperYeeGrid& grid, const std::vector<CopperPMLShell>& pmlShells,
-                            const CopperExcitation& excitation, const std::vector<CopperCPMLShell>& cpmlShells)
-    : _impl(std::make_unique<Impl>()) {
-    _impl->dims = grid.dims;
-    _impl->timestepSeconds = grid.timestepSeconds;
-    _impl->signalPeriodSeconds = excitation.signalPeriodSeconds;
+MetalEngineImpl::MetalEngineImpl(const CopperYeeGrid& grid, const CopperExcitation& excitation,
+                                  const std::vector<CopperCPMLShell>& cpmlShells) {
+    _dims = grid.dims;
+    _timestepSeconds = grid.timestepSeconds;
+    _signalPeriodSeconds = excitation.signalPeriodSeconds;
 
-    _impl->device = MTLCreateSystemDefaultDevice();
-    if (_impl->device == nil) {
+    _device = MTLCreateSystemDefaultDevice();
+    if (_device == nil) {
         throw std::runtime_error("CopperEngine: no Metal device available");
     }
 
     NSBundle* bundle = [NSBundle bundleForClass:[CopperEngineBundleAnchor class]];
     NSError* error = nil;
-    id<MTLLibrary> library = [_impl->device newDefaultLibraryWithBundle:bundle error:&error];
+    id<MTLLibrary> library = [_device newDefaultLibraryWithBundle:bundle error:&error];
     if (library == nil) {
         throw std::runtime_error("CopperEngine: failed to load Copper's default Metal library: " +
                                   std::string(error.localizedDescription.UTF8String));
@@ -172,7 +172,7 @@ CopperEngine::CopperEngine(const CopperYeeGrid& grid, const std::vector<CopperPM
         }
         NSError* pipelineError = nil;
         id<MTLComputePipelineState> pipeline =
-            [_impl->device newComputePipelineStateWithFunction:function error:&pipelineError];
+            [_device newComputePipelineStateWithFunction:function error:&pipelineError];
         if (pipeline == nil) {
             throw std::runtime_error("CopperEngine: failed to build " + std::string(name.UTF8String) +
                                       " pipeline state: " + std::string(pipelineError.localizedDescription.UTF8String));
@@ -180,75 +180,49 @@ CopperEngine::CopperEngine(const CopperYeeGrid& grid, const std::vector<CopperPM
         return pipeline;
     };
 
-    _impl->updateEPipeline = makePipeline(@"update_e_interior");
-    _impl->updateHPipeline = makePipeline(@"update_h_interior");
-    _impl->pmlPreEPipeline = makePipeline(@"pml_pre_e");
-    _impl->pmlPostEPipeline = makePipeline(@"pml_post_e");
-    _impl->pmlPreHPipeline = makePipeline(@"pml_pre_h");
-    _impl->pmlPostHPipeline = makePipeline(@"pml_post_h");
-    _impl->cpmlCorrectEPipeline = makePipeline(@"cpml_correct_e");
-    _impl->cpmlCorrectHPipeline = makePipeline(@"cpml_correct_h");
-    _impl->applyExcitationEPipeline = makePipeline(@"apply_excitation_e");
-    _impl->applyExcitationHPipeline = makePipeline(@"apply_excitation_h");
+    _updateEPipeline = makePipeline(@"update_e_interior");
+    _updateHPipeline = makePipeline(@"update_h_interior");
+    _cpmlCorrectEPipeline = makePipeline(@"cpml_correct_e");
+    _cpmlCorrectHPipeline = makePipeline(@"cpml_correct_h");
+    _applyExcitationEPipeline = makePipeline(@"apply_excitation_e");
+    _applyExcitationHPipeline = makePipeline(@"apply_excitation_h");
 
-    _impl->queue = [_impl->device newCommandQueue];
-    if (_impl->queue == nil) {
+    _queue = [_device newCommandQueue];
+    if (_queue == nil) {
         throw std::runtime_error("CopperEngine: failed to create a Metal command queue");
     }
 
     CopperGridDimsGPU dimsGPU{grid.dims.nx, grid.dims.ny, grid.dims.nz};
-    _impl->dimsBuffer = [_impl->device newBufferWithBytes:&dimsGPU
-                                                    length:sizeof(dimsGPU)
-                                                   options:MTLResourceStorageModeShared];
+    _dimsBuffer = [_device newBufferWithBytes:&dimsGPU length:sizeof(dimsGPU) options:MTLResourceStorageModeShared];
 
     const std::size_t cellCount = grid.dims.cellCount();
     for (int axis = 0; axis < 3; ++axis) {
-        _impl->eField[axis] = makeZeroedBuffer(_impl->device, cellCount);
-        _impl->hField[axis] = makeZeroedBuffer(_impl->device, cellCount);
-        _impl->vv[axis] = makeUploadedBuffer(_impl->device, grid.vv[axis]);
-        _impl->vi[axis] = makeUploadedBuffer(_impl->device, grid.vi[axis]);
-        _impl->ii[axis] = makeUploadedBuffer(_impl->device, grid.ii[axis]);
-        _impl->iv[axis] = makeUploadedBuffer(_impl->device, grid.iv[axis]);
+        _eField[axis] = makeZeroedBuffer(_device, cellCount);
+        _hField[axis] = makeZeroedBuffer(_device, cellCount);
+        _vv[axis] = makeUploadedBuffer(_device, grid.vv[axis]);
+        _vi[axis] = makeUploadedBuffer(_device, grid.vi[axis]);
+        _ii[axis] = makeUploadedBuffer(_device, grid.ii[axis]);
+        _iv[axis] = makeUploadedBuffer(_device, grid.iv[axis]);
     }
 
-    _impl->pmlShells.reserve(pmlShells.size());
-    for (const CopperPMLShell& shell : pmlShells) {
-        Impl::PMLShellBuffers buffers;
-        const CopperPMLShellGPU shellGPU{shell.startX, shell.startY, shell.startZ,
-                                          shell.dims.nx, shell.dims.ny, shell.dims.nz};
-        buffers.shellUniform = [_impl->device newBufferWithBytes:&shellGPU
-                                                            length:sizeof(shellGPU)
-                                                           options:MTLResourceStorageModeShared];
-        buffers.vv = makeUploadedBuffer(_impl->device, concatAxes(shell.vv));
-        buffers.vvfo = makeUploadedBuffer(_impl->device, concatAxes(shell.vvfo));
-        buffers.vvfn = makeUploadedBuffer(_impl->device, concatAxes(shell.vvfn));
-        buffers.ii = makeUploadedBuffer(_impl->device, concatAxes(shell.ii));
-        buffers.iifo = makeUploadedBuffer(_impl->device, concatAxes(shell.iifo));
-        buffers.iifn = makeUploadedBuffer(_impl->device, concatAxes(shell.iifn));
-        buffers.voltFlux = makeZeroedBuffer(_impl->device, 3 * static_cast<std::size_t>(shell.dims.cellCount()));
-        buffers.currFlux = makeZeroedBuffer(_impl->device, 3 * static_cast<std::size_t>(shell.dims.cellCount()));
-        buffers.dispatchSize = MTLSizeMake(shell.dims.nx, shell.dims.ny, shell.dims.nz);
-        _impl->pmlShells.push_back(buffers);
-    }
-
-    _impl->cpmlShells.reserve(cpmlShells.size());
+    _cpmlShells.reserve(cpmlShells.size());
     for (const CopperCPMLShell& shell : cpmlShells) {
-        Impl::CPMLShellBuffers buffers;
-        const CopperPMLShellGPU shellGPU{shell.startX, shell.startY, shell.startZ,
-                                          shell.dims.nx, shell.dims.ny, shell.dims.nz};
-        buffers.shellUniform = [_impl->device newBufferWithBytes:&shellGPU
-                                                            length:sizeof(shellGPU)
-                                                           options:MTLResourceStorageModeShared];
-        buffers.bE = makeUploadedBuffer(_impl->device, concatAxes(shell.bE));
-        buffers.cE = makeUploadedBuffer(_impl->device, concatAxes(shell.cE));
-        buffers.bH = makeUploadedBuffer(_impl->device, concatAxes(shell.bH));
-        buffers.cH = makeUploadedBuffer(_impl->device, concatAxes(shell.cH));
-        buffers.psiE0 = makeUploadedBuffer(_impl->device, concatAxes(shell.psiE0));
-        buffers.psiE1 = makeUploadedBuffer(_impl->device, concatAxes(shell.psiE1));
-        buffers.psiH0 = makeUploadedBuffer(_impl->device, concatAxes(shell.psiH0));
-        buffers.psiH1 = makeUploadedBuffer(_impl->device, concatAxes(shell.psiH1));
+        CPMLShellBuffers buffers;
+        const CopperCPMLShellGPU shellGPU{shell.startX, shell.startY, shell.startZ, shell.dims.nx, shell.dims.ny,
+                                          shell.dims.nz};
+        buffers.shellUniform = [_device newBufferWithBytes:&shellGPU
+                                                      length:sizeof(shellGPU)
+                                                     options:MTLResourceStorageModeShared];
+        buffers.bE = makeUploadedBuffer(_device, concatAxes(shell.bE));
+        buffers.cE = makeUploadedBuffer(_device, concatAxes(shell.cE));
+        buffers.bH = makeUploadedBuffer(_device, concatAxes(shell.bH));
+        buffers.cH = makeUploadedBuffer(_device, concatAxes(shell.cH));
+        buffers.psiE0 = makeUploadedBuffer(_device, concatAxes(shell.psiE0));
+        buffers.psiE1 = makeUploadedBuffer(_device, concatAxes(shell.psiE1));
+        buffers.psiH0 = makeUploadedBuffer(_device, concatAxes(shell.psiH0));
+        buffers.psiH1 = makeUploadedBuffer(_device, concatAxes(shell.psiH1));
         buffers.dispatchSize = MTLSizeMake(shell.dims.nx, shell.dims.ny, shell.dims.nz);
-        _impl->cpmlShells.push_back(buffers);
+        _cpmlShells.push_back(buffers);
     }
 
     // copper::CopperExcitationCell (CopperExcitation.hpp) is uploaded here by raw bytes, not
@@ -257,142 +231,73 @@ CopperEngine::CopperEngine(const CopperYeeGrid& grid, const std::vector<CopperPM
     static_assert(sizeof(CopperExcitationCell) == sizeof(CopperExcitationCellGPU),
                   "copper::CopperExcitationCell must stay layout-compatible with CopperExcitationCellGPU");
 
-    _impl->signalLength = static_cast<std::uint32_t>(excitation.voltageSignal.size());
-    _impl->voltageCellCount = static_cast<std::uint32_t>(excitation.voltageCells.size());
-    _impl->currentCellCount = static_cast<std::uint32_t>(excitation.currentCells.size());
-    if (_impl->voltageCellCount > 0) {
-        _impl->voltageCells = [_impl->device newBufferWithBytes:excitation.voltageCells.data()
-                                                           length:excitation.voltageCells.size() *
-                                                                  sizeof(CopperExcitationCell)
-                                                          options:MTLResourceStorageModeShared];
-        _impl->voltageSignal = makeUploadedBuffer(_impl->device, excitation.voltageSignal);
+    _signalLength = static_cast<std::uint32_t>(excitation.voltageSignal.size());
+    _voltageCellCount = static_cast<std::uint32_t>(excitation.voltageCells.size());
+    _currentCellCount = static_cast<std::uint32_t>(excitation.currentCells.size());
+    if (_voltageCellCount > 0) {
+        _voltageCells = [_device newBufferWithBytes:excitation.voltageCells.data()
+                                              length:excitation.voltageCells.size() * sizeof(CopperExcitationCell)
+                                             options:MTLResourceStorageModeShared];
+        _voltageSignal = makeUploadedBuffer(_device, excitation.voltageSignal);
     }
-    if (_impl->currentCellCount > 0) {
-        _impl->currentCells = [_impl->device newBufferWithBytes:excitation.currentCells.data()
-                                                           length:excitation.currentCells.size() *
-                                                                  sizeof(CopperExcitationCell)
-                                                          options:MTLResourceStorageModeShared];
-        _impl->currentSignal = makeUploadedBuffer(_impl->device, excitation.currentSignal);
+    if (_currentCellCount > 0) {
+        _currentCells = [_device newBufferWithBytes:excitation.currentCells.data()
+                                              length:excitation.currentCells.size() * sizeof(CopperExcitationCell)
+                                             options:MTLResourceStorageModeShared];
+        _currentSignal = makeUploadedBuffer(_device, excitation.currentSignal);
     }
 }
 
-CopperEngine::~CopperEngine() = default;
-
-void CopperEngine::Impl::encodeIterationPhase(id<MTLComputeCommandEncoder> encoder, IterationPhase phase) {
+void MetalEngineImpl::encodeIterationPhase(id<MTLComputeCommandEncoder> encoder, IterationPhase phase) {
     const bool encodeVoltage = phase != IterationPhase::Current;
     const bool encodeCurrent = phase != IterationPhase::Voltage;
-    const MTLSize eGrid = MTLSizeMake(dims.nx, dims.ny, dims.nz);
-    const MTLSize hGrid = MTLSizeMake(dims.nx > 0 ? dims.nx - 1 : 0, dims.ny > 0 ? dims.ny - 1 : 0,
-                                       dims.nz > 0 ? dims.nz - 1 : 0);
-    const NSUInteger tgWidth = updateEPipeline.threadExecutionWidth;
+    const MTLSize eGrid = MTLSizeMake(_dims.nx, _dims.ny, _dims.nz);
+    const MTLSize hGrid = MTLSizeMake(_dims.nx > 0 ? _dims.nx - 1 : 0, _dims.ny > 0 ? _dims.ny - 1 : 0,
+                                       _dims.nz > 0 ? _dims.nz - 1 : 0);
+    const NSUInteger tgWidth = _updateEPipeline.threadExecutionWidth;
     const MTLSize threadsPerThreadgroup = MTLSizeMake(tgWidth, 1, 1);
 
     // Excitation params for *this* iteration -- numTS read before increment, matching
     // Engine_Ext_Excitation::Apply2VoltagesImpl/Apply2CurrentImpl's own
     // `m_Eng->GetNumberOfTimesteps()` (both stages share this one value, exactly like the CPU
     // engine's Apply2Voltages/Apply2Current do within a single Engine::IterateTS iteration). Bound
-    // below via setBytes:, not a shared MTLBuffer -- see the Impl field comment on why.
-    const auto numTS = static_cast<std::int32_t>(currentTimestep);
-    const std::int32_t period = (signalPeriodSeconds > 0.0)
-                                     ? static_cast<std::int32_t>(signalPeriodSeconds / timestepSeconds)
+    // below via setBytes:, not a shared MTLBuffer -- see the class's own field comment on why.
+    const auto numTS = static_cast<std::int32_t>(_currentTimestep);
+    const std::int32_t period = (_signalPeriodSeconds > 0.0)
+                                     ? static_cast<std::int32_t>(_signalPeriodSeconds / _timestepSeconds)
                                      : numTS + 1;
-    const CopperExcitationParamsGPU excitationParams{numTS, period, signalLength};
-
-    // Binds and dispatches one PML pre/post stage (pml_pre_e/pml_post_e/pml_pre_h/pml_post_h) across
-    // every shell -- see CopperPML.hpp for why there can be more than one (up to 6, one per active
-    // PML face) -- then barriers so the following interior/PML dispatch sees the result. A no-op
-    // (nothing bound, no barrier) when there are no PML shells at all, e.g. an all-PEC run.
-    enum class PMLStage { EPre, EPost, HPre, HPost };
-    auto dispatchPMLStage = [&](PMLStage stage) {
-        if (pmlShells.empty()) {
-            return;
-        }
-        id<MTLComputePipelineState> pipeline = nil;
-        id<MTLBuffer> field0 = nil, field1 = nil, field2 = nil;
-        NSUInteger fieldIndex0 = 0;
-        switch (stage) {
-        case PMLStage::EPre:
-        case PMLStage::EPost:
-            field0 = eField[0];
-            field1 = eField[1];
-            field2 = eField[2];
-            fieldIndex0 = CopperBufferIndexEx;
-            pipeline = (stage == PMLStage::EPre) ? pmlPreEPipeline : pmlPostEPipeline;
-            break;
-        case PMLStage::HPre:
-        case PMLStage::HPost:
-            field0 = hField[0];
-            field1 = hField[1];
-            field2 = hField[2];
-            fieldIndex0 = CopperBufferIndexHx;
-            pipeline = (stage == PMLStage::HPre) ? pmlPreHPipeline : pmlPostHPipeline;
-            break;
-        }
-
-        for (const Impl::PMLShellBuffers& shell : pmlShells) {
-            [encoder setComputePipelineState:pipeline];
-            [encoder setBuffer:dimsBuffer offset:0 atIndex:CopperBufferIndexDims];
-            [encoder setBuffer:shell.shellUniform offset:0 atIndex:CopperBufferIndexPMLShell];
-            [encoder setBuffer:field0 offset:0 atIndex:fieldIndex0];
-            [encoder setBuffer:field1 offset:0 atIndex:fieldIndex0 + 1];
-            [encoder setBuffer:field2 offset:0 atIndex:fieldIndex0 + 2];
-            switch (stage) {
-            case PMLStage::EPre:
-                [encoder setBuffer:shell.vv offset:0 atIndex:CopperBufferIndexPMLCoeffA];
-                [encoder setBuffer:shell.vvfo offset:0 atIndex:CopperBufferIndexPMLCoeffB];
-                [encoder setBuffer:shell.voltFlux offset:0 atIndex:CopperBufferIndexPMLFlux];
-                break;
-            case PMLStage::EPost:
-                [encoder setBuffer:shell.vvfn offset:0 atIndex:CopperBufferIndexPMLCoeffC];
-                [encoder setBuffer:shell.voltFlux offset:0 atIndex:CopperBufferIndexPMLFlux];
-                break;
-            case PMLStage::HPre:
-                [encoder setBuffer:shell.ii offset:0 atIndex:CopperBufferIndexPMLCoeffA];
-                [encoder setBuffer:shell.iifo offset:0 atIndex:CopperBufferIndexPMLCoeffB];
-                [encoder setBuffer:shell.currFlux offset:0 atIndex:CopperBufferIndexPMLFlux];
-                break;
-            case PMLStage::HPost:
-                [encoder setBuffer:shell.iifn offset:0 atIndex:CopperBufferIndexPMLCoeffC];
-                [encoder setBuffer:shell.currFlux offset:0 atIndex:CopperBufferIndexPMLFlux];
-                break;
-            }
-            [encoder dispatchThreads:shell.dispatchSize threadsPerThreadgroup:threadsPerThreadgroup];
-        }
-        [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
-    };
+    const CopperExcitationParamsGPU excitationParams{numTS, period, _signalLength};
 
     // Binds and dispatches cpml_correct_e/cpml_correct_h across every CPML shell -- a no-op (nothing
-    // bound, no barrier) when there are no CPML shells, e.g. a UPML or PEC-only run. Unlike
-    // dispatchPMLStage above, this is a single additive correction, not a pre/post pair -- see
-    // CopperCPML.hpp's own doc comment for why.
+    // bound, no barrier) when there are no CPML shells, e.g. a PEC-only run.
     enum class CPMLStage { E, H };
     auto dispatchCPMLCorrect = [&](CPMLStage stage) {
-        if (cpmlShells.empty()) {
+        if (_cpmlShells.empty()) {
             return;
         }
-        id<MTLComputePipelineState> pipeline = stage == CPMLStage::E ? cpmlCorrectEPipeline : cpmlCorrectHPipeline;
-        for (const Impl::CPMLShellBuffers& shell : cpmlShells) {
+        id<MTLComputePipelineState> pipeline = stage == CPMLStage::E ? _cpmlCorrectEPipeline : _cpmlCorrectHPipeline;
+        for (const CPMLShellBuffers& shell : _cpmlShells) {
             [encoder setComputePipelineState:pipeline];
-            [encoder setBuffer:dimsBuffer offset:0 atIndex:CopperBufferIndexDims];
-            [encoder setBuffer:shell.shellUniform offset:0 atIndex:CopperBufferIndexPMLShell];
-            [encoder setBuffer:eField[0] offset:0 atIndex:CopperBufferIndexEx];
-            [encoder setBuffer:eField[1] offset:0 atIndex:CopperBufferIndexEy];
-            [encoder setBuffer:eField[2] offset:0 atIndex:CopperBufferIndexEz];
-            [encoder setBuffer:hField[0] offset:0 atIndex:CopperBufferIndexHx];
-            [encoder setBuffer:hField[1] offset:0 atIndex:CopperBufferIndexHy];
-            [encoder setBuffer:hField[2] offset:0 atIndex:CopperBufferIndexHz];
+            [encoder setBuffer:_dimsBuffer offset:0 atIndex:CopperBufferIndexDims];
+            [encoder setBuffer:shell.shellUniform offset:0 atIndex:CopperBufferIndexCPMLShell];
+            [encoder setBuffer:_eField[0] offset:0 atIndex:CopperBufferIndexEx];
+            [encoder setBuffer:_eField[1] offset:0 atIndex:CopperBufferIndexEy];
+            [encoder setBuffer:_eField[2] offset:0 atIndex:CopperBufferIndexEz];
+            [encoder setBuffer:_hField[0] offset:0 atIndex:CopperBufferIndexHx];
+            [encoder setBuffer:_hField[1] offset:0 atIndex:CopperBufferIndexHy];
+            [encoder setBuffer:_hField[2] offset:0 atIndex:CopperBufferIndexHz];
             if (stage == CPMLStage::E) {
-                [encoder setBuffer:vi[0] offset:0 atIndex:CopperBufferIndexVI0];
-                [encoder setBuffer:vi[1] offset:0 atIndex:CopperBufferIndexVI1];
-                [encoder setBuffer:vi[2] offset:0 atIndex:CopperBufferIndexVI2];
+                [encoder setBuffer:_vi[0] offset:0 atIndex:CopperBufferIndexVI0];
+                [encoder setBuffer:_vi[1] offset:0 atIndex:CopperBufferIndexVI1];
+                [encoder setBuffer:_vi[2] offset:0 atIndex:CopperBufferIndexVI2];
                 [encoder setBuffer:shell.bE offset:0 atIndex:CopperBufferIndexCPMLCoeffB];
                 [encoder setBuffer:shell.cE offset:0 atIndex:CopperBufferIndexCPMLCoeffC];
                 [encoder setBuffer:shell.psiE0 offset:0 atIndex:CopperBufferIndexCPMLPsi0];
                 [encoder setBuffer:shell.psiE1 offset:0 atIndex:CopperBufferIndexCPMLPsi1];
             } else {
-                [encoder setBuffer:iv[0] offset:0 atIndex:CopperBufferIndexIV0];
-                [encoder setBuffer:iv[1] offset:0 atIndex:CopperBufferIndexIV1];
-                [encoder setBuffer:iv[2] offset:0 atIndex:CopperBufferIndexIV2];
+                [encoder setBuffer:_iv[0] offset:0 atIndex:CopperBufferIndexIV0];
+                [encoder setBuffer:_iv[1] offset:0 atIndex:CopperBufferIndexIV1];
+                [encoder setBuffer:_iv[2] offset:0 atIndex:CopperBufferIndexIV2];
                 [encoder setBuffer:shell.bH offset:0 atIndex:CopperBufferIndexCPMLCoeffB];
                 [encoder setBuffer:shell.cH offset:0 atIndex:CopperBufferIndexCPMLCoeffC];
                 [encoder setBuffer:shell.psiH0 offset:0 atIndex:CopperBufferIndexCPMLPsi0];
@@ -403,48 +308,41 @@ void CopperEngine::Impl::encodeIterationPhase(id<MTLComputeCommandEncoder> encod
         [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
     };
 
-    // --- Voltage (E) update: pml_pre_e -> update_e_interior -> pml_post_e ->
-    // apply_excitation_e, mirroring Engine::IterateTS's own
-    // DoPreVoltageUpdates/UpdateVoltages/DoPostVoltageUpdates/ Apply2Voltages
-    // order. ---
+    // --- Voltage (E) update: interior -> CPML correction -> excitation. ---
     if (encodeVoltage) {
-        dispatchPMLStage(PMLStage::EPre);
-
-        [encoder setComputePipelineState:updateEPipeline];
-        [encoder setBuffer:dimsBuffer offset:0 atIndex:CopperBufferIndexDims];
-        [encoder setBuffer:eField[0] offset:0 atIndex:CopperBufferIndexEx];
-        [encoder setBuffer:eField[1] offset:0 atIndex:CopperBufferIndexEy];
-        [encoder setBuffer:eField[2] offset:0 atIndex:CopperBufferIndexEz];
-        [encoder setBuffer:hField[0] offset:0 atIndex:CopperBufferIndexHx];
-        [encoder setBuffer:hField[1] offset:0 atIndex:CopperBufferIndexHy];
-        [encoder setBuffer:hField[2] offset:0 atIndex:CopperBufferIndexHz];
-        [encoder setBuffer:vv[0] offset:0 atIndex:CopperBufferIndexVV0];
-        [encoder setBuffer:vv[1] offset:0 atIndex:CopperBufferIndexVV1];
-        [encoder setBuffer:vv[2] offset:0 atIndex:CopperBufferIndexVV2];
-        [encoder setBuffer:vi[0] offset:0 atIndex:CopperBufferIndexVI0];
-        [encoder setBuffer:vi[1] offset:0 atIndex:CopperBufferIndexVI1];
-        [encoder setBuffer:vi[2] offset:0 atIndex:CopperBufferIndexVI2];
+        [encoder setComputePipelineState:_updateEPipeline];
+        [encoder setBuffer:_dimsBuffer offset:0 atIndex:CopperBufferIndexDims];
+        [encoder setBuffer:_eField[0] offset:0 atIndex:CopperBufferIndexEx];
+        [encoder setBuffer:_eField[1] offset:0 atIndex:CopperBufferIndexEy];
+        [encoder setBuffer:_eField[2] offset:0 atIndex:CopperBufferIndexEz];
+        [encoder setBuffer:_hField[0] offset:0 atIndex:CopperBufferIndexHx];
+        [encoder setBuffer:_hField[1] offset:0 atIndex:CopperBufferIndexHy];
+        [encoder setBuffer:_hField[2] offset:0 atIndex:CopperBufferIndexHz];
+        [encoder setBuffer:_vv[0] offset:0 atIndex:CopperBufferIndexVV0];
+        [encoder setBuffer:_vv[1] offset:0 atIndex:CopperBufferIndexVV1];
+        [encoder setBuffer:_vv[2] offset:0 atIndex:CopperBufferIndexVV2];
+        [encoder setBuffer:_vi[0] offset:0 atIndex:CopperBufferIndexVI0];
+        [encoder setBuffer:_vi[1] offset:0 atIndex:CopperBufferIndexVI1];
+        [encoder setBuffer:_vi[2] offset:0 atIndex:CopperBufferIndexVI2];
         [encoder dispatchThreads:eGrid threadsPerThreadgroup:threadsPerThreadgroup];
 
-        // pml_post_e (next, if there's any PML) reads the E buffers this dispatch
-        // just wrote -- Metal doesn't guarantee that ordering/visibility across
-        // dispatches within one encoder on its own.
+        // CPML reads the fields this dispatch just wrote.
         [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
 
-        dispatchPMLStage(PMLStage::EPost);
         dispatchCPMLCorrect(CPMLStage::E);
 
-        if (voltageCellCount > 0) {
-            [encoder setComputePipelineState:applyExcitationEPipeline];
-            [encoder setBuffer:dimsBuffer offset:0 atIndex:CopperBufferIndexDims];
-            [encoder setBuffer:eField[0] offset:0 atIndex:CopperBufferIndexEx];
-            [encoder setBuffer:eField[1] offset:0 atIndex:CopperBufferIndexEy];
-            [encoder setBuffer:eField[2] offset:0 atIndex:CopperBufferIndexEz];
-            [encoder setBuffer:voltageCells offset:0 atIndex:CopperBufferIndexExcCells];
-            [encoder setBuffer:voltageSignal offset:0 atIndex:CopperBufferIndexExcSignal];
+        if (_voltageCellCount > 0) {
+            [encoder setComputePipelineState:_applyExcitationEPipeline];
+            [encoder setBuffer:_dimsBuffer offset:0 atIndex:CopperBufferIndexDims];
+            [encoder setBuffer:_eField[0] offset:0 atIndex:CopperBufferIndexEx];
+            [encoder setBuffer:_eField[1] offset:0 atIndex:CopperBufferIndexEy];
+            [encoder setBuffer:_eField[2] offset:0 atIndex:CopperBufferIndexEz];
+            [encoder setBuffer:_voltageCells offset:0 atIndex:CopperBufferIndexExcCells];
+            [encoder setBuffer:_voltageSignal offset:0 atIndex:CopperBufferIndexExcSignal];
             [encoder setBytes:&excitationParams length:sizeof(excitationParams) atIndex:CopperBufferIndexExcParams];
-            const MTLSize excGrid = MTLSizeMake(voltageCellCount, 1, 1);
-            const MTLSize excThreadsPerThreadgroup = MTLSizeMake(std::min<NSUInteger>(tgWidth, voltageCellCount), 1, 1);
+            const MTLSize excGrid = MTLSizeMake(_voltageCellCount, 1, 1);
+            const MTLSize excThreadsPerThreadgroup =
+                MTLSizeMake(std::min<NSUInteger>(tgWidth, _voltageCellCount), 1, 1);
             [encoder dispatchThreads:excGrid threadsPerThreadgroup:excThreadsPerThreadgroup];
             // update_h_interior (next) reads the E buffer this just wrote into
             // additively.
@@ -452,148 +350,147 @@ void CopperEngine::Impl::encodeIterationPhase(id<MTLComputeCommandEncoder> encod
         }
     }
 
-    // --- Current (H) update: pml_pre_h -> update_h_interior -> pml_post_h ->
-    // apply_excitation_h. ---
+    // --- Current (H) update: interior -> CPML correction -> excitation. ---
     if (encodeCurrent) {
-        dispatchPMLStage(PMLStage::HPre);
-
-        [encoder setComputePipelineState:updateHPipeline];
-        [encoder setBuffer:dimsBuffer offset:0 atIndex:CopperBufferIndexDims];
-        [encoder setBuffer:eField[0] offset:0 atIndex:CopperBufferIndexEx];
-        [encoder setBuffer:eField[1] offset:0 atIndex:CopperBufferIndexEy];
-        [encoder setBuffer:eField[2] offset:0 atIndex:CopperBufferIndexEz];
-        [encoder setBuffer:hField[0] offset:0 atIndex:CopperBufferIndexHx];
-        [encoder setBuffer:hField[1] offset:0 atIndex:CopperBufferIndexHy];
-        [encoder setBuffer:hField[2] offset:0 atIndex:CopperBufferIndexHz];
-        [encoder setBuffer:ii[0] offset:0 atIndex:CopperBufferIndexII0];
-        [encoder setBuffer:ii[1] offset:0 atIndex:CopperBufferIndexII1];
-        [encoder setBuffer:ii[2] offset:0 atIndex:CopperBufferIndexII2];
-        [encoder setBuffer:iv[0] offset:0 atIndex:CopperBufferIndexIV0];
-        [encoder setBuffer:iv[1] offset:0 atIndex:CopperBufferIndexIV1];
-        [encoder setBuffer:iv[2] offset:0 atIndex:CopperBufferIndexIV2];
+        [encoder setComputePipelineState:_updateHPipeline];
+        [encoder setBuffer:_dimsBuffer offset:0 atIndex:CopperBufferIndexDims];
+        [encoder setBuffer:_eField[0] offset:0 atIndex:CopperBufferIndexEx];
+        [encoder setBuffer:_eField[1] offset:0 atIndex:CopperBufferIndexEy];
+        [encoder setBuffer:_eField[2] offset:0 atIndex:CopperBufferIndexEz];
+        [encoder setBuffer:_hField[0] offset:0 atIndex:CopperBufferIndexHx];
+        [encoder setBuffer:_hField[1] offset:0 atIndex:CopperBufferIndexHy];
+        [encoder setBuffer:_hField[2] offset:0 atIndex:CopperBufferIndexHz];
+        [encoder setBuffer:_ii[0] offset:0 atIndex:CopperBufferIndexII0];
+        [encoder setBuffer:_ii[1] offset:0 atIndex:CopperBufferIndexII1];
+        [encoder setBuffer:_ii[2] offset:0 atIndex:CopperBufferIndexII2];
+        [encoder setBuffer:_iv[0] offset:0 atIndex:CopperBufferIndexIV0];
+        [encoder setBuffer:_iv[1] offset:0 atIndex:CopperBufferIndexIV1];
+        [encoder setBuffer:_iv[2] offset:0 atIndex:CopperBufferIndexIV2];
         [encoder dispatchThreads:hGrid threadsPerThreadgroup:threadsPerThreadgroup];
 
-        // pml_post_h (next, if there's any PML) reads the H buffers this dispatch
-        // just wrote.
+        // CPML reads the fields this dispatch just wrote.
         [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
 
-        dispatchPMLStage(PMLStage::HPost);
         dispatchCPMLCorrect(CPMLStage::H);
 
-        if (currentCellCount > 0) {
-            [encoder setComputePipelineState:applyExcitationHPipeline];
-            [encoder setBuffer:dimsBuffer offset:0 atIndex:CopperBufferIndexDims];
-            [encoder setBuffer:hField[0] offset:0 atIndex:CopperBufferIndexHx];
-            [encoder setBuffer:hField[1] offset:0 atIndex:CopperBufferIndexHy];
-            [encoder setBuffer:hField[2] offset:0 atIndex:CopperBufferIndexHz];
-            [encoder setBuffer:currentCells offset:0 atIndex:CopperBufferIndexExcCells];
-            [encoder setBuffer:currentSignal offset:0 atIndex:CopperBufferIndexExcSignal];
+        if (_currentCellCount > 0) {
+            [encoder setComputePipelineState:_applyExcitationHPipeline];
+            [encoder setBuffer:_dimsBuffer offset:0 atIndex:CopperBufferIndexDims];
+            [encoder setBuffer:_hField[0] offset:0 atIndex:CopperBufferIndexHx];
+            [encoder setBuffer:_hField[1] offset:0 atIndex:CopperBufferIndexHy];
+            [encoder setBuffer:_hField[2] offset:0 atIndex:CopperBufferIndexHz];
+            [encoder setBuffer:_currentCells offset:0 atIndex:CopperBufferIndexExcCells];
+            [encoder setBuffer:_currentSignal offset:0 atIndex:CopperBufferIndexExcSignal];
             [encoder setBytes:&excitationParams length:sizeof(excitationParams) atIndex:CopperBufferIndexExcParams];
-            const MTLSize excGrid = MTLSizeMake(currentCellCount, 1, 1);
-            const MTLSize excThreadsPerThreadgroup = MTLSizeMake(std::min<NSUInteger>(tgWidth, currentCellCount), 1, 1);
+            const MTLSize excGrid = MTLSizeMake(_currentCellCount, 1, 1);
+            const MTLSize excThreadsPerThreadgroup =
+                MTLSizeMake(std::min<NSUInteger>(tgWidth, _currentCellCount), 1, 1);
             [encoder dispatchThreads:excGrid threadsPerThreadgroup:excThreadsPerThreadgroup];
         }
 
-        // Next iteration's pml_pre_e/update_e_interior reads whatever this
+        // Next iteration's update_e_interior reads whatever this
         // iteration's H update (and any PML/excitation on top of it) wrote --
-        // covered by whichever of the barriers above ran last (the PML-post
-        // barrier if there was no H excitation, since dispatchPMLStage only
-        // barriers when it actually dispatches something; here there's always at
-        // least the interior H barrier already issued, so the field is visible
-        // regardless of which later stages were no-ops).
+        // covered by the barrier below.
         [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
 
-        ++currentTimestep;
+        ++_currentTimestep;
     }
 }
 
-void CopperEngine::run(std::uint32_t steps) {
-    id<MTLCommandBuffer> commandBuffer = [_impl->queue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+void MetalEngineImpl::run(std::uint32_t steps) {
+    // Copper is normally driven from a long-lived C++ worker thread, which does not establish an
+    // AppKit run-loop autorelease pool of its own. Metal returns autoreleased command buffers and
+    // encoder-side helper objects; without a local pool those completed objects remain queued in
+    // the thread's outer pool for the duration of the simulation.
+    @autoreleasepool {
+        id<MTLCommandBuffer> commandBuffer = [_queue commandBuffer];
+        id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
 
-    for (std::uint32_t step = 0; step < steps; ++step) {
-        _impl->encodeIterationPhase(encoder, CopperEngine::Impl::IterationPhase::Full);
-    }
-
-    [encoder endEncoding];
-    [commandBuffer commit];
-    [commandBuffer waitUntilCompleted];
-
-    if (commandBuffer.error != nil) {
-        throw std::runtime_error("CopperEngine::run: Metal command buffer failed: " +
-                                 std::string(commandBuffer.error.localizedDescription.UTF8String));
-    }
-}
-
-void CopperEngine::runWithProbeSampling(std::uint32_t steps, const ProbeSampler& sampler,
-                                        const MidStepCorrection& midStepCorrection) {
-    for (std::uint32_t step = 0; step < steps; ++step) {
-        auto runPhase = [&](CopperEngine::Impl::IterationPhase phase, const char* phaseName) {
-            id<MTLCommandBuffer> commandBuffer = [_impl->queue commandBuffer];
-            id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
-            _impl->encodeIterationPhase(encoder, phase);
-            [encoder endEncoding];
-            [commandBuffer commit];
-            [commandBuffer waitUntilCompleted];
-
-            if (commandBuffer.error != nil) {
-                throw std::runtime_error(
-                    std::string("CopperEngine::runWithProbeSampling ") + phaseName +
-                    " command buffer failed: " + std::string(commandBuffer.error.localizedDescription.UTF8String));
-            }
-        };
-
-        if (midStepCorrection) {
-            // Waiting here is the GPU->CPU fence for MTLStorageModeShared field
-            // buffers. The CPU correction writes those same shared bytes; committing
-            // the Current phase afterward is the corresponding CPU->GPU ordering
-            // point, so update_h_interior sees the correction in this timestep rather
-            // than one timestep late.
-            runPhase(CopperEngine::Impl::IterationPhase::Voltage, "voltage");
-            midStepCorrection();
-            runPhase(CopperEngine::Impl::IterationPhase::Current, "current");
-        } else {
-            runPhase(CopperEngine::Impl::IterationPhase::Full, "full-iteration");
+        for (std::uint32_t step = 0; step < steps; ++step) {
+            encodeIterationPhase(encoder, IterationPhase::Full);
         }
 
-        if (!sampler(_impl->currentTimestep)) {
+        [encoder endEncoding];
+        [commandBuffer commit];
+        [commandBuffer waitUntilCompleted];
+
+        if (commandBuffer.error != nil) {
+            throw std::runtime_error("CopperEngine::run: Metal command buffer failed: " +
+                                     std::string(commandBuffer.error.localizedDescription.UTF8String));
+        }
+    }
+}
+
+void MetalEngineImpl::runWithProbeSampling(std::uint32_t steps, const CopperEngine::ProbeSampler& sampler,
+                                            const CopperEngine::MidStepCorrection& midStepCorrection) {
+    for (std::uint32_t step = 0; step < steps; ++step) {
+        bool shouldContinue = true;
+        @autoreleasepool {
+            auto runPhase = [&](IterationPhase phase, const char* phaseName) {
+                id<MTLCommandBuffer> commandBuffer = [_queue commandBuffer];
+                id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+                encodeIterationPhase(encoder, phase);
+                [encoder endEncoding];
+                [commandBuffer commit];
+                [commandBuffer waitUntilCompleted];
+
+                if (commandBuffer.error != nil) {
+                    throw std::runtime_error(
+                        std::string("CopperEngine::runWithProbeSampling ") + phaseName +
+                        " command buffer failed: " +
+                        std::string(commandBuffer.error.localizedDescription.UTF8String));
+                }
+            };
+
+            if (midStepCorrection) {
+                // Waiting here is the GPU->CPU fence for MTLStorageModeShared field
+                // buffers. The CPU correction writes those same shared bytes; committing
+                // the Current phase afterward is the corresponding CPU->GPU ordering
+                // point, so update_h_interior sees the correction in this timestep rather
+                // than one timestep late.
+                runPhase(IterationPhase::Voltage, "voltage");
+                midStepCorrection();
+                runPhase(IterationPhase::Current, "current");
+            } else {
+                runPhase(IterationPhase::Full, "full-iteration");
+            }
+
+            shouldContinue = sampler(_currentTimestep);
+        }
+        if (!shouldContinue) {
             break;
         }
     }
 }
 
-std::vector<float> CopperEngine::readField(Field field) const {
-    std::vector<float> result;
-    readField(field, result);
-    return result;
-}
-
-void CopperEngine::readField(Field field, std::vector<float>& destination) const {
+void MetalEngineImpl::readField(CopperEngine::Field field, std::vector<float>& destination) const {
     const int axis = static_cast<int>(field) % 3;
     const bool isH = static_cast<int>(field) >= 3;
-    id<MTLBuffer> buffer = isH ? _impl->hField[axis] : _impl->eField[axis];
+    id<MTLBuffer> buffer = isH ? _hField[axis] : _eField[axis];
     const auto* data = static_cast<const float*>(buffer.contents);
-    destination.assign(data, data + _impl->dims.cellCount());
+    destination.assign(data, data + _dims.cellCount());
 }
 
-float CopperEngine::readFieldCell(Field field, std::uint32_t x, std::uint32_t y, std::uint32_t z) const {
+float MetalEngineImpl::readFieldCell(CopperEngine::Field field, std::uint32_t x, std::uint32_t y,
+                                      std::uint32_t z) const {
     const int axis = static_cast<int>(field) % 3;
     const bool isH = static_cast<int>(field) >= 3;
-    id<MTLBuffer> buffer = isH ? _impl->hField[axis] : _impl->eField[axis];
+    id<MTLBuffer> buffer = isH ? _hField[axis] : _eField[axis];
     const auto* data = static_cast<const float*>(buffer.contents);
-    return data[copperGridIndex(_impl->dims, x, y, z)];
+    return data[copperGridIndex(_dims, x, y, z)];
 }
 
-void CopperEngine::writeFieldCell(Field field, std::uint32_t x, std::uint32_t y, std::uint32_t z, float value) {
+void MetalEngineImpl::writeFieldCell(CopperEngine::Field field, std::uint32_t x, std::uint32_t y, std::uint32_t z,
+                                      float value) {
     const int axis = static_cast<int>(field) % 3;
     const bool isH = static_cast<int>(field) >= 3;
-    id<MTLBuffer> buffer = isH ? _impl->hField[axis] : _impl->eField[axis];
+    id<MTLBuffer> buffer = isH ? _hField[axis] : _eField[axis];
     auto* data = static_cast<float*>(buffer.contents);
-    data[copperGridIndex(_impl->dims, x, y, z)] = value;
+    data[copperGridIndex(_dims, x, y, z)] = value;
 }
 
-double CopperEngine::estimateEnergy() const {
-    const vDSP_Length n = _impl->dims.cellCount();
+double MetalEngineImpl::estimateEnergy() const {
+    const vDSP_Length n = _dims.cellCount();
     // vDSP_svesq's own accumulator is float32 -- for a large/energetic grid the true sum of squares
     // legitimately reaches into the 1e38 range (confirmed on a real board: 3.49e38, right at
     // float32's ~3.4e38 ceiling), so a float32 accumulator spuriously overflows to inf/nan even
@@ -606,17 +503,21 @@ double CopperEngine::estimateEnergy() const {
     double hSumSq = 0.0;
     for (int axis = 0; axis < 3; ++axis) {
         double axisSumSq = 0.0;
-        vDSP_vspdp(static_cast<const float*>(_impl->eField[axis].contents), 1, converted.data(), 1, n);
+        vDSP_vspdp(static_cast<const float*>(_eField[axis].contents), 1, converted.data(), 1, n);
         vDSP_svesqD(converted.data(), 1, &axisSumSq, n);
         eSumSq += axisSumSq;
 
-        vDSP_vspdp(static_cast<const float*>(_impl->hField[axis].contents), 1, converted.data(), 1, n);
+        vDSP_vspdp(static_cast<const float*>(_hField[axis].contents), 1, converted.data(), 1, n);
         vDSP_svesqD(converted.data(), 1, &axisSumSq, n);
         hSumSq += axisSumSq;
     }
-    return EPS0 * eSumSq + MUE0 * hSumSq;
+    return physical::epsilon0 * eSumSq + physical::mu0 * hSumSq;
 }
 
-const CopperGridDims& CopperEngine::dims() const { return _impl->dims; }
+std::unique_ptr<EngineBackend> makeMetalEngineBackend(const CopperYeeGrid& grid,
+                                                       const CopperExcitation& excitation,
+                                                       const std::vector<CopperCPMLShell>& cpmlShells) {
+    return std::make_unique<MetalEngineImpl>(grid, excitation, cpmlShells);
+}
 
 } // namespace copper

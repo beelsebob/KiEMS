@@ -21,7 +21,8 @@
 
 namespace kiems {
 
-/// Direct (Goertzel-style) DFT of a time-domain signal at a set of frequencies.
+/// DFT of a time-domain signal at a set of frequencies. Uniform time/frequency grids use an exact
+/// chirp-Z FFT convolution; irregular grids retain the direct implementation.
 std::expected<std::vector<std::complex<double>>, std::string> dftTimeToFreq(
     const std::vector<double>& t, const std::vector<double>& val, const std::vector<double>& freq,
     const std::string& signalType = "pulse");

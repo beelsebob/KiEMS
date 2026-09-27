@@ -25,6 +25,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) NSInteger outputPort;
 /// Display-ready label, e.g. "S₁₁" -- matches postprocess.cpp's own _sLabel convention.
 @property (nonatomic, copy, readonly) NSString *label;
+/// Whether this output lies in the excited port's passive-connected net group.
+@property (nonatomic, readonly, getter=isReceived) BOOL received;
 @property (nonatomic, copy, readonly) NSArray<NSNumber *> *magnitudeDb;
 @property (nonatomic, copy, readonly) NSArray<NSNumber *> *phaseDeg;
 @end

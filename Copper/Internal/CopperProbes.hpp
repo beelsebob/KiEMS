@@ -18,9 +18,9 @@
 #include <string>
 #include <vector>
 
-#include "CopperYeeGrid.hpp"
-#include "FDTD/operator.h"
 #include "ContinuousStructure.h"
+#include "CopperOperator.hpp"
+#include "CopperYeeGrid.hpp"
 
 namespace copper {
 
@@ -46,9 +46,8 @@ struct CopperProbe {
 
 /// Walks every CSPropProbeBox in `csx` with ProbeType 0 (voltage) or 1 (current) -- the only two
 /// types kiems's own ports.cpp ever creates (see csx_helpers.cpp's `addProbe`) -- and snaps
-/// each one's primitive box to `op`'s mesh. `op` must already be fully set up
-/// (openEMS::SetupFDTD() already run).
-std::vector<CopperProbe> discoverProbes(ContinuousStructure& csx, Operator& op);
+/// each one's primitive box to `op`'s mesh.
+std::vector<CopperProbe> discoverProbes(ContinuousStructure& csx, CopperOperator& op);
 
 /// Straight sum of E-field-edge ("volt") values along the probe's single non-degenerate axis -- a
 /// direct port of Engine_Interface_FDTD::CalcVoltageIntegral. `field` is called as

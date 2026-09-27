@@ -1,4 +1,4 @@
-// KiCad net names come back from libkicad_query with a literal '/' escaped as the placeholder token
+// KiCad net names come back from ki with a literal '/' escaped as the placeholder token
 // "{slash}" (KiCad's own internal/UI convention for hierarchical-sheet-path net names, e.g.
 // "/MCU/USB/Upstream/SSRx-"). Gerber files' own %TO.N net-name attributes carry the real, unescaped
 // character -- KiCad's Gerber export never applies that placeholder scheme. Comparing a net name
@@ -25,7 +25,7 @@ public:
     explicit NetName(std::string original) : _original(std::move(original)) {}
 
     /// The exact string this NetName was constructed from, unaltered. Pass this back into any
-    /// libkicad_query call, JSON field, or Obj-C++/Swift bridge boundary expecting to round-trip the
+    /// ki call, JSON field, or Obj-C++/Swift bridge boundary expecting to round-trip the
     /// same representation this NetName came from -- never use it to compare against or look up in
     /// Gerber-derived data (CopperOp::net, Pad::net(), GerberFile::traceForNet()), which is in the
     /// other, unescaped convention.

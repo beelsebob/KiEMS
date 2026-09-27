@@ -45,9 +45,8 @@ public:
     };
 
     /// Creates (truncating any existing file at `path`) and writes the static header/grid content
-    /// immediately -- everything up to `/frames/*` existing with zero frames. `chunkFrames` is both
-    /// the compression and the read/seek granularity for the six big per-frame datasets -- see the
-    /// format doc's own "Chunking / compression rationale" section.
+    /// immediately. `chunkFrames` controls only the SWMR publication cadence; field data uses
+    /// fixed, independently compressed spatial chunks described by the format document.
     static std::expected<FieldFrameSeriesWriter, std::string> create(const std::filesystem::path& path,
                                                                         const Header& header,
                                                                         std::uint32_t chunkFrames = 16);

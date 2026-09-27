@@ -343,10 +343,10 @@ std::optional<Postprocessor::DiffPairSdd> Postprocessor::getDiffPairSdd(std::int
     if (!pair.correct()) {
         return std::nullopt;
     }
-    const auto sp = static_cast<std::size_t>(*pair.startP().resolvedIndex());
-    const auto sn = static_cast<std::size_t>(*pair.startN().resolvedIndex());
-    const auto ep = static_cast<std::size_t>(*pair.stopP().resolvedIndex());
-    const auto en = static_cast<std::size_t>(*pair.stopN().resolvedIndex());
+    const auto sp = static_cast<std::size_t>(*pair.positiveExcitation().resolvedIndex());
+    const auto sn = static_cast<std::size_t>(*pair.negativeExcitation().resolvedIndex());
+    const auto ep = static_cast<std::size_t>(*pair.positiveProbe().resolvedIndex());
+    const auto en = static_cast<std::size_t>(*pair.negativeProbe().resolvedIndex());
     if (!isValid(_sParams[sp][sp]) || !isValid(_sParams[sn][sn])) {
         return std::nullopt;
     }
@@ -387,10 +387,10 @@ std::optional<Postprocessor::DiffPairImpedance> Postprocessor::getDiffPairImpeda
     if (!pair.correct()) {
         return std::nullopt;
     }
-    const auto sp = static_cast<std::size_t>(*pair.startP().resolvedIndex());
-    const auto sn = static_cast<std::size_t>(*pair.startN().resolvedIndex());
-    const auto ep = static_cast<std::size_t>(*pair.stopP().resolvedIndex());
-    const auto en = static_cast<std::size_t>(*pair.stopN().resolvedIndex());
+    const auto sp = static_cast<std::size_t>(*pair.positiveExcitation().resolvedIndex());
+    const auto sn = static_cast<std::size_t>(*pair.negativeExcitation().resolvedIndex());
+    const auto ep = static_cast<std::size_t>(*pair.positiveProbe().resolvedIndex());
+    const auto en = static_cast<std::size_t>(*pair.negativeProbe().resolvedIndex());
     if (!isValid(_sParams[sp][sp]) || !isValid(_sParams[sn][sn])) {
         return std::nullopt;
     }
@@ -677,10 +677,10 @@ void Postprocessor::renderTraceDelays(bool transparent, const std::filesystem::p
         if (!pair.correct()) {
             continue;
         }
-        const auto sp = static_cast<std::size_t>(*pair.startP().resolvedIndex());
-        const auto sn = static_cast<std::size_t>(*pair.startN().resolvedIndex());
-        const auto ep = static_cast<std::size_t>(*pair.stopP().resolvedIndex());
-        const auto en = static_cast<std::size_t>(*pair.stopN().resolvedIndex());
+        const auto sp = static_cast<std::size_t>(*pair.positiveExcitation().resolvedIndex());
+        const auto sn = static_cast<std::size_t>(*pair.negativeExcitation().resolvedIndex());
+        const auto ep = static_cast<std::size_t>(*pair.positiveProbe().resolvedIndex());
+        const auto en = static_cast<std::size_t>(*pair.negativeProbe().resolvedIndex());
         const bool nOk = !std::any_of(_delays[en][sn].begin(), _delays[en][sn].end(),
                                        [](double v) { return std::isnan(v); });
         const bool pOk = !std::any_of(_delays[ep][sp].begin(), _delays[ep][sp].end(),

@@ -44,9 +44,14 @@ enum SIPrefix: CaseIterable {
         }
     }
 
+    /// Canonical symbol plus any keyboard-friendly input aliases. Consumers which build compound
+    /// unit spellings (such as `µb/s` and `ub/s`) should use this rather than duplicating the
+    /// micro-prefix exception.
+    var inputSymbols: [String] { [symbol] + alternateInputSymbols }
+
     /// The prefix a single trailing character matches, if any -- case-sensitive (see type doc).
     static func matching(symbol: String) -> SIPrefix? {
-        allCases.first { symbol == $0.symbol || $0.alternateInputSymbols.contains(symbol) }
+        allCases.first { $0.inputSymbols.contains(symbol) }
     }
 
     /// Largest prefix that keeps `value`'s scaled magnitude >= 1, restricted to kilo/mega/giga/tera

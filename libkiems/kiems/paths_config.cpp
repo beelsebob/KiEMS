@@ -5,7 +5,6 @@
 namespace kiems {
 
 PathsConfig PathsConfig::forConfigFile(std::filesystem::path configFile, std::filesystem::path kicadCliPath,
-                                        std::filesystem::path kicadQueryHelperPath,
                                         std::filesystem::path fdtdWorkerPath,
                                         std::filesystem::path copperFdtdWorkerPath) {
     PathsConfig paths;
@@ -18,7 +17,6 @@ PathsConfig PathsConfig::forConfigFile(std::filesystem::path configFile, std::fi
     paths.simulationDir = configDir / constants::simulationDir;
     paths.resultsDir = configDir / constants::resultsDir;
     paths.kicadCliPath = std::move(kicadCliPath);
-    paths.kicadQueryHelperPath = std::move(kicadQueryHelperPath);
     paths.fdtdWorkerPath = std::move(fdtdWorkerPath);
     paths.copperFdtdWorkerPath = std::move(copperFdtdWorkerPath);
     paths.configDir = configDir;

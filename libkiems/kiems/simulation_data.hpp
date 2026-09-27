@@ -180,8 +180,11 @@ private:
 /// Slices `data.configuration()`'s board (see Simulation::sliceBoard()) into a SimulationGeometry.
 /// Combine with `data` via SimulationData<Geometry>'s own constructor to advance the pipeline:
 /// `SimulationData<SimulationStage::Geometry>(data, *generateGeometry(data, config, paths))`.
+/// `onProgress`, when supplied, reports completed polygon-operation and triangulation primitive
+/// batches, followed by a finishing phase while the remaining bookkeeping completes.
 std::expected<SimulationGeometry, std::string> generateGeometry(const SimulationData<SimulationStage::Configured>& data,
-                                                                  const EMSConfig& config, const PathsConfig& paths);
+                                                                  const EMSConfig& config, const PathsConfig& paths,
+                                                                  const GeometryProcessingProgressCallback& onProgress = {});
 
 /// Places grid lines (see Simulation::addGrid()/gridLines()) for `data.geometry()`'s already-sliced
 /// board into a SimulationGrid. Combine with `data` via SimulationData<Grid>'s own constructor to

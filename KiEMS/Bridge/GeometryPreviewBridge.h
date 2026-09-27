@@ -11,21 +11,45 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+typedef NS_ENUM(NSInteger, EMSGeometryTriangleKind) {
+    EMSGeometryTriangleKindGeneric = 0,
+    EMSGeometryTriangleKindTrace,
+    EMSGeometryTriangleKindPin,
+    EMSGeometryTriangleKindZone,
+};
+
 /// One filled triangle, already tessellated on the C++ side (board-slicing's own triangulation) --
 /// exposed as three raw points rather than re-deriving polygon outlines from disjoint triangles.
 @interface EMSGeometryTriangle : NSObject
 @property (nonatomic, readonly) CGPoint a;
 @property (nonatomic, readonly) CGPoint b;
 @property (nonatomic, readonly) CGPoint c;
+/// Per-triangle color override, RGBA -- alpha 0 (the default, via initWithA:b:c:) means "no
+/// override, use this triangle's own EMSGeometryLayer.hexColor instead" (real copper is always
+/// fully opaque, so alpha 0 can never collide with a real color). Used by both whole-board and
+/// simulation-cutout layer previews to color each net's own copper distinctly within one shared
+/// per-layer EMSGeometryLayer, rather than exploding the layer list (and GeometryView's own
+/// per-layer legend/visibility toggles) into one synthetic layer per net.
+@property (nonatomic, readonly) simd_double4 color;
+/// Display opacity independent of the color-override sentinel above. Filled zones use 0.7; all
+/// other board geometry defaults to 1.0.
+@property (nonatomic, readonly) double opacity;
+/// Whole-board picking metadata. Simulation-cutout and silkscreen triangles are Generic. A trace
+/// selects its complete net; a pin selects one footprint pad; zones are identifiable in the ID
+/// pass but deliberately not selectable by the board UI.
+@property (nonatomic, readonly) EMSGeometryTriangleKind kind;
+@property (nonatomic, copy, readonly, nullable) NSString *netName;
+@property (nonatomic, copy, readonly, nullable) NSString *footprintReference;
+@property (nonatomic, copy, readonly, nullable) NSString *padNumber;
 @end
 
-/// One copper layer's final (post-slicing) triangulated geometry, board-top to board-bottom in the
-/// same order as EMSConfigBridge.metalLayerNames.
+/// One KiCad layer's triangulated display geometry. Copper layers retain picking metadata; other
+/// enabled fabrication/technical/user layers use the same flat-mesh representation.
 @interface EMSGeometryLayer : NSObject
 @property (nonatomic, copy, readonly) NSString *name;
 @property (nonatomic, copy, readonly) NSArray<EMSGeometryTriangle *> *triangles;
 /// "#RRGGBB"/"#RRGGBBAA", from the board's active KiCad color theme (see
-/// kiems::libkicad_query::layerColors) -- nil if that lookup failed or had no entry for this
+/// libkicad::layerColors) -- nil if that lookup failed or had no entry for this
 /// layer, in which case the caller should fall back to its own default palette.
 @property (nonatomic, copy, readonly, nullable) NSString *hexColor;
 /// This layer's own real Z position, in the same board-top-at-0 frame as gridLinesZ -- the
@@ -36,6 +60,13 @@ NS_ASSUME_NONNULL_BEGIN
 /// to lay layers out by real board thickness (rather than approximating with even spacing across
 /// the board) should place each layer's own triangles at this Z.
 @property (nonatomic, readonly) double z;
+/// NO for a catalog placeholder whose expensive contours have not been tessellated yet.
+@property (nonatomic, readonly) BOOL geometryGenerated;
++ (instancetype)placeholderWithName:(NSString *)name
+                           hexColor:(nullable NSString *)hexColor
+                                  z:(double)z;
+/// Replaces a catalog placeholder's mesh in-place. Call on the main thread.
+- (void)replaceTriangles:(NSArray<EMSGeometryTriangle *> *)triangles;
 @end
 
 /// One via -- either a real board via (from the board's own Excellon drill file, kept only where it
@@ -58,6 +89,23 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) CGPoint ringPosition2;
 @property (nonatomic, readonly) double diameter;
 @property (nonatomic, readonly) double annularRingDiameter;
+/// nil for a synthetic stitching via or a per-simulation sliced-board real via (neither call site
+/// currently threads a net name through); populated for the whole-board preview, straight from
+/// libkicad::throughHoles -- this is what lets a via act as a real graph node bridging two copper
+/// layers of the same net (see GeometryView.rebuildActivityBuffers()'s own trace-graph doc comment).
+@property (nonatomic, copy, readonly, nullable) NSString *netName;
+@end
+
+/// One routed-track centreline segment, real KiCad copper -- unlike EMSGeometryTriangle (its
+/// triangulated *fill* shape, no notion of "one continuous routed segment"), this is the raw
+/// start/end centerline from libkicad::allTracks (curves arrive as short connected pieces), exactly
+/// what a per-net pin/via graph needs for a real edge length between two landmarks. Whole-board
+/// preview only -- empty for a per-simulation sliced-board preview.
+@interface EMSGeometryTrackSegment : NSObject
+@property (nonatomic, copy, readonly) NSString *netName;
+@property (nonatomic, copy, readonly) NSString *layerName;
+@property (nonatomic, readonly) CGPoint start;
+@property (nonatomic, readonly) CGPoint end;
 @end
 
 /// One resolved simulation port -- where an excitation/measurement point sits on the board.
@@ -79,7 +127,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// single-Z board layer), still in the same simulation-unit/Edge-Cuts-origin frame as everything
 /// else here. See buildGeometryPreview()'s own comment on where these come from and the coordinate
 /// transform applied. `color` is the model's own real STEP color (straight from
-/// kiems::libkicad_query::ComponentTriangle, itself from XCAFDoc_ColorTool -- the same source
+/// libkicad::ComponentTriangle, itself from XCAFDoc_ColorTool -- the same source
 /// WriteSTEP/WriteGLTF preserve), (1,1,1,1) if the model carries none -- shared by all three
 /// vertices (one real material per triangle, not interpolated per-vertex).
 @interface EMSGeometryComponentTriangle : NSObject
@@ -87,6 +135,12 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) simd_double3 b;
 @property (nonatomic, readonly) simd_double3 c;
 @property (nonatomic, readonly) simd_double4 color;
+/// Populated only for whole-board via mesh triangles. Component-model triangles and sliced-board
+/// synthetic vias leave it nil. This lets picking/activity treat the plated barrel and annular
+/// rings as part of their electrical net rather than stopping the overlay at the surrounding trace.
+@property (nonatomic, copy, readonly, nullable) NSString *netName;
+/// Owning footprint for real component-model triangles. Via triangles leave this nil.
+@property (nonatomic, copy, readonly, nullable) NSString *footprintReference;
 @end
 
 /// One camera-facing plane of Yee-grid edges, already split edge-by-edge and colored from the
@@ -116,6 +170,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// A renderable snapshot of one simulation's sliced board geometry, in simulation units -- everything
 /// a geometry-preview view needs to draw it, with no further C++ types involved.
 @interface EMSGeometryPreview : NSObject
+/// Distinguishes the configuration screen's complete-board preview from a simulation cutout.
+/// GeometryView uses this only to choose sensible initial layer visibility.
+@property (nonatomic, readonly) BOOL wholeBoard;
 @property (nonatomic, copy, readonly) NSArray<EMSGeometryLayer *> *layers;
 /// Top/bottom solder mask, if this board's stackup has one on that side -- nil (not an empty
 /// EMSGeometryLayer) when absent, e.g. no F_Mask.gbr/B_Mask.gbr was exported. Reuses
@@ -130,6 +187,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// This simulation's own cutout outline, a single closed polygon loop.
 @property (nonatomic, copy, readonly) NSArray<NSValue *> *outline; // NSValue-wrapped CGPoint
 @property (nonatomic, copy, readonly) NSArray<EMSGeometryVia *> *vias;
+/// Every routed-track centreline segment, real KiCad copper -- see EMSGeometryTrackSegment's own
+/// doc comment. Empty for a per-simulation sliced-board preview.
+@property (nonatomic, copy, readonly) NSArray<EMSGeometryTrackSegment *> *trackSegments;
 /// Stitching-via candidate positions board-slicing considered but rejected (no ground copper there,
 /// or too close to another via) -- see kiems::SlicedBoard::failedStitchingViaAttempts's own
 /// doc comment. NSValue-wrapped CGPoint, same convention as `outline`.
@@ -162,7 +222,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// Every diagnostic KiCad's own exporter reported while building renderedComponentReferences' shapes
 /// -- most commonly "Could not add 3D model for <ref>." / "File not found: <path>" pairs, for a
 /// component whose linked 3D model can't be resolved (see
-/// kiems::libkicad_query::ComponentModelExportResult's own doc comment). Non-fatal: the rest of
+/// libkicad::ComponentModelExportResult's own doc comment). Non-fatal: the rest of
 /// componentMeshTriangles is still populated for every other requested component. Empty if every
 /// requested component's model resolved cleanly, or if the export itself failed outright (in which
 /// case componentMeshTriangles is empty too, not populated-minus-one).
@@ -203,6 +263,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) double yMin;
 @property (nonatomic, readonly) double width;
 @property (nonatomic, readonly) double height;
+/// Incorporates the detailed meshes/board furniture of a later preview without replacing this
+/// instance (and therefore without losing the user's current layer visibility choices).
+- (void)mergeLoadedPreview:(EMSGeometryPreview *)preview;
 @end
 
 NS_ASSUME_NONNULL_END

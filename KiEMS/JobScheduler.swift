@@ -1,4 +1,5 @@
 import Cocoa
+import Darwin
 
 /// Which conceptual step a Job represents -- raw value order IS chain/dependency order (a later
 /// case always depends on every earlier one having already run for the same simulation). Mirrors
@@ -320,16 +321,20 @@ final class JobScheduler {
     /// own background call polls at specific checkpoints (e.g. between excited ports); it is never
     /// observed *inside* the single most expensive, uninterruptible step of a run (openEMS's own
     /// SetupFDTD()/CalcECOperator() -- see EMSSimulationPipelineBridge.mm's own doc comment on
-    /// setupFDTDOperator()), which can still be executing well after Document.close() returns and the
+    /// prepareRunDirectory()), which can still be executing well after Document.close() returns and the
     /// Document itself deallocates. Deleting the scratch directory out from under that still-running
     /// background thread (which is chdir'd into a subdirectory of it) crashed the app the moment it
     /// next asked the OS for its own current working directory. Scheduling the deletion on this same
     /// serial executionQueue -- rather than running it inline wherever the caller happens to be --
     /// guarantees it's ordered after whatever job closure is currently occupying that queue, exactly
     /// like every other cross-thread access this class already serializes through it.
-    func cleanUpDirectory(_ directory: URL) {
+    func cleanUpDirectory(_ directory: URL, lockFileDescriptor: Int32?) {
         executionQueue.async {
             try? FileManager.default.removeItem(at: directory)
+            if let lockFileDescriptor {
+                _ = flock(lockFileDescriptor, LOCK_UN)
+                Darwin.close(lockFileDescriptor)
+            }
         }
     }
 
@@ -356,7 +361,6 @@ final class JobScheduler {
         let config: EMSConfigBridge
         let packageDir: String
         let kicadCliPath: String
-        let helperPath: String
     }
 
     /// Marks the next queued job `.running` and dispatches its execution, if nothing else is
@@ -381,8 +385,7 @@ final class JobScheduler {
         }
         let context = ExecutionContext(
             pipeline: document.pipeline(forSimulationNamed: next.simulationName), config: document.config,
-            packageDir: document.pipelineDirectory.path, kicadCliPath: AppPaths.resolveKicadCli(),
-            helperPath: AppPaths.kicadQueryHelperPath)
+            packageDir: document.pipelineDirectory.path, kicadCliPath: AppPaths.resolveKicadCli())
         executionQueue.async { [weak self] in
             self?.execute(next, context: context)
         }
@@ -400,13 +403,19 @@ final class JobScheduler {
             do {
                 try context.pipeline.ensureStage(
                     stage, config: context.config, packageDir: context.packageDir,
-                    kicadCliPath: context.kicadCliPath, kicadQueryHelperPath: context.helperPath,
+                    kicadCliPath: context.kicadCliPath,
                     progress: { [weak self] progress in
                         DispatchQueue.main.async {
                             self?.updateProgress(job, progress)
                         }
                     })
-                DispatchQueue.main.async { [weak self] in self?.finishExecution(job, error: nil) }
+                let wroteOutput = context.pipeline.lastEnsureStageWroteOutput()
+                DispatchQueue.main.async { [weak self] in
+                    if wroteOutput {
+                        job.document?.updateChangeCount(.changeDone)
+                    }
+                    self?.finishExecution(job, error: nil)
+                }
             } catch {
                 DispatchQueue.main.async { [weak self] in self?.finishExecution(job, error: error) }
             }
@@ -448,12 +457,56 @@ final class JobScheduler {
             } else {
                 let toRemove = dependents(of: job)
                 jobs.removeAll { candidate in toRemove.contains { $0.id == candidate.id } }
-                job.status = .failed(error.localizedDescription)
+                let diskIsFull = Self.isDiskFull(error as NSError)
+                let message = diskIsFull
+                    ? "KiEMS stopped \(job.kind.displayName.lowercased()) for “\(job.simulationName)” because the disk is full. Free some disk space, then run it again.\n\n\(error.localizedDescription)"
+                    : error.localizedDescription
+                NSLog("[sim] [%@] %@ failed: %@", job.simulationName, job.kind.displayName, message)
+                job.status = .failed(message)
+                if diskIsFull {
+                    presentDiskFullAlert(for: job, detail: error.localizedDescription)
+                }
             }
         } else {
             jobs.removeAll { $0.id == job.id }
         }
         startNextIfIdle()
         notifyObservers()
+    }
+
+    /// HDF5 can wrap ENOSPC in its own error text, while Foundation file operations preserve it as
+    /// either a Cocoa "write out of space" error or an underlying POSIX error. Recognize all three
+    /// forms so a full disk always gets a specific explanation instead of an opaque run failure.
+    private static func isDiskFull(_ error: NSError) -> Bool {
+        if error.domain == NSPOSIXErrorDomain, error.code == Int(ENOSPC) {
+            return true
+        }
+        if error.domain == NSCocoaErrorDomain,
+           error.code == CocoaError.Code.fileWriteOutOfSpace.rawValue {
+            return true
+        }
+        let description = error.localizedDescription.lowercased()
+        if description.contains("no space left on device") ||
+            description.contains("disk is full") ||
+            description.contains("disk full") {
+            return true
+        }
+        if let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError {
+            return isDiskFull(underlying)
+        }
+        return false
+    }
+
+    private func presentDiskFullAlert(for job: Job, detail: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "Simulation stopped: disk is full"
+        alert.informativeText = "KiEMS could not finish \(job.kind.displayName.lowercased()) for “\(job.simulationName)”. Free some disk space, then run it again.\n\n\(detail)"
+        alert.addButton(withTitle: "OK")
+        if let window = job.document?.windowControllers.first?.window {
+            alert.beginSheetModal(for: window)
+        } else {
+            alert.runModal()
+        }
     }
 }

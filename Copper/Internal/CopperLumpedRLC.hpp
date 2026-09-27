@@ -27,9 +27,9 @@
 #include <cstdint>
 #include <vector>
 
-#include "CopperYeeGrid.hpp"
-#include "FDTD/operator.h"
 #include "ContinuousStructure.h"
+#include "CopperOperator.hpp"
+#include "CopperYeeGrid.hpp"
 
 namespace copper {
 
@@ -64,6 +64,7 @@ struct CopperLumpedRLCCell {
 /// at all. Returns one entry per (cell, axis) pair covered by every SERIES CSPropLumpedElement's
 /// snapped box; empty if there are none (matching buildExcitation()'s own "empty, not an error"
 /// tolerance for "nothing to do here").
-std::vector<CopperLumpedRLCCell> discoverLumpedRLC(ContinuousStructure& csx, const CopperYeeGrid& grid, Operator& op);
+std::vector<CopperLumpedRLCCell> discoverLumpedRLC(ContinuousStructure& csx, const CopperYeeGrid& grid,
+                                                     CopperOperator& op);
 
 } // namespace copper

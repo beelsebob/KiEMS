@@ -844,7 +844,7 @@ final class SourceListViewController: NSViewController {
 
     /// A reveal requested while rootNodes doesn't yet hold the right scope's data -- switchScope(to:
     /// thenReveal:) stashes it here and refreshBoardData()'s own completion applies it once the new
-    /// scope's nodes have actually loaded (a real subprocess round trip -- see refreshBoardData's own
+    /// scope's nodes have actually loaded (board parsing is asynchronous -- see refreshBoardData's own
     /// doc comment -- so this can't just happen synchronously inline).
     private enum PendingReveal {
         case net(String)
@@ -950,7 +950,6 @@ final class SourceListViewController: NSViewController {
         planeComboBox.addItems(withObjectValues: document.config.metalLayerNames)
         planeComboBox.stringValue = currentPlaneSelection
 
-        let helperPath = AppPaths.kicadQueryHelperPath
         let currentScope = scope
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let nodes: [SourceListNode]
@@ -968,7 +967,7 @@ final class SourceListViewController: NSViewController {
             case .netClass:
                 let names: [String]
                 do {
-                    names = try KicadBoardBridge.netClasses(forBoard: kicadPcbPath, kicadQueryHelperPath: helperPath)
+                    names = try KicadBoardBridge.netClasses(forBoard: kicadPcbPath)
                         .sorted(by: Self.byLocalizedStandardName)
                 } catch {
                     names = []
@@ -979,9 +978,9 @@ final class SourceListViewController: NSViewController {
                 var names: [String] = []
                 var footprints: [KicadFootprintInfo] = []
                 do {
-                    names = try KicadBoardBridge.allNets(forBoard: kicadPcbPath, kicadQueryHelperPath: helperPath)
+                    names = try KicadBoardBridge.allNets(forBoard: kicadPcbPath)
                         .sorted(by: Self.byLocalizedStandardName)
-                    footprints = try KicadBoardBridge.footprints(forBoard: kicadPcbPath, kicadQueryHelperPath: helperPath)
+                    footprints = try KicadBoardBridge.footprints(forBoard: kicadPcbPath)
                 } catch {
                     queryError = error.localizedDescription
                 }
@@ -990,7 +989,7 @@ final class SourceListViewController: NSViewController {
             case .footprint:
                 var footprints: [KicadFootprintInfo] = []
                 do {
-                    footprints = try KicadBoardBridge.footprints(forBoard: kicadPcbPath, kicadQueryHelperPath: helperPath)
+                    footprints = try KicadBoardBridge.footprints(forBoard: kicadPcbPath)
                         .sorted { Self.byLocalizedStandardName($0.reference, $1.reference) }
                 } catch {
                     queryError = error.localizedDescription
@@ -1769,6 +1768,22 @@ final class SourceListViewController: NSViewController {
         return entryAutoIncluding(identity, in: sim)
     }
 
+    /// Absorb-only pins require the net's geometry but do not make it a simulated signal path.
+    /// Unlike entryAutoIncluding(_:in:), a newly-created entry therefore starts GeometryOnly;
+    /// an existing entry keeps whichever inclusion level the user already selected.
+    private func entryAutoIncludingGeometryOnly(_ node: SourceListNode,
+                                                 in sim: EMSSimulationBridge) -> EMSInvolvedNetBridge? {
+        if let existing = matchingEntry(for: node) {
+            return existing
+        }
+        guard case .pin(_, let pin) = node.kind, !pin.netName.isEmpty else { return nil }
+        let entry = sim.addInvolvedNet(with: .net)
+        entry.net = pin.netName
+        entry.inclusionLevel = .geometryOnly
+        entry.useExplicitPinSelections()
+        return entry
+    }
+
     // MARK: - Differential-pair mirroring
 
     private static let alwaysMirrorDifferentialPairChangesDefaultsKey = "AlwaysMirrorDifferentialPairChanges"
@@ -1957,7 +1972,7 @@ final class SourceListViewController: NSViewController {
                 // the termination this pin already had.
                 entry.setPinAbsorbOnly(true, withFootprint: footprintReference, pin: pin.number)
             } else {
-                entry.setPinProbed(false, absorbSignal: true, withFootprint: footprintReference, pin: pin.number)
+                entry.setPinAbsorbOnly(false, withFootprint: footprintReference, pin: pin.number)
             }
         }
         refreshAfterToggle(node)
@@ -1974,7 +1989,7 @@ final class SourceListViewController: NSViewController {
             guard let entry = matchingEntry(for: node) else { return }
             entry.setPinProbed(true, absorbSignal: absorb, withFootprint: footprintReference, pin: pin.number)
         } else if absorb {
-            guard let entry = entryAutoIncluding(node, in: sim) else {
+            guard let entry = entryAutoIncludingGeometryOnly(node, in: sim) else {
                 absorbCheckbox.state = .off
                 return
             }
@@ -2031,6 +2046,17 @@ final class SourceListViewController: NSViewController {
     @objc private func mainExcitationToggled() {
         guard let node = selectedNode, let excitation = matchingExcitation(for: node) else { return }
         excitation.isMain = mainExcitationCheckbox.state == .on
+        if !excitation.isMain {
+            // Frequency and amplitude are required for a non-main excitation. Populate sensible
+            // values when revealing those controls so a newly-created (main-by-default) source
+            // remains valid even if the document is saved before either field is edited.
+            if excitation.frequency == nil {
+                excitation.frequency = NSNumber(value: document?.config.frequencyStart ?? 0)
+            }
+            if excitation.amplitude == nil {
+                excitation.amplitude = NSNumber(value: 1)
+            }
+        }
         if case .pin(_, let pin) = node.kind,
            let partner = differentialPairPartnerPin(footprintReference: excitation.footprintReference,
                                                      netName: pin.netName),

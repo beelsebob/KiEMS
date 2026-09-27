@@ -18,20 +18,21 @@ final class DocumentWindowController: NSWindowController {
     private let boardPopUp = NSPopUpButton()
     private let statusLabel = NSTextField(labelWithString: "")
     private let progressIndicator = NSProgressIndicator()
+    private let mainContentLoadingIndicator = NSProgressIndicator()
     private var simulationListViewController: SimulationListViewController?
     private var propertiesViewController: SimulationPropertiesViewController?
-    private var involvedNetsViewController: InvolvedNetsViewController?
+    private var wholeBoardViewController: WholeBoardViewController?
     private var sourceListViewController: SourceListViewController?
     private var geometryViewController: GeometryViewController?
     private var simulationResultsViewController: SimulationResultsViewController?
     private var fieldViewerViewController: FieldViewerViewController?
     private var noSelectionLabel: NSTextField?
-    private var propertiesBackgroundStrip: NSView?
     /// Kept in sync by simulationListVC.onSelectionChanged -- sourceListVC.onInvolvedNetsChanged
     /// needs to know which simulation to invalidate the geometry cache for, but doesn't carry that
     /// index itself (it fires for whichever simulation SourceListViewController is currently
     /// editing, which is always this one).
     private var currentSimulationIndex: Int?
+    private var isLoadingBoard = false
 
     private var boardCandidates: [URL] = []
     private let kicadFileWatcher = KicadFileWatcher()
@@ -243,8 +244,14 @@ final class DocumentWindowController: NSWindowController {
         let propertiesVC = SimulationPropertiesViewController(document: ownerDocument)
         propertiesViewController = propertiesVC
 
-        let involvedNetsVC = InvolvedNetsViewController(document: ownerDocument)
-        involvedNetsViewController = involvedNetsVC
+        // Replaces the old involved-nets/source-list configuration duo outright (see
+        // WholeBoardViewController's own doc comment) -- sourceListVC below is still instantiated
+        // and wired (its own non-UI logic, e.g. cache invalidation, is unaffected), just never
+        // unhidden any more. propertiesVC is different: still the exact same settings panel, just
+        // reparented into wholeBoardVC's own info column instead of sitting above sourceListVC --
+        // see WholeBoardViewController.loadView()'s own comment on where its view actually ends up.
+        let wholeBoardVC = WholeBoardViewController(document: ownerDocument, propertiesViewController: propertiesVC)
+        wholeBoardViewController = wholeBoardVC
 
         // Each simulation's 3 outline sub-entries (Geometry/Simulation Results/Field Viewer) present
         // one of these instead of the properties/involved-nets/source-list trio -- see
@@ -254,8 +261,7 @@ final class DocumentWindowController: NSWindowController {
 
         let sourceListVC = SourceListViewController(document: ownerDocument)
         sourceListViewController = sourceListVC
-        // See includedToggled's own doc comment -- involvedNetsVC's table has no way to know on its
-        // own that a net/net-class/pin's "Included in Simulation" state just changed. A net's
+        // See includedToggled's own doc comment. A net's
         // membership/impedance/plane/width also change what the geometry step actually builds
         // (port placement, hull extent), so a stale cached geometry/error from before the edit
         // can't keep being shown either -- see GeometryViewController.invalidateCache's own doc
@@ -264,25 +270,24 @@ final class DocumentWindowController: NSWindowController {
         // worst case is one avoidable re-run next time Geometry is opened.)
         let simulationResultsVC = SimulationResultsViewController(document: ownerDocument)
         simulationResultsViewController = simulationResultsVC
-        sourceListVC.onInvolvedNetsChanged = { [weak involvedNetsVC, weak geometryVC, weak simulationResultsVC, weak self] in
-            involvedNetsVC?.refresh()
+        let configurationChanged = { [weak geometryVC, weak simulationResultsVC, weak self] in
             if let index = self?.currentSimulationIndex {
                 geometryVC?.invalidateCache(forSimulationIndex: index)
                 simulationResultsVC?.invalidateCache(forSimulationIndex: index)
+                // A stale "succeeded" dot must not keep showing once the cache it was reporting on is
+                // gone -- see PhaseState.invalid's own doc comment. All 3 rows: an involved-nets edit
+                // can change the geometry step's own output (port placement, hull extent), which
+                // invalidates .simulation (and therefore .fieldPostProcessing, which has no cache of
+                // its own -- see JobKind's own doc comment) too. Read via the `self.simulationListViewController`
+                // property (not a captured local) since simulationListVC itself isn't declared until
+                // later in this same setup function.
+                for kind in JobKind.allCases {
+                    self?.simulationListViewController?.setInvalid(forSimulationIndex: index, kind: kind)
+                }
             }
         }
-        // Selecting a row in the involved-nets summary table jumps the source list below it to that
-        // same net/pin (switching scope first if needed) and, via its own selection notification,
-        // fills in the detail pane on the right the same way manually browsing to it would -- see
-        // InvolvedNetsViewController.SelectionTarget's own doc comment.
-        involvedNetsVC.onSelectionRequested = { [weak sourceListVC] target in
-            switch target {
-            case .net(let name):
-                sourceListVC?.revealNet(named: name)
-            case .footprintPin(let footprintReference, let padNumber):
-                sourceListVC?.revealPin(footprintReference: footprintReference, padNumber: padNumber)
-            }
-        }
+        sourceListVC.onInvolvedNetsChanged = configurationChanged
+        wholeBoardVC.onConfigurationChanged = configurationChanged
         let fieldViewerVC = FieldViewerViewController(document: ownerDocument)
         fieldViewerViewController = fieldViewerVC
 
@@ -292,13 +297,13 @@ final class DocumentWindowController: NSWindowController {
         // hadn't run yet, that callback would hit not-yet-built controls (e.g. SourceListViewController's
         // `excitationFieldsContainer: NSStackView!`, still nil) and crash.
         _ = propertiesVC.view
-        _ = involvedNetsVC.view
+        _ = wholeBoardVC.view
         _ = sourceListVC.view
         _ = geometryVC.view
         _ = simulationResultsVC.view
         _ = fieldViewerVC.view
         propertiesVC.view.translatesAutoresizingMaskIntoConstraints = false
-        involvedNetsVC.view.translatesAutoresizingMaskIntoConstraints = false
+        wholeBoardVC.view.translatesAutoresizingMaskIntoConstraints = false
         sourceListVC.view.translatesAutoresizingMaskIntoConstraints = false
         geometryVC.view.translatesAutoresizingMaskIntoConstraints = false
         simulationResultsVC.view.translatesAutoresizingMaskIntoConstraints = false
@@ -307,41 +312,14 @@ final class DocumentWindowController: NSWindowController {
         simulationResultsVC.view.isHidden = true
         fieldViewerVC.view.isHidden = true
 
-        // Shown instead of propertiesVC.view (hidden entirely, not just its fields disabled)
-        // whenever nothing is selected -- see simulationListVC.onSelectionChanged below.
+        // Shown instead of wholeBoardVC.view whenever nothing is selected -- see
+        // simulationListVC.onSelectionChanged below.
         let noSelectionLabel = NSTextField(labelWithString: "No Simulation Selected")
         noSelectionLabel.font = .systemFont(ofSize: 28, weight: .medium)
         noSelectionLabel.textColor = .tertiaryLabelColor
         noSelectionLabel.alignment = .center
         noSelectionLabel.translatesAutoresizingMaskIntoConstraints = false
         self.noSelectionLabel = noSelectionLabel
-
-        // Spans the full window width (including behind the sidebar -- added to contentView before
-        // it, below, so the sidebar's glass draws on top) and sits flush against topSectionView's
-        // bottom edge with no gap. Its own bottom tracks propertiesVC.view's bottom directly, so it
-        // still fits exactly when the via-settings disclosure row expands/collapses.
-        let propertiesBackgroundStrip = NSView()
-        propertiesBackgroundStrip.wantsLayer = true
-        propertiesBackgroundStrip.layer?.backgroundColor =
-            NSColor(red: 0.55, green: 0.62, blue: 0.72, alpha: 0.16).cgColor
-        propertiesBackgroundStrip.translatesAutoresizingMaskIntoConstraints = false
-        self.propertiesBackgroundStrip = propertiesBackgroundStrip
-
-        // A hard edge at the strip's own bottom, same "hairline" recipe as topSectionSeparator --
-        // sourceListVC.view (below) touches this line directly, so it reads as a clean boundary
-        // rather than the blue simply fading into whatever's beneath it.
-        let propertiesBackgroundSeparator = NSView()
-        propertiesBackgroundSeparator.wantsLayer = true
-        propertiesBackgroundSeparator.layer?.backgroundColor = NSColor.separatorColor.cgColor
-        propertiesBackgroundSeparator.translatesAutoresizingMaskIntoConstraints = false
-        propertiesBackgroundStrip.addSubview(propertiesBackgroundSeparator)
-        NSLayoutConstraint.activate([
-            propertiesBackgroundSeparator.leadingAnchor.constraint(equalTo: propertiesBackgroundStrip.leadingAnchor),
-            propertiesBackgroundSeparator.trailingAnchor.constraint(
-                equalTo: propertiesBackgroundStrip.trailingAnchor),
-            propertiesBackgroundSeparator.bottomAnchor.constraint(equalTo: propertiesBackgroundStrip.bottomAnchor),
-            propertiesBackgroundSeparator.heightAnchor.constraint(equalToConstant: 1),
-        ])
 
         let simulationListVC = SimulationListViewController(document: ownerDocument)
         simulationListViewController = simulationListVC
@@ -361,18 +339,32 @@ final class DocumentWindowController: NSWindowController {
         }
         // See SimulationPropertiesViewController.onGeometryParametersChanged's own doc comment --
         // a hull-padding/via/ground-net edit invalidates whichever simulation it belongs to.
-        propertiesVC.onGeometryParametersChanged = { [weak geometryVC, weak simulationResultsVC] index in
+        propertiesVC.onGeometryParametersChanged = { [weak geometryVC, weak simulationResultsVC,
+                                                       weak simulationListVC, weak wholeBoardVC] index in
             geometryVC?.invalidateCache(forSimulationIndex: index)
             simulationResultsVC?.invalidateCache(forSimulationIndex: index)
+            // See onInvolvedNetsChanged's identical comment on why all 3 rows.
+            for kind in JobKind.allCases {
+                simulationListVC?.setInvalid(forSimulationIndex: index, kind: kind)
+            }
+            // Hull padding changes the fast region highlight, while padding/inset/spacing all
+            // change Setup's asynchronous stitching-via plan -- see
+            // WholeBoardViewController.refreshActivityHighlight().
+            wholeBoardVC?.refreshActivityHighlight()
         }
         // See SimulationPropertiesViewController.onFDTDParametersChanged's own doc comment -- unlike
         // onGeometryParametersChanged above, this only touches simulation results (max. timesteps
         // doesn't affect the geometry step's output at all), and for every simulation in the document
         // at once, since it's a document-level setting rather than a per-simulation one.
-        propertiesVC.onFDTDParametersChanged = { [weak simulationResultsVC, weak self] in
+        propertiesVC.onFDTDParametersChanged = { [weak simulationResultsVC, weak simulationListVC, weak self] in
             guard let simulationCount = self?.ownerDocument.config.simulations.count else { return }
             for index in 0..<simulationCount {
                 simulationResultsVC?.invalidateCache(forSimulationIndex: index)
+                // Geometry itself is untouched by an FDTD-only parameter -- only .simulation/
+                // .fieldPostProcessing go invalid (see onInvolvedNetsChanged's identical comment on
+                // why the latter tags along with the former).
+                simulationListVC?.setInvalid(forSimulationIndex: index, kind: .simulation)
+                simulationListVC?.setInvalid(forSimulationIndex: index, kind: .fieldPostProcessing)
             }
         }
         propertiesVC.onResultsParametersChanged = { [weak simulationResultsVC, weak self] index in
@@ -383,19 +375,19 @@ final class DocumentWindowController: NSWindowController {
         // simulation's "Geometry" row has no other way to know a background pipeline run started/
         // finished for it.
         geometryVC.onRunStateChanged = { [weak simulationListVC] index, isRunning in
-            simulationListVC?.setGeometryRowBusy(isRunning, forSimulationIndex: index)
+            simulationListVC?.setBusy(isRunning, forSimulationIndex: index, kind: .geometryGeneration)
         }
         // Deliberately no equivalent relay of simulationResultsVC.onRunStateChanged here -- that
         // fires as soon as the *combined* run starts, before it's known whether the Simulation
         // Results stage itself has actually begun (it computes geometry first). The "Simulation
-        // Results" row's own .running transition instead comes only from onProgressChanged's
-        // .simulation-phase case below, via setSimulationResultsProgress -- see that method's own
+        // Results" row's own .inProgress transition instead comes only from onProgressChanged's
+        // .simulation-phase case below, via setProgress(...,kind: .simulation) -- see setBusy's own
         // doc comment.
         //
         // Drives the "Geometry" row's own progress fraction while GeometryViewController's own run
         // is in flight (selecting the Geometry row directly).
         geometryVC.onProgressChanged = { [weak simulationListVC] index, progress in
-            simulationListVC?.setGeometryProgress(progress.fraction, forSimulationIndex: index)
+            simulationListVC?.setProgress(progress.fraction, forSimulationIndex: index, kind: .geometryGeneration)
         }
         // simulationResultsVC's own ensureStage:.results run computes geometry/grid as an
         // unavoidable first step (see EMSPipelineProgressPhase's own doc comment) -- reuse the
@@ -405,87 +397,96 @@ final class DocumentWindowController: NSWindowController {
         simulationResultsVC.onProgressChanged = { [weak simulationListVC] index, progress in
             switch progress.phase {
             case .geometry:
-                simulationListVC?.setGeometryRowBusy(true, forSimulationIndex: index)
-                simulationListVC?.setGeometryProgress(progress.fraction, forSimulationIndex: index)
+                simulationListVC?.setBusy(true, forSimulationIndex: index, kind: .geometryGeneration)
+                simulationListVC?.setProgress(progress.fraction, forSimulationIndex: index, kind: .geometryGeneration)
             case .settingUp, .simulation:
                 // Reaching either of these phases at all means geometry itself already succeeded.
                 // .settingUp's own `fraction` is always 0 (openEMS gives no real progress signal for
                 // it -- see EMSPipelineProgressPhase's own doc comment), so the row's own progress
                 // ring just sits at 0% (still correctly showing "busy") for that portion -- the real,
                 // ticking countdown lives in SimulationResultsViewController's own bigger status view.
-                simulationListVC?.setGeometryRowCompleted(true, forSimulationIndex: index)
-                simulationListVC?.setSimulationResultsProgress(progress.fraction, forSimulationIndex: index)
+                simulationListVC?.setCompleted(true, forSimulationIndex: index, kind: .geometryGeneration)
+                simulationListVC?.setProgress(progress.fraction, forSimulationIndex: index, kind: .simulation)
             @unknown default:
                 break
             }
         }
         // See GeometryViewController.onRunFinished's doc comment -- swaps the "Geometry" row's
-        // circular progress ring for its green/yellow completed/error status icon.
+        // circular progress ring for its green/yellow succeeded/failed status icon.
         geometryVC.onRunFinished = { [weak simulationListVC] index, success in
-            simulationListVC?.setGeometryRowCompleted(success, forSimulationIndex: index)
+            simulationListVC?.setCompleted(success, forSimulationIndex: index, kind: .geometryGeneration)
         }
         // simulationResultsVC's own run can fail in either its geometry or simulation phase (see its
         // onRunFinished's own doc comment) -- attribute the outcome to whichever row was actually in
         // flight when it stopped. A failure during .geometry never reached the Simulation Results row
-        // at all, so that row is left untouched (still .notStarted).
+        // at all, so that row is left untouched (still .invalid).
         simulationResultsVC.onRunFinished = { [weak simulationListVC] index, reachedPhase, success in
             switch reachedPhase {
             case .geometry:
-                simulationListVC?.setGeometryRowCompleted(success, forSimulationIndex: index)
+                simulationListVC?.setCompleted(success, forSimulationIndex: index, kind: .geometryGeneration)
             case .settingUp, .simulation:
-                simulationListVC?.setGeometryRowCompleted(true, forSimulationIndex: index)
-                simulationListVC?.setSimulationResultsRowCompleted(success, forSimulationIndex: index)
+                simulationListVC?.setCompleted(true, forSimulationIndex: index, kind: .geometryGeneration)
+                simulationListVC?.setCompleted(success, forSimulationIndex: index, kind: .simulation)
             @unknown default:
                 break
             }
         }
         // A job cancelled (via the Jobs window) rather than genuinely failed -- revert whichever
-        // row(s) were showing progress back to "not started" instead of the yellow error state
+        // row(s) were showing progress back to "invalid" instead of the yellow failed state
         // onRunFinished(_:_:false) would otherwise show. See GeometryViewController.onRunCancelled's
         // own doc comment.
         geometryVC.onRunCancelled = { [weak simulationListVC] index in
-            simulationListVC?.resetGeometryRow(forSimulationIndex: index)
+            simulationListVC?.setInvalid(forSimulationIndex: index, kind: .geometryGeneration)
         }
         simulationResultsVC.onRunCancelled = { [weak simulationListVC] index, reachedPhase in
             switch reachedPhase {
             case .geometry:
-                simulationListVC?.resetGeometryRow(forSimulationIndex: index)
+                simulationListVC?.setInvalid(forSimulationIndex: index, kind: .geometryGeneration)
             case .settingUp, .simulation:
                 // Geometry genuinely finished before the .settingUp/.simulation-phase job was
-                // cancelled -- leave that row showing "completed", only reset the Simulation Results one.
-                simulationListVC?.setGeometryRowCompleted(true, forSimulationIndex: index)
-                simulationListVC?.resetSimulationResultsRow(forSimulationIndex: index)
+                // cancelled -- leave that row showing "succeeded", only reset the Simulation Results one.
+                simulationListVC?.setCompleted(true, forSimulationIndex: index, kind: .geometryGeneration)
+                simulationListVC?.setInvalid(forSimulationIndex: index, kind: .simulation)
             @unknown default:
                 break
             }
         }
-        fieldViewerVC.onRunCancelled = { [weak simulationListVC] index in
-            simulationListVC?.resetFieldViewerRow(forSimulationIndex: index)
+        // FieldViewerViewController watches all 3 of a simulation's own prerequisite jobs (see its
+        // own onRunStateChanged doc comment for why), so every callback below fires for
+        // .geometryGeneration/.simulation progress too, not just .fieldPostProcessing -- those rows
+        // are already correctly driven by geometryVC/simulationResultsVC's own wiring above, so only
+        // relay a `.fieldPostProcessing`-kind report into the sidebar's own Field Viewer row here.
+        // Forwarding every kind unfiltered (the previous behavior) was a real bug: a geometry-phase
+        // progress report made the Field Viewer row's own indicator fill up while geometry was still
+        // building, with no simulation/field work having started at all.
+        fieldViewerVC.onRunCancelled = { [weak simulationListVC] index, kind in
+            guard kind == .fieldPostProcessing else { return }
+            simulationListVC?.setInvalid(forSimulationIndex: index, kind: kind)
         }
-        // Field Viewer's own row -- a plain busy/progress/completed trio like Geometry's own, no
-        // phase-switching needed (see FieldViewerViewController.syncFromScheduler()'s own doc comment
-        // on why its progress is already phase-agnostic).
-        fieldViewerVC.onRunStateChanged = { [weak simulationListVC] index, isRunning in
-            simulationListVC?.setFieldViewerRowBusy(isRunning, forSimulationIndex: index)
+        fieldViewerVC.onRunStateChanged = { [weak simulationListVC] index, kind, isRunning in
+            guard kind == .fieldPostProcessing else { return }
+            simulationListVC?.setBusy(isRunning, forSimulationIndex: index, kind: kind)
         }
-        fieldViewerVC.onProgressChanged = { [weak simulationListVC] index, progress in
-            simulationListVC?.setFieldViewerProgress(progress.fraction, forSimulationIndex: index)
+        fieldViewerVC.onProgressChanged = { [weak simulationListVC] index, kind, progress in
+            guard kind == .fieldPostProcessing else { return }
+            simulationListVC?.setProgress(progress.fraction, forSimulationIndex: index, kind: kind)
         }
-        fieldViewerVC.onRunFinished = { [weak simulationListVC] index, success in
-            simulationListVC?.setFieldViewerRowCompleted(success, forSimulationIndex: index)
+        fieldViewerVC.onRunFinished = { [weak simulationListVC] index, kind, success in
+            guard kind == .fieldPostProcessing else { return }
+            simulationListVC?.setCompleted(success, forSimulationIndex: index, kind: kind)
         }
         simulationListVC.onSelectionChanged = { [weak self] selection in
             guard let self else { return }
 
+            // The outline owns a valid initial selection before the linked board's asynchronous
+            // preview exists. Retain that selection, but never reveal any of its content until the
+            // load callback below removes the main-pane spinner.
+            guard !self.isLoadingBoard else { return }
+
             // Exactly one of these 4 is shown at a time -- selecting a simulation itself shows the
-            // properties/involved-nets/source-list trio (as before Phase 5's outline-view rework);
-            // selecting one of its 3 sub-entries shows that entry's own view controller instead,
-            // filling the same region. setSelectedSimulationIndex is only called on the trio for the
-            // .simulation case (not unconditionally for every case, as this used to do) --
-            // InvolvedNetsViewController.refresh() re-shows its own view asynchronously once it has
-            // rows, regardless of which of the 4 is actually on screen; calling it while a sub-entry
-            // (e.g. Geometry) is showing let it pop back up over that sub-entry's view once its
-            // background refresh finished.
+            // properties/whole-board/source-list trio; selecting one of its 3 sub-entries shows that
+            // entry's own view controller instead, filling the same region. setSelectedSimulationIndex
+            // is only called on the trio for the .simulation case, not unconditionally for every case.
             var showsSimulationDetail = false
             var showsGeometry = false
             var showsSimulationResults = false
@@ -495,7 +496,8 @@ final class DocumentWindowController: NSWindowController {
                 showsSimulationDetail = true
                 self.currentSimulationIndex = index
                 self.propertiesViewController?.setSelectedSimulationIndex(index)
-                self.involvedNetsViewController?.setSelectedSimulationIndex(index)
+                self.wholeBoardViewController?.setSelectedSimulationIndex(index)
+                self.wholeBoardViewController?.refresh()
                 self.sourceListViewController?.setSelectedSimulationIndex(index)
             case .geometry(let index):
                 showsGeometry = true
@@ -509,18 +511,36 @@ final class DocumentWindowController: NSWindowController {
             case nil:
                 self.currentSimulationIndex = nil
                 self.propertiesViewController?.setSelectedSimulationIndex(nil)
-                self.involvedNetsViewController?.setSelectedSimulationIndex(nil)
+                self.wholeBoardViewController?.setSelectedSimulationIndex(nil)
                 self.sourceListViewController?.setSelectedSimulationIndex(nil)
             }
 
-            self.propertiesViewController?.view.isHidden = !showsSimulationDetail
-            self.involvedNetsViewController?.view.isHidden = !showsSimulationDetail
-            self.sourceListViewController?.view.isHidden = !showsSimulationDetail
-            self.propertiesBackgroundStrip?.isHidden = !showsSimulationDetail
-            self.geometryViewController?.view.isHidden = !showsGeometry
-            self.simulationResultsViewController?.view.isHidden = !showsSimulationResults
-            self.fieldViewerViewController?.view.isHidden = !showsFieldViewer
-            self.noSelectionLabel?.isHidden = selection != nil
+            // sourceListVC is never shown any more -- wholeBoardVC fills this whole case's region
+            // alone. Still instantiated and wired (not ripped out) since nothing about its own
+            // non-UI logic was wrong -- just permanently unreachable now that nothing ever unhides
+            // its view. propertiesVC.view is different: it's reparented inside wholeBoardVC's own
+            // info column now (see WholeBoardViewController.loadView()), so *it* toggles
+            // propertiesVC.view.isHidden itself, based on whether anything's selected on the board
+            // -- touching it here too would just race with that.
+            if self.isLoadingBoard {
+                // refresh() can begin during the selection callback above; do not let the normal
+                // visibility update at the end of this callback undo the loading overlay it just set.
+                self.wholeBoardViewController?.view.isHidden = true
+                self.sourceListViewController?.view.isHidden = true
+                self.geometryViewController?.view.isHidden = true
+                self.simulationResultsViewController?.view.isHidden = true
+                self.fieldViewerViewController?.view.isHidden = true
+                self.fieldViewerViewController?.setViewerVisible(false)
+                self.noSelectionLabel?.isHidden = true
+            } else {
+                self.wholeBoardViewController?.view.isHidden = !showsSimulationDetail
+                self.sourceListViewController?.view.isHidden = true
+                self.geometryViewController?.view.isHidden = !showsGeometry
+                self.simulationResultsViewController?.view.isHidden = !showsSimulationResults
+                self.fieldViewerViewController?.view.isHidden = !showsFieldViewer
+                self.fieldViewerViewController?.setViewerVisible(showsFieldViewer)
+                self.noSelectionLabel?.isHidden = selection != nil
+            }
         }
         simulationListVC.view.translatesAutoresizingMaskIntoConstraints = false
 
@@ -530,17 +550,22 @@ final class DocumentWindowController: NSWindowController {
         let rightRegion = NSView()
         rightRegion.translatesAutoresizingMaskIntoConstraints = false
 
-        contentView.addSubview(propertiesBackgroundStrip)
+        mainContentLoadingIndicator.style = .spinning
+        mainContentLoadingIndicator.controlSize = .large
+        mainContentLoadingIndicator.isDisplayedWhenStopped = false
+        mainContentLoadingIndicator.translatesAutoresizingMaskIntoConstraints = false
+        mainContentLoadingIndicator.isHidden = true
+
         contentView.addSubview(topSectionView)
         contentView.addSubview(simulationListVC.view)
         contentView.addSubview(rightRegion)
-        rightRegion.addSubview(propertiesVC.view)
-        rightRegion.addSubview(involvedNetsVC.view)
+        rightRegion.addSubview(wholeBoardVC.view)
         rightRegion.addSubview(sourceListVC.view)
         rightRegion.addSubview(geometryVC.view)
         rightRegion.addSubview(simulationResultsVC.view)
         rightRegion.addSubview(fieldViewerVC.view)
         rightRegion.addSubview(noSelectionLabel)
+        rightRegion.addSubview(mainContentLoadingIndicator)
 
         NSLayoutConstraint.activate([
             topSectionView.topAnchor.constraint(equalTo: contentView.topAnchor),
@@ -561,38 +586,25 @@ final class DocumentWindowController: NSWindowController {
             rightRegion.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
             rightRegion.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
 
-            propertiesVC.view.topAnchor.constraint(equalTo: rightRegion.topAnchor),
-            propertiesVC.view.leadingAnchor.constraint(equalTo: rightRegion.leadingAnchor, constant: 16),
-            propertiesVC.view.trailingAnchor.constraint(lessThanOrEqualTo: rightRegion.trailingAnchor, constant: -16),
-
             noSelectionLabel.centerXAnchor.constraint(equalTo: rightRegion.centerXAnchor),
             noSelectionLabel.centerYAnchor.constraint(equalTo: rightRegion.centerYAnchor),
 
-            // These reference propertiesVC.view, a descendant of rightRegion added above -- valid now
-            // that both share contentView as a common ancestor (activating a constraint between views
-            // with no common ancestor yet doesn't fail cleanly, it hangs).
-            propertiesBackgroundStrip.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            propertiesBackgroundStrip.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            propertiesBackgroundStrip.topAnchor.constraint(equalTo: topSectionView.bottomAnchor),
-            propertiesBackgroundStrip.bottomAnchor.constraint(equalTo: propertiesVC.view.bottomAnchor),
+            mainContentLoadingIndicator.centerXAnchor.constraint(equalTo: rightRegion.centerXAnchor),
+            mainContentLoadingIndicator.centerYAnchor.constraint(equalTo: rightRegion.centerYAnchor),
 
-            // involvedNetsVC.view: same full-width, no-margin placement as sourceListVC.view below it
-            // (see that constraint block's own comment) -- touches the blue bar's bottom directly.
-            involvedNetsVC.view.topAnchor.constraint(equalTo: propertiesBackgroundStrip.bottomAnchor),
-            involvedNetsVC.view.leadingAnchor.constraint(equalTo: rightRegion.leadingAnchor),
-            involvedNetsVC.view.trailingAnchor.constraint(equalTo: rightRegion.trailingAnchor),
+            // wholeBoardVC.view now fills the *whole* region, same as geometryVC.view/
+            // simulationResultsVC.view/fieldViewerVC.view below -- it replaces the entire old
+            // involved-nets/source-list duo, not just a strip above it. propertiesVC.view is no
+            // longer positioned here at all -- see WholeBoardViewController.loadView()'s own
+            // comment on where it actually lives now.
+            wholeBoardVC.view.topAnchor.constraint(equalTo: rightRegion.topAnchor),
+            wholeBoardVC.view.leadingAnchor.constraint(equalTo: rightRegion.leadingAnchor),
+            wholeBoardVC.view.trailingAnchor.constraint(equalTo: rightRegion.trailingAnchor),
+            wholeBoardVC.view.bottomAnchor.constraint(equalTo: rightRegion.bottomAnchor),
 
-            // sourceListVC.view: touches involvedNetsVC.view's bottom, touches the sidebar's right
-            // edge (no margin, unlike propertiesVC.view's 16pt inset above), and extends to the
-            // window's bottom -- independent of propertiesVC.view now, not stacked below it with
-            // spacing. Trailing is an equality, not propertiesVC.view's lessThanOrEqualTo --
-            // sourceListVC.view now hosts an NSSplitView internally (see SourceListViewController),
-            // which has no intrinsic content width of its own to fall back on (its arranged
-            // subviews' sizes are meant to be imposed top-down by the divider, not derived
-            // bottom-up from content the way a plain NSStackView's is). Without a real width pinned
-            // all the way down, the whole chain -- lacking any other width-determining constraint --
-            // collapsed to zero.
-            sourceListVC.view.topAnchor.constraint(equalTo: involvedNetsVC.view.bottomAnchor),
+            // sourceListVC.view is always hidden now (see onSelectionChanged) -- this just keeps its
+            // own internal layout non-conflicting, nothing user-visible.
+            sourceListVC.view.topAnchor.constraint(equalTo: rightRegion.topAnchor),
             sourceListVC.view.leadingAnchor.constraint(equalTo: rightRegion.leadingAnchor),
             sourceListVC.view.trailingAnchor.constraint(equalTo: rightRegion.trailingAnchor),
             sourceListVC.view.bottomAnchor.constraint(equalTo: rightRegion.bottomAnchor),
@@ -614,6 +626,34 @@ final class DocumentWindowController: NSWindowController {
             fieldViewerVC.view.trailingAnchor.constraint(equalTo: rightRegion.trailingAnchor),
             fieldViewerVC.view.bottomAnchor.constraint(equalTo: rightRegion.bottomAnchor),
         ])
+
+        wholeBoardVC.onLoadingStateChanged = { [weak self] isLoading in
+            self?.setBoardLoading(isLoading)
+        }
+        // On reopen, restoreLinkedBoardIfNeeded() has already reconstructed the picker state above;
+        // this is the actual asynchronous KiCad parse/preview load whose completion gates the UI.
+        if ownerDocument.config.kicadPcbPath != nil {
+            wholeBoardVC.refresh()
+        }
+    }
+
+    private func setBoardLoading(_ isLoading: Bool) {
+        isLoadingBoard = isLoading
+        simulationListViewController?.view.isHidden = isLoading
+        mainContentLoadingIndicator.isHidden = !isLoading
+        if isLoading {
+            mainContentLoadingIndicator.startAnimation(nil)
+            wholeBoardViewController?.view.isHidden = true
+            sourceListViewController?.view.isHidden = true
+            geometryViewController?.view.isHidden = true
+            simulationResultsViewController?.view.isHidden = true
+            fieldViewerViewController?.view.isHidden = true
+            fieldViewerViewController?.setViewerVisible(false)
+            noSelectionLabel?.isHidden = true
+        } else {
+            mainContentLoadingIndicator.stopAnimation(nil)
+            simulationListViewController?.notifyCurrentSelection()
+        }
     }
 
     /// Restores the project/board picker header and net lists for a document that was opened from
@@ -752,25 +792,23 @@ final class DocumentWindowController: NSWindowController {
     private func importBoard(_ boardURL: URL) {
         let doc = ownerDocument
 
+        setBoardLoading(true)
         statusLabel.stringValue = "Linking \(boardURL.lastPathComponent)…"
         progressIndicator.startAnimation(nil)
         projectPathField.isEnabled = false
         boardPopUp.isEnabled = false
 
         let config = doc.config
-        let helperPath = AppPaths.kicadQueryHelperPath
-
         // Just a stackup query against boardURL directly (see KicadBoardBridge.linkKicadPCB's doc
         // comment) -- no kicad-cli export, no copy into the document, so this doesn't touch the
         // filesystem at all and works whether or not the document has ever been saved. Still a
-        // real subprocess round trip (shells out to the query helper), so kept off the main thread.
+        // parsing work, so it remains off the main thread.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
-                try KicadBoardBridge.linkKicadPCB(boardURL.path, config: config, kicadQueryHelperPath: helperPath)
+                try KicadBoardBridge.linkKicadPCB(boardURL.path, config: config)
                 // Fetched here (already off the main thread) rather than in importSucceeded, so the
                 // ground-net guess below has real data to work with instead of a second async hop.
-                let nets = (try? KicadBoardBridge.allNets(forBoard: boardURL.path,
-                                                            kicadQueryHelperPath: helperPath)) ?? []
+                let nets = (try? KicadBoardBridge.allNets(forBoard: boardURL.path)) ?? []
                 DispatchQueue.main.async {
                     self?.importSucceeded(boardURL: boardURL, document: doc, availableNets: nets)
                 }
@@ -790,6 +828,11 @@ final class DocumentWindowController: NSWindowController {
         document.updateChangeCount(.changeDone)
         propertiesViewController?.refreshNetLists()
         sourceListViewController?.refreshBoardData()
+        if wholeBoardViewController?.refresh() != true {
+            // Relinking the already-loaded board does not start another preview request, so there
+            // will be no loading callback to clear the link-stage overlay in that case.
+            setBoardLoading(false)
+        }
         simulationListViewController?.setProjectAvailable(true)
 
         let siblings = (try? FileManager.default.contentsOfDirectory(
@@ -816,6 +859,7 @@ final class DocumentWindowController: NSWindowController {
     }
 
     private func importFailed(error: Error) {
+        setBoardLoading(false)
         progressIndicator.stopAnimation(nil)
         projectPathField.isEnabled = true
         boardPopUp.isEnabled = true
@@ -838,9 +882,15 @@ final class DocumentWindowController: NSWindowController {
         guard ownerDocument.config.kicadPcbPath != nil else { return }
         propertiesViewController?.refreshNetLists()
         sourceListViewController?.refreshBoardData()
+        wholeBoardViewController?.invalidate()
+        wholeBoardViewController?.refresh()
         for index in ownerDocument.config.simulations.indices {
             geometryViewController?.invalidateCache(forSimulationIndex: index)
             simulationResultsViewController?.invalidateCache(forSimulationIndex: index)
+            // See onInvolvedNetsChanged's identical comment on why all 3 rows.
+            for kind in JobKind.allCases {
+                simulationListViewController?.setInvalid(forSimulationIndex: index, kind: kind)
+            }
         }
     }
 
@@ -850,7 +900,7 @@ final class DocumentWindowController: NSWindowController {
     /// of reusing anything already resolved in memory. Unlike handleLinkedKicadFilesChanged() above
     /// (which only fires when KicadFileWatcher notices the linked .kicad_pcb itself changed on
     /// disk), this exists for the case nothing on disk changed but the *interpretation* of it did --
-    /// e.g. a fix to how this app's own KiCad-board query helper resolves nets/footprints/pins --
+    /// e.g. a fix to how libkicad resolves nets/footprints/pins --
     /// which no automatic cache invalidation elsewhere in this app is designed to detect, since
     /// EMSSimulationPipelineBridge's own ensurePrepared: only ever re-derives _paths (and therefore
     /// re-runs exportKicadPcb/importStackup/resolveSimulationPorts) once per pipeline instance's
@@ -860,6 +910,10 @@ final class DocumentWindowController: NSWindowController {
             geometryViewController?.invalidateCache(forSimulationIndex: index)
             simulationResultsViewController?.invalidateCache(forSimulationIndex: index)
             fieldViewerViewController?.invalidateCache(forSimulationIndex: index)
+            // See onInvolvedNetsChanged's identical comment on why all 3 rows.
+            for kind in JobKind.allCases {
+                simulationListViewController?.setInvalid(forSimulationIndex: index, kind: kind)
+            }
         }
     }
 

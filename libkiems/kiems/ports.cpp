@@ -5,6 +5,7 @@
 #include <cmath>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 
@@ -54,32 +55,184 @@ std::size_t _argminAbsDiff(const std::vector<double>& v, double target) {
     return best;
 }
 
+void _fft(std::vector<std::complex<double>>& values, bool inverse) {
+    const std::size_t count = values.size();
+    for (std::size_t i = 1, j = 0; i < count; ++i) {
+        std::size_t bit = count >> 1;
+        for (; j & bit; bit >>= 1) {
+            j ^= bit;
+        }
+        j ^= bit;
+        if (i < j) {
+            std::swap(values[i], values[j]);
+        }
+    }
+    for (std::size_t length = 2; length <= count; length <<= 1) {
+        const double angle = (inverse ? 2.0 : -2.0) * M_PI / static_cast<double>(length);
+        const std::complex<double> step(std::cos(angle), std::sin(angle));
+        for (std::size_t start = 0; start < count; start += length) {
+            std::complex<double> phase(1.0, 0.0);
+            for (std::size_t offset = 0; offset < length / 2; ++offset) {
+                const std::complex<double> even = values[start + offset];
+                const std::complex<double> odd = values[start + offset + length / 2] * phase;
+                values[start + offset] = even + odd;
+                values[start + offset + length / 2] = even - odd;
+                phase *= step;
+            }
+        }
+    }
+    if (inverse) {
+        const double scale = 1.0 / static_cast<double>(count);
+        for (auto& value : values) {
+            value *= scale;
+        }
+    }
+}
+
+bool _uniformGrid(const std::vector<double>& values, double& step) {
+    if (values.size() < 2) {
+        step = 0.0;
+        return true;
+    }
+    step = values[1] - values[0];
+    for (std::size_t index = 2; index < values.size(); ++index) {
+        const double expected = values[0] + static_cast<double>(index) * step;
+        const double tolerance = std::max(std::abs(step) * 1e-5,
+                                          std::numeric_limits<double>::epsilon() * std::abs(expected) * 32.0);
+        if (std::abs(values[index] - expected) > tolerance) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Evaluates a uniformly sampled signal at an arbitrary, uniformly spaced set of frequencies using
+// Bluestein's chirp-Z identity. Unlike a normal FFT, neither the first frequency nor the frequency
+// spacing has to coincide with an FFT bin, so this is numerically equivalent to the direct DFT
+// below while reducing a real 300,000-sample x 1,001-frequency probe from O(NM) transcendental-heavy
+// work to O((N+M) log(N+M)). The kernel spectrum is cached because every U/I probe in one simulation
+// has the same time/frequency grids.
+class ChirpZPlan {
+public:
+    ChirpZPlan(const std::vector<double>& time, const std::vector<double>& frequency, double dt, double df)
+        : _inputCount(time.size()),
+          _outputCount(frequency.size()),
+          _timeStart(time.empty() ? 0.0 : time.front()),
+          _timeStep(dt),
+          _frequencyStart(frequency.empty() ? 0.0 : frequency.front()),
+          _frequencyStep(df),
+          _inputChirp(_inputCount),
+          _outputChirp(_outputCount) {
+        _fftSize = 1;
+        const std::size_t convolutionSize = _inputCount + _outputCount - 1;
+        while (_fftSize < convolutionSize) {
+            _fftSize <<= 1;
+        }
+
+        std::vector<std::complex<double>> kernel(_fftSize, {0.0, 0.0});
+        const auto unitPhase = [](double angle) {
+            const double reduced = std::remainder(angle, 2.0 * M_PI);
+            return std::complex<double>(std::cos(reduced), std::sin(reduced));
+        };
+        for (std::size_t n = 0; n < _inputCount; ++n) {
+            const double nd = static_cast<double>(n);
+            _inputChirp[n] = unitPhase(-2.0 * M_PI * _frequencyStart * _timeStep * nd -
+                                       M_PI * _frequencyStep * _timeStep * nd * nd);
+        }
+        for (std::size_t k = 0; k < _outputCount; ++k) {
+            const double kd = static_cast<double>(k);
+            _outputChirp[k] = unitPhase(-2.0 * M_PI * (_frequencyStart + kd * _frequencyStep) * _timeStart -
+                                        M_PI * _frequencyStep * _timeStep * kd * kd);
+        }
+        for (std::ptrdiff_t m = -static_cast<std::ptrdiff_t>(_inputCount - 1);
+             m <= static_cast<std::ptrdiff_t>(_outputCount - 1); ++m) {
+            const double md = static_cast<double>(m);
+            kernel[static_cast<std::size_t>(m + static_cast<std::ptrdiff_t>(_inputCount - 1))] =
+                unitPhase(M_PI * _frequencyStep * _timeStep * md * md);
+        }
+        _fft(kernel, false);
+        _kernelSpectrum = std::move(kernel);
+    }
+
+    bool matches(const std::vector<double>& time, const std::vector<double>& frequency, double dt, double df) const {
+        return time.size() == _inputCount && frequency.size() == _outputCount &&
+               (time.empty() || time.front() == _timeStart) && dt == _timeStep &&
+               (frequency.empty() || frequency.front() == _frequencyStart) && df == _frequencyStep;
+    }
+
+    std::vector<std::complex<double>> transform(const std::vector<double>& samples) const {
+        std::vector<std::complex<double>> work(_fftSize, {0.0, 0.0});
+        for (std::size_t n = 0; n < _inputCount; ++n) {
+            work[n] = samples[n] * _inputChirp[n];
+        }
+        _fft(work, false);
+        for (std::size_t index = 0; index < _fftSize; ++index) {
+            work[index] *= _kernelSpectrum[index];
+        }
+        _fft(work, true);
+
+        std::vector<std::complex<double>> result(_outputCount);
+        for (std::size_t k = 0; k < _outputCount; ++k) {
+            result[k] = work[k + _inputCount - 1] * _outputChirp[k];
+        }
+        return result;
+    }
+
+private:
+    std::size_t _inputCount;
+    std::size_t _outputCount;
+    std::size_t _fftSize;
+    double _timeStart;
+    double _timeStep;
+    double _frequencyStart;
+    double _frequencyStep;
+    std::vector<std::complex<double>> _inputChirp;
+    std::vector<std::complex<double>> _outputChirp;
+    std::vector<std::complex<double>> _kernelSpectrum;
+};
+
 } // namespace
 
 std::expected<std::vector<std::complex<double>>, std::string> dftTimeToFreq(const std::vector<double>& t,
                                                                              const std::vector<double>& val,
                                                                              const std::vector<double>& freq,
                                                                              const std::string& signalType) {
-    std::vector<std::complex<double>> fVal(freq.size(), std::complex<double>(0, 0));
-    for (std::size_t nF = 0; nF < freq.size(); ++nF) {
-        std::complex<double> sum(0, 0);
-        for (std::size_t n = 0; n < t.size(); ++n) {
-            sum += val[n] * std::exp(std::complex<double>(0, -2 * M_PI * freq[nF] * t[n]));
+    if (t.size() != val.size()) {
+        return std::unexpected("Time and signal sample counts do not match");
+    }
+    if (signalType != "pulse" && signalType != "periodic") {
+        return std::unexpected("Unknown signal type: " + signalType);
+    }
+
+    std::vector<std::complex<double>> fVal;
+    double dt = 0.0;
+    double df = 0.0;
+    if (!t.empty() && !freq.empty() && _uniformGrid(t, dt) && _uniformGrid(freq, df)) {
+        static thread_local std::unique_ptr<ChirpZPlan> cachedPlan;
+        if (!cachedPlan || !cachedPlan->matches(t, freq, dt, df)) {
+            cachedPlan = std::make_unique<ChirpZPlan>(t, freq, dt, df);
         }
-        fVal[nF] = sum;
+        fVal = cachedPlan->transform(val);
+    } else {
+        fVal.assign(freq.size(), std::complex<double>(0, 0));
+        for (std::size_t nF = 0; nF < freq.size(); ++nF) {
+            std::complex<double> sum(0, 0);
+            for (std::size_t n = 0; n < t.size(); ++n) {
+                sum += val[n] * std::exp(std::complex<double>(0, -2 * M_PI * freq[nF] * t[n]));
+            }
+            fVal[nF] = sum;
+        }
     }
     if (signalType == "pulse") {
-        const double dt = t.size() > 1 ? t[1] - t[0] : 0;
+        const double scalingDt = t.size() > 1 ? t[1] - t[0] : 0;
         for (auto& v : fVal) {
-            v *= dt;
+            v *= scalingDt;
         }
     } else if (signalType == "periodic") {
         const double n = static_cast<double>(t.size());
         for (auto& v : fVal) {
             v /= n;
         }
-    } else {
-        return std::unexpected("Unknown signal type: " + signalType);
     }
     for (auto& v : fVal) {
         v *= 2.0;

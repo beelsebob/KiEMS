@@ -48,6 +48,9 @@ struct PadPosition {
     std::string footprintRef;
     std::string padNumber;
     std::string netName;
+    /// KiCad's canonical schematic electrical type (for example "input", "bidirectional", or
+    /// "power_in"). Empty when the PCB pad has no linked schematic pin metadata.
+    std::string pinType;
     double xMm = 0;
     double yMm = 0;
     double orientationDeg = 0;
@@ -81,6 +84,7 @@ struct FootprintPin {
     std::string number;
     std::string function; // empty if the pad has no assigned pin function
     std::string netName; // empty if the pad isn't connected to any net
+    std::string pinType; // KiCad schematic electrical type; empty when unavailable
 };
 
 /// One footprint on the board: its reference designator, KiCad's "Value" field text (e.g. "100nF",
@@ -92,11 +96,20 @@ struct FootprintInfo {
     std::vector<FootprintPin> pins;
 };
 
-/// One copper layer's configured display color, from the currently active PCB color theme (see
+/// One enabled layer's configured display color, from the currently active PCB color theme (see
 /// layerColors()) -- `hex` is `COLOR4D::ToHexString()`'s own format ("#RRGGBB" or "#RRGGBBAA").
 struct LayerColor {
-    std::string name; // Same as StackupLayer::name for the matching copper layer, e.g. "F.Cu"
+    std::string name; // KiCad board-layer name, e.g. "F.Cu", "F.Fab", or "Edge.Cuts"
     std::string hex;
+};
+
+/// The effective PCB-editor color override for one net. KiCad stores explicit per-net colors and
+/// net-class colors separately in the project file; the PCB renderer gives an explicit net color
+/// precedence over the net's effective (possibly composite) net-class color. `netColors()` exposes
+/// that resolved result so clients do not need to reproduce KiCad's net-class matching rules.
+struct NetColor {
+    std::string name;
+    std::string hex; // COLOR4D::ToHexString(), "#RRGGBB" or "#RRGGBBAA"
 };
 
 /// One plated through-hole feature on the board -- either a plain KiCad via (PCB_VIA, not tied to
@@ -162,6 +175,22 @@ struct PolygonLoop {
 struct CopperPolygon {
     std::string netName;
     std::string copperLayerName;
+    /// True when this polygon came from a filled zone rather than a track or pad. Consumers use
+    /// this distinction only for display opacity; it remains ordinary copper geometry.
+    bool zone = false;
+    /// Populated only when this contour came from a footprint pad. Together these preserve the
+    /// physical pin identity through the whole-board triangulation path; tracks/vias and zones
+    /// leave both empty.
+    std::string footprintRef;
+    std::string padNumber;
+    PolygonLoop loop;
+};
+
+/// One silkscreen contour, optionally owned by a footprint. Board-level drawings leave
+/// footprintRef empty; footprint graphics/text retain their reference so display clients can
+/// visually de-emphasise silk belonging to components outside the selected simulation.
+struct SilkscreenPolygon {
+    std::string footprintRef;
     PolygonLoop loop;
 };
 
@@ -171,6 +200,35 @@ struct BoardGeometry {
     std::vector<CopperPolygon> copper;
     std::vector<PolygonLoop> frontMaskOpenings;
     std::vector<PolygonLoop> backMaskOpenings;
+    std::vector<SilkscreenPolygon> frontSilkscreen;
+    std::vector<SilkscreenPolygon> backSilkscreen;
+};
+
+/// One enabled layer from the board file, in KiCad's own display/layer order.  This is deliberately
+/// separate from the physical stackup: documentation, fabrication, adhesive, courtyard and other
+/// technical layers have no stackup entry but are still valid preview layers.
+struct BoardLayerInfo {
+    std::string name;
+    bool copper = false;
+    bool solderMask = false;
+};
+
+/// Geometry for one enabled board layer. Copper retains the ownership metadata used by the setup
+/// screen's picking/highlighting path. Other layers are anonymous filled contours. For solder mask
+/// KiCad returns the apertures, so callers form the visible coating by subtracting these contours
+/// from the board outline.
+struct BoardLayerGeometry {
+    BoardLayerInfo layer;
+    std::vector<CopperPolygon> copper;
+    std::vector<PolygonLoop> contours;
+    std::vector<PolygonLoop> boardOutline;
+};
+
+struct BoardBounds {
+    double xMinMm = 0;
+    double xMaxMm = 0;
+    double yMinMm = 0;
+    double yMaxMm = 0;
 };
 
 /// One mesh triangle of a footprint's real, placed 3D model -- mirrors STEP_COMPONENT_TRIANGLE
@@ -185,6 +243,7 @@ struct ComponentTriangle {
     double bx = 0, by = 0, bz = 0;
     double cx = 0, cy = 0, cz = 0;
     double r = 0, g = 0, b = 0, a = 0;
+    std::string footprintReference;
 };
 
 /// Result of exporting specific footprints' own real, placed 3D models (via
@@ -212,6 +271,10 @@ struct ComponentModelExportResult {
 };
 
 namespace detail {
+
+/// Initializes the process-global KiCad/wx runtime without loading a board. GUI applications must
+/// call this once on their main thread before dispatching board queries to worker queues.
+bool initializeRaw(std::string& error);
 
 struct RawStringListResult {
     bool ok = false;
@@ -283,6 +346,18 @@ struct RawBoardGeometryResult {
     BoardGeometry geometry;
 };
 
+struct RawBoardLayersResult {
+    bool ok = false;
+    std::string error;
+    std::vector<BoardLayerInfo> layers;
+};
+
+struct RawBoardLayerGeometryResult {
+    bool ok = false;
+    std::string error;
+    BoardLayerGeometry geometry;
+};
+
 struct RawStackupResult {
     bool ok = false;
     std::string error;
@@ -295,10 +370,22 @@ struct RawLayerColorsResult {
     std::vector<LayerColor> colors;
 };
 
+struct RawNetColorsResult {
+    bool ok = false;
+    std::string error;
+    std::vector<NetColor> colors;
+};
+
 RawPadCountsResult countPadsRaw(const std::string& projectPath, const std::string& boardPath);
 
 RawNetNameResult netForFootprintPinRaw(const std::string& projectPath, const std::string& boardPath,
                                         const std::string& footprintRef, const std::string& pin);
+
+/// The highest-priority constituent of the effective net class KiCad resolves for one concrete
+/// net. Reuses RawNetNameResult's single string payload across the C++20/C++23 boundary; its
+/// `netName` field contains the class.
+RawNetNameResult netClassForNetRaw(const std::string& projectPath, const std::string& boardPath,
+                                    const std::string& netName);
 
 RawPadResult resolvePinRaw(const std::string& projectPath, const std::string& boardPath,
                             const std::string& footprintRef, const std::string& pin);
@@ -316,7 +403,7 @@ RawTracksOnNetResult tracksOnNetRaw(const std::string& projectPath, const std::s
 /// unlike looping allNets()+padsOnNet() per net, this is one single board load, not one per net. See
 /// kiems::LumpedComponentConfig's own doc comment on the diagonal-part cardinal-bridge
 /// interference check for why that matters: a real board can have on the order of a hundred nets,
-/// and each libkicad_query call is its own subprocess that reloads and reparses the whole board from
+/// and each public query may otherwise reload and reparse the whole board from
 /// scratch.
 RawPadsOnNetResult allPadsRaw(const std::string& projectPath, const std::string& boardPath);
 
@@ -326,9 +413,17 @@ RawZonesResult zonesRaw(const std::string& projectPath, const std::string& board
 
 RawBoardGeometryResult boardGeometryRaw(const std::string& projectPath, const std::string& boardPath);
 
+RawBoardLayersResult boardLayersRaw(const std::string& projectPath, const std::string& boardPath);
+
+RawBoardLayerGeometryResult boardLayerGeometryRaw(const std::string& projectPath,
+                                                    const std::string& boardPath,
+                                                    const std::string& layerName);
+
 RawStackupResult stackupRaw(const std::string& projectPath, const std::string& boardPath);
 
 RawLayerColorsResult layerColorsRaw(const std::string& projectPath, const std::string& boardPath);
+
+RawNetColorsResult netColorsRaw(const std::string& projectPath, const std::string& boardPath);
 
 RawStringListResult netClassesRaw(const std::string& projectPath, const std::string& boardPath);
 

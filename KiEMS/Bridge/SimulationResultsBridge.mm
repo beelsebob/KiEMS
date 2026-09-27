@@ -8,6 +8,7 @@
 #include <set>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "kiems/config.hpp"
@@ -58,6 +59,46 @@ NSString* responseLabel(const kiems::PortConfig& measuredPort) {
                                         measuredPort.padNumber().c_str()];
 }
 
+/// Connectivity among the nets present in this simulation, with each included two-terminal R/L/C
+/// acting as an edge. This deliberately uses SimulationConfig::lumpedComponents(), not every
+/// passive on the PCB: only components successfully resolved into the actual model may make a
+/// result count as received from an excitation.
+class IncludedNetConnectivity {
+public:
+    explicit IncludedNetConnectivity(const SimulationConfig& simulation) {
+        for (const auto& component : simulation.lumpedComponents()) {
+            unite(component.net1(), component.net2());
+        }
+    }
+
+    bool connected(const std::string& first, const std::string& second) {
+        return find(first) == find(second);
+    }
+
+private:
+    std::string find(const std::string& net) {
+        const auto existing = parent.find(net);
+        if (existing == parent.end()) {
+            parent.emplace(net, net);
+            return net;
+        }
+        if (existing->second == net) {
+            return net;
+        }
+        existing->second = find(existing->second);
+        return existing->second;
+    }
+
+    void unite(const std::string& first, const std::string& second) {
+        if (first.empty() || second.empty()) return;
+        const std::string firstRoot = find(first);
+        const std::string secondRoot = find(second);
+        if (firstRoot != secondRoot) parent[firstRoot] = secondRoot;
+    }
+
+    std::unordered_map<std::string, std::string> parent;
+};
+
 } // namespace
 
 @implementation EMSResultsPort
@@ -81,12 +122,14 @@ NSString* responseLabel(const kiems::PortConfig& measuredPort) {
 @implementation EMSResultsSParamCurve
 - (instancetype)initWithOutputPort:(NSInteger)outputPort
                               label:(NSString*)label
+                           received:(BOOL)received
                         magnitudeDb:(NSArray<NSNumber*>*)magnitudeDb
                            phaseDeg:(NSArray<NSNumber*>*)phaseDeg {
     self = [super init];
     if (self) {
         _outputPort = outputPort;
         _label = [label copy];
+        _received = received;
         _magnitudeDb = [magnitudeDb copy];
         _phaseDeg = [phaseDeg copy];
     }
@@ -292,6 +335,7 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
 
     NSMutableArray<EMSResultsSParamSet*>* sParamSets = [NSMutableArray array];
     NSMutableArray<EMSResultsSmith*>* smithCharts = [NSMutableArray array];
+    IncludedNetConnectivity includedNetConnectivity(simConfig);
     for (std::int32_t i = 0; i < portCount; ++i) {
         if (!simConfig.ports()[static_cast<std::size_t>(i)].excite()) {
             continue;
@@ -318,6 +362,9 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
             [curves addObject:[[EMSResultsSParamCurve alloc]
                                    initWithOutputPort:j
                                                  label:responseLabel(simConfig.ports()[static_cast<std::size_t>(j)])
+                                              received:includedNetConnectivity.connected(
+                                                           simConfig.ports()[static_cast<std::size_t>(i)].netName(),
+                                                           simConfig.ports()[static_cast<std::size_t>(j)].netName())
                                            magnitudeDb:toNSArray(magDb)
                                               phaseDeg:toNSArray(phaseDeg)]];
         }
@@ -378,15 +425,15 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
         NSArray<NSNumber*>* zAngle = diffZ.has_value() ? toNSArray(diffZ->angleDeg) : nil;
 
         NSArray<NSNumber*>* nDelay = nil;
-        if (pair.startN().resolvedIndex().has_value() && pair.stopN().resolvedIndex().has_value()) {
-            if (const auto d = postprocessor.getDelay(*pair.stopN().resolvedIndex(), *pair.startN().resolvedIndex());
+        if (pair.negativeExcitation().resolvedIndex().has_value() && pair.negativeProbe().resolvedIndex().has_value()) {
+            if (const auto d = postprocessor.getDelay(*pair.negativeProbe().resolvedIndex(), *pair.negativeExcitation().resolvedIndex());
                 d.has_value()) {
                 nDelay = toNSArray(*d, 1e9);
             }
         }
         NSArray<NSNumber*>* pDelay = nil;
-        if (pair.startP().resolvedIndex().has_value() && pair.stopP().resolvedIndex().has_value()) {
-            if (const auto d = postprocessor.getDelay(*pair.stopP().resolvedIndex(), *pair.startP().resolvedIndex());
+        if (pair.positiveExcitation().resolvedIndex().has_value() && pair.positiveProbe().resolvedIndex().has_value()) {
+            if (const auto d = postprocessor.getDelay(*pair.positiveProbe().resolvedIndex(), *pair.positiveExcitation().resolvedIndex());
                 d.has_value()) {
                 pDelay = toNSArray(*d, 1e9);
             }
@@ -395,8 +442,8 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
         if (sdd11 == nil && sdd21 == nil && zMag == nil && nDelay == nil && pDelay == nil) {
             continue;
         }
-        NSString* name = pair.name().has_value() ? @(pair.name()->c_str())
-                                                   : [NSString stringWithFormat:@"Diff Pair %zu", idx + 1];
+        const std::string displayName = pair.displayName();
+        NSString* name = @(displayName.c_str());
         [diffPairs addObject:[[EMSResultsDiffPair alloc] initWithName:name
                                                                 sdd11Db:sdd11
                                                                 sdd21Db:sdd21
@@ -546,15 +593,15 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
     // not four charts for the pair's individual conductors.
     for (std::size_t pairIndex = 0; pairIndex < simConfig.diffPairs().size(); ++pairIndex) {
         const DifferentialPairConfig& pair = simConfig.diffPairs()[pairIndex];
-        if (!pair.correct() || !pair.startP().resolvedIndex().has_value() ||
-            !pair.startN().resolvedIndex().has_value() || !pair.stopP().resolvedIndex().has_value() ||
-            !pair.stopN().resolvedIndex().has_value()) {
+        if (!pair.correct() || !pair.positiveExcitation().resolvedIndex().has_value() ||
+            !pair.negativeExcitation().resolvedIndex().has_value() || !pair.positiveProbe().resolvedIndex().has_value() ||
+            !pair.negativeProbe().resolvedIndex().has_value()) {
             continue;
         }
-        const std::int32_t sp = *pair.startP().resolvedIndex();
-        const std::int32_t sn = *pair.startN().resolvedIndex();
-        const std::int32_t ep = *pair.stopP().resolvedIndex();
-        const std::int32_t en = *pair.stopN().resolvedIndex();
+        const std::int32_t sp = *pair.positiveExcitation().resolvedIndex();
+        const std::int32_t sn = *pair.negativeExcitation().resolvedIndex();
+        const std::int32_t ep = *pair.positiveProbe().resolvedIndex();
+        const std::int32_t en = *pair.negativeProbe().resolvedIndex();
         differentialPorts.insert(sp);
         differentialPorts.insert(sn);
         differentialPorts.insert(ep);
@@ -573,8 +620,8 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
         for (std::size_t f = 0; f < hdd.size(); ++f) {
             hdd[f] = 0.5 * ((*sEpSp)[f] - (*sEpSn)[f] - (*sEnSp)[f] + (*sEnSn)[f]);
         }
-        NSString* name = pair.name().has_value() ? @(pair.name()->c_str())
-                                                   : [NSString stringWithFormat:@"Differential Pair %zu", pairIndex + 1];
+        const std::string displayName = pair.displayName();
+        NSString* name = @(displayName.c_str());
         appendEye(name, true, hdd);
     }
 

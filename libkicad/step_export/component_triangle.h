@@ -1,6 +1,8 @@
 #ifndef LIBKICAD_STEP_EXPORT_COMPONENT_TRIANGLE_H
 #define LIBKICAD_STEP_EXPORT_COMPONENT_TRIANGLE_H
 
+#include <string>
+
 // Deliberately its own tiny, dependency-free header (no OCCT/KiCad includes at all) rather than a
 // nested type of STEP_PCB_MODEL: exporter_step.h only forward-declares STEP_PCB_MODEL (its own
 // full definition pulls in enough of OCCT/KiCad's own headers, in a fragile enough include order,
@@ -19,6 +21,7 @@ struct STEP_COMPONENT_TRIANGLE
     double bx, by, bz;
     double cx, cy, cz;
     double r, g, b, a;
+    std::string footprintReference;
 };
 
 #endif

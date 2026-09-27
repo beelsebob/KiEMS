@@ -8,7 +8,7 @@ import Cocoa
 /// checks) -- this view only owns how to *display* whichever not-ready state that machine is in.
 ///
 /// A caller needing extra accessory content alongside the core status/progress display (e.g.
-/// SimulationResultsViewController's excitation icon and energy-decay level indicator) can anchor
+/// SimulationResultsViewController's excitation icon and energy-history chart) can anchor
 /// its own subviews directly to this view's public `progressBar`/`timeEstimateLabel` -- both live
 /// inside this view's own hierarchy but are exposed for exactly that purpose, the same way the
 /// original per-VC implementations positioned those accessories relative to their own local
@@ -75,7 +75,13 @@ final class ProgressStatusView: NSView {
     private var currentJobStack: NSStackView!
 
     private var stack: NSStackView!
+    private var stackCenterYConstraint: NSLayoutConstraint!
     private(set) var state: State = .hidden
+
+    /// Top of the currently-visible status rows. Owners with accessory content below this view can
+    /// use this anchor to centre the complete status/accessory group instead of centring this
+    /// core block and then allowing the accessories to make the composition bottom-heavy.
+    var contentTopAnchor: NSLayoutYAxisAnchor { stack.topAnchor }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -177,14 +183,21 @@ final class ProgressStatusView: NSView {
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
 
+        stackCenterYConstraint = stack.centerYAnchor.constraint(equalTo: centerYAnchor)
         NSLayoutConstraint.activate([
             stack.centerXAnchor.constraint(equalTo: centerXAnchor),
-            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            stackCenterYConstraint,
             stack.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 24),
             stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -24),
         ])
 
         setState(.hidden)
+    }
+
+    /// Disables this view's normal self-centring while an owner centres a larger group containing
+    /// the status rows and its own accessory views. Re-enabling restores the default shared layout.
+    func setUsesDefaultVerticalCentering(_ usesDefaultCentering: Bool) {
+        stackCenterYConstraint.isActive = usesDefaultCentering
     }
 
     /// `animated` smooths just `.progress`'s own determinate-fraction transition (and the current-job

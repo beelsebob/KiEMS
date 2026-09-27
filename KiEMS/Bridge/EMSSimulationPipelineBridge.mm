@@ -9,7 +9,10 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <map>
 #include <optional>
+#include <regex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -22,16 +25,17 @@
 #include "kiems/simulation.hpp"
 #include "kiems/simulation_data.hpp"
 
-// Forward-declare-only boundary header (see its own file comment) -- safe alongside every
-// kiems header above despite those using the *installed* CSXCAD/openEMS forms and Copper's
-// own internals using the flat/source-checkout forms, for the same reason
-// kiems/main.cpp's own runGPUPortInProcess() can: this header never exposes a complete
-// openEMS/ContinuousStructure definition itself. This is what lets the App run Copper's GPU engine
+#include "CopperUtils/logging.hpp"
+
+// Forward-declare-only boundary header (see its own file comment) keeps Copper's private
+// implementation details out of the bridge while accepting libkiems's CSXCAD geometry. This lets
+// the App run Copper's GPU engine
 // in-process (see runGPUPortInProcess() below) instead of posix_spawning kiems_fdtd_worker as
 // a separate process -- KiEMS links Copper.framework directly (see the Xcode project's
 // own build settings), while libkiems itself still never does.
 #include "CopperFDTDRunner.h"
 
+using kiems::DifferentialPairConfig;
 using kiems::EMSConfig;
 using kiems::FDTDBackend;
 using kiems::PathsConfig;
@@ -49,6 +53,11 @@ using kiems::SimulationStage;
            targetEnergyChangeDB:(double)targetEnergyChangeDB
                  absoluteEnergy:(double)absoluteEnergy
                duringExcitation:(BOOL)duringExcitation
+          simulationTimeSeconds:(double)simulationTimeSeconds
+         excitationEndTimeSeconds:(double)excitationEndTimeSeconds
+      plannedSimulationTimeSeconds:(double)plannedSimulationTimeSeconds
+                    excitationF0Hz:(double)excitationF0Hz
+                    excitationFcHz:(double)excitationFcHz
                  excitedNetName:(nullable NSString*)excitedNetName {
     self = [super init];
     if (self) {
@@ -58,6 +67,11 @@ using kiems::SimulationStage;
         _targetEnergyChangeDB = targetEnergyChangeDB;
         _absoluteEnergy = absoluteEnergy;
         _duringExcitation = duringExcitation;
+        _simulationTimeSeconds = simulationTimeSeconds;
+        _excitationEndTimeSeconds = excitationEndTimeSeconds;
+        _plannedSimulationTimeSeconds = plannedSimulationTimeSeconds;
+        _excitationF0Hz = excitationF0Hz;
+        _excitationFcHz = excitationFcHz;
         _excitedNetName = [excitedNetName copy];
     }
     return self;
@@ -93,6 +107,54 @@ std::expected<std::filesystem::path, std::string> currentPathOrError() {
 constexpr NSInteger kCancelledErrorCode = 2;
 constexpr const char* kCancelledMessage = "Cancelled";
 
+// Persisted pipeline products are valid only for the exact resolved, single-simulation config
+// that produced them. In particular, an Absorbing checkbox changes the physical CSXCAD model but
+// not the shape of geometry.json or the S-parameter CSVs, so merely finding those files is not
+// enough to prove they can be reused. Bump this version whenever a solver/serialization change
+// makes otherwise-identical saved products unsafe to restore.
+constexpr const char* kPipelineCacheVersion = "KiEMS-pipeline-cache-v5\n";
+constexpr const char* kGeometryCacheInputsName = "cache_inputs.txt";
+constexpr const char* kResultsCacheInputsName = "cache_inputs.txt";
+
+std::optional<std::string> readWholeFile(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in.is_open()) return std::nullopt;
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+std::optional<std::string> pipelineCacheInputs(const PathsConfig& paths) {
+    auto config = readWholeFile(paths.configFile);
+    if (!config.has_value()) return std::nullopt;
+    return std::string(kPipelineCacheVersion) + *config;
+}
+
+bool cacheInputsMatch(const std::filesystem::path& marker, const std::optional<std::string>& current) {
+    if (!current.has_value()) return false;
+    const auto saved = readWholeFile(marker);
+    return saved.has_value() && *saved == *current;
+}
+
+void saveCacheInputs(const std::filesystem::path& marker, const std::optional<std::string>& current) {
+    if (!current.has_value()) return;
+    const std::filesystem::path temporary = marker.string() + ".tmp";
+    std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) {
+        Cu::logWarning("Could not write pipeline cache marker " + temporary.string());
+        return;
+    }
+    out.write(current->data(), static_cast<std::streamsize>(current->size()));
+    out.close();
+    if (!out) {
+        Cu::logWarning("Could not finish pipeline cache marker " + temporary.string());
+        return;
+    }
+    std::error_code ec;
+    std::filesystem::remove(marker, ec);
+    ec.clear();
+    std::filesystem::rename(temporary, marker, ec);
+    if (ec) Cu::logWarning("Could not install pipeline cache marker " + marker.string() + ": " + ec.message());
+}
+
 NSError* makeCancelledError() {
     return [NSError errorWithDomain:EMSConfigErrorDomain
                                 code:kCancelledErrorCode
@@ -117,7 +179,7 @@ std::vector<double> linspace(double start, double stop, std::int32_t num) {
 
 /// The kiems::FDTDPortRunner passed to kiems::generateResults() so the FDTD step runs in
 /// this one process -- mirrors kiems/main.cpp's own runGPUPortInProcess() exactly (see its own
-/// doc comment for why a portRunner has to do the setupFDTDOperator()/runFDTDPortOnGPU()/
+/// doc comment for why a portRunner has to do the prepareRunDirectory()/runFDTDPortOnGPU()/
 /// probe-file-write sequence itself), just without CLI-style stdout progress logging: this app
 /// reports progress through `progressHandler` instead (see EMSPipelineProgress's own doc comment).
 ///
@@ -153,11 +215,8 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
         return std::unexpected(cwdResult.error());
     }
     const std::filesystem::path cwd = *cwdResult;
-    // sim.setupFDTDOperator() (openEMS's own SetupFDTD()/CalcECOperator()) is the one call in this
-    // whole pipeline with genuinely no progress hook of its own -- it's also, per real-world timing,
-    // the single most expensive step of the entire Simulation phase on anything but a tiny board (see
-    // EMSPipelineProgressPhase's own doc comment). Reported here as one single SettingUp-phase
-    // report, before the call, rather than left silent -- without this, the UI's last-known phase
+    // Report one indeterminate SettingUp phase before directory preparation and Copper operator
+    // construction. Without this, the UI's last-known phase
     // just stays whatever Geometry left it at (fraction 1.0), which is what made this look like
     // geometry itself was still running. No fraction/estimate of any kind attached -- a caller should
     // show an indeterminate ("barber pole") indicator for this phase, not a predicted countdown.
@@ -168,9 +227,14 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
                                                 targetEnergyChangeDB:0.0
                                                       absoluteEnergy:0.0
                                                     duringExcitation:NO
+                                         simulationTimeSeconds:0.0
+                                        excitationEndTimeSeconds:0.0
+                                     plannedSimulationTimeSeconds:0.0
+                                                   excitationF0Hz:0.0
+                                                   excitationFcHz:0.0
                                                       excitedNetName:@(excitedNetName.c_str())]);
     }
-    if (auto result = sim.setupFDTDOperator(excitedPortNumber); !result) {
+    if (auto result = sim.prepareRunDirectory(excitedPortNumber); !result) {
         return std::unexpected(result.error());
     }
     auto probeDirResult = currentPathOrError();
@@ -179,20 +243,20 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     }
     const std::filesystem::path probeDir = *probeDirResult;
     // Boundary kind left at runFDTDPortOnGPU()'s own default (real CPML -- see
-    // Internal/CopperCPML.hpp) -- no app-side toggle for kiems::PMLKind yet (plain UPML,
-    // openEMS's own original formulation, is reachable via `--pml upml` on the CLI for
-    // comparison/fallback -- see PMLKind's own doc comment). alphaMax is *not* left at
+    // Internal/CopperCPML.hpp). alphaMax is *not* left at
     // runFDTDPortOnGPU()'s own generic 100MHz-based default -- see copper::cpmlAlphaMaxForFrequency()'s
     // own doc comment for why a simulation whose configured sweep floor is below 100MHz (this app's own
     // Frequency::start() default is 1MHz -- config.hpp) needs alphaMax computed from that simulation's
     // own value instead, or late-time energy from the under-damped gap between the two frequencies
     // persists and visibly grows over a long run.
     //
-    // pmlDepthCells passed explicitly (matching kiems::constants::pmlDepthCells, the same value
-    // Simulation::setBoundaryConditions() used -- or, for a CPML run, deliberately did *not* pass to
-    // openEMS's own Set_BC_PML() -- see that function's own comment) rather than relying on
-    // runFDTDPortOnGPU()'s own default staying in sync with it.
+    // Pass pmlDepthCells explicitly so Copper and GridGenerator use the same CPML shell depth.
     const double cpmlAlphaMax = copper::cpmlAlphaMaxForFrequency(sim.config().frequency().start());
+    copper::CopperFDTDPortConfig portConfig;
+    portConfig.boundaryIsPEC = sim.boundaryIsPEC();
+    portConfig.f0 = sim.excitationF0();
+    portConfig.fc = sim.excitationFc();
+    portConfig.maxTimesteps = sim.maxTimesteps();
     copper::CopperFDTDProgressCallback onCopperProgress;
     if (progressHandler) {
         onCopperProgress = [&](const copper::CopperFDTDProgress& p) {
@@ -217,6 +281,11 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
                                         targetEnergyChangeDB:p.targetEnergyChangeDB
                                               absoluteEnergy:p.absoluteEnergy
                                             duringExcitation:p.duringExcitation
+                                 simulationTimeSeconds:p.simulationTimeSeconds
+                                excitationEndTimeSeconds:p.excitationEndTimeSeconds
+                             plannedSimulationTimeSeconds:p.plannedSimulationTimeSeconds
+                                           excitationF0Hz:p.excitationF0Hz
+                                           excitationFcHz:p.excitationFcHz
                                               excitedNetName:@(excitedNetName.c_str())];
             progressHandler(progress);
         };
@@ -228,11 +297,11 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     fieldSeries.boardZMin = boardZMinMeters;
     fieldSeries.boardZMax = boardZMaxMeters;
     fieldSeries.onWriterReady = std::move(onWriterReady);
-    // Keep the writer's default multi-frame chunk. FieldFrameSeriesReader maps a requested frame to
-    // its containing chunk and caches exactly that chunk, making sequential playback cheap without
-    // ever reading the rest of the series.
+    // Keep the writer's default multi-frame compression chunk. FieldFrameSeriesReader requests only
+    // the displayed frame's hyperslab and retains that frame plus one prefetched successor, so the
+    // viewer's resident memory remains bounded independently of the series length.
     const copper::CopperFDTDRunResult gpuResult = copper::runFDTDPortOnGPU(
-        sim.fdtdEngine(), sim.csx(), onCopperProgress, copper::CopperBoundaryKind::CPML, cpmlAlphaMax,
+        sim.csx(), portConfig, onCopperProgress, cpmlAlphaMax,
         kiems::constants::pmlDepthCells, [&] { return cancelRequested.load(); }, fieldSeries);
     // Best-effort restore -- `cwd` no longer existing shouldn't discard an otherwise-successful run's
     // own results (unlike currentPathOrError()'s other two call sites above, both load-bearing).
@@ -263,6 +332,110 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     return {};
 }
 
+struct SavedFieldFrameSeries {
+    std::vector<std::pair<std::int32_t, std::filesystem::path>> files;
+    std::uint64_t generation = 0;
+};
+
+constexpr const char* kFieldFrameManifestName = "field_frames_current.txt";
+
+std::optional<std::pair<std::int32_t, std::uint64_t>> fieldFrameIdentity(const std::filesystem::path& path) {
+    static const std::regex pattern(R"(^field_frames_port_([0-9]+)_([01])\.h5$)");
+    std::smatch match;
+    const std::string filename = path.filename().string();
+    if (!std::regex_match(filename, match, pattern)) {
+        return std::nullopt;
+    }
+    try {
+        const long long port = std::stoll(match[1].str());
+        if (port < 0 || port > std::numeric_limits<std::int32_t>::max()) {
+            return std::nullopt;
+        }
+        return std::pair{static_cast<std::int32_t>(port), static_cast<std::uint64_t>(std::stoull(match[2].str()))};
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+void saveFieldFrameManifest(
+    const std::filesystem::path& simulationDirectory,
+    const std::vector<std::pair<std::int32_t, std::filesystem::path>>& series) {
+    const std::filesystem::path destination = simulationDirectory / kFieldFrameManifestName;
+    const std::filesystem::path temporary = destination.string() + ".tmp";
+    std::ofstream out(temporary, std::ios::trunc);
+    if (!out.is_open()) {
+        Cu::logWarning("Could not write field-frame manifest " + temporary.string());
+        return;
+    }
+    for (const auto& [port, path] : series) {
+        out << port << ' ' << path.filename().string() << '\n';
+    }
+    out.close();
+    if (!out) {
+        Cu::logWarning("Could not finish writing field-frame manifest " + temporary.string());
+        return;
+    }
+    std::error_code ec;
+    std::filesystem::remove(destination, ec);
+    ec.clear();
+    std::filesystem::rename(temporary, destination, ec);
+    if (ec) {
+        Cu::logWarning("Could not install field-frame manifest " + destination.string() + ": " + ec.message());
+    }
+}
+
+SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulationDirectory) {
+    SavedFieldFrameSeries restored;
+    const std::filesystem::path manifest = simulationDirectory / kFieldFrameManifestName;
+    std::ifstream in(manifest);
+    if (in.is_open()) {
+        std::int32_t declaredPort = -1;
+        std::string filename;
+        while (in >> declaredPort >> filename) {
+            const std::filesystem::path path = simulationDirectory / std::filesystem::path(filename).filename();
+            const auto identity = fieldFrameIdentity(path);
+            if (!identity.has_value() || identity->first != declaredPort || !std::filesystem::is_regular_file(path)) {
+                restored.files.clear();
+                break;
+            }
+            restored.files.emplace_back(declaredPort, path);
+            restored.generation = identity->second;
+        }
+        if (!restored.files.empty()) {
+            return restored;
+        }
+    }
+
+    // Compatibility with packages saved before the manifest existed. Each completed run used one
+    // common 0/1 slot for all ports, so choose the slot containing the newest frame file, then take
+    // every port from that slot. A newly saved run always has the unambiguous manifest above.
+    std::error_code iteratorError;
+    std::filesystem::directory_iterator iterator(simulationDirectory, iteratorError), end;
+    std::optional<std::uint64_t> newestSlot;
+    std::filesystem::file_time_type newestTime = std::filesystem::file_time_type::min();
+    std::map<std::uint64_t, std::map<std::int32_t, std::filesystem::path>> bySlot;
+    for (; !iteratorError && iterator != end; iterator.increment(iteratorError)) {
+        const auto identity = fieldFrameIdentity(iterator->path());
+        if (!identity.has_value() || !iterator->is_regular_file()) {
+            continue;
+        }
+        bySlot[identity->second][identity->first] = iterator->path();
+        std::error_code timeError;
+        const auto modified = iterator->last_write_time(timeError);
+        if (!timeError && (!newestSlot.has_value() || modified > newestTime)) {
+            newestSlot = identity->second;
+            newestTime = modified;
+        }
+    }
+    if (newestSlot.has_value()) {
+        restored.generation = *newestSlot;
+        for (const auto& [port, path] : bySlot[*newestSlot]) {
+            restored.files.emplace_back(port, path);
+        }
+    }
+    return restored;
+}
+
 } // namespace
 
 @implementation EMSSimulationPipelineBridge {
@@ -280,7 +453,11 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     std::optional<SimulationData<SimulationStage::Geometry>> _geometry;
     std::optional<SimulationData<SimulationStage::Grid>> _grid;
     std::optional<SimulationData<SimulationStage::Results>> _results;
-    std::optional<SimulationData<SimulationStage::Postprocessing>> _postprocessing;
+    // Kept independently of SimulationData<Results> because a reopened document restores the
+    // processed data directly from its saved CSVs. The raw incident/reflected FDTD phasors aren't
+    // needed again unless Results is invalidated, at which point both objects are discarded and a
+    // fresh run rebuilds them together.
+    std::shared_ptr<Postprocessor> _postprocessor;
 
     // -geometryPreview's own cache -- buildGeometryPreview() now does real work (a libkicad
     // component-model export subprocess, plus via mesh generation), so unlike the flyweight it used
@@ -304,6 +481,12 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     // refreshing and serving the previous run's now-abandoned file.
     NSMutableDictionary<NSString*, EMSFieldSnapshot*>* _fieldSnapshotCache;
 
+    // "<positiveExcitation port index>|<negativeExcitation port index>" -> last differential-mode
+    // snapshot combined from that pair's own two legs, guarded by the same mutex above. These are
+    // lightweight frame handles just like the single-ended snapshots; their field data is combined
+    // only when the viewer asks to display a frame. Rebuild only when either leg publishes more.
+    NSMutableDictionary<NSString*, EMSFieldSnapshot*>* _combinedFieldSnapshotCache;
+
     // Set by -requestCancellation (any thread), read by -ensurePrepared:/-ensureStage: (the
     // background thread actually running them) at each checkpoint -- see -requestCancellation's own
     // doc comment. Cleared at the top of -ensureStage: for the next run, not at the end of this one
@@ -312,6 +495,7 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     // in-class initializer here, Objective-C's ivar block doesn't support one the way a plain C++
     // class body would.
     std::atomic<bool> _cancelRequested;
+    std::atomic<bool> _lastEnsureStageWroteOutput;
 }
 
 - (instancetype)initWithSimulationName:(NSString*)simulationName {
@@ -319,6 +503,8 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     if (self) {
         _simulationName = simulationName.UTF8String;
         _simConfig = nullptr;
+        _cancelRequested.store(false);
+        _lastEnsureStageWroteOutput.store(false);
     }
     return self;
 }
@@ -330,8 +516,12 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     case EMSPipelineStageGrid:
         return _grid.has_value();
     case EMSPipelineStageResults:
-        return _postprocessing.has_value();
+        return _postprocessor != nullptr;
     }
+}
+
+- (BOOL)lastEnsureStageWroteOutput {
+    return _lastEnsureStageWroteOutput.load();
 }
 
 - (void)requestCancellation {
@@ -362,7 +552,6 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
 - (BOOL)ensurePrepared:(EMSConfigBridge*)config
              packageDir:(NSString*)packageDir
            kicadCliPath:(NSString*)kicadCliPath
-   kicadQueryHelperPath:(NSString*)helperPath
                   error:(NSError**)error {
     if (_paths.has_value()) {
         return YES;
@@ -388,7 +577,7 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     trimmedConfig.simulations() = {std::move(*trimmedSimIt)};
 
     PathsConfig paths = PathsConfig::forConfigFile(std::filesystem::path(packageDir.UTF8String) / "simulation.json",
-                                                    kicadCliPath.UTF8String, helperPath.UTF8String, "");
+                                                    kicadCliPath.UTF8String, "");
 
     if (auto result = kiems::exportKicadPcb(paths, *trimmedConfig.kicadPcbPath()); !result) {
         if (error) *error = makeError(result.error());
@@ -420,6 +609,67 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     _simConfig = &_scaledConfig->simulations().front();
     _paths.emplace(std::move(paths));
     _configured.emplace(*_simConfig);
+
+    const std::optional<std::string> currentCacheInputs = pipelineCacheInputs(*_paths);
+    const std::filesystem::path geometryCacheInputs =
+        _paths->geometryDir / _simulationName / kGeometryCacheInputsName;
+    if (!cacheInputsMatch(geometryCacheInputs, currentCacheInputs)) {
+        Cu::logDebug("Saved geometry/results ignored for " + _simulationName +
+                     ": cache inputs differ from the current simulation configuration");
+        return YES;
+    }
+
+    // A reopened Document seeds this scratch package from its saved fab/ems directories before the
+    // bridge is created (Document.pipelineDirectory). Hydrate every stage that can be reconstructed
+    // from those files now, so ensureStage's post-prepare cache check can return before performing
+    // another expensive FDTD run. A missing/malformed cache remains a normal cache miss: ensureStage
+    // continues below and regenerates it instead of making the document unopenable.
+    auto loadedGrid = kiems::loadSimulationData(*_simConfig, kiems::simulationDataFile(*_paths, _simulationName));
+    if (!loadedGrid) {
+        Cu::logDebug("No saved pipeline data restored for " + _simulationName + ": " + loadedGrid.error());
+        return YES;
+    }
+    kiems::SimulationGeometry geometry = loadedGrid->geometry();
+    kiems::SimulationGrid grid = loadedGrid->grid();
+    _geometry.emplace(*_configured, std::move(geometry));
+    _grid.emplace(*_geometry, std::move(grid));
+
+    const std::filesystem::path resultsCacheInputs =
+        _paths->simulationDir / _simulationName / kResultsCacheInputsName;
+    if (!cacheInputsMatch(resultsCacheInputs, currentCacheInputs)) {
+        Cu::logDebug("Saved simulation results ignored for " + _simulationName +
+                     ": cache inputs differ from the current simulation configuration");
+        return YES;
+    }
+
+    const std::vector<double> frequencies =
+        linspace(_scaledConfig->frequency().start(), _scaledConfig->frequency().stop(),
+                 kiems::constants::frequencySampleCount);
+    auto restoredPostprocessor = std::make_shared<Postprocessor>(frequencies, *_simConfig);
+    const std::filesystem::path simulationDirectory = _paths->simulationDir / _simulationName;
+    try {
+        if (auto result = restoredPostprocessor->loadSparams(simulationDirectory); !result) {
+            Cu::logDebug("No saved simulation results restored for " + _simulationName + ": " + result.error());
+            return YES;
+        }
+        if (auto result = restoredPostprocessor->loadProbes(simulationDirectory); !result) {
+            Cu::logDebug("Saved probe results could not be restored for " + _simulationName + ": " + result.error());
+            return YES;
+        }
+        restoredPostprocessor->processData();
+    } catch (const std::exception& exception) {
+        Cu::logWarning("Saved simulation results could not be restored for " + _simulationName + ": " +
+                       exception.what());
+        return YES;
+    }
+    _postprocessor = std::move(restoredPostprocessor);
+
+    SavedFieldFrameSeries restoredFields = loadFieldFrameSeries(simulationDirectory);
+    {
+        std::lock_guard lock(_fieldFrameSeriesMutex);
+        _fieldFrameSeries = std::move(restoredFields.files);
+        _fieldFrameSeriesGeneration = restoredFields.generation;
+    }
     return YES;
 }
 
@@ -427,26 +677,25 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
              config:(EMSConfigBridge*)config
          packageDir:(NSString*)packageDir
        kicadCliPath:(NSString*)kicadCliPath
-kicadQueryHelperPath:(NSString*)helperPath
            progress:(nullable EMSPipelineProgressHandler)progressHandler
               error:(NSError**)error {
+    _lastEnsureStageWroteOutput.store(false);
     if ([self hasStage:stage]) {
         return YES;
     }
     // Cleared here, not at the end of a run -- avoids a race in the gap between one call finishing
     // and the next one starting (see _cancelRequested's own ivar comment).
     _cancelRequested.store(false);
-    if (![self ensurePrepared:config packageDir:packageDir kicadCliPath:kicadCliPath kicadQueryHelperPath:helperPath
-                         error:error]) {
+    if (![self ensurePrepared:config packageDir:packageDir kicadCliPath:kicadCliPath error:error]) {
         return NO;
     }
+    // ensurePrepared also hydrates any stages persisted in a reopened package. It may therefore
+    // have satisfied this request even though the pre-prepare hasStage check above was necessarily
+    // false on a newly constructed bridge.
+    if ([self hasStage:stage]) {
+        return YES;
+    }
 
-    // Geometry phase: only two real checkpoints exist (board-slicing and grid-placement each have
-    // no finer-grained progress of their own to report -- see kiems::GeometryPhase, which
-    // GeometryResult::build()'s own onProgress bracketing mirrors identically), so this reports
-    // 0.0 -> 0.5 -> 1.0 rather than a continuously-advancing fraction. Reported even when only
-    // EMSPipelineStageGeometry/Grid was actually requested, not just on the way to Results -- a
-    // caller watching only the Geometry row still wants to see it move.
     auto reportGeometryProgress = [&](double fraction) {
         if (progressHandler) {
             progressHandler([[EMSPipelineProgress alloc] initWithPhase:EMSPipelineProgressPhaseGeometry
@@ -455,7 +704,30 @@ kicadQueryHelperPath:(NSString*)helperPath
                                                      targetEnergyChangeDB:0
                                                            absoluteEnergy:0
                                                          duringExcitation:NO
+                                              simulationTimeSeconds:0
+                                             excitationEndTimeSeconds:0
+                                          plannedSimulationTimeSeconds:0
+                                                        excitationF0Hz:0
+                                                        excitationFcHz:0
                                                            excitedNetName:nil]);
+        }
+    };
+    auto reportGeometryProcessingProgress = [&](const kiems::GeometryProcessingProgress& progress) {
+        const double primitiveFraction = progress.totalPrimitives == 0
+            ? 0.0
+            : std::clamp(static_cast<double>(progress.completedPrimitives) /
+                             static_cast<double>(progress.totalPrimitives),
+                         0.0, 1.0);
+        switch (progress.phase) {
+            case kiems::GeometryProcessingPhase::PolygonOperations:
+                reportGeometryProgress(0.80 * primitiveFraction);
+                break;
+            case kiems::GeometryProcessingPhase::Triangulation:
+                reportGeometryProgress(0.80 + 0.19 * primitiveFraction);
+                break;
+            case kiems::GeometryProcessingPhase::Finishing:
+                reportGeometryProgress(0.99);
+                break;
         }
     };
 
@@ -465,7 +737,8 @@ kicadQueryHelperPath:(NSString*)helperPath
             return NO;
         }
         reportGeometryProgress(0.0);
-        auto geometryResult = kiems::generateGeometry(*_configured, *_scaledConfig, *_paths);
+        auto geometryResult = kiems::generateGeometry(*_configured, *_scaledConfig, *_paths,
+                                                       reportGeometryProcessingProgress);
         if (!geometryResult) {
             if (error) *error = makeError(geometryResult.error());
             return NO;
@@ -489,11 +762,9 @@ kicadQueryHelperPath:(NSString*)helperPath
             if (error) *error = makeCancelledError();
             return NO;
         }
-        // The 0.5 checkpoint lands here (not right after generateGeometry() above), unconditionally,
-        // so it's reported whether slicing *just* happened above or was already cached from an
-        // earlier ensureStage: call -- either way, grid placement is genuinely the second half of
-        // this call's own remaining geometry-phase work.
-        reportGeometryProgress(0.5);
+        // Polygon processing and triangulation occupy the first 99%; grid placement, persistence,
+        // and the remaining bookkeeping deliberately stay in the final one-percent tail.
+        reportGeometryProgress(0.99);
         auto grid = kiems::generateGrid(*_geometry, *_scaledConfig, options, *_paths);
         _grid.emplace(*_geometry, std::move(grid));
         // A cached -geometryPreview built while only EMSPipelineStageGeometry had run (gridLines
@@ -504,7 +775,7 @@ kicadQueryHelperPath:(NSString*)helperPath
         // saved package (e.g. `kiems -s`) can pick up straight from here without redoing any of
         // this work itself -- see GeometryResult::load()'s own doc comment. Unlike GeometryResult::
         // build(), nothing else along this path has created paths.geometryDir/_simulationName yet
-        // (setupFDTDOperator() creates its own simulationDir subtree later, but that's a different
+        // (prepareRunDirectory() creates its own simulationDir subtree later, but that's a different
         // directory) -- has to happen here, or saveSimulationData()'s ofstream fails to open.
         std::error_code dirEc;
         std::filesystem::create_directories(_paths->geometryDir / _simulationName, dirEc);
@@ -521,6 +792,9 @@ kicadQueryHelperPath:(NSString*)helperPath
             if (error) *error = makeError(result.error());
             return NO;
         }
+        saveCacheInputs(_paths->geometryDir / _simulationName / kGeometryCacheInputsName,
+                        pipelineCacheInputs(*_paths));
+        _lastEnsureStageWroteOutput.store(true);
     }
     // Reported unconditionally here (not just inside the !_grid.has_value() branch above) -- geometry
     // and grid are always fully done by this point whether either was freshly computed by this call
@@ -561,6 +835,7 @@ kicadQueryHelperPath:(NSString*)helperPath
             std::lock_guard lock(_fieldFrameSeriesMutex);
             _fieldFrameSeries.clear();
             _fieldSnapshotCache = nil;
+            _combinedFieldSnapshotCache = nil;
         }
         auto portRunner = [self, progressHandler, totalExcitedPorts, &portsCompleted,
                            boardZMinMeters, fieldFrameSeriesDirectory,
@@ -604,9 +879,15 @@ kicadQueryHelperPath:(NSString*)helperPath
             return NO;
         }
         _results.emplace(*_grid, std::move(*resultsResult));
+        std::vector<std::pair<std::int32_t, std::filesystem::path>> completedSeries;
+        {
+            std::lock_guard lock(_fieldFrameSeriesMutex);
+            completedSeries = _fieldFrameSeries;
+        }
+        saveFieldFrameManifest(fieldFrameSeriesDirectory, completedSeries);
     }
 
-    if (!_postprocessing.has_value()) {
+    if (_postprocessor == nullptr) {
         auto postprocessing = kiems::generatePostprocessing(*_results, frequencies);
         // calculateSparams() (inside generatePostprocessing()) alone isn't enough for this app's own
         // charts -- impedance/diff-pair/trace-delay data additionally needs processData() (see
@@ -618,7 +899,11 @@ kicadQueryHelperPath:(NSString*)helperPath
         postprocessing.postprocessor->processData();
         // Written to disk too, matching what `kiems -a` would leave behind in the saved package.
         postprocessing.postprocessor->sparamToFile(_paths->simulationDir / _simulationName);
-        _postprocessing.emplace(*_results, std::move(postprocessing));
+        postprocessing.postprocessor->probeToFile(_paths->simulationDir / _simulationName);
+        _postprocessor = std::move(postprocessing.postprocessor);
+        saveCacheInputs(_paths->simulationDir / _simulationName / kResultsCacheInputsName,
+                        pipelineCacheInputs(*_paths));
+        _lastEnsureStageWroteOutput.store(true);
     }
     return YES;
 }
@@ -636,13 +921,25 @@ kicadQueryHelperPath:(NSString*)helperPath
     return _geometryPreviewCache;
 }
 
+- (nullable EMSGeometryLayer*)geometryLayerNamed:(NSString*)layerName error:(NSError**)error {
+    if (!_geometry || !_scaledConfig || !_paths) return nil;
+    const double tolerance = static_cast<double>(_scaledConfig->pixelSize()) *
+                             kiems::constants::unitMultiplier;
+    auto result = buildSlicedBoardLayerPreview(*_paths, layerName.UTF8String,
+                                                _geometry->geometry().slicedBoard, tolerance);
+    if (!result) {
+        if (error != nil) *error = makeError(result.error());
+        return nil;
+    }
+    return *result;
+}
+
 - (nullable EMSResultsPreview*)resultsPreview {
-    if (!_postprocessing.has_value()) {
+    if (_postprocessor == nullptr) {
         return nil;
     }
     if (!_resultsPreviewCache) {
-        _resultsPreviewCache = buildResultsPreview(*_postprocessing->postprocessing().postprocessor, *_simConfig,
-                                                   _scaledConfig->frequency());
+        _resultsPreviewCache = buildResultsPreview(*_postprocessor, *_simConfig, _scaledConfig->frequency());
     }
     return _resultsPreviewCache;
 }
@@ -686,23 +983,118 @@ kicadQueryHelperPath:(NSString*)helperPath
         // drops the previous run's now-abandoned reader here instead of retaining it forever.
         _fieldSnapshotCache = refreshedCache;
     }
+
+    // Add one differential-mode entry per configured differential pair, combining that pair's own
+    // two already-built single-ended snapshots (both legs excited independently, at the pair's
+    // driven/near end -- positiveExcitation/negativeExcitation, the same two ports Postprocessor::
+    // getDiffPairSdd() reads its own mixed-mode S-parameters from) rather than opening anything
+    // new. A pair whose legs
+    // aren't both present yet (not excited, not configured, or field export still catching up)
+    // simply doesn't get an entry this call -- it'll appear once both are.
+    //
+    // _simConfig is null until -ensurePrepared: has actually run (eg a simulation whose results
+    // haven't been generated yet, selected before any job has queued/run for it) -- snapshots is
+    // then still empty too (nothing in _fieldFrameSeries yet), so there's nothing to combine.
+    if (_simConfig != nullptr) {
+        NSMutableDictionary<NSString*, EMSFieldSnapshot*>* refreshedCombinedCache =
+            [NSMutableDictionary dictionaryWithCapacity:_simConfig->diffPairs().size()];
+        NSDictionary<NSString*, EMSFieldSnapshot*>* previousCombinedCache;
+        {
+            std::lock_guard lock(_fieldFrameSeriesMutex);
+            previousCombinedCache = [_combinedFieldSnapshotCache copy];
+        }
+        Cu::logDebug() << "fieldSnapshots: " << _simConfig->diffPairs().size() << " configured differential pair(s), "
+                       << snapshots.count << " single-ended snapshot(s) available";
+        for (const DifferentialPairConfig& pair : _simConfig->diffPairs()) {
+            const std::string pairLabel = pair.name().value_or("(unnamed differential pair)");
+            if (!pair.correct()) {
+                Cu::logDebug() << "fieldSnapshots: differential pair '" << pairLabel << "' not correct (unresolved "
+                               << "port reference), skipping";
+                continue;
+            }
+            if (!pair.positiveExcitation().resolvedIndex().has_value() ||
+                !pair.negativeExcitation().resolvedIndex().has_value()) {
+                Cu::logDebug() << "fieldSnapshots: differential pair '" << pairLabel
+                               << "' has no resolved positiveExcitation/negativeExcitation index, skipping";
+                continue;
+            }
+            const NSInteger sp = *pair.positiveExcitation().resolvedIndex();
+            const NSInteger sn = *pair.negativeExcitation().resolvedIndex();
+            EMSFieldSnapshot* legP = nil;
+            EMSFieldSnapshot* legN = nil;
+            for (EMSFieldSnapshot* snapshot in snapshots) {
+                if (snapshot.excitedPort == sp) legP = snapshot;
+                if (snapshot.excitedPort == sn) legN = snapshot;
+            }
+            if (legP == nil || legN == nil) {
+                Cu::logDebug() << "fieldSnapshots: differential pair '" << pairLabel << "' wants excited ports "
+                               << sp << " (P, " << (legP == nil ? "missing" : "present") << ") and " << sn
+                               << " (N, " << (legN == nil ? "missing" : "present")
+                               << ") -- neither has field export run for it yet, skipping";
+                continue;
+            }
+
+            NSString* pairKey = [NSString stringWithFormat:@"%ld|%ld", (long)sp, (long)sn];
+            const NSUInteger currentFrameCount = MIN(legP.frames.count, legN.frames.count);
+            EMSFieldSnapshot* combined = previousCombinedCache[pairKey];
+            if (combined == nil || combined.frames.count != currentFrameCount) {
+                const std::string displayName = pair.displayName();
+                NSString* name = @(displayName.c_str());
+                // Distinct from every real port index (always >= 0) and from every other pair's own
+                // key, so the field viewer's per-simulation "last selected series" persistence (keyed
+                // on excitedPort) treats this as its own stable series across refreshes.
+                const NSInteger excitedPort = -(sp * 100000 + sn + 1);
+                combined = buildCombinedFieldSnapshot(legP, legN, name, excitedPort, 0.5, -0.5);
+            }
+            if (combined != nil) {
+                [snapshots addObject:combined];
+                refreshedCombinedCache[pairKey] = combined;
+            }
+        }
+        {
+            std::lock_guard lock(_fieldFrameSeriesMutex);
+            _combinedFieldSnapshotCache = refreshedCombinedCache;
+        }
+    }
+
     return [snapshots copy];
 }
 
 - (void)invalidateFromStage:(EMSPipelineStage)stage {
+    // The scratch directory is later copied wholesale back into the document package. Remove the
+    // invalidated stage's persisted form as well as its in-memory objects, otherwise saving after a
+    // config edit (but before rerunning) would preserve stale files that a future launch could
+    // incorrectly restore as current.
+    if (_paths.has_value()) {
+        std::error_code removeError;
+        if (stage == EMSPipelineStageGeometry || stage == EMSPipelineStageGrid) {
+            std::filesystem::remove_all(_paths->geometryDir / _simulationName, removeError);
+            if (removeError) {
+                Cu::logWarning("Could not remove invalidated geometry cache for " + _simulationName + ": " +
+                               removeError.message());
+            }
+        }
+        removeError.clear();
+        std::filesystem::remove_all(_paths->simulationDir / _simulationName, removeError);
+        if (removeError) {
+            Cu::logWarning("Could not remove invalidated simulation cache for " + _simulationName + ": " +
+                           removeError.message());
+        }
+    }
     switch (stage) {
     case EMSPipelineStageGeometry:
         // Everything depends, directly or transitively, on the sliced board -- discard the whole
         // chain, including the prepared/scaled config snapshot (a config edit invalidating geometry
         // might just as well have changed something scaledToSimulationUnits() would scale
         // differently, e.g. hull padding).
-        _postprocessing.reset();
+        _postprocessor.reset();
         _resultsPreviewCache = nil;
         _results.reset();
         {
             std::lock_guard lock(_fieldFrameSeriesMutex);
             _fieldFrameSeries.clear();
             _fieldSnapshotCache = nil;
+            _combinedFieldSnapshotCache = nil;
         }
         _grid.reset();
         _geometry.reset();
@@ -714,13 +1106,14 @@ kicadQueryHelperPath:(NSString*)helperPath
         break;
     case EMSPipelineStageGrid:
         // Geometry stays valid -- only the grid lines (and anything built from them) get redone.
-        _postprocessing.reset();
+        _postprocessor.reset();
         _resultsPreviewCache = nil;
         _results.reset();
         {
             std::lock_guard lock(_fieldFrameSeriesMutex);
             _fieldFrameSeries.clear();
             _fieldSnapshotCache = nil;
+            _combinedFieldSnapshotCache = nil;
         }
         _grid.reset();
         _geometryPreviewCache = nil;
@@ -728,13 +1121,14 @@ kicadQueryHelperPath:(NSString*)helperPath
     case EMSPipelineStageResults:
         // Geometry (and the grid lines placed on it) stay valid -- only the FDTD run and its own
         // postprocessing get redone.
-        _postprocessing.reset();
+        _postprocessor.reset();
         _resultsPreviewCache = nil;
         _results.reset();
         {
             std::lock_guard lock(_fieldFrameSeriesMutex);
             _fieldFrameSeries.clear();
             _fieldSnapshotCache = nil;
+            _combinedFieldSnapshotCache = nil;
         }
         break;
     }

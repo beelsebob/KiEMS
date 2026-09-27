@@ -4,7 +4,19 @@
 // compiled at c++23 via a per-file override rather than the libkicad target's default c++20.
 #include "../libkicad/libkicad.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
 namespace libkicad {
+
+std::expected<void, std::string> initialize() {
+    std::string error;
+    if (!detail::initializeRaw(error)) {
+        return std::unexpected(std::move(error));
+    }
+    return {};
+}
 
 std::expected<PadCounts, std::string> countPads(const std::string& projectPath, const std::string& boardPath) {
     detail::RawPadCountsResult raw = detail::countPadsRaw(projectPath, boardPath);
@@ -18,6 +30,16 @@ std::expected<std::string, std::string> netForFootprintPin(const std::string& pr
                                                              const std::string& boardPath,
                                                              const std::string& footprintRef, const std::string& pin) {
     detail::RawNetNameResult raw = detail::netForFootprintPinRaw(projectPath, boardPath, footprintRef, pin);
+    if (!raw.ok) {
+        return std::unexpected(std::move(raw.error));
+    }
+    return raw.netName;
+}
+
+std::expected<std::string, std::string> netClassForNet(const std::string& projectPath,
+                                                         const std::string& boardPath,
+                                                         const std::string& netName) {
+    detail::RawNetNameResult raw = detail::netClassForNetRaw(projectPath, boardPath, netName);
     if (!raw.ok) {
         return std::unexpected(std::move(raw.error));
     }
@@ -81,6 +103,39 @@ std::expected<BoardGeometry, std::string> boardGeometry(const std::string& proje
     return raw.geometry;
 }
 
+std::expected<std::vector<BoardLayerInfo>, std::string> boardLayers(const std::string& projectPath,
+                                                                     const std::string& boardPath) {
+    detail::RawBoardLayersResult raw = detail::boardLayersRaw(projectPath, boardPath);
+    if (!raw.ok) return std::unexpected(std::move(raw.error));
+    return raw.layers;
+}
+
+std::expected<BoardLayerGeometry, std::string> boardLayerGeometry(const std::string& projectPath,
+                                                                   const std::string& boardPath,
+                                                                   const std::string& layerName) {
+    detail::RawBoardLayerGeometryResult raw =
+        detail::boardLayerGeometryRaw(projectPath, boardPath, layerName);
+    if (!raw.ok) return std::unexpected(std::move(raw.error));
+    return raw.geometry;
+}
+
+std::expected<BoardBounds, std::string> boardBounds(const BoardGeometry& geometry) {
+    BoardBounds result{std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(),
+                       std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()};
+    for (const PolygonLoop& loop : geometry.outline) {
+        for (const auto& [x, y] : loop.pointsMm) {
+            result.xMinMm = std::min(result.xMinMm, x);
+            result.xMaxMm = std::max(result.xMaxMm, x);
+            result.yMinMm = std::min(result.yMinMm, y);
+            result.yMaxMm = std::max(result.yMaxMm, y);
+        }
+    }
+    if (!std::isfinite(result.xMinMm) || !std::isfinite(result.yMinMm)) {
+        return std::unexpected("Board geometry has no usable Edge.Cuts points");
+    }
+    return result;
+}
+
 std::expected<std::vector<PadPosition>, std::string> allPads(const std::string& projectPath,
                                                                 const std::string& boardPath) {
     detail::RawPadsOnNetResult raw = detail::allPadsRaw(projectPath, boardPath);
@@ -111,6 +166,15 @@ std::expected<std::vector<StackupLayer>, std::string> stackup(const std::string&
 std::expected<std::vector<LayerColor>, std::string> layerColors(const std::string& projectPath,
                                                                   const std::string& boardPath) {
     detail::RawLayerColorsResult raw = detail::layerColorsRaw(projectPath, boardPath);
+    if (!raw.ok) {
+        return std::unexpected(std::move(raw.error));
+    }
+    return raw.colors;
+}
+
+std::expected<std::vector<NetColor>, std::string> netColors(const std::string& projectPath,
+                                                              const std::string& boardPath) {
+    detail::RawNetColorsResult raw = detail::netColorsRaw(projectPath, boardPath);
     if (!raw.ok) {
         return std::unexpected(std::move(raw.error));
     }

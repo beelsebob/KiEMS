@@ -14,7 +14,7 @@ namespace {
 // header comment for why this is a clean-room reimplementation rather than a read of that
 // extension's own (protected) state.
 std::vector<CopperLumpedRLCCell> _discoverForProperty(CSPropLumpedElement& prop, const CopperYeeGrid& grid,
-                                                        Operator& op) {
+                                                        CopperOperator& op) {
     std::vector<CopperLumpedRLCCell> cells;
     if (prop.GetLEtype() != CSPropLumpedElement::SERIES) {
         return cells;
@@ -39,7 +39,7 @@ std::vector<CopperLumpedRLCCell> _discoverForProperty(CSPropLumpedElement& prop,
     const bool hasC = !std::isnan(rawC) && rawC > 0.0;
     const double C = hasC ? rawC : 0.0;
 
-    const double dT = op.GetTimestep();
+    const double dT = op.timestepSeconds();
 
     for (std::size_t p = 0; p < prop.GetQtyPrimitives(); ++p) {
         CSPrimBox* box = prop.GetPrimitive(p)->ToBox();
@@ -54,7 +54,7 @@ std::vector<CopperLumpedRLCCell> _discoverForProperty(CSPropLumpedElement& prop,
         }
         unsigned int uiStart[3];
         unsigned int uiStop[3];
-        const int snapDim = op.SnapBox2Mesh(dstart, dstop, uiStart, uiStop, /*dualMesh=*/false, /*fullMesh=*/true);
+        const int snapDim = op.snapBox2Mesh(dstart, dstop, uiStart, uiStop, /*dualMesh=*/false, /*snapMethod=*/0);
         if (snapDim <= 0) {
             continue; // outside the domain, or a degenerate box -- nothing to do
         }
@@ -82,6 +82,17 @@ std::vector<CopperLumpedRLCCell> _discoverForProperty(CSPropLumpedElement& prop,
             ib0 = 2.0 * dT * dC / (4.0 * dL * dC + 2.0 * dT * dR * dC + dT * dT);
             b1 = (dT * dT - 4.0 * dL * dC) / (dT * dC);
             b2 = (4.0 * dL * dC - 2.0 * dT * dR * dC + dT * dT) / (2.0 * dT * dC);
+        }
+        // A SERIES element with no R, L, or C at all (dC==0 branch, dL==0, dR==0) makes ib0 =
+        // dT/0 = inf -- mathematically undefined for this ADE formulation, not just numerically
+        // unlucky (openEMS's own real Operator_Ext_LumpedRLC has the identical division and no
+        // guard against it either: IsLElumpedRLC() accepts every SERIES-type element regardless of
+        // its R/L/C values). A "lumped element" with no impedance at all isn't a real RLC in the
+        // FDTD sense -- whatever conductive geometry it represents is already captured as ordinary
+        // copper/PEC elsewhere -- so skip it here rather than injecting a NaN/Inf coefficient that
+        // corrupts the field on the very first applyLumpedRLC() call of the run.
+        if (!std::isfinite(ib0) || !std::isfinite(b1) || !std::isfinite(b2)) {
+            continue;
         }
 
         unsigned int pos[3] = {0, 0, 0};
@@ -122,7 +133,7 @@ std::vector<CopperLumpedRLCCell> _discoverForProperty(CSPropLumpedElement& prop,
 } // namespace
 
 std::vector<CopperLumpedRLCCell> discoverLumpedRLC(ContinuousStructure& csx, const CopperYeeGrid& grid,
-                                                     Operator& op) {
+                                                     CopperOperator& op) {
     std::vector<CopperLumpedRLCCell> result;
     for (CSProperties* prop : csx.GetPropertyByType(CSProperties::LUMPED_ELEMENT)) {
         auto* lumped = dynamic_cast<CSPropLumpedElement*>(prop);

@@ -35,6 +35,10 @@ final class GeometryViewController: NSViewController {
     // refreshDisplay() can restore state on re-selection" role.
     private var timeEstimateText: [Int: String] = [:]
     private var currentIndex: Int?
+    private var layerCatalogs: [Int: EMSGeometryPreview] = [:]
+    private var layerLoaders: [Int: BoardLayerGeometryLoader] = [:]
+    private var loadingLayerCatalogs: Set<Int> = []
+    private var mergedDetailedPreview: Set<Int> = []
 
     /// Fired whenever a given simulation's geometry step starts/finishes running, so
     /// DocumentWindowController can relay it to SimulationListViewController's spinner.
@@ -60,7 +64,7 @@ final class GeometryViewController: NSViewController {
     /// finishing with a real error -- see JobScheduler's own doc comment on why that's a distinct
     /// outcome from onRunFinished(_:false): the user asked for this, so there's nothing to show as
     /// an error, just nothing yet. DocumentWindowController wires this to
-    /// SimulationListViewController.resetGeometryRow(forSimulationIndex:).
+    /// SimulationListViewController.setInvalid(forSimulationIndex:kind: .geometryGeneration).
     var onRunCancelled: ((Int) -> Void)?
 
     init(document: Document) {
@@ -115,6 +119,7 @@ final class GeometryViewController: NSViewController {
     /// immediately if there is one; otherwise kicks off the geometry step in the background.
     func showGeometry(forSimulationIndex index: Int) {
         currentIndex = index
+        loadLayerCatalogIfNeeded(forSimulationIndex: index)
         refreshDisplay()
 
         guard let document, index < document.config.simulations.count else { return }
@@ -142,6 +147,10 @@ final class GeometryViewController: NSViewController {
     /// explicit Geometry selection (showGeometry) is what triggers the real re-run.
     func invalidateCache(forSimulationIndex index: Int) {
         errors[index] = nil
+        layerLoaders[index]?.cancel()
+        layerLoaders[index] = nil
+        layerCatalogs[index] = nil
+        mergedDetailedPreview.remove(index)
         guard let document, index < document.config.simulations.count else { return }
         JobScheduler.shared.invalidate(document: document, simulationName: document.config.simulations[index].name,
                                         fromStage: .geometry)
@@ -168,12 +177,34 @@ final class GeometryViewController: NSViewController {
         let wantsGrid = gridOverlayEnabled[currentIndex] ?? false
         showGridCheckbox.state = wantsGrid ? .on : .off
 
-        if let preview = pipeline.geometryPreview() {
-            geometryView.preview = preview
+        if let detailed = pipeline.geometryPreview() {
+            let preview: EMSGeometryPreview
+            if let catalog = layerCatalogs[currentIndex] {
+                if !mergedDetailedPreview.contains(currentIndex) {
+                    catalog.mergeLoadedPreview(detailed)
+                    mergedDetailedPreview.insert(currentIndex)
+                    let loader = BoardLayerGeometryLoader(pipeline: pipeline, preview: catalog,
+                                                           view: geometryView,
+                                                           initiallyVisible: geometryView.visibleLayerNames)
+                    layerLoaders[currentIndex] = loader
+                    loader.start()
+                }
+                preview = catalog
+            } else {
+                preview = detailed
+            }
+            if geometryView.preview !== preview { geometryView.preview = preview }
+            else { geometryView.refreshLoadedGeometry() }
             geometryView.showGrid = wantsGrid
             geometryView.isHidden = false
             progressStatus.setState(.hidden)
             showGridCheckbox.isHidden = false
+        } else if let catalog = layerCatalogs[currentIndex] {
+            if geometryView.preview !== catalog { geometryView.preview = catalog }
+            geometryView.showGrid = false
+            geometryView.isHidden = false
+            progressStatus.setState(.hidden)
+            showGridCheckbox.isHidden = true
         } else if let error = errors[currentIndex] {
             geometryView.isHidden = true
             progressStatus.setState(.error(error))
@@ -197,6 +228,23 @@ final class GeometryViewController: NSViewController {
             geometryView.isHidden = true
             progressStatus.setState(.hidden)
             showGridCheckbox.isHidden = true
+        }
+    }
+
+    private func loadLayerCatalogIfNeeded(forSimulationIndex index: Int) {
+        guard layerCatalogs[index] == nil, !loadingLayerCatalogs.contains(index),
+              let document, let boardPath = document.config.kicadPcbPath else { return }
+        loadingLayerCatalogs.insert(index)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let preview = try? KicadBoardBridge.layerCatalogPreview(forBoard: boardPath,
+                                                                     wholeBoard: false)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.loadingLayerCatalogs.remove(index)
+                guard let preview else { return }
+                self.layerCatalogs[index] = preview
+                if self.currentIndex == index { self.refreshDisplay() }
+            }
         }
     }
 
@@ -237,7 +285,6 @@ final class GeometryViewController: NSViewController {
                 guard wasRunning else { continue }
                 finishTracking(forSimulationIndex: index)
                 if pipeline.hasStage(.grid) {
-                    document.updateChangeCount(.changeDone)
                     onRunFinished?(index, true)
                 } else {
                     // Cancelled, not failed -- the checkbox's own "Show Grid" state is left as-is

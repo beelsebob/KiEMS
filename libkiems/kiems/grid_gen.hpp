@@ -1,6 +1,7 @@
 // Dynamic simulation grid generation. Ported from kiems/grid_gen.py.
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -11,8 +12,42 @@
 #include "config.hpp"
 #include "gerber_io.hpp"
 #include "paths_config.hpp"
+#include "polygon_geometry.hpp"
 
 namespace kiems {
+
+namespace grid_detail {
+/// Converts the authoritative post-cut copper loops into density segments without introducing the
+/// artificial internal edges that would result from using the triangulated representation.
+std::vector<TraceSegment> copperBoundarySegments(const std::vector<Cu::PolygonSet>& layerCopperLoops);
+
+/// Clips mesh-density hint segments to the true 2D simulation cutout. Exposed for regression tests;
+/// simulation geometry itself is still clipped separately by board_slicing.cpp.
+std::vector<TraceSegment> clipTraceSegmentsToCutout(
+    const std::vector<TraceSegment>& segments,
+    const std::vector<std::vector<Cu::Position>>& cutoutLoops,
+    double boundaryTolerance = 0.0);
+
+/// Extends both ends of an already-sorted core mesh with non-PML vacuum cells, geometrically
+/// growing from the existing boundary cell to `targetCellSize`. The returned outermost cell at
+/// each end is exactly the target size, ready for a uniform CPML band.
+std::vector<double> growGridBoundaryCellsToSize(std::vector<double> lines, double targetCellSize,
+                                                 double maximumCellRatio);
+
+/// Removes every line outside `[contentMin, contentMax]`, anchors those two boundaries, then builds
+/// fresh outward-only vacuum padding. Cell widths can only grow (up to `targetCellSize`) as they
+/// move away from the content, and padding continues until both the requested minimum domain extent
+/// and the coarse target size have been reached. This prevents a generic two-sided region fill from
+/// shrinking cells again merely to meet an artificial margin boundary.
+std::vector<double> rebuildExteriorPadding(std::vector<double> lines, double contentMin, double contentMax,
+                                            double minimumDomainMin, double minimumDomainMax,
+                                            double targetCellSize, double maximumCellRatio,
+                                            double minimumBoundaryCellSize);
+
+/// Appends `cellCount` uniform CPML cells at both ends, copying the now-coarse outermost core-cell
+/// widths produced by growGridBoundaryCellsToSize().
+std::vector<double> appendUniformPMLCells(std::vector<double> lines, std::int32_t cellCount);
+}
 
 /// Manages grid generation. All the geometric-series/region-densification machinery
 /// (Region, SubRegion, GridGeneratorAxis) is an internal implementation detail of this class.
@@ -22,14 +57,13 @@ public:
     /// (SlicedBoard's, per board_slicing.hpp) -- not necessarily the real board's, and not
     /// necessarily starting at (0,0), since a sliced cutout is generally offset from the real
     /// board's own Edge_Cuts origin. `boardCutout` is SlicedBoard::cutoutLoops (same coordinate
-    /// frame as the above; every loop of the true, possibly disjoint/possibly holed cutout region,
-    /// not just its largest loop -- see that field's own doc comment) -- used to filter which
-    /// trace/pad geometry actually drives mesh DENSITY (see generate()'s own doc comment); pass an
-    /// empty vector to fall back to bounding-box-only filtering (e.g. for an old cached geometry
-    /// stage with no stored cutoutLoops). `config` must outlive this GridGenerator (kept by
-    /// reference).
+    /// frame as the above. `layerCopperLoops` is SlicedBoard::layerCopperLoops: the actual copper
+    /// remaining after the hull cut, and therefore the sole source for ordinary XY mesh density.
+    /// `boardCutout` remains available only to clip the special differential-pair centreline pass.
+    /// `config` and `layerCopperLoops` must outlive this GridGenerator (kept by reference).
     GridGenerator(const EMSConfig& config, double boardXMin, double boardYMin, double boardWidth, double boardHeight,
-                  const std::vector<std::vector<Position>>& boardCutout);
+                  const std::vector<std::vector<Position>>& boardCutout,
+                  const std::vector<Cu::PolygonSet>& layerCopperLoops);
     ~GridGenerator();
 
     /// Extra pads to consider during grid generation (e.g. synthetic port apertures).
@@ -46,25 +80,11 @@ public:
     double xmin() const;
     double ymin() const;
 
-    /// Generates the complete dynamic grid (X, Y and Z lines) into `grid`, densifying around
-    /// `simConfig`'s resolved involved nets (see SimulationConfig::resolvedNets(), populated by
-    /// port_resolution.cpp) plus `additionalDensityNets`.
-    ///
-    /// `additionalDensityNets` gets exactly the same edge-snapped/optimal-densified treatment as an
-    /// involved net, without being involved itself -- the caller's own ground net and/or
-    /// GeometryOnly-level involved-nets entries ("Included in Simulation", as opposed to full
-    /// "Simulation Net" participation -- see NetInclusionLevel's own doc comment), neither of which
-    /// feeds resolvedNets()/ports but both of which are real copper actually present in the
-    /// simulated geometry. Local complexity varies enormously for this kind of net (a wide open pour
-    /// in one area, dense via stitching in another), which this densification already self-modulates
-    /// for: a pour with few edges produces few Region entries and stays close to the coarse `max`
-    /// background density, while a stitched area's many small via/pad edges naturally drive it
-    /// toward the fine `optimal` density, the same way it already does for any signal net's own
-    /// geometry. Passing an empty list (the caller's own choice, e.g. if ground net resolution
-    /// failed) reproduces this function's original behaviour exactly -- that copper covered only by
-    /// the coarse whole-board pass, regardless of its own local complexity.
-    CSRectGrid& generate(CSRectGrid& grid, const SimulationConfig& simConfig, const PathsConfig& paths,
-                        const std::vector<std::string>& additionalDensityNets = {});
+    /// Generates the complete dynamic grid (X, Y and Z lines) into `grid`. Ordinary density comes
+    /// exclusively from the already-sliced copper supplied to the constructor. The original board
+    /// is consulted only for differential-pair net identity, and those centrelines are clipped to
+    /// the cutout before their coupling gap is refined.
+    CSRectGrid& generate(CSRectGrid& grid, const SimulationConfig& simConfig, const PathsConfig& paths);
 
     /// The core mesh's own extent along each axis -- everywhere *inside* the PML band generate()
     /// appends beyond it (see GridGeneratorAxis::pmlInnerMin()/pmlInnerMax()'s own doc comment, in

@@ -8,6 +8,32 @@
 
 namespace kiems {
 
+namespace {
+
+std::complex<double> interpolateTransfer(
+    const std::vector<double>& frequencies,
+    const std::vector<std::complex<double>>& transferFunction,
+    double frequency) {
+    if (frequency <= frequencies.front()) {
+        return transferFunction.front();
+    }
+    if (frequency >= frequencies.back()) {
+        return transferFunction.back();
+    }
+    const auto upper = std::lower_bound(frequencies.begin(), frequencies.end(), frequency);
+    const std::size_t upperIndex = static_cast<std::size_t>(upper - frequencies.begin());
+    const std::size_t lowerIndex = upperIndex - 1;
+    const double span = frequencies[upperIndex] - frequencies[lowerIndex];
+    if (!(span > 0)) {
+        return transferFunction[lowerIndex];
+    }
+    const double fraction = (frequency - frequencies[lowerIndex]) / span;
+    return transferFunction[lowerIndex] +
+           (transferFunction[upperIndex] - transferFunction[lowerIndex]) * fraction;
+}
+
+} // namespace
+
 std::optional<EyeDiagramData> computeEyeDiagram(
     const std::vector<double>& frequencies,
     const std::vector<std::complex<double>>& transferFunction,
@@ -18,7 +44,11 @@ std::optional<EyeDiagramData> computeEyeDiagram(
     }
 
     constexpr std::size_t samplesPerUI = 32;
-    constexpr std::size_t bitCount = 255; // two complete PRBS7 periods plus one bit
+    // One exact PRBS7 period makes the source periodic at the transform boundary. The old 255-bit
+    // buffer was transformed directly at the simulation's frequency samples; those frequencies
+    // generally describe a much shorter periodic time window, aliasing the PRBS into an apparently
+    // transition-only oscillation after the inverse transform.
+    constexpr std::size_t bitCount = 127;
     const double dt = 1.0 / (bitRate * static_cast<double>(samplesPerUI));
 
     TimeWaveform source;
@@ -33,11 +63,32 @@ std::optional<EyeDiagramData> computeEyeDiagram(
         lfsr = ((lfsr << 1U) & 0x7eU) | feedback;
     }
 
-    std::vector<std::complex<double>> spectrum = forwardTransform(source, frequencies);
-    for (std::size_t f = 0; f < spectrum.size(); ++f) {
-        spectrum[f] *= transferFunction[f];
+    // Transform on the waveform's own Fourier grid, then interpolate the simulated channel onto
+    // that grid. This makes the forward/inverse pair describe the same 127-UI periodic waveform
+    // regardless of the simulation's frequency spacing.
+    const double transformDf = 1.0 / (static_cast<double>(source.samples.size()) * dt);
+    const double nyquist = 0.5 / dt;
+    const double maximumFrequency = std::min(frequencies.back(), nyquist);
+    if (!(maximumFrequency >= 0) || !std::isfinite(maximumFrequency)) {
+        return std::nullopt;
     }
-    const TimeWaveform received = inverseTransform(frequencies, spectrum, dt, source.samples.size());
+    const std::size_t transformFrequencyCount =
+        static_cast<std::size_t>(std::floor(maximumFrequency / transformDf)) + 1;
+    if (transformFrequencyCount < 2) {
+        return std::nullopt;
+    }
+    std::vector<double> transformFrequencies(transformFrequencyCount);
+    std::vector<std::complex<double>> resampledTransfer(transformFrequencyCount);
+    for (std::size_t f = 0; f < transformFrequencyCount; ++f) {
+        transformFrequencies[f] = static_cast<double>(f) * transformDf;
+        resampledTransfer[f] = interpolateTransfer(frequencies, transferFunction, transformFrequencies[f]);
+    }
+
+    std::vector<std::complex<double>> spectrum = forwardTransform(source, transformFrequencies);
+    for (std::size_t f = 0; f < spectrum.size(); ++f) {
+        spectrum[f] *= resampledTransfer[f];
+    }
+    const TimeWaveform received = inverseTransform(transformFrequencies, spectrum, dt, source.samples.size());
 
     // Recover the phase at which received transitions occur. Scoring the average first
     // difference at each possible sample-within-UI phase handles arbitrary propagation delay and
@@ -47,12 +98,11 @@ std::optional<EyeDiagramData> computeEyeDiagram(
     for (std::size_t phase = 0; phase < samplesPerUI; ++phase) {
         double score = 0;
         std::size_t count = 0;
-        for (std::size_t bit = 16; bit + 16 < bitCount; ++bit) {
+        for (std::size_t bit = 0; bit < bitCount; ++bit) {
             const std::size_t sample = bit * samplesPerUI + phase;
-            if (sample > 0 && sample < received.samples.size()) {
-                score += std::abs(received.samples[sample] - received.samples[sample - 1]);
-                ++count;
-            }
+            const std::size_t preceding = (sample + received.samples.size() - 1) % received.samples.size();
+            score += std::abs(received.samples[sample] - received.samples[preceding]);
+            ++count;
         }
         if (count > 0 && score / static_cast<double>(count) > bestScore) {
             bestScore = score / static_cast<double>(count);
@@ -67,17 +117,17 @@ std::optional<EyeDiagramData> computeEyeDiagram(
         result.timeUI[i] = static_cast<double>(i) / static_cast<double>(samplesPerUI) - 0.5;
     }
 
-    for (std::size_t bit = 16; bit + 16 < bitCount; ++bit) {
+    for (std::size_t bit = 0; bit < bitCount; ++bit) {
         const std::ptrdiff_t start = static_cast<std::ptrdiff_t>(bit * samplesPerUI + transitionPhase) -
                                      static_cast<std::ptrdiff_t>(samplesPerUI / 2);
-        const std::ptrdiff_t end = start + static_cast<std::ptrdiff_t>(2 * samplesPerUI);
-        if (start < 0 || end >= static_cast<std::ptrdiff_t>(received.samples.size())) {
-            continue;
-        }
         std::vector<double> trace(result.timeUI.size());
         bool finite = true;
         for (std::size_t i = 0; i < trace.size(); ++i) {
-            trace[i] = received.samples[static_cast<std::size_t>(start + static_cast<std::ptrdiff_t>(i))];
+            const std::ptrdiff_t unwrapped = start + static_cast<std::ptrdiff_t>(i);
+            const std::ptrdiff_t sampleCount = static_cast<std::ptrdiff_t>(received.samples.size());
+            const std::size_t wrapped =
+                static_cast<std::size_t>((unwrapped % sampleCount + sampleCount) % sampleCount);
+            trace[i] = received.samples[wrapped];
             finite = finite && std::isfinite(trace[i]);
         }
         if (finite) {

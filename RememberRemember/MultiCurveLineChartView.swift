@@ -8,6 +8,7 @@ import AppKit
 public final class MultiCurveLineChartView: NSView {
     private let yAxisLabel = NSTextField(labelWithString: "")
     private let chart = LineChartView()
+    private var configuredYAxisLabel = ""
 
     public init() {
         super.init(frame: .zero)
@@ -38,17 +39,46 @@ public final class MultiCurveLineChartView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    public func configure(yAxisLabel label: String) {
-        yAxisLabel.stringValue = label
+    /// Supplies the Y quantity name/unit used both by the optional caption and the chart's hover
+    /// readout. A disclosure graph already shows this caption in its own heading, so those callers
+    /// can hide this duplicate while retaining the metadata needed by the readout.
+    public func configure(yAxisLabel label: String, showsLabel: Bool = true) {
+        configuredYAxisLabel = label
+        // Keep a hidden duplicate caption from reserving its non-empty intrinsic height. The full
+        // label remains in configuredYAxisLabel for hover metadata even when another view presents
+        // the same heading.
+        yAxisLabel.stringValue = showsLabel ? label : ""
+        yAxisLabel.isHidden = !showsLabel || label.isEmpty
     }
 
     /// Replaces the chart's data. Every curve shares `xValuesGHz` as its X series. `minRange` --
     /// see LineChartView.setData's own doc comment -- keeps the axis showing at least this window
     /// regardless of the data's own extent.
     public func setCurves(xValuesGHz: [Double], curves: [(label: String, values: [Double])],
-                           minRange: (min: Double, max: Double)? = nil, xAxisLabel: String? = "Frequency [GHz]") {
-        chart.setData(xValues: xValuesGHz, curves: curves.map { ChartCurve(label: $0.label, values: $0.values) },
-                       leftAxisMinRange: minRange, xAxisLabel: xAxisLabel)
+                           minRange: (min: Double, max: Double)? = nil,
+                           xAxisScale: ChartXAxisScale = .logarithmic,
+                           xAxisLabel: String? = "Frequency [GHz]") {
+        setStyledCurves(
+            xValuesGHz: xValuesGHz,
+            curves: curves.map { ChartCurve(label: $0.label, values: $0.values) },
+            minRange: minRange,
+            xAxisScale: xAxisScale,
+            xAxisLabel: xAxisLabel)
+    }
+
+    /// The styled counterpart to setCurves(_:), for plots where individual series need their own
+    /// stroke widths or dash styles. Keeping this separate leaves the concise tuple-based API used
+    /// by the ordinary results charts unchanged.
+    public func setStyledCurves(xValuesGHz: [Double], curves: [ChartCurve],
+                                minRange: (min: Double, max: Double)? = nil,
+                                xAxisMinRange: (min: Double, max: Double)? = nil,
+                                xIntensityBand: ChartXIntensityBand? = nil,
+                                xAxisScale: ChartXAxisScale = .logarithmic,
+                                xAxisLabel: String? = "Frequency [GHz]") {
+        chart.setData(xValues: xValuesGHz, curves: curves,
+                      leftAxisMinRange: minRange, xAxisMinRange: xAxisMinRange,
+                      xIntensityBand: xIntensityBand, xAxisScale: xAxisScale, xAxisLabel: xAxisLabel,
+                      leftYAxisLabel: configuredYAxisLabel)
     }
 
     /// A single average curve at the normal stroke weight, a shaded min/max band behind it, and
@@ -58,10 +88,12 @@ public final class MultiCurveLineChartView: NSView {
     public func setBandedCurves(xValuesGHz: [Double], probeCurves: [(label: String, values: [Double])],
                                  averageLabel: String, average: [Double], band: (low: [Double], high: [Double]),
                                  minRange: (min: Double, max: Double)? = nil,
+                                 xAxisScale: ChartXAxisScale = .logarithmic,
                                  xAxisLabel: String? = "Frequency [GHz]") {
         var curves = [ChartCurve(label: averageLabel, values: average)]
         curves += probeCurves.map { ChartCurve(label: $0.label, values: $0.values, lineWidth: 0.75) }
         chart.setData(xValues: xValuesGHz, curves: curves, band: ChartBand(low: band.low, high: band.high),
-                       leftAxisMinRange: minRange, xAxisLabel: xAxisLabel)
+                       leftAxisMinRange: minRange, xAxisScale: xAxisScale, xAxisLabel: xAxisLabel,
+                       leftYAxisLabel: configuredYAxisLabel)
     }
 }

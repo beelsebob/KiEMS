@@ -2,9 +2,12 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <limits>
+#include <numeric>
 #include <hdf5.h>
 #include <os/signpost.h>
 
@@ -63,7 +66,8 @@ const DisableHDF5ErrorPrinting kDisableHDF5ErrorPrinting;
 
 std::expected<hid_t, std::string> createExtendibleDataset(hid_t file, const char* name, int rank,
                                                              const hsize_t* dims, const hsize_t* maxdims,
-                                                             const hsize_t* chunkDims, bool useBlosc2,
+                                                             const hsize_t* chunkDims, hid_t nativeType,
+                                                             bool useBlosc2,
                                                              std::vector<HId>& owned) {
     HId space(H5Screate_simple(rank, dims, maxdims), H5Sclose);
     if (!space.valid()) {
@@ -78,22 +82,20 @@ std::expected<hid_t, std::string> createExtendibleDataset(hid_t file, const char
             return std::unexpected(filtered.error() + " for " + name);
         }
     }
-    // Sized to comfortably hold one full chunk (every slot -- HDF5's own chunk cache is per
-    // dataset, not shared) so a chunk being filled one frame at a time is never evicted/
-    // recompressed before it's actually complete. rdcc_nbytes is the byte budget; rdcc_nslots
-    // (a hash-table size, conventionally a prime well above the expected number of simultaneously
-    // "hot" chunks) and rdcc_w0 (eviction policy, 0=LRU..1=always-prefer-more-accessed) are left at
-    // HDF5's own sane defaults' shape, just with a bigger byte budget.
-    std::size_t chunkBytes = sizeof(float);
+    // Large grids are spatially tiled, so never let HDF5 quietly scale a per-dataset cache to the
+    // whole grid. Six such caches were a significant part of the simulation's resident memory.
+    std::size_t chunkBytes = H5Tget_size(nativeType);
     for (int i = 0; i < rank; ++i) {
         chunkBytes *= chunkDims[i];
     }
     HId dapl(H5Pcreate(H5P_DATASET_ACCESS), H5Pclose);
-    if (!dapl.valid() || H5Pset_chunk_cache(dapl.get(), 1009, chunkBytes * 2, 0.75) < 0) {
+    constexpr std::size_t kMaximumChunkCacheBytes = 32ULL * 1024 * 1024;
+    const std::size_t cacheBytes = std::min(chunkBytes * 2, kMaximumChunkCacheBytes);
+    if (!dapl.valid() || H5Pset_chunk_cache(dapl.get(), 1009, cacheBytes, 0.75) < 0) {
         return std::unexpected(std::string("H5Pset_chunk_cache failed for ") + name);
     }
     hid_t dataset =
-        H5Dcreate2(file, name, H5T_NATIVE_FLOAT, space.get(), H5P_DEFAULT, dcpl.get(), dapl.get());
+        H5Dcreate2(file, name, nativeType, space.get(), H5P_DEFAULT, dcpl.get(), dapl.get());
     if (dataset < 0) {
         return std::unexpected(std::string("H5Dcreate2 failed for ") + name);
     }
@@ -147,6 +149,9 @@ std::expected<void, std::string> writeDoubleArrayDataset(hid_t file, const char*
 struct FieldFrameSeriesWriter::Impl {
     HId file;
     std::array<hid_t, 6> component{}; // Ex,Ey,Ez,Hx,Hy,Hz -- owned via `owned`, not closed directly
+    hid_t previewEnergy = -1;
+    std::array<hid_t, 6> previewComponent{};
+    hid_t refinementOrder = -1;
     hid_t timestepDataset = -1;
     hid_t timeSecondsDataset = -1;
     hid_t minEnergyDataset = -1;
@@ -156,6 +161,8 @@ struct FieldFrameSeriesWriter::Impl {
     hid_t publishedFrameCountDataset = -1;
     std::vector<HId> owned; // keeps every dataset/property-list handle alive for the file's lifetime
     std::uint32_t nx = 0, ny = 0, nz = 0;
+    std::uint32_t previewNx = 0, previewNy = 0, previewNz = 0;
+    std::uint32_t previewFactorX = 16, previewFactorY = 16, previewFactorZ = 2;
     std::uint32_t frameCount = 0;
     std::uint32_t publishedFrameCount = 0;
     std::uint32_t chunkFrames = 16;
@@ -166,7 +173,7 @@ struct FieldFrameSeriesWriter::Impl {
         if (publishedFrameCount == frameCount) {
             return {};
         }
-        // SWMR has no transaction spanning the nineteen extendible datasets in this file. Flush all
+        // SWMR has no transaction spanning all extendible datasets in this file. Flush all
         // field and metadata data first, then publish the new count through its own scalar dataset
         // and flush that dataset second. A reader which observes the new count is therefore
         // guaranteed that every byte belonging to those frames was already made visible first.
@@ -205,31 +212,13 @@ std::expected<FieldFrameSeriesWriter, std::string> FieldFrameSeriesWriter::creat
     if (chunkFrames == 0) {
         chunkFrames = 1;
     }
-    // Blosc2/HDF5's filter-callback API is int32_t-sized throughout (nbytes/buf_size, and the
-    // BLOSC2_MAX_OVERHEAD compressor headroom added on top of that on the compress side) -- a single
-    // filter invocation's own input (one dataset's whole chunk: chunkFrames * nx * ny * nz *
-    // sizeof(float)) must stay well under that ~2GiB ceiling, or the filter callback fails outright.
-    // That never showed up against the smoketest's tiny synthetic grid, but a large real board's mesh
-    // with the caller's requested chunkFrames (16 by default) can push a single component's own chunk
-    // well past it. Shrinks chunkFrames for this specific series so its own per-chunk byte count stays
-    // under a budget with real headroom below the hard limit -- never below 1 frame, this format's own
-    // finest granularity; a single frame's own chunk gets no inter-frame compression benefit, but at
-    // least writes successfully instead of failing the whole run's field capture outright.
-    constexpr std::uint64_t kMaxChunkBytes = 1536ULL * 1024 * 1024; // 1.5 GiB -- well under Blosc2/
-                                                                     // HDF5's hard ~2GiB (INT32_MAX)
-                                                                     // per-filter-call ceiling.
+    // `chunkFrames` is now only the atomic SWMR publication cadence. Field samples themselves are
+    // one-frame spatial tiles, so a compression call never scales with the whole mesh.
     const std::uint64_t frameBytes =
         static_cast<std::uint64_t>(header.nx) * header.ny * header.nz * sizeof(float);
     if (frameBytes == 0) {
         return std::unexpected("FieldFrameSeriesWriter::create: computed frame size is zero");
     }
-    if (frameBytes > static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max())) {
-        return std::unexpected("FieldFrameSeriesWriter::create: a single frame (" + std::to_string(frameBytes) +
-                               " bytes) already exceeds Blosc2/HDF5's own filter size limit -- this mesh "
-                               "is too large for the field frame-series format at its current resolution");
-    }
-    const std::uint64_t maxFramesPerChunk = std::max<std::uint64_t>(kMaxChunkBytes / frameBytes, 1);
-    chunkFrames = static_cast<std::uint32_t>(std::min<std::uint64_t>(chunkFrames, maxFramesPerChunk));
     // Plain stdout fprintf, matching CopperFDTDRunner.cpp's own progress-reporting convention --
     // Copper.framework doesn't link libkiems, so kiems's own Cu::logInfo isn't reachable
     // here. One line per series (only at create() time, not per-frame), giving the grid size and
@@ -238,10 +227,9 @@ std::expected<FieldFrameSeriesWriter, std::string> FieldFrameSeriesWriter::creat
     // so this is the only way to see the true numbers from a real run's own console output.
     std::fprintf(stdout,
                  "Copper: field frame-series %s: grid=%ux%ux%u, frame=%llu bytes/component, "
-                 "chunkFrames=%u (%llu bytes/component/chunk)\n",
+                 "publishFrames=%u, detailTile=16x16x2\n",
                  path.string().c_str(), header.nx, header.ny, header.nz,
-                 static_cast<unsigned long long>(frameBytes), chunkFrames,
-                 static_cast<unsigned long long>(frameBytes) * chunkFrames);
+                 static_cast<unsigned long long>(frameBytes), chunkFrames);
     if (auto registered = registerHDF5Blosc2Filter(); !registered) {
         return std::unexpected(registered.error());
     }
@@ -250,6 +238,14 @@ std::expected<FieldFrameSeriesWriter, std::string> FieldFrameSeriesWriter::creat
     impl->nx = header.nx;
     impl->ny = header.ny;
     impl->nz = header.nz;
+    impl->previewNx = (header.nx + impl->previewFactorX - 1) / impl->previewFactorX;
+    impl->previewNy = (header.ny + impl->previewFactorY - 1) / impl->previewFactorY;
+    impl->previewNz = (header.nz + impl->previewFactorZ - 1) / impl->previewFactorZ;
+    const std::uint64_t previewCellCount64 =
+        static_cast<std::uint64_t>(impl->previewNx) * impl->previewNy * impl->previewNz;
+    if (previewCellCount64 > std::numeric_limits<std::uint32_t>::max()) {
+        return std::unexpected("Field preview has too many cells for uint32 refinement indices");
+    }
     impl->chunkFrames = chunkFrames;
 
     HId fileAccess(H5Pcreate(H5P_FILE_ACCESS), H5Pclose);
@@ -264,12 +260,18 @@ std::expected<FieldFrameSeriesWriter, std::string> FieldFrameSeriesWriter::creat
     const hid_t file = impl->file.get();
 
     // Root attributes.
-    if (auto r = writeScalarAttribute<std::int32_t>(file, "format_version", H5T_NATIVE_INT32, 1); !r) return std::unexpected(r.error());
+    if (auto r = writeScalarAttribute<std::int32_t>(file, "format_version", H5T_NATIVE_INT32, 3); !r) return std::unexpected(r.error());
     if (auto r = writeStringAttribute(file, "simulation_name", header.simulationName); !r) return std::unexpected(r.error());
     if (auto r = writeScalarAttribute<std::int32_t>(file, "excited_port", H5T_NATIVE_INT32, header.excitedPort); !r) return std::unexpected(r.error());
     if (auto r = writeScalarAttribute<std::int32_t>(file, "nx", H5T_NATIVE_INT32, static_cast<std::int32_t>(header.nx)); !r) return std::unexpected(r.error());
     if (auto r = writeScalarAttribute<std::int32_t>(file, "ny", H5T_NATIVE_INT32, static_cast<std::int32_t>(header.ny)); !r) return std::unexpected(r.error());
     if (auto r = writeScalarAttribute<std::int32_t>(file, "nz", H5T_NATIVE_INT32, static_cast<std::int32_t>(header.nz)); !r) return std::unexpected(r.error());
+    if (auto r = writeScalarAttribute<std::int32_t>(file, "preview_factor_x", H5T_NATIVE_INT32, static_cast<std::int32_t>(impl->previewFactorX)); !r) return std::unexpected(r.error());
+    if (auto r = writeScalarAttribute<std::int32_t>(file, "preview_factor_y", H5T_NATIVE_INT32, static_cast<std::int32_t>(impl->previewFactorY)); !r) return std::unexpected(r.error());
+    if (auto r = writeScalarAttribute<std::int32_t>(file, "preview_factor_z", H5T_NATIVE_INT32, static_cast<std::int32_t>(impl->previewFactorZ)); !r) return std::unexpected(r.error());
+    if (auto r = writeScalarAttribute<std::int32_t>(file, "preview_nx", H5T_NATIVE_INT32, static_cast<std::int32_t>(impl->previewNx)); !r) return std::unexpected(r.error());
+    if (auto r = writeScalarAttribute<std::int32_t>(file, "preview_ny", H5T_NATIVE_INT32, static_cast<std::int32_t>(impl->previewNy)); !r) return std::unexpected(r.error());
+    if (auto r = writeScalarAttribute<std::int32_t>(file, "preview_nz", H5T_NATIVE_INT32, static_cast<std::int32_t>(impl->previewNz)); !r) return std::unexpected(r.error());
     if (auto r = writeScalarAttribute<double>(file, "timestep_seconds", H5T_NATIVE_DOUBLE, header.timestepSeconds); !r) return std::unexpected(r.error());
     if (auto r = writeScalarAttribute<double>(file, "board_z_min", H5T_NATIVE_DOUBLE, header.boardZMin); !r) return std::unexpected(r.error());
     if (auto r = writeScalarAttribute<double>(file, "board_z_max", H5T_NATIVE_DOUBLE, header.boardZMax); !r) return std::unexpected(r.error());
@@ -285,20 +287,57 @@ std::expected<FieldFrameSeriesWriter, std::string> FieldFrameSeriesWriter::creat
         if (auto r = writeDoubleArrayDataset(file, "/grid/line_z", header.lineZ); !r) return std::unexpected(r.error());
     }
 
+    // The viewer normally reads only this small pyramid base. Energy is max pooled so a thin,
+    // high-energy feature cannot disappear; signed components are block averaged so differential
+    // combinations remain meaningful instead of max-pooling positive and negative fields.
+    {
+        HId preview(H5Gcreate2(file, "/preview", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT), H5Gclose);
+        if (!preview.valid()) return std::unexpected("H5Gcreate2 failed for /preview");
+        const hsize_t dims[4] = {0, impl->previewNz, impl->previewNy, impl->previewNx};
+        const hsize_t maxdims[4] = {H5S_UNLIMITED, impl->previewNz, impl->previewNy, impl->previewNx};
+        const hsize_t chunks[4] = {1, impl->previewNz, impl->previewNy, impl->previewNx};
+        auto energy = createExtendibleDataset(file, "/preview/energy_max", 4, dims, maxdims, chunks,
+                                              H5T_NATIVE_FLOAT, true, impl->owned);
+        if (!energy) return std::unexpected(energy.error());
+        impl->previewEnergy = *energy;
+        static const char* const names[6] = {"/preview/Ex_mean", "/preview/Ey_mean", "/preview/Ez_mean",
+                                             "/preview/Hx_mean", "/preview/Hy_mean", "/preview/Hz_mean"};
+        for (std::size_t i = 0; i < 6; ++i) {
+            auto dataset = createExtendibleDataset(file, names[i], 4, dims, maxdims, chunks,
+                                                   H5T_NATIVE_FLOAT, true, impl->owned);
+            if (!dataset) return std::unexpected(dataset.error());
+            impl->previewComponent[i] = *dataset;
+        }
+        // One permutation per frame, containing x-fastest linear preview-cell indices ordered by
+        // descending normalized high-resolution variation. Its chunks match one complete ordering,
+        // so a decoder can fetch the small preview plus this list, then spend a bounded amount of
+        // time reading the most informative independently-compressed detail cells first.
+        const hsize_t orderDims[2] = {0, static_cast<hsize_t>(previewCellCount64)};
+        const hsize_t orderMaxDims[2] = {H5S_UNLIMITED, orderDims[1]};
+        const hsize_t orderChunks[2] = {1, orderDims[1]};
+        auto order = createExtendibleDataset(file, "/preview/refinement_order", 2, orderDims,
+                                             orderMaxDims, orderChunks, H5T_NATIVE_UINT32, true,
+                                             impl->owned);
+        if (!order) return std::unexpected(order.error());
+        impl->refinementOrder = *order;
+    }
+
     // /frames group + the six big extendible component datasets, chunked+compressed.
     {
         HId frames(H5Gcreate2(file, "/frames", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT), H5Gclose);
         if (!frames.valid()) {
             return std::unexpected("H5Gcreate2 failed for /frames");
         }
-        static const char* const kComponentNames[6] = {"/frames/Ex", "/frames/Ey", "/frames/Ez",
-                                                          "/frames/Hx", "/frames/Hy", "/frames/Hz"};
-        const hsize_t dims4[4] = {0, header.nx, header.ny, header.nz};
-        const hsize_t maxdims4[4] = {H5S_UNLIMITED, header.nx, header.ny, header.nz};
-        const hsize_t chunk4[4] = {chunkFrames, header.nx, header.ny, header.nz};
+        static const char* const kComponentNames[6] = {"/frames/Ex_xor", "/frames/Ey_xor", "/frames/Ez_xor",
+                                                       "/frames/Hx_xor", "/frames/Hy_xor", "/frames/Hz_xor"};
+        const hsize_t dims4[4] = {0, header.nz, header.ny, header.nx};
+        const hsize_t maxdims4[4] = {H5S_UNLIMITED, header.nz, header.ny, header.nx};
+        const hsize_t chunk4[4] = {1, std::min<hsize_t>(header.nz, impl->previewFactorZ),
+                                  std::min<hsize_t>(header.ny, impl->previewFactorY),
+                                  std::min<hsize_t>(header.nx, impl->previewFactorX)};
         for (int i = 0; i < 6; ++i) {
-            auto ds = createExtendibleDataset(file, kComponentNames[i], 4, dims4, maxdims4, chunk4, true,
-                                              impl->owned);
+            auto ds = createExtendibleDataset(file, kComponentNames[i], 4, dims4, maxdims4, chunk4,
+                                              H5T_NATIVE_UINT32, true, impl->owned);
             if (!ds) return std::unexpected(ds.error());
             impl->component[static_cast<std::size_t>(i)] = *ds;
         }
@@ -404,29 +443,6 @@ std::expected<void, std::string> FieldFrameSeriesWriter::writeFrame(std::uint32_
                                    "Encode field-frame block", "block=%u first_frame=%u capacity=%u",
                                    frameIndex / impl.chunkFrames, frameIndex, impl.chunkFrames);
     }
-    const hsize_t newExtent4[4] = {frameIndex + 1, impl.nx, impl.ny, impl.nz};
-    const hsize_t start4[4] = {frameIndex, 0, 0, 0};
-    const hsize_t count4[4] = {1, impl.nx, impl.ny, impl.nz};
-    HId memspace4(H5Screate_simple(4, count4, nullptr), H5Sclose);
-    if (!memspace4.valid()) {
-        return std::unexpected("H5Screate_simple failed for a field-component frame write");
-    }
-    for (std::size_t i = 0; i < components.size(); ++i) {
-        const hid_t dataset = impl.component[i];
-        if (H5Dset_extent(dataset, newExtent4) < 0) {
-            return std::unexpected("H5Dset_extent failed while appending a frame");
-        }
-        HId filespace(H5Dget_space(dataset), H5Sclose);
-        if (!filespace.valid() ||
-            H5Sselect_hyperslab(filespace.get(), H5S_SELECT_SET, start4, nullptr, count4, nullptr) < 0) {
-            return std::unexpected("H5Sselect_hyperslab failed while appending a frame");
-        }
-        if (H5Dwrite(dataset, H5T_NATIVE_FLOAT, memspace4.get(), filespace.get(), H5P_DEFAULT,
-                     components[i]->data()) < 0) {
-            return std::unexpected("H5Dwrite failed while appending a frame");
-        }
-    }
-
     auto appendScalar = [&](hid_t dataset, hid_t nativeType, const void* value) -> std::expected<void, std::string> {
         const hsize_t newExtent1[1] = {frameIndex + 1};
         const hsize_t start1[1] = {frameIndex};
@@ -448,6 +464,12 @@ std::expected<void, std::string> FieldFrameSeriesWriter::writeFrame(std::uint32_
 
     float minEnergy = 0.0F;
     float maxEnergy = 0.0F;
+    const std::size_t previewCellCount = static_cast<std::size_t>(impl.previewNx) * impl.previewNy * impl.previewNz;
+    std::vector<float> previewEnergy(previewCellCount, 0.0F);
+    std::vector<float> previewEnergyMin(previewCellCount, std::numeric_limits<float>::infinity());
+    std::array<std::vector<float>, 6> previewComponents;
+    for (auto& component : previewComponents) component.assign(previewCellCount, 0.0F);
+    std::vector<std::uint32_t> previewSampleCounts(previewCellCount, 0);
     std::array<float, 6> componentMin;
     std::array<float, 6> componentMax;
     for (std::size_t component = 0; component < components.size(); ++component) {
@@ -462,16 +484,150 @@ std::expected<void, std::string> FieldFrameSeriesWriter::writeFrame(std::uint32_
     // forward-declared openEMS type.
     constexpr double kEps0 = 8.8541878128e-12;
     constexpr double kMu0 = 1.25663706212e-6;
-    for (std::size_t i = 0; i < cellCount; ++i) {
-        for (std::size_t component = 0; component < components.size(); ++component) {
-            componentMin[component] = std::min(componentMin[component], (*components[component])[i]);
-            componentMax[component] = std::max(componentMax[component], (*components[component])[i]);
+    for (std::uint32_t z = 0; z < impl.nz; ++z) {
+        for (std::uint32_t y = 0; y < impl.ny; ++y) {
+            for (std::uint32_t x = 0; x < impl.nx; ++x) {
+                const std::size_t i = x + static_cast<std::size_t>(impl.nx) * (y + static_cast<std::size_t>(impl.ny) * z);
+                const std::size_t previewIndex = (x / impl.previewFactorX) +
+                    static_cast<std::size_t>(impl.previewNx) * ((y / impl.previewFactorY) +
+                    static_cast<std::size_t>(impl.previewNy) * (z / impl.previewFactorZ));
+                for (std::size_t component = 0; component < components.size(); ++component) {
+                    const float value = (*components[component])[i];
+                    componentMin[component] = std::min(componentMin[component], value);
+                    componentMax[component] = std::max(componentMax[component], value);
+                    previewComponents[component][previewIndex] += value;
+                }
+                ++previewSampleCounts[previewIndex];
+                const float eSq = ex[i] * ex[i] + ey[i] * ey[i] + ez[i] * ez[i];
+                const float hSq = hx[i] * hx[i] + hy[i] * hy[i] + hz[i] * hz[i];
+                const float energy = static_cast<float>(kEps0) * eSq + static_cast<float>(kMu0) * hSq;
+                if (i == 0 || energy < minEnergy) minEnergy = energy;
+                if (i == 0 || energy > maxEnergy) maxEnergy = energy;
+                previewEnergy[previewIndex] = std::max(previewEnergy[previewIndex], energy);
+                previewEnergyMin[previewIndex] = std::min(previewEnergyMin[previewIndex], energy);
+            }
         }
-        const float eSq = ex[i] * ex[i] + ey[i] * ey[i] + ez[i] * ez[i];
-        const float hSq = hx[i] * hx[i] + hy[i] * hy[i] + hz[i] * hz[i];
-        const float energy = static_cast<float>(kEps0) * eSq + static_cast<float>(kMu0) * hSq;
-        if (i == 0 || energy < minEnergy) minEnergy = energy;
-        if (i == 0 || energy > maxEnergy) maxEnergy = energy;
+    }
+    for (std::size_t i = 0; i < previewCellCount; ++i) {
+        const float divisor = static_cast<float>(previewSampleCounts[i]);
+        for (auto& component : previewComponents) component[i] /= divisor;
+    }
+
+    // Rank preview cells by the detail lost in their low-resolution representation. Component
+    // residuals are normalized by each component's own frame range so E and H units cannot dominate
+    // one another; energy span is normalized independently. Taking the maximum makes a cell rank
+    // highly when *any* selectable field needs detail. Non-finite residuals are intentionally first:
+    // they are diagnostically important and must not make std::sort's ordering undefined.
+    std::vector<float> refinementScore(previewCellCount, 0.0F);
+    const float energyRange = maxEnergy - minEnergy;
+    for (std::size_t i = 0; i < previewCellCount; ++i) {
+        if (energyRange > 0.0F) {
+            refinementScore[i] = std::max(refinementScore[i],
+                                          (previewEnergy[i] - previewEnergyMin[i]) / energyRange);
+        }
+    }
+
+    const hsize_t previewExtent[4] = {frameIndex + 1, impl.previewNz, impl.previewNy, impl.previewNx};
+    const hsize_t previewStart[4] = {frameIndex, 0, 0, 0};
+    const hsize_t previewCount[4] = {1, impl.previewNz, impl.previewNy, impl.previewNx};
+    HId previewMemspace(H5Screate_simple(4, previewCount, nullptr), H5Sclose);
+    auto appendPreview = [&](hid_t dataset, const float* values) -> std::expected<void, std::string> {
+        if (H5Dset_extent(dataset, previewExtent) < 0) {
+            return std::unexpected("H5Dset_extent failed while appending a preview frame");
+        }
+        HId filespace(H5Dget_space(dataset), H5Sclose);
+        if (!filespace.valid() || !previewMemspace.valid() ||
+            H5Sselect_hyperslab(filespace.get(), H5S_SELECT_SET, previewStart, nullptr, previewCount, nullptr) < 0 ||
+            H5Dwrite(dataset, H5T_NATIVE_FLOAT, previewMemspace.get(), filespace.get(), H5P_DEFAULT, values) < 0) {
+            return std::unexpected("H5Dwrite failed while appending a preview frame");
+        }
+        return {};
+    };
+    if (auto result = appendPreview(impl.previewEnergy, previewEnergy.data()); !result) return result;
+    for (std::size_t i = 0; i < previewComponents.size(); ++i) {
+        if (auto result = appendPreview(impl.previewComponent[i], previewComponents[i].data()); !result) return result;
+    }
+    // Lossless detail residuals. Arithmetic float subtraction cannot guarantee bit-exact recovery,
+    // so store originalBits XOR previewMeanBits. Within a coarse block the shared high bits usually
+    // become zero and compress well; decoding is exact and each 16x16x2 preview-cell tile is independent.
+    const hsize_t detailExtent[4] = {frameIndex + 1, impl.nz, impl.ny, impl.nx};
+    const std::uint32_t kTileX = impl.previewFactorX;
+    const std::uint32_t kTileY = impl.previewFactorY;
+    const std::uint32_t kTileZ = impl.previewFactorZ;
+    std::vector<std::uint32_t> residual;
+    residual.reserve(static_cast<std::size_t>(kTileX) * kTileY * kTileZ);
+    for (std::size_t component = 0; component < components.size(); ++component) {
+        const hid_t dataset = impl.component[component];
+        const float componentRange = componentMax[component] - componentMin[component];
+        if (H5Dset_extent(dataset, detailExtent) < 0) {
+            return std::unexpected("H5Dset_extent failed while appending field detail");
+        }
+        for (std::uint32_t z0 = 0; z0 < impl.nz; z0 += kTileZ) {
+            const std::uint32_t tileNz = std::min(kTileZ, impl.nz - z0);
+            for (std::uint32_t y0 = 0; y0 < impl.ny; y0 += kTileY) {
+                const std::uint32_t tileNy = std::min(kTileY, impl.ny - y0);
+                for (std::uint32_t x0 = 0; x0 < impl.nx; x0 += kTileX) {
+                    const std::uint32_t tileNx = std::min(kTileX, impl.nx - x0);
+                    residual.clear();
+                    for (std::uint32_t z = z0; z < z0 + tileNz; ++z) {
+                        for (std::uint32_t y = y0; y < y0 + tileNy; ++y) {
+                            for (std::uint32_t x = x0; x < x0 + tileNx; ++x) {
+                                const std::size_t fullIndex = x + static_cast<std::size_t>(impl.nx) *
+                                    (y + static_cast<std::size_t>(impl.ny) * z);
+                                const std::size_t previewIndex = (x / impl.previewFactorX) +
+                                    static_cast<std::size_t>(impl.previewNx) * ((y / impl.previewFactorY) +
+                                    static_cast<std::size_t>(impl.previewNy) * (z / impl.previewFactorZ));
+                                if (componentRange > 0.0F) {
+                                    const float normalized =
+                                        std::abs((*components[component])[fullIndex] -
+                                                 previewComponents[component][previewIndex]) / componentRange;
+                                    refinementScore[previewIndex] =
+                                        std::max(refinementScore[previewIndex],
+                                                 std::isfinite(normalized)
+                                                     ? normalized
+                                                     : std::numeric_limits<float>::infinity());
+                                }
+                                residual.push_back(std::bit_cast<std::uint32_t>((*components[component])[fullIndex]) ^
+                                                   std::bit_cast<std::uint32_t>(previewComponents[component][previewIndex]));
+                            }
+                        }
+                    }
+                    const hsize_t start[4] = {frameIndex, z0, y0, x0};
+                    const hsize_t count[4] = {1, tileNz, tileNy, tileNx};
+                    HId filespace(H5Dget_space(dataset), H5Sclose);
+                    HId memspace(H5Screate_simple(4, count, nullptr), H5Sclose);
+                    if (!filespace.valid() || !memspace.valid() ||
+                        H5Sselect_hyperslab(filespace.get(), H5S_SELECT_SET, start, nullptr, count, nullptr) < 0 ||
+                        H5Dwrite(dataset, H5T_NATIVE_UINT32, memspace.get(), filespace.get(), H5P_DEFAULT,
+                                 residual.data()) < 0) {
+                        return std::unexpected("H5Dwrite failed while appending field detail residual");
+                    }
+                }
+            }
+        }
+    }
+
+    std::vector<std::uint32_t> refinementOrder(previewCellCount);
+    std::iota(refinementOrder.begin(), refinementOrder.end(), 0U);
+    std::sort(refinementOrder.begin(), refinementOrder.end(), [&](std::uint32_t lhs, std::uint32_t rhs) {
+        if (refinementScore[lhs] != refinementScore[rhs]) return refinementScore[lhs] > refinementScore[rhs];
+        return lhs < rhs;
+    });
+    {
+        const hsize_t extent[2] = {frameIndex + 1, previewCellCount};
+        const hsize_t start[2] = {frameIndex, 0};
+        const hsize_t count[2] = {1, previewCellCount};
+        HId memspace(H5Screate_simple(2, count, nullptr), H5Sclose);
+        if (H5Dset_extent(impl.refinementOrder, extent) < 0) {
+            return std::unexpected("H5Dset_extent failed while appending refinement order");
+        }
+        HId filespace(H5Dget_space(impl.refinementOrder), H5Sclose);
+        if (!filespace.valid() || !memspace.valid() ||
+            H5Sselect_hyperslab(filespace.get(), H5S_SELECT_SET, start, nullptr, count, nullptr) < 0 ||
+            H5Dwrite(impl.refinementOrder, H5T_NATIVE_UINT32, memspace.get(), filespace.get(),
+                     H5P_DEFAULT, refinementOrder.data()) < 0) {
+            return std::unexpected("H5Dwrite failed while appending refinement order");
+        }
     }
 
     if (auto r = appendScalar(impl.timestepDataset, H5T_NATIVE_UINT32, &timestep); !r) return r;

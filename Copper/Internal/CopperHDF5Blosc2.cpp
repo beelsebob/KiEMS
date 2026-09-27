@@ -43,7 +43,11 @@ blosc2_context* threadLocalCompressContext() {
     thread_local blosc2_context* context = nullptr;
     if (context == nullptr) {
         blosc2_cparams parameters = BLOSC2_CPARAMS_DEFAULTS;
-        parameters.compcode = BLOSC_ZSTD;
+        // Playback is latency-sensitive and field-frame chunks are decoded much more often than
+        // they are encoded. LZ4 gives up some compression ratio in exchange for substantially
+        // cheaper decoding. The codec is recorded in every Blosc2 chunk, so this only affects new
+        // writes; the generic decompressor below continues to read existing Zstd chunks.
+        parameters.compcode = BLOSC_LZ4;
         parameters.clevel = 1;
         parameters.typesize = sizeof(float);
         parameters.filters[BLOSC2_MAX_FILTERS - 1] = BLOSC_BITSHUFFLE;
@@ -201,7 +205,7 @@ const H5Z_class2_t kBlosc2Filter = {
     kBlosc2FilterId,
     1,
     1,
-    "Blosc2 Zstd level 1 + bitshuffle",
+    "Blosc2 LZ4 level 1 + bitshuffle",
     nullptr,
     nullptr,
     filterBlosc2,

@@ -10,7 +10,7 @@
 #include <cstdint>
 #include <vector>
 
-#include "FDTD/operator.h"
+class Operator;
 
 namespace copper {
 

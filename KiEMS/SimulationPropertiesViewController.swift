@@ -5,7 +5,8 @@ import Cocoa
 /// setSelectedSimulationIndex) -- viaPlatingThickness/viaFillingEpsilon/frequencyStart/frequencyStop
 /// stay editable regardless (they're document-level, not per-simulation), but the rest disable
 /// themselves when nothing is selected.
-final class SimulationPropertiesViewController: NSViewController {
+final class SimulationPropertiesViewController: NSViewController, NSComboBoxDelegate {
+    private static let formFont = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
     private weak var document: Document?
     private var selectedIndex: Int?
 
@@ -31,15 +32,12 @@ final class SimulationPropertiesViewController: NSViewController {
     var onFDTDParametersChanged: (() -> Void)?
     var onResultsParametersChanged: ((Int) -> Void)?
 
+    // Gates SimulationConfig::isDifferentialPair() -- see its own doc comment for exactly what
+    // that changes (whether reciprocal net-pair metadata actually gets turned into a diffPairs()
+    // entry, or the simulation stays plain single-ended regardless of any such metadata).
+    private let differentialPairCheckbox = NSButton(checkboxWithTitle: "Differential Pair", target: nil, action: nil)
     private let nameField = NSTextField(string: "")
-    private let groundKindPopUp = NSPopUpButton()
-    private let groundNamePopUp = NSPopUpButton()
-    // groundNamePopUp's own button face renders sub/superscript fine (attributedTitle's
-    // .baselineOffset is a real NSAttributedString attribute AppKit already draws), but not the
-    // `~{...}` overline -- that needs NetNameFormatting's manual drawing (see NetNameCellView),
-    // which a menu item's attributedTitle can't provide. This mirrors the popup's current selection
-    // purely for that case, so a negated ground net (e.g. "~{RESET}") still reads correctly.
-    private let groundNameView = NetNameView()
+    private let groundNameComboBox = NSComboBox()
     private let maxStepsField = NSTextField(string: "")
     // The FDTD grid's own base target cell size -- document-level (EMSConfig), not per-simulation,
     // same as maxStepsField beside it. maxTimestepValueLabel/simulationRealTimeValueLabel are
@@ -74,7 +72,16 @@ final class SimulationPropertiesViewController: NSViewController {
     private let frequencyStopFormatter = UnitSuffixValueFormatter(
         displaySuffix: "Hz", acceptedSuffixes: ["hertz", "hz"], autoSelectsSIPrefix: true)
     private let eyeBitRateFormatter = UnitSuffixValueFormatter(
-        displaySuffix: "bit/s", acceptedSuffixes: ["bit/s", "bps"], autoSelectsSIPrefix: true)
+        displaySuffix: "bit/s", acceptedSuffixes: ["bit/s", "bps"],
+        scaledSuffixes: SIPrefix.allCases.flatMap { prefix in
+            prefix.inputSymbols.flatMap { symbol in
+                [
+                    (suffix: "\(symbol)b/s", factor: prefix.factor),
+                    (suffix: "\(symbol)B/s", factor: 8 * prefix.factor),
+                ]
+            }
+        },
+        autoSelectsSIPrefix: true)
     private let maxStepsFormatter: NumberFormatter = {
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
@@ -82,18 +89,15 @@ final class SimulationPropertiesViewController: NSViewController {
         return formatter
     }()
 
-    private let viaAdvancedDisclosureButton = NSButton()
-    private var viaAdvancedRow: NSStackView?
-    private var viaAdvancedRowExpanded = false
-
     private var groundNetClassNames: [String] = []
     private var groundNetNames: [String] = []
 
-    // What the user had selected the last time the ground-net kind was the *other* one -- restored
-    // verbatim on switching back (see groundKindChanged), rather than re-guessing every time. Reset
-    // whenever the selected simulation changes, so one simulation's choices never leak into another's.
-    private var rememberedNetName: String?
-    private var rememberedNetClassName: String?
+    private struct GroundMenuChoice {
+        let kind: EMSGroundSelectorKind
+        let name: String
+    }
+    private var groundChoicesByComboIndex: [Int: GroundMenuChoice] = [:]
+    private var isUpdatingGroundComboBox = false
 
     init(document: Document) {
         self.document = document
@@ -111,27 +115,64 @@ final class SimulationPropertiesViewController: NSViewController {
         reload()
     }
 
-    private func labeled(_ title: String, _ control: NSView, labelWidth: CGFloat = 120) -> NSStackView {
+    // At the small system font, "Frequency Range:" is just under 95pt wide. Matching the column to
+    // that width lets the sidebar's own inset provide the requested leading padding rather than
+    // adding another inset inside the right-aligned label column.
+    private static let labelWidth: CGFloat = 95
+
+    private func labeled(_ title: String, _ control: NSView) -> NSStackView {
         let label = NSTextField(labelWithString: title)
+        label.font = Self.formFont
+        label.textColor = .labelColor
         label.alignment = .right
-        label.setContentHuggingPriority(.required, for: .horizontal)
-        label.widthAnchor.constraint(equalToConstant: labelWidth).isActive = true
+        label.lineBreakMode = .byWordWrapping
+        label.maximumNumberOfLines = 2
+        label.cell?.wraps = true
+        label.widthAnchor.constraint(equalToConstant: Self.labelWidth).isActive = true
         let row = NSStackView(views: [label, control])
         row.orientation = .horizontal
+        row.alignment = .centerY
+        row.distribution = .fill
         row.spacing = 8
+        control.setContentHuggingPriority(.defaultLow, for: .horizontal)
         return row
     }
 
+    private func section(_ title: String, views: [NSView]) -> NSStackView {
+        let separator = NSBox()
+        separator.boxType = .separator
+        let heading = NSTextField(labelWithString: title)
+        heading.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+        heading.textColor = .secondaryLabelColor
+
+        let section = NSStackView(views: [separator, heading] + views)
+        section.orientation = .vertical
+        section.alignment = .leading
+        section.spacing = 6
+        section.setCustomSpacing(8, after: separator)
+        section.setCustomSpacing(10, after: heading)
+        separator.widthAnchor.constraint(equalTo: section.widthAnchor).isActive = true
+        for view in views {
+            view.widthAnchor.constraint(equalTo: section.widthAnchor).isActive = true
+        }
+        return section
+    }
+
     private func buildUI() {
+        differentialPairCheckbox.target = self
+        differentialPairCheckbox.action = #selector(differentialPairToggled)
+        differentialPairCheckbox.controlSize = .small
+        differentialPairCheckbox.font = Self.formFont
+
         nameField.target = self
         nameField.action = #selector(nameChanged)
 
-        groundKindPopUp.addItems(withTitles: ["Net", "Net Class"])
-        groundKindPopUp.target = self
-        groundKindPopUp.action = #selector(groundKindChanged)
-
-        groundNamePopUp.target = self
-        groundNamePopUp.action = #selector(groundNameChanged)
+        groundNameComboBox.target = self
+        groundNameComboBox.action = #selector(groundNameChanged)
+        groundNameComboBox.delegate = self
+        groundNameComboBox.controlSize = .small
+        groundNameComboBox.font = Self.formFont
+        groundNameComboBox.completes = true
 
         hullPaddingField.formatter = hullPaddingFormatter
         viaEdgeDistanceField.formatter = viaEdgeDistanceFormatter
@@ -147,6 +188,8 @@ final class SimulationPropertiesViewController: NSViewController {
         for field in [hullPaddingField, viaEdgeDistanceField, viaSpacingField, platingThicknessField,
                       fillingEpsilonField, frequencyStartField, frequencyStopField, maxStepsField,
                       gridDensityField, eyeBitRateField] {
+            field.controlSize = .small
+            field.font = Self.formFont
             field.alignment = .right
             field.target = self
             field.action = #selector(numberFieldChanged(_:))
@@ -154,140 +197,65 @@ final class SimulationPropertiesViewController: NSViewController {
 
         maxTimestepValueLabel.textColor = .secondaryLabelColor
         simulationRealTimeValueLabel.textColor = .secondaryLabelColor
+        for field in [nameField, maxTimestepValueLabel, simulationRealTimeValueLabel] {
+            field.controlSize = .small
+            field.font = Self.formFont
+        }
+        maxTimestepValueLabel.alignment = .right
+        simulationRealTimeValueLabel.alignment = .right
 
-        viaAdvancedDisclosureButton.bezelStyle = .regularSquare
-        viaAdvancedDisclosureButton.isBordered = false
-        viaAdvancedDisclosureButton.imagePosition = .imageOnly
-        viaAdvancedDisclosureButton.image = NSImage(
-            systemSymbolName: "chevron.right", accessibilityDescription: "Show more via settings")
-        viaAdvancedDisclosureButton.target = self
-        viaAdvancedDisclosureButton.action = #selector(toggleViaAdvancedRow)
-        viaAdvancedDisclosureButton.widthAnchor.constraint(equalToConstant: 16).isActive = true
-        viaAdvancedDisclosureButton.heightAnchor.constraint(equalToConstant: 16).isActive = true
+        let rangeSeparator = NSTextField(labelWithString: "–")
+        rangeSeparator.font = Self.formFont
+        rangeSeparator.textColor = .secondaryLabelColor
+        let frequencyRange = NSStackView(views: [frequencyStartField, rangeSeparator, frequencyStopField])
+        frequencyRange.orientation = .horizontal
+        frequencyRange.alignment = .centerY
+        frequencyRange.distribution = .fill
+        frequencyRange.spacing = 3
+        frequencyStartField.widthAnchor.constraint(greaterThanOrEqualToConstant: 42).isActive = true
+        frequencyStopField.widthAnchor.constraint(greaterThanOrEqualToConstant: 42).isActive = true
+        frequencyStartField.widthAnchor.constraint(equalTo: frequencyStopField.widthAnchor).isActive = true
+        rangeSeparator.setContentHuggingPriority(.required, for: .horizontal)
 
-        let groundRow = NSStackView(views: [groundKindPopUp, groundNamePopUp, groundNameView])
-        groundRow.orientation = .horizontal
-        groundRow.spacing = 8
-
-        // Grid density sits left of Max. timesteps in one row (same stack-of-stacks-plus-spacer
-        // shape as frequencyRow below); maxTimestepValueLabel/simulationRealTimeValueLabel are
-        // read-only values derived from both, directly beneath -- see updateDerivedTimingLabels().
-        // Built via the same labeled(_:_:labelWidth:) helper, same 130 labelWidth and 8pt spacing,
-        // as gridAndStepsRow immediately above, so both rows' two columns land at the same x --
-        // "Max timestep:"/its value line up under "Grid density:"/gridDensityField, and
-        // "Simulation real time:"/its value line up under "Max. timesteps:"/maxStepsField.
-        let gridAndStepsRowSpacer = NSView()
-        gridAndStepsRowSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let gridAndStepsRow = NSStackView(views: [
-            labeled("Grid density:", gridDensityField, labelWidth: 130),
-            labeled("Max. timesteps:", maxStepsField, labelWidth: 130),
-            gridAndStepsRowSpacer,
-        ])
-        gridAndStepsRow.orientation = .horizontal
-        gridAndStepsRow.spacing = 8
-
-        let derivedTimingRowSpacer = NSView()
-        derivedTimingRowSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let derivedTimingRow = NSStackView(views: [
-            labeled("Max timestep:", maxTimestepValueLabel, labelWidth: 130),
-            labeled("Simulation real time:", simulationRealTimeValueLabel, labelWidth: 130),
-            derivedTimingRowSpacer,
-        ])
-        derivedTimingRow.orientation = .horizontal
-        derivedTimingRow.spacing = 8
-
-        let frequencyStartRow = labeled("Frequency start:", frequencyStartField, labelWidth: 130)
-        // 130, not a tighter fit for "Stop:" -- matches viaSpacing's/fillingEpsilon's second-column
-        // labelWidth below so "Stop"/"Via spacing"/"Via filling epsilon" line up as one column.
-        let frequencyStopRow = labeled("Stop:", frequencyStopField, labelWidth: 130)
-        // frequencyRow (a stack-of-stacks, unlike the single-level rows above it e.g. nameField's)
-        // doesn't hug its content tightly against the outer `stack`'s required-priority pin to
-        // view's edges -- .fill distribution stretches an arranged subview to absorb the leftover
-        // width regardless of that subview's own hugging priority. Same fix as viaMainRowSpacer
-        // below: give the spare width somewhere invisible to go, at the row's end, instead of
-        // letting it open a gap between "Frequency start" and "Stop".
-        let frequencyRowSpacer = NSView()
-        frequencyRowSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let frequencyRow = NSStackView(views: [frequencyStartRow, frequencyStopRow, frequencyRowSpacer])
-        frequencyRow.orientation = .horizontal
-        frequencyRow.spacing = 8
-
-        // Absorbs all the row's spare width, so "Via edge distance"/"Via spacing" stay snugly
-        // adjacent regardless of how wide the row ends up -- only the disclosure button (pinned
-        // after this spacer) moves when the row's overall width changes, never the fields before it.
-        let viaMainRowSpacer = NSView()
-        viaMainRowSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        let viaMainRow = NSStackView(views: [
-            labeled("Via edge distance:", viaEdgeDistanceField, labelWidth: 130),
-            // 130, not a tighter fit -- see frequencyStopRow's comment above.
-            labeled("Via spacing:", viaSpacingField, labelWidth: 130),
-            viaMainRowSpacer,
-            viaAdvancedDisclosureButton,
-        ])
-        viaMainRow.orientation = .horizontal
-        viaMainRow.spacing = 8
-
-        let viaAdvancedRow = NSStackView(views: [
-            labeled("Via plating thickness:", platingThicknessField, labelWidth: 130),
-            labeled("Via filling epsilon:", fillingEpsilonField, labelWidth: 130),
-        ])
-        viaAdvancedRow.orientation = .horizontal
-        viaAdvancedRow.spacing = 8
-        viaAdvancedRow.isHidden = true
-        self.viaAdvancedRow = viaAdvancedRow
-
-        let stack = NSStackView(views: [
-            // labelWidth 130 on all three (not the 120 default) so their fields line up with Via
-            // edge distance's field directly below -- "Via edge distance:" is the widest label here.
-            labeled("Name:", nameField, labelWidth: 130),
-            labeled("Ground net:", groundRow, labelWidth: 130),
-            gridAndStepsRow,
-            derivedTimingRow,
-            labeled("Hull padding:", hullPaddingField, labelWidth: 130),
-            frequencyRow,
-            labeled("Eye bit rate:", eyeBitRateField, labelWidth: 130),
-            viaMainRow,
-            viaAdvancedRow,
-        ])
+        let nameRow = labeled("Name:", nameField)
+        let networksSection = section("Networks", views: [
+                labeled("", differentialPairCheckbox),
+                labeled("Ground Net:", groundNameComboBox),
+            ])
+        let geometrySection = section("Geometry", views: [
+                labeled("Padding:", hullPaddingField),
+                labeled("Stitching Inset:", viaEdgeDistanceField),
+                labeled("Stitching Spacing:", viaSpacingField),
+                labeled("Via Plating Thickness:", platingThicknessField),
+                labeled("Via Filling Epsilon:", fillingEpsilonField),
+            ])
+        let resolutionSection = section("Resolution", views: [
+                labeled("Min Resolution:", gridDensityField),
+                labeled("Timestep Length:", maxTimestepValueLabel),
+                labeled("Max Timesteps:", maxStepsField),
+                labeled("Sim Real Time:", simulationRealTimeValueLabel),
+                labeled("Frequency Range:", frequencyRange),
+                labeled("Digital Bitrate:", eyeBitRateField),
+            ])
+        let topLevelViews = [nameRow, networksSection, geometrySection, resolutionSection]
+        let stack = NSStackView(views: topLevelViews)
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 8
+        stack.spacing = 14
         stack.translatesAutoresizingMaskIntoConstraints = false
+        for view in topLevelViews {
+            view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
 
         view.addSubview(stack)
         // Pinned to all four edges, not just leading/top -- view (a plain NSView with no intrinsic
         // content size of its own) needs its size fully determined by stack's, or it collapses to
-        // zero when arranged as a subview inside DocumentWindowController's outer NSStackView. The
-        // bluish-grey background strip behind this panel now lives in DocumentWindowController
-        // instead (spanning the full window width, not just this column) -- see propertiesBackgroundStrip.
+        // zero when arranged as a subview inside WholeBoardViewController's info column.
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 8),
-            stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -8),
-        ])
-        for field in [nameField, hullPaddingField, maxStepsField, gridDensityField, eyeBitRateField] {
-            field.widthAnchor.constraint(equalToConstant: 160).isActive = true
-        }
-        // Matches gridDensityField's own column width directly above, even though this is plain
-        // text, not a bordered input box -- otherwise its own intrinsic (much narrower) width would
-        // pull "Simulation real time:" leftward out of alignment with "Max. timesteps:" above it.
-        maxTimestepValueLabel.widthAnchor.constraint(equalToConstant: 160).isActive = true
-        // Same 100pt for every field in this panel, frequencyStart/Stop included -- keeps "Via
-        // spacing"/"Stop"/"Via filling epsilon" (all labelWidth 130 above) lined up as one column.
-        for field in [viaEdgeDistanceField, viaSpacingField, platingThicknessField, fillingEpsilonField,
-                      frequencyStartField, frequencyStopField] {
-            field.widthAnchor.constraint(equalToConstant: 100).isActive = true
-        }
-        // Forces viaMainRow to span stack's full width -- otherwise it would just be as wide as its
-        // own tightly-packed content, and the disclosure button (the row's last item) wouldn't reach
-        // the panel's true right edge until the wider rows above happened to make stack wider anyway.
-        // Only valid once both share a common ancestor (stack, just added above as their shared
-        // ancestor's descendant) -- activating this before that doesn't fail cleanly, it hangs.
-        NSLayoutConstraint.activate([
-            viaMainRow.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
-            viaMainRow.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 4),
+            stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -4),
         ])
     }
 
@@ -297,14 +265,6 @@ final class SimulationPropertiesViewController: NSViewController {
         formatter.maximumFractionDigits = 6
         return formatter
     }()
-
-    @objc private func toggleViaAdvancedRow() {
-        viaAdvancedRowExpanded.toggle()
-        viaAdvancedRow?.isHidden = !viaAdvancedRowExpanded
-        viaAdvancedDisclosureButton.image = NSImage(
-            systemSymbolName: viaAdvancedRowExpanded ? "chevron.down" : "chevron.right",
-            accessibilityDescription: "Show more via settings")
-    }
 
     private var selectedSimulation: EMSSimulationBridge? {
         guard let document, let selectedIndex else { return nil }
@@ -317,17 +277,14 @@ final class SimulationPropertiesViewController: NSViewController {
     /// simulation changes, including to nil when nothing (or the list is empty).
     func setSelectedSimulationIndex(_ index: Int?) {
         selectedIndex = index
-        rememberedNetName = nil
-        rememberedNetClassName = nil
         reload()
     }
 
     /// Called by SimulationListViewController (via DocumentWindowController) after a rename
     /// performed directly in the source list -- if this panel happens to be showing that same
     /// simulation right now, its own name field would otherwise go stale. Deliberately just the one
-    /// field, not a full setSelectedSimulationIndex(_:) re-call: that also resets
-    /// rememberedNetName/rememberedNetClassName and re-queries net lists, neither of which a plain
-    /// rename should disturb.
+    /// field, not a full setSelectedSimulationIndex(_:) re-call: that also re-queries net lists,
+    /// which a plain rename should not disturb.
     func refreshNameFieldIfSelected(index: Int) {
         guard selectedIndex == index, let sim = selectedSimulation else { return }
         nameField.stringValue = sim.name
@@ -349,15 +306,16 @@ final class SimulationPropertiesViewController: NSViewController {
             viaEdgeDistanceField.stringValue = ""
             viaSpacingField.stringValue = ""
             eyeBitRateField.stringValue = ""
-            groundNamePopUp.removeAllItems()
-            groundNameView.configure(name: "", font: groundNamePopUp.font ?? .systemFont(ofSize: NSFont.systemFontSize))
+            differentialPairCheckbox.state = .off
+            groundNameComboBox.removeAllItems()
+            groundNameComboBox.stringValue = ""
             setPerSimulationFieldsEnabled(false)
             return
         }
         setPerSimulationFieldsEnabled(true)
 
         nameField.stringValue = sim.name
-        groundKindPopUp.selectItem(at: sim.groundNetKind == .net ? 0 : 1)
+        differentialPairCheckbox.state = sim.isDifferentialPair ? .on : .off
         hullPaddingField.doubleValue = sim.hullPadding
         viaEdgeDistanceField.doubleValue = sim.viaEdgeDistance
         viaSpacingField.doubleValue = sim.viaSpacing
@@ -371,7 +329,7 @@ final class SimulationPropertiesViewController: NSViewController {
         // addSimulationNamed: sets it to an empty string, not nil (to_json() dereferences the active
         // kind's optional unconditionally, so it can never be left unset -- see that method's own
         // comment), so isEmpty is the right check here, not == nil. Left alone,
-        // updateGroundNamePopUp() below has nothing to select() for an empty name, so the popup just
+        // updateGroundNameComboBox() below has nothing to select() for an empty name, so the field
         // shows whichever net query happened to return first -- which reads as a deliberate but
         // wrong guess ("/MCU/DS1/En" instead of the obviously-better "GND"), when really nothing was
         // ever guessed at all. groundNetNames reflects the last completed refreshNetLists() (a board
@@ -385,8 +343,8 @@ final class SimulationPropertiesViewController: NSViewController {
     }
 
     private func setPerSimulationFieldsEnabled(_ enabled: Bool) {
-        for control in [nameField, groundKindPopUp, groundNamePopUp, hullPaddingField, viaEdgeDistanceField,
-                         viaSpacingField, eyeBitRateField] as [NSControl] {
+        for control in [nameField, differentialPairCheckbox, groundNameComboBox, hullPaddingField,
+                         viaEdgeDistanceField, viaSpacingField, eyeBitRateField] as [NSControl] {
             control.isEnabled = enabled
         }
     }
@@ -395,40 +353,56 @@ final class SimulationPropertiesViewController: NSViewController {
     /// popup's choices depend on the board that was just linked.
     func refreshNetLists() {
         guard let document, let kicadPcbPath = document.config.kicadPcbPath else { return }
-        let helperPath = AppPaths.kicadQueryHelperPath
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let classes = (try? KicadBoardBridge.netClasses(forBoard: kicadPcbPath,
-                                                              kicadQueryHelperPath: helperPath)) ?? []
-            let nets = (try? KicadBoardBridge.allNets(forBoard: kicadPcbPath,
-                                                        kicadQueryHelperPath: helperPath)) ?? []
+            let classes = (try? KicadBoardBridge.netClasses(forBoard: kicadPcbPath)) ?? []
+            let nets = (try? KicadBoardBridge.allNets(forBoard: kicadPcbPath)) ?? []
             DispatchQueue.main.async {
                 self?.groundNetClassNames = classes
                 self?.groundNetNames = nets
-                self?.updateGroundNamePopUp()
+                self?.updateGroundNameComboBox()
             }
         }
     }
 
-    private func updateGroundNamePopUp() {
+    private func updateGroundNameComboBox() {
         guard let sim = selectedSimulation else { return }
-        let names = sim.groundNetKind == .net ? groundNetNames : groundNetClassNames
-        groundNamePopUp.removeAllItems()
-        // Built as NSMenuItems directly (rather than addItems(withTitles:)) so each can carry an
-        // attributedTitle -- NSPopUpButton draws its own button face from the selected item's
-        // attributedTitle when set, so this renders sub/superscript on the button itself, not just
-        // in the dropdown.
-        let font = groundNamePopUp.font ?? .systemFont(ofSize: NSFont.systemFontSize)
-        for name in names {
-            let item = NSMenuItem(title: name, action: nil, keyEquivalent: "")
-            item.attributedTitle = NetNameFormatting.attributedString(for: name, font: font)
-            groundNamePopUp.menu?.addItem(item)
+        isUpdatingGroundComboBox = true
+        defer { isUpdatingGroundComboBox = false }
+        groundNameComboBox.removeAllItems()
+        groundChoicesByComboIndex.removeAll()
+        let font = groundNameComboBox.font ?? Self.formFont
+
+        func addHeading(_ title: String) {
+            groundNameComboBox.addItem(withObjectValue: NSAttributedString(
+                string: title,
+                attributes: [.font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize,
+                                                       weight: .semibold),
+                             .foregroundColor: NSColor.secondaryLabelColor]))
         }
-        if let currentName = sim.groundNetName, let index = names.firstIndex(of: currentName) {
-            groundNamePopUp.selectItem(at: index)
-            groundNameView.configure(name: currentName, font: font)
-        } else {
-            groundNameView.configure(name: "", font: font)
+
+        func addChoices(_ names: [String], kind: EMSGroundSelectorKind) {
+            for name in names {
+                let index = groundNameComboBox.numberOfItems
+                groundNameComboBox.addItem(
+                    withObjectValue: NetNameFormatting.attributedString(for: name, font: font))
+                groundChoicesByComboIndex[index] = GroundMenuChoice(kind: kind, name: name)
+            }
         }
+
+        addHeading("Nets")
+        addChoices(groundNetNames, kind: .net)
+        groundNameComboBox.addItem(withObjectValue: NSAttributedString(
+            string: "────────",
+            attributes: [.font: font, .foregroundColor: NSColor.separatorColor]))
+        addHeading("Net Classes")
+        addChoices(groundNetClassNames, kind: .netClass)
+
+        let selectedIndex = groundChoicesByComboIndex.first {
+            let choice = $0.value
+            return choice.kind == sim.groundNetKind && choice.name == sim.groundNetName
+        }?.key
+        if let selectedIndex { groundNameComboBox.selectItem(at: selectedIndex) }
+        groundNameComboBox.stringValue = sim.groundNetName ?? ""
     }
 
     @objc private func nameChanged() {
@@ -437,56 +411,16 @@ final class SimulationPropertiesViewController: NSViewController {
         onNameChanged?()
     }
 
-    @objc private func groundKindChanged() {
-        guard let sim = selectedSimulation else { return }
-        let newKind: EMSGroundSelectorKind = groundKindPopUp.indexOfSelectedItem == 0 ? .net : .netClass
-        let previousKind = sim.groundNetKind
-        guard newKind != previousKind else { return }
-        let previousName = sim.groundNetName
-
-        // Remember whatever was active before switching away from it, so switching back restores it
-        // exactly rather than re-guessing.
-        if previousKind == .net {
-            rememberedNetName = previousName
-        } else {
-            rememberedNetClassName = previousName
-        }
-
-        sim.groundNetKind = newKind
+    /// See SimulationConfig::isDifferentialPair()'s own doc comment -- treated the same as a
+    /// ground-net/hull-padding edit (onGeometryParametersChanged, not a dedicated callback): it
+    /// doesn't itself move any port, but it does change what resolveSimulationPorts() populates
+    /// diffPairs() with, which downstream Results/Field Viewer state depends on, so any cache from
+    /// before the edit is just as stale.
+    @objc private func differentialPairToggled() {
+        selectedSimulation?.isDifferentialPair = differentialPairCheckbox.state == .on
         document?.updateChangeCount(.changeDone)
         if let selectedIndex {
             onGeometryParametersChanged?(selectedIndex)
-        }
-        // Refresh the popup's item list immediately (selecting nothing yet, since sim.groundNetName
-        // is still the old kind's value) -- resolveNewGroundSelection corrects the selection once it
-        // has an answer, synchronously or, when it needs a fresh net-class-membership query, async.
-        updateGroundNamePopUp()
-
-        resolveNewGroundSelection(for: sim, newKind: newKind, previousKind: previousKind, previousName: previousName)
-    }
-
-    /// Picks what to select after switching ground-net kind, per (in priority order): a remembered
-    /// choice from the last time this kind was active; otherwise a guess derived from whatever was
-    /// just active in the *other* kind (a net class containing the previous net, or the best-guess
-    /// ground net within the previous net class); otherwise a fresh best-guess over everything.
-    private func resolveNewGroundSelection(for sim: EMSSimulationBridge, newKind: EMSGroundSelectorKind,
-                                             previousKind: EMSGroundSelectorKind, previousName: String?) {
-        if newKind == .net {
-            if let remembered = rememberedNetName, groundNetNames.contains(remembered) {
-                applyGroundSelection(remembered, to: sim)
-            } else if previousKind == .netClass, let netClassName = previousName {
-                guessNet(within: netClassName, for: sim)
-            } else {
-                applyGroundSelection(GroundNetHeuristic.bestGuess(among: groundNetNames), to: sim)
-            }
-        } else {
-            if let remembered = rememberedNetClassName, groundNetClassNames.contains(remembered) {
-                applyGroundSelection(remembered, to: sim)
-            } else if previousKind == .net, let netName = previousName {
-                guessNetClass(containing: netName, for: sim)
-            } else {
-                applyGroundSelection(GroundNetHeuristic.bestGuess(among: groundNetClassNames), to: sim)
-            }
         }
     }
 
@@ -496,76 +430,62 @@ final class SimulationPropertiesViewController: NSViewController {
         if let selectedIndex {
             onGeometryParametersChanged?(selectedIndex)
         }
-        updateGroundNamePopUp()
-    }
-
-    /// Finds the best-guess ground net among netClassName's own members, querying the board for its
-    /// membership since that isn't cached anywhere (unlike groundNetNames/groundNetClassNames).
-    private func guessNet(within netClassName: String, for sim: EMSSimulationBridge) {
-        guard let document, let kicadPcbPath = document.config.kicadPcbPath else {
-            applyGroundSelection(GroundNetHeuristic.bestGuess(among: groundNetNames), to: sim)
-            return
-        }
-        let helperPath = AppPaths.kicadQueryHelperPath
-        let targetIndex = selectedIndex
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let members = (try? KicadBoardBridge.netsInNetClass(
-                forBoard: kicadPcbPath, netClass: netClassName, kicadQueryHelperPath: helperPath)) ?? []
-            let guess = GroundNetHeuristic.bestGuess(among: members) ?? members.first
-            DispatchQueue.main.async {
-                // The user may have selected a different simulation while this query was in flight --
-                // don't apply a guess computed for the wrong one.
-                guard let self, self.selectedIndex == targetIndex, let currentSim = self.selectedSimulation else {
-                    return
-                }
-                self.applyGroundSelection(guess, to: currentSim)
-            }
-        }
-    }
-
-    /// Finds a net class that contains netName by querying each net class's own membership in turn --
-    /// there's no direct "which net class is this net in" query, only the reverse. Falls back to the
-    /// most ground-like net class name if none actually contains it (a net not assigned any class, or
-    /// a stale remembered name, say).
-    private func guessNetClass(containing netName: String, for sim: EMSSimulationBridge) {
-        guard let document, let kicadPcbPath = document.config.kicadPcbPath else {
-            applyGroundSelection(GroundNetHeuristic.bestGuess(among: groundNetClassNames), to: sim)
-            return
-        }
-        let helperPath = AppPaths.kicadQueryHelperPath
-        let netClasses = groundNetClassNames
-        let targetIndex = selectedIndex
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            var containingClass: String?
-            for netClass in netClasses {
-                let members = (try? KicadBoardBridge.netsInNetClass(
-                    forBoard: kicadPcbPath, netClass: netClass, kicadQueryHelperPath: helperPath)) ?? []
-                if members.contains(netName) {
-                    containingClass = netClass
-                    break
-                }
-            }
-            let guess = containingClass ?? GroundNetHeuristic.bestGuess(among: netClasses)
-            DispatchQueue.main.async {
-                guard let self, self.selectedIndex == targetIndex, let currentSim = self.selectedSimulation else {
-                    return
-                }
-                self.applyGroundSelection(guess, to: currentSim)
-            }
-        }
+        updateGroundNameComboBox()
     }
 
     @objc private func groundNameChanged() {
-        guard let sim = selectedSimulation else { return }
-        let names = sim.groundNetKind == .net ? groundNetNames : groundNetClassNames
-        let index = groundNamePopUp.indexOfSelectedItem
-        guard index >= 0, index < names.count else { return }
-        sim.groundNetName = names[index]
+        guard !isUpdatingGroundComboBox, let sim = selectedSimulation else { return }
+        let typedName = groundNameComboBox.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let selectedChoice = groundChoicesByComboIndex[groundNameComboBox.indexOfSelectedItem]
+            .flatMap { $0.name == typedName ? $0 : nil }
+        var choice = selectedChoice
+        if choice == nil {
+            // If a net and net class share a name, preserve the current kind when possible. A new
+            // typed value otherwise resolves to a concrete net before a net class.
+            if sim.groundNetKind == .net, groundNetNames.contains(typedName) {
+                choice = GroundMenuChoice(kind: .net, name: typedName)
+            } else if sim.groundNetKind == .netClass, groundNetClassNames.contains(typedName) {
+                choice = GroundMenuChoice(kind: .netClass, name: typedName)
+            } else if groundNetNames.contains(typedName) {
+                choice = GroundMenuChoice(kind: .net, name: typedName)
+            } else if groundNetClassNames.contains(typedName) {
+                choice = GroundMenuChoice(kind: .netClass, name: typedName)
+            }
+        }
+        guard let choice else {
+            // Headings, the visual separator, and arbitrary text are not valid model values.
+            updateGroundNameComboBox()
+            return
+        }
+        guard sim.groundNetKind != choice.kind || sim.groundNetName != choice.name else {
+            updateGroundNameComboBox()
+            return
+        }
+        sim.groundNetKind = choice.kind
+        sim.groundNetName = choice.name
         document?.updateChangeCount(.changeDone)
         if let selectedIndex {
             onGeometryParametersChanged?(selectedIndex)
         }
-        groundNameView.configure(name: names[index], font: groundNamePopUp.font ?? .systemFont(ofSize: NSFont.systemFontSize))
+        updateGroundNameComboBox()
+    }
+
+    func comboBoxSelectionDidChange(_ notification: Notification) {
+        guard let comboBox = notification.object as? NSComboBox,
+              comboBox === groundNameComboBox else { return }
+        groundNameChanged()
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) {
+        guard let comboBox = notification.object as? NSComboBox,
+              comboBox === groundNameComboBox else { return }
+        groundNameChanged()
+    }
+
+    func comboBox(_ comboBox: NSComboBox, completedString string: String) -> String? {
+        guard comboBox === groundNameComboBox else { return nil }
+        let choices = groundNetNames + groundNetClassNames
+        return choices.first { $0.range(of: string, options: [.anchored, .caseInsensitive]) != nil }
     }
 
     @objc private func numberFieldChanged(_ sender: NSTextField) {

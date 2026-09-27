@@ -165,7 +165,7 @@ bool checkConfigMutateSaveRoundTrip() {
 
 // Exercises InvolvedNetConfig's own legacy-vs-explicit pin-selection resolution mode boundary (see
 // its own doc comment) in isolation -- port_resolution.cpp's actual pad loop needs a real KiCad
-// board (via the libkicad_query subprocess) to exercise end-to-end, out of reach for this
+// board to exercise end-to-end, out of reach for this
 // smoketest, but the mode-switch behavior itself is plain C++ object state this can verify directly.
 bool checkInvolvedNetPinSelectionResolutionMode() {
     bool ok = true;
@@ -283,10 +283,10 @@ bool checkPostprocessorRawAccessors() {
     // port_resolution.cpp, but DifferentialPairConfig::correct() defaults to true and postInit()
     // is only needed to *detect* unresolved refs, so setting the indices directly is enough here.
     DifferentialPairConfig pair;
-    pair.startP().setResolvedIndex(0);
-    pair.startN().setResolvedIndex(1);
-    pair.stopP().setResolvedIndex(2);
-    pair.stopN().setResolvedIndex(3);
+    pair.positiveExcitation().setResolvedIndex(0);
+    pair.negativeExcitation().setResolvedIndex(1);
+    pair.positiveProbe().setResolvedIndex(2);
+    pair.negativeProbe().setResolvedIndex(3);
     sim.diffPairs().push_back(pair);
 
     const std::vector<double> freqs = {1e9, 2e9, 3e9};
@@ -373,36 +373,36 @@ bool checkPostprocessorRawAccessors() {
 bool checkParseComponentValue() {
     struct Case {
         std::string raw;
-        char unitLetter;
+        ComponentUnit unit;
         std::optional<double> expected;
     };
     const std::vector<Case> cases = {
-        {"10k", 'R', 10000.0},
-        {"4k7", 'R', 4700.0},
-        {"100nF", 'F', 1e-7},
-        {"4u7", 'F', 4.7e-6},
-        {"0R1", 'R', 0.1},
-        {"1M2", 'R', 1.2e6},
-        {"4.7uF", 'F', 4.7e-6},
-        {"4.7\xC2\xB5H", 'H', 4.7e-6}, // 'µ' UTF-8 spelling
-        {"1M", 'R', 1e6},
-        {"", 'R', std::nullopt},
-        {"LED", 'R', std::nullopt},
-        {"4k7k", 'R', std::nullopt}, // two markers -- ambiguous
+        {"10k", ComponentUnit::Resistance, 10000.0},
+        {"4k7", ComponentUnit::Resistance, 4700.0},
+        {"100nF", ComponentUnit::Capacitance, 1e-7},
+        {"4u7", ComponentUnit::Capacitance, 4.7e-6},
+        {"0R1", ComponentUnit::Resistance, 0.1},
+        {"1M2", ComponentUnit::Resistance, 1.2e6},
+        {"4.7uF", ComponentUnit::Capacitance, 4.7e-6},
+        {"4.7\xC2\xB5H", ComponentUnit::Inductance, 4.7e-6}, // 'µ' UTF-8 spelling
+        {"1M", ComponentUnit::Resistance, 1e6},
+        {"", ComponentUnit::Resistance, std::nullopt},
+        {"LED", ComponentUnit::Resistance, std::nullopt},
+        {"4k7k", ComponentUnit::Resistance, std::nullopt}, // two markers -- ambiguous
     };
     bool ok = true;
     for (const Case& c : cases) {
-        const std::optional<double> got = parseComponentValue(c.raw, c.unitLetter);
+        const std::optional<double> got = parseComponentValue(c.raw, c.unit);
         if (got.has_value() != c.expected.has_value()) {
-            std::cerr << "FAIL: parseComponentValue(\"" << c.raw << "\", '" << c.unitLetter << "') returned "
+            std::cerr << "FAIL: parseComponentValue(\"" << c.raw << "\") returned "
                        << (got.has_value() ? "a value" : "nullopt") << ", expected "
                        << (c.expected.has_value() ? "a value" : "nullopt") << "\n";
             ok = false;
             continue;
         }
         if (got.has_value() && std::abs(*got - *c.expected) > std::abs(*c.expected) * 1e-9 + 1e-15) {
-            std::cerr << "FAIL: parseComponentValue(\"" << c.raw << "\", '" << c.unitLetter << "') = " << *got
-                       << ", expected " << *c.expected << "\n";
+            std::cerr << "FAIL: parseComponentValue(\"" << c.raw << "\") = " << *got << ", expected " << *c.expected
+                       << "\n";
             ok = false;
         }
     }

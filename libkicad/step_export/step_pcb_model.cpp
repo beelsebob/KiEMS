@@ -99,6 +99,8 @@
 #include <XCAFDoc_ColorTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 #include <XCAFDoc_VisMaterialTool.hxx>
+#include <XCAFPrs.hxx>
+#include <XCAFPrs_IndexedDataMapOfShapeStyle.hxx>
 #include <XCAFDoc_Area.hxx>
 #include <XCAFDoc_Centroid.hxx>
 #include <XCAFDoc_Editor.hxx>
@@ -1895,7 +1897,8 @@ bool STEP_PCB_MODEL::AddComponent( const wxString& aBaseName, const wxString& aF
         std::string fileNameUTF8 = aFileName.utf8_string();
         std::string model_key = fileNameUTF8 + "_" + std::to_string( aScale.x ) + "_"
                                 + std::to_string( aScale.y ) + "_" + std::to_string( aScale.z );
-        m_pcb_component_models.emplace_back( llabel, std::move( model_key ) );
+        m_pcb_component_models.push_back(
+                COMPONENT_MODEL_INSTANCE{ llabel, std::move( model_key ), aRefDes.utf8_string() } );
     }
 
     // attach the RefDes name
@@ -3822,22 +3825,12 @@ bool STEP_PCB_MODEL::getModelLabel( const wxString& aBaseName, const wxString& a
     }
 
     // XCAFDoc_Editor::Extract (inside transferModel(), just above) rebuilds the destination label
-    // tree by walking the source's component/reference graph, which does carry over colors
-    // assigned at the label level (one color per referenced part/solid) -- but NOT colors assigned
-    // directly to individual sub-shapes (a specific face within one solid's own shape, the common
-    // case for a multi-material footprint model with more distinct regions than it has separate
-    // solids), which XCAFDoc_ColorTool stores independently of the label tree Extract walks.
-    // Confirmed empirically against a real multi-color KiCad library STEP model: every face was
-    // still correctly colored in `doc` (the freshly-read source, immediately after readSTEP()), and
-    // reapplying that same color onto its destination counterpart via XCAFDoc_ColorTool::SetColor()
-    // (a TopoDS_Shape overload, walked in lockstep by face order) DOES take -- GetColor() on that
-    // same destination shape/face, right there, confirms it -- but the color is gone again by the
-    // time GetComponentTriangles() queries the *final*, further-instanced shape AddComponent()
-    // builds from this model afterward (an XCAF assembly-component reference, not the same shape
-    // object). Captured here instead, in face-visit order, and consumed by *index* rather than by
-    // shape identity -- see m_modelFaceColors' own doc comment for why, and GetComponentTriangles()
-    // for the matching consumption order (also a flat, ungrouped TopExp_Explorer(..., TopAbs_FACE),
-    // deliberately not TopAbs_SOLID-grouped, so both sides visit faces in the same sequence).
+    // tree, but effective STEP presentation styles do not reliably survive the subsequent model
+    // transfer and component instancing in a form GetComponentTriangles() can query. Resolve those
+    // styles in the freshly-read source document instead, including colors inherited from assembly,
+    // solid, and shell labels, then capture them in face-visit order. GetComponentTriangles()
+    // consumes the same flat TopExp_Explorer(..., TopAbs_FACE) order, deliberately not a
+    // TopAbs_SOLID-grouped traversal, so the two lists remain aligned after transfer.
     {
         Handle( XCAFDoc_ColorTool ) srcColorTool = XCAFDoc_DocumentTool::ColorTool( doc->Main() );
         Handle( XCAFDoc_ShapeTool ) srcShapeTool = XCAFDoc_DocumentTool::ShapeTool( doc->Main() );
@@ -3849,13 +3842,83 @@ bool STEP_PCB_MODEL::getModelLabel( const wxString& aBaseName, const wxString& a
 
         for( int i = 1; i <= srcFree.Length(); ++i )
         {
+            // STEP presentation styles are commonly attached to assembly/solid/subshape labels,
+            // rather than directly to the TopoDS_Face object.  CollectStyleSettings resolves that
+            // hierarchy into effective per-shape styles (the same route OCCT's own XCAF viewer
+            // uses), so models such as Amphenol's 12401826E412A retain their distinct shell and
+            // insert colours instead of collapsing to one fallback colour.
+            XCAFPrs_IndexedDataMapOfShapeStyle effectiveStyles;
+            XCAFPrs::CollectStyleSettings( srcFree.Value( i ), TopLoc_Location(), effectiveStyles );
+
+            // CollectStyleSettings records a style at the shape where it is declared (often a
+            // solid or shell), not redundantly on every descendant face. Expand those effective
+            // styles to faces once so the flat face-order capture below can perform an exact,
+            // location-aware lookup without losing inherited assembly/solid colours.
+            struct EffectiveFaceColor
+            {
+                TopAbs_ShapeEnum sourceType;
+                Quantity_ColorRGBA color;
+            };
+            NCollection_DataMap<TopoDS_Shape, EffectiveFaceColor, TopTools_ShapeMapHasher>
+                    effectiveFaceColors;
+
+            for( int styleIndex = 1; styleIndex <= effectiveStyles.Extent(); ++styleIndex )
+            {
+                const XCAFPrs_Style& style = effectiveStyles.FindFromIndex( styleIndex );
+
+                if( !style.IsSetColorSurf() )
+                    continue;
+
+                const Quantity_ColorRGBA color = style.GetColorSurfRGBA();
+                const TopoDS_Shape& styledShape = effectiveStyles.FindKey( styleIndex );
+                const TopAbs_ShapeEnum sourceType = styledShape.ShapeType();
+
+                const auto rememberFace = [&]( const TopoDS_Shape& face )
+                {
+                    if( effectiveFaceColors.IsBound( face ) )
+                    {
+                        EffectiveFaceColor& existing = effectiveFaceColors.ChangeFind( face );
+
+                        // TopAbs shape kinds increase from broad assemblies (COMPOUND) toward
+                        // specific sub-shapes (FACE). A face/shell/solid style must beat an
+                        // inherited assembly style regardless of CollectStyleSettings' map order.
+                        if( sourceType >= existing.sourceType )
+                            existing = { sourceType, color };
+                    }
+                    else
+                        effectiveFaceColors.Bind( face, { sourceType, color } );
+                };
+
+                if( styledShape.ShapeType() == TopAbs_FACE )
+                {
+                    rememberFace( styledShape );
+                }
+                else
+                {
+                    for( TopExp_Explorer styleFaceExp( styledShape, TopAbs_FACE );
+                         styleFaceExp.More(); styleFaceExp.Next() )
+                    {
+                        rememberFace( styleFaceExp.Current() );
+                    }
+                }
+            }
+
             TopoDS_Shape srcShape;
             srcShapeTool->GetShape( srcFree.Value( i ), srcShape );
 
             for( TopExp_Explorer srcExp( srcShape, TopAbs_FACE ); srcExp.More(); srcExp.Next() )
             {
                 Quantity_ColorRGBA color;
-                bool has = srcColorTool->GetColor( srcExp.Current(), XCAFDoc_ColorSurf, color );
+                bool has = false;
+
+                if( effectiveFaceColors.IsBound( srcExp.Current() ) )
+                {
+                    color = effectiveFaceColors.Find( srcExp.Current() ).color;
+                    has = true;
+                }
+
+                if( !has )
+                    has = srcColorTool->GetColor( srcExp.Current(), XCAFDoc_ColorSurf, color );
 
                 if( !has )
                     has = srcColorTool->GetColor( srcExp.Current(), XCAFDoc_ColorGen, color );
@@ -4484,8 +4547,10 @@ bool STEP_PCB_MODEL::GetComponentTriangles( std::vector<STEP_COMPONENT_TRIANGLE>
     const std::size_t startSize = aTriangles.size();
     static const std::pair<bool, Quantity_ColorRGBA> kNoColor{ false, Quantity_ColorRGBA( 1.0f, 1.0f, 1.0f, 1.0f ) };
 
-    for( const auto& [componentLabel, modelKey] : m_pcb_component_models )
+    for( const COMPONENT_MODEL_INSTANCE& component : m_pcb_component_models )
     {
+        const TDF_Label& componentLabel = component.label;
+        const std::string& modelKey = component.modelKey;
         TopoDS_Shape componentShape;
 
         if( !m_assy->GetShape( componentLabel, componentShape ) )
@@ -4517,7 +4582,11 @@ bool STEP_PCB_MODEL::GetComponentTriangles( std::vector<STEP_COMPONENT_TRIANGLE>
 
             const std::pair<bool, Quantity_ColorRGBA>& entry =
                     ( faceColors && faceIndex < faceColors->size() ) ? ( *faceColors )[faceIndex] : kNoColor;
-            const Quantity_ColorRGBA& color = entry.second;
+            // Quantity_ColorRGBA's default constructor is yellow, not a neutral sentinel. Honour
+            // the validity bit captured alongside every face; otherwise any STEP face without an
+            // explicit material is rendered bright yellow instead of using the documented white
+            // fallback.
+            const Quantity_ColorRGBA& color = entry.first ? entry.second : kNoColor.second;
 
             const gp_Trsf trsf = loc.Transformation();
 
@@ -4535,7 +4604,7 @@ bool STEP_PCB_MODEL::GetComponentTriangles( std::vector<STEP_COMPONENT_TRIANGLE>
                         p2.X(), p2.Y(), p2.Z(),
                         p3.X(), p3.Y(), p3.Z(),
                         color.GetRGB().Red(), color.GetRGB().Green(), color.GetRGB().Blue(),
-                        color.Alpha() } );
+                        color.Alpha(), component.reference } );
             }
         }
     }

@@ -19,18 +19,6 @@ enum SimulationListSelection: Equatable {
     }
 }
 
-/// A "Geometry"/"Simulation Results" row's own status -- drives its trailing indicator: a
-/// determinate circular progress ring while `.running`, otherwise a small tinted status icon (blue
-/// "not started" outline, green filled "completed", or yellow "error" triangle). Absence of an
-/// entry in the owning dictionary is treated as `.notStarted` -- see SimulationListViewController's
-/// own geometryRowStatus/simulationResultsRowStatus.
-private enum SimulationRowStatus {
-    case notStarted
-    case running(fraction: Double)
-    case completed
-    case error
-}
-
 /// A simulation row's name field -- just a plain label; all the rename mechanics live on
 /// SimulationOutlineView/SimulationListViewController instead of on the field itself. This exists
 /// only so SimulationListViewController's NSTextFieldDelegate methods can type-check which fields
@@ -106,25 +94,17 @@ final class SimulationListViewController: NSViewController {
     /// item identity (and therefore expansion/selection) survives a cosmetic-only reload.
     private var simulationNodes: [SimulationListNode] = []
 
-    /// Per-simulation status for the "Geometry" row's trailing indicator -- missing entries read as
-    /// `.notStarted`. Driven by DocumentWindowController, wired to GeometryViewController's
-    /// onRunStateChanged (-> `.running`), onProgressChanged (fraction while `.running`), and
-    /// onRunFinished (-> `.completed`/`.error`).
-    private var geometryRowStatus: [Int: SimulationRowStatus] = [:]
-
-    /// Same as geometryRowStatus, for the "Simulation Results" row -- except there's no equivalent
-    /// of geometryRowStatus's own eager onRunStateChanged(true) transition into `.running`, since
-    /// SimulationResultsViewController's own run starting doesn't mean *this* stage has: it computes
-    /// geometry first (see EMSPipelineProgressPhase's own doc comment), so this row only ever enters
-    /// `.running` once onProgressChanged actually reports the .simulation phase beginning -- see
-    /// setSimulationResultsProgress's own doc comment.
-    private var simulationResultsRowStatus: [Int: SimulationRowStatus] = [:]
-
-    /// Same as geometryRowStatus, for the "Field Viewer" row -- driven by JobScheduler (via
-    /// DocumentWindowController's relay of FieldViewerViewController's own onRunStateChanged/
-    /// onProgressChanged/onRunFinished, mirroring geometryRowStatus's own simple pattern since a
-    /// field-post-processing job has no phase-switching to worry about, unlike simulationResultsRowStatus).
-    private var fieldViewerRowStatus: [Int: SimulationRowStatus] = [:]
+    /// Central, per-simulation, per-phase status store -- one PhaseState per (simulation index,
+    /// JobKind), covering all 3 sidebar sub-rows (Geometry/.geometryGeneration, Simulation
+    /// Results/.simulation, Field Viewer/.fieldPostProcessing). Missing entries read as `.invalid`
+    /// (see phaseState(forSimulationIndex:kind:)) -- a simulation that's never been touched, or whose
+    /// cache was just invalidated by a config edit, looks the same either way. Driven entirely by
+    /// DocumentWindowController's wiring of GeometryViewController/SimulationResultsViewController/
+    /// FieldViewerViewController's own callbacks (and, for `.invalid`, its own cache-invalidation call
+    /// sites) -- every write here must be tagged with the JobKind it actually belongs to, which is
+    /// what keeps one phase's progress from leaking into another row's indicator (the bug this
+    /// central store replaces 3 independently-derived dictionaries to fix).
+    private var phaseStates: [Int: [JobKind: PhaseState]] = [:]
 
     /// Fired whenever the selected row changes, including to nil when the list is empty or nothing
     /// is selected.
@@ -355,140 +335,86 @@ final class SimulationListViewController: NSViewController {
         selectionChanged()
     }
 
-    /// Finds and reloads just the "Geometry" sub-row for `index`, after geometryRowStatus[index] has
-    /// already been updated -- shared by every geometryRowStatus mutator below so each one stays a
-    /// one-line status update. Only reloads the one affected row (unlike includedToggled's full
-    /// reloadData(), this state is purely local to a single row, not something that can leave a
-    /// sibling row's cached icon stale).
-    private func reloadGeometryRow(forSimulationIndex index: Int) {
+    /// Maps a JobKind to its sub-row's own SimulationListSelection case -- shared by phaseState(...)
+    /// and reloadRow(...) so the (simulation node -> child node) lookup logic lives in exactly one
+    /// place.
+    private static func matchesChild(_ selection: SimulationListSelection, kind: JobKind) -> Bool {
+        switch (selection, kind) {
+        case (.geometry, .geometryGeneration), (.simulationResults, .simulation),
+             (.fieldViewer, .fieldPostProcessing):
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Finds and reloads just the sub-row for `index`/`kind`, after phaseStates[index]?[kind] has
+    /// already been updated -- shared by every phaseState mutator below so each one stays a one-line
+    /// status update. Only reloads the one affected row (unlike includedToggled's full reloadData(),
+    /// this state is purely local to a single row, not something that can leave a sibling row's
+    /// cached icon stale).
+    private func reloadRow(forSimulationIndex index: Int, kind: JobKind) {
         guard let simulationNode = simulationNodes.first(where: {
             if case .simulation(let i) = $0.kind { return i == index }
             return false
         }) else { return }
-        guard let geometryNode = simulationNode.children.first(where: {
-            if case .geometry = $0.kind { return true }
-            return false
-        }) else { return }
-        outlineView.reloadItem(geometryNode)
+        guard let childNode = simulationNode.children.first(where: { Self.matchesChild($0.kind, kind: kind) })
+        else { return }
+        outlineView.reloadItem(childNode)
     }
 
-    /// Same as reloadGeometryRow, for the "Simulation Results" row.
-    private func reloadSimulationResultsRow(forSimulationIndex index: Int) {
-        guard let simulationNode = simulationNodes.first(where: {
-            if case .simulation(let i) = $0.kind { return i == index }
-            return false
-        }) else { return }
-        guard let resultsNode = simulationNode.children.first(where: {
-            if case .simulationResults = $0.kind { return true }
-            return false
-        }) else { return }
-        outlineView.reloadItem(resultsNode)
+    /// The current status of one simulation's one phase -- `.invalid` for a phase with no stored
+    /// entry (never run, or invalidated since it last ran -- see phaseStates' own doc comment).
+    func phaseState(forSimulationIndex index: Int, kind: JobKind) -> PhaseState {
+        phaseStates[index]?[kind] ?? .invalid
     }
 
-    /// Same as reloadGeometryRow, for the "Field Viewer" row.
-    private func reloadFieldViewerRow(forSimulationIndex index: Int) {
-        guard let simulationNode = simulationNodes.first(where: {
-            if case .simulation(let i) = $0.kind { return i == index }
-            return false
-        }) else { return }
-        guard let fieldViewerNode = simulationNode.children.first(where: {
-            if case .fieldViewer = $0.kind { return true }
-            return false
-        }) else { return }
-        outlineView.reloadItem(fieldViewerNode)
+    private func setPhaseState(_ state: PhaseState, forSimulationIndex index: Int, kind: JobKind) {
+        phaseStates[index, default: [:]][kind] = state
+        reloadRow(forSimulationIndex: index, kind: kind)
     }
 
-    /// Called by DocumentWindowController (wired to GeometryViewController.onRunStateChanged)
-    /// whenever a simulation's geometry-step pipeline run starts or finishes. Only the `busy == true`
-    /// transition is handled here (-> `.running(fraction: 0)`); the matching "finished" transition
-    /// always arrives via setGeometryRowCompleted(_:forSimulationIndex:) instead (see its own doc
-    /// comment), so `busy == false` is a deliberate no-op rather than resetting to `.notStarted`.
-    /// GeometryViewController's own run starting really does mean the Geometry stage has started
-    /// (unlike the Simulation Results row -- see simulationResultsRowStatus's own doc comment for why
-    /// there's no equivalent eager setSimulationResultsRowBusy).
-    func setGeometryRowBusy(_ busy: Bool, forSimulationIndex index: Int) {
+    /// Called by DocumentWindowController whenever a simulation's `kind` phase starts running (from
+    /// GeometryViewController.onRunStateChanged for `.geometryGeneration`, or
+    /// FieldViewerViewController's own kind-tagged onRunStateChanged for `.fieldPostProcessing` --
+    /// see that callback's own doc comment for why it's tagged at all). `.simulation` has no
+    /// equivalent eager call: SimulationResultsViewController's own run starting doesn't mean the
+    /// Simulation Results *phase* itself has (it computes geometry first, see
+    /// EMSPipelineProgressPhase's own doc comment) -- that row only ever enters `.inProgress` once
+    /// setProgress(...) actually reports the .simulation phase beginning. Only the `busy == true`
+    /// transition is handled here; the matching "finished" transition always arrives via
+    /// setCompleted(...) instead, so `busy == false` is a deliberate no-op.
+    func setBusy(_ busy: Bool, forSimulationIndex index: Int, kind: JobKind) {
         guard busy else { return }
-        geometryRowStatus[index] = .running(fraction: 0)
-        reloadGeometryRow(forSimulationIndex: index)
+        setPhaseState(.inProgress(fraction: 0), forSimulationIndex: index, kind: kind)
     }
 
-    /// Called by DocumentWindowController (wired to GeometryViewController.onProgressChanged)
-    /// whenever the in-flight geometry pipeline run reports a new fraction -- updates the
-    /// "Geometry" row's own circular progress indicator without disturbing its busy state. A no-op
-    /// if that row isn't currently `.running` (e.g. a stale report arriving after the row already
-    /// finished).
-    func setGeometryProgress(_ fraction: Double, forSimulationIndex index: Int) {
-        guard case .running = geometryRowStatus[index] else { return }
-        geometryRowStatus[index] = .running(fraction: fraction)
-        reloadGeometryRow(forSimulationIndex: index)
+    /// Called by DocumentWindowController whenever the in-flight pipeline run reports a new fraction
+    /// for `kind`'s own phase -- updates that row's circular progress indicator. Unconditional (not
+    /// guarded on already being `.inProgress`): every caller only ever forwards a progress report
+    /// that arrived while JobScheduler itself considers the underlying job `.running`/`.cancelling`,
+    /// so there's no stale-report case to guard against in practice, and `.simulation`'s own row (see
+    /// setBusy's own doc comment) relies on this being unconditional to ever enter `.inProgress` at all.
+    func setProgress(_ fraction: Double, forSimulationIndex index: Int, kind: JobKind) {
+        setPhaseState(.inProgress(fraction: fraction), forSimulationIndex: index, kind: kind)
     }
 
-    /// Called by DocumentWindowController (wired to SimulationResultsViewController.onProgressChanged)
-    /// whenever the in-flight results pipeline run reports a new .simulation-phase fraction -- the
-    /// *only* place the "Simulation Results" row ever enters `.running` (unconditionally, unlike
-    /// setGeometryProgress's guarded update -- there's no earlier busy(true) call for this row to
-    /// guard against pre-empting; see simulationResultsRowStatus's own doc comment for why). This is
-    /// what keeps the row showing its blue "not started" circle for as long as the same combined run
-    /// is still only in its .geometry phase.
-    func setSimulationResultsProgress(_ fraction: Double, forSimulationIndex index: Int) {
-        simulationResultsRowStatus[index] = .running(fraction: fraction)
-        reloadSimulationResultsRow(forSimulationIndex: index)
+    /// Called by DocumentWindowController once a simulation's `kind` phase finishes, successfully or
+    /// not -- swaps that row's trailing indicator from its circular progress ring to a green filled
+    /// "succeeded" dot or a yellow "failed" triangle. The only place a `.inProgress` row ever leaves
+    /// that state (see setBusy's own doc comment for why `busy == false` alone doesn't do it).
+    func setCompleted(_ success: Bool, forSimulationIndex index: Int, kind: JobKind) {
+        setPhaseState(success ? .succeeded : .failed, forSimulationIndex: index, kind: kind)
     }
 
-    /// Called by DocumentWindowController (wired to GeometryViewController.onRunFinished) once a
-    /// simulation's geometry-step pipeline run finishes, successfully or not -- swaps the "Geometry"
-    /// row's trailing indicator from its circular progress ring to a green filled "completed" dot or
-    /// a yellow "error" triangle. This is the only place a `.running` row ever leaves that state (see
-    /// setGeometryRowBusy's own doc comment for why `busy == false` alone doesn't do it).
-    func setGeometryRowCompleted(_ success: Bool, forSimulationIndex index: Int) {
-        geometryRowStatus[index] = success ? .completed : .error
-        reloadGeometryRow(forSimulationIndex: index)
-    }
-
-    /// Same as setGeometryRowCompleted, for the "Simulation Results" row -- see
-    /// SimulationResultsViewController.onRunFinished's doc comment.
-    func setSimulationResultsRowCompleted(_ success: Bool, forSimulationIndex index: Int) {
-        simulationResultsRowStatus[index] = success ? .completed : .error
-        reloadSimulationResultsRow(forSimulationIndex: index)
-    }
-
-    /// Same trio as the Geometry row's own busy/progress/completed methods, for the "Field Viewer"
-    /// row -- see fieldViewerRowStatus's own doc comment.
-    func setFieldViewerRowBusy(_ busy: Bool, forSimulationIndex index: Int) {
-        guard busy else { return }
-        fieldViewerRowStatus[index] = .running(fraction: 0)
-        reloadFieldViewerRow(forSimulationIndex: index)
-    }
-
-    func setFieldViewerProgress(_ fraction: Double, forSimulationIndex index: Int) {
-        guard case .running = fieldViewerRowStatus[index] else { return }
-        fieldViewerRowStatus[index] = .running(fraction: fraction)
-        reloadFieldViewerRow(forSimulationIndex: index)
-    }
-
-    func setFieldViewerRowCompleted(_ success: Bool, forSimulationIndex index: Int) {
-        fieldViewerRowStatus[index] = success ? .completed : .error
-        reloadFieldViewerRow(forSimulationIndex: index)
-    }
-
-    /// Reverts a row from `.running` back to `.notStarted` -- for a job JobScheduler reports as
-    /// cancelled (as opposed to genuinely failed, which goes through setXRowCompleted(false,...)
-    /// instead): the user asked for it to stop, so there's nothing to show as "errored", just
-    /// nothing yet. Removes the dictionary entry entirely rather than writing `.notStarted`
-    /// explicitly -- an absent entry already reads as `.notStarted` everywhere else in this file.
-    func resetGeometryRow(forSimulationIndex index: Int) {
-        geometryRowStatus[index] = nil
-        reloadGeometryRow(forSimulationIndex: index)
-    }
-
-    func resetSimulationResultsRow(forSimulationIndex index: Int) {
-        simulationResultsRowStatus[index] = nil
-        reloadSimulationResultsRow(forSimulationIndex: index)
-    }
-
-    func resetFieldViewerRow(forSimulationIndex index: Int) {
-        fieldViewerRowStatus[index] = nil
-        reloadFieldViewerRow(forSimulationIndex: index)
+    /// Marks `kind`'s own phase `.invalid` for `index` -- either because a job JobScheduler reports
+    /// as cancelled (as opposed to genuinely failed, which goes through setCompleted(false,...)
+    /// instead: the user asked for it to stop, so there's nothing to show as "failed", just nothing
+    /// yet), or because a config edit invalidated this phase's cached pipeline stage (see
+    /// DocumentWindowController's own cache-invalidation call sites) -- a stale "succeeded" dot must
+    /// not keep showing once the cache it was reporting on is gone.
+    func setInvalid(forSimulationIndex index: Int, kind: JobKind) {
+        setPhaseState(.invalid, forSimulationIndex: index, kind: kind)
     }
 
     @objc private func selectionChanged() {
@@ -499,6 +425,12 @@ final class SimulationListViewController: NSViewController {
             return
         }
         onSelectionChanged?(node.kind)
+    }
+
+    /// Re-applies the current row after DocumentWindowController's initial board-loading overlay is
+    /// removed. The selection itself exists while loading, but its content is deliberately withheld.
+    func notifyCurrentSelection() {
+        selectionChanged()
     }
 
     @objc private func addSimulation() {
@@ -562,14 +494,14 @@ extension SimulationListViewController: NSOutlineViewDelegate {
             return cell
         case .geometry(let simulationIndex):
             return Self.makeChildCell(in: outlineView, owner: self, title: "Geometry", symbolName: "cube",
-                                       status: geometryRowStatus[simulationIndex] ?? .notStarted)
+                                       status: phaseState(forSimulationIndex: simulationIndex, kind: .geometryGeneration))
         case .simulationResults(let simulationIndex):
             return Self.makeChildCell(in: outlineView, owner: self, title: "Simulation Results",
                                        symbolName: "chart.bar",
-                                       status: simulationResultsRowStatus[simulationIndex] ?? .notStarted)
+                                       status: phaseState(forSimulationIndex: simulationIndex, kind: .simulation))
         case .fieldViewer(let simulationIndex):
-            return Self.makeChildCell(in: outlineView, owner: self, title: "Field Viewer",
-                                       symbolName: "waveform", status: fieldViewerRowStatus[simulationIndex] ?? .notStarted)
+            return Self.makeChildCell(in: outlineView, owner: self, title: "Field Viewer", symbolName: "waveform",
+                                       status: phaseState(forSimulationIndex: simulationIndex, kind: .fieldPostProcessing))
         }
     }
 
@@ -661,21 +593,21 @@ extension SimulationListViewController: NSOutlineViewDelegate {
     private static let spinnerIdentifier = NSUserInterfaceItemIdentifier("SimulationListChildCell.spinner")
     private static let statusImageIdentifier = NSUserInterfaceItemIdentifier("SimulationListChildCell.statusImage")
 
-    /// Not-yet-started/completed/error glyphs for makeChildCell's trailing status indicator --
-    /// template images so contentTintColor (set fresh per state in makeChildCell) actually colors
-    /// them, built once and reused across every cell/state.
-    private static let notStartedImage: NSImage = {
-        let image = NSImage(systemSymbolName: "circle", accessibilityDescription: "Not started")!
+    /// Invalid/succeeded/failed glyphs for makeChildCell's trailing status indicator -- template
+    /// images so contentTintColor (set fresh per state in makeChildCell) actually colors them, built
+    /// once and reused across every cell/state.
+    private static let invalidImage: NSImage = {
+        let image = NSImage(systemSymbolName: "circle", accessibilityDescription: "Not yet run")!
         image.isTemplate = true
         return image
     }()
-    private static let completedImage: NSImage = {
-        let image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "Completed")!
+    private static let succeededImage: NSImage = {
+        let image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "Succeeded")!
         image.isTemplate = true
         return image
     }()
-    private static let errorImage: NSImage = {
-        let image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Error")!
+    private static let failedImage: NSImage = {
+        let image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Failed")!
         image.isTemplate = true
         return image
     }()
@@ -683,13 +615,12 @@ extension SimulationListViewController: NSOutlineViewDelegate {
     /// Sub-entry rows (Geometry/Simulation Results/Field Viewer) are identical in every simulation,
     /// so a distinct reuse identifier per symbol (rather than per node) is enough to recycle them.
     /// `status` drives the row's trailing indicator: a determinate circular progress ring while
-    /// `.running`, otherwise a small tinted status glyph (blue outline "not started", green filled
-    /// "completed", yellow triangle "error") -- every child row gets one, including Field Viewer,
-    /// which has no pipeline logic behind it yet and so is always `.notStarted`. Both indicator
-    /// subviews are built once and reused alongside the rest of the cell, just re-valued/re-toggled
-    /// fresh on every call.
+    /// `.inProgress`, otherwise a small tinted status glyph (blue outline "invalid", green filled
+    /// "succeeded", yellow triangle "failed") -- every child row gets one, including Field Viewer.
+    /// Both indicator subviews are built once and reused alongside the rest of the cell, just
+    /// re-valued/re-toggled fresh on every call.
     private static func makeChildCell(
-        in outlineView: NSOutlineView, owner: Any?, title: String, symbolName: String, status: SimulationRowStatus
+        in outlineView: NSOutlineView, owner: Any?, title: String, symbolName: String, status: PhaseState
     ) -> NSTableCellView {
         let identifier = NSUserInterfaceItemIdentifier("SimulationListChildCell-\(symbolName)")
         let cell: NSTableCellView
@@ -770,24 +701,24 @@ extension SimulationListViewController: NSOutlineViewDelegate {
         // At most one of the two trailing indicators is ever visible at once -- they share the same
         // slot at the row's trailing edge, well clear of the leading-edge icon.
         switch status {
-        case .running(let fraction):
+        case .inProgress(let fraction):
             spinner.isHidden = false
             spinner.doubleValue = fraction
             statusImageView.isHidden = true
-        case .notStarted:
+        case .invalid:
             spinner.isHidden = true
             statusImageView.isHidden = false
-            statusImageView.image = Self.notStartedImage
+            statusImageView.image = Self.invalidImage
             statusImageView.contentTintColor = .systemBlue
-        case .completed:
+        case .succeeded:
             spinner.isHidden = true
             statusImageView.isHidden = false
-            statusImageView.image = Self.completedImage
+            statusImageView.image = Self.succeededImage
             statusImageView.contentTintColor = .systemGreen
-        case .error:
+        case .failed:
             spinner.isHidden = true
             statusImageView.isHidden = false
-            statusImageView.image = Self.errorImage
+            statusImageView.image = Self.failedImage
             statusImageView.contentTintColor = .systemYellow
         }
         return cell

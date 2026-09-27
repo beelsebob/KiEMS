@@ -11,3 +11,5 @@ __pycache__/
 /et
 /ht
 /worker_error.txt
+/libkicad/BuildPaths.local.xcconfig
+/geometry_preview_components.stl

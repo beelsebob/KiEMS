@@ -37,7 +37,7 @@ TimeWaveform inverseTransform(const std::vector<double>& frequencies, const std:
 
 /// Synthesizes the "main" excitation's stimulus: openEMS's own modulated-Gaussian-pulse shape
 /// (Excitation::CalcGaussianPulsExcitation, openEMS/FDTD/excitation.cpp: cos(2*pi*f0*(t-9/(2*pi*fc)))
-/// * exp(-(2*pi*fc*t/3-3)^2), with f0/fc from `freq` exactly as Simulation::setExcitation() derives
+/// * exp(-(2*pi*fc*t/3-3)^2), with f0/fc derived from `freq` exactly as Simulation does
 /// them -- the same pulse shape actually used during S-parameter extraction), delayed by `startTime`,
 /// phase-shifted by `phaseDegrees` (added directly to the cosine's argument), and rectangularly
 /// windowed to fade out by `startTime+duration` (the pulse's own natural envelope already decays

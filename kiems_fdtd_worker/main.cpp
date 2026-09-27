@@ -1,10 +1,16 @@
-// A dedicated, single-purpose process that runs exactly one port's FDTD pass and exits. Spawned by
-// Simulation::run() (see simulation.hpp/.cpp) via posix_spawn -- this is the process that actually
-// chdirs for openEMS's benefit, so the caller's own process/working directory is never touched.
-// Takes one argument: the path to a small job.json (written by Simulation::run() into the
-// simulation's own output directory) describing which config/simulation/port to run. On failure,
-// writes a human-readable message to "worker_error.txt" next to the job file and exits non-zero;
-// Simulation::run() reads that file back to build its own std::expected failure.
+// A dedicated, single-purpose process that runs exactly one port's FDTD pass on Copper's CPU
+// engine and exits -- the CPU sibling of copper_fdtd_worker (see that target's own main.cpp,
+// which this one mirrors closely; the two differ only in which copper::runFDTDPortOn{CPU,GPU}()
+// they call). Spawned by Simulation::run() (see simulation.hpp/.cpp) via posix_spawn when
+// RunOptions::backend == FDTDBackend::OpenEMSCPU -- that enumerator's name is a historical holdover
+// from when this worker ran openEMS's own Engine::RunFDTD() directly; it now runs Copper's own CPU
+// backend instead (see kiems::Simulation's own doc comments for why the real CPU stepping loop is
+// no longer used by anything in this codebase). Same job.json contract, same worker_error.txt
+// failure convention, same exit-code convention as copper_fdtd_worker -- Simulation::run() itself
+// can't tell which backend actually produced a given simulation directory's output.
+//
+// This worker stays on Copper's public boundary: simulation.hpp supplies the complete CSXCAD type,
+// while CopperFDTDRunner.h only forward-declares it. No Copper/Internal headers are needed here.
 
 #include <cstdlib>
 #include <fstream>
@@ -15,11 +21,14 @@
 #include <nlohmann/json.hpp>
 
 #include "kiems/config.hpp"
+#include "kiems/constants.hpp"
 #include "kiems/importer.hpp"
 #include "kiems/paths_config.hpp"
 #include "kiems/port_resolution.hpp"
 #include "kiems/simulation.hpp"
 #include "kiems/simulation_data.hpp"
+
+#include "CopperFDTDRunner.h"
 
 using namespace kiems;
 
@@ -56,12 +65,10 @@ int main(int argc, char** argv) {
     std::filesystem::path configPath;
     std::string simName;
     std::int32_t excitedPort = 0;
-    std::filesystem::path kicadQueryHelperPath;
     try {
         configPath = job.at("config_path").get<std::string>();
         simName = job.at("simulation_name").get<std::string>();
         excitedPort = job.at("excited_port").get<std::int32_t>();
-        kicadQueryHelperPath = job.at("kicad_query_helper_path").get<std::string>();
     } catch (const nlohmann::json::exception& error) {
         writeError(simPath, std::string("Malformed job file: ") + error.what());
         return EXIT_FAILURE;
@@ -77,13 +84,7 @@ int main(int argc, char** argv) {
     }
     EMSConfig config = std::move(*configResult);
 
-    // No kicad-cli/worker paths needed -- this process never exports gerbers or spawns a further
-    // worker, it only reloads the geometry a prior stage already saved to disk. kicadQueryHelperPath
-    // *is* needed though: simConfig.ports() isn't (de)serialized (see PortConfig's own doc comment
-    // in config.hpp), so it must be rebuilt fresh below via importStackup()+resolveSimulationPorts(),
-    // exactly like main.cpp's own -s/-p path does, using the same helper path the spawning process
-    // already resolved (passed through job.json rather than re-derived here).
-    const PathsConfig paths = PathsConfig::forConfigFile(configPath, "", kicadQueryHelperPath, "");
+    const PathsConfig paths = PathsConfig::forConfigFile(configPath, "", "");
 
     if (auto result = importStackup(paths, config); !result) {
         writeError(simPath, result.error());
@@ -106,14 +107,10 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    // Deserializes the exact same SimulationData<Grid> (sliced board + placed grid lines --
-    // see simulation_data.hpp) GeometryResult::build()/load() would have in memory in-process --
-    // this worker is a genuinely separate process, so a file is the only way to get it. Rebuilding
-    // this Simulation's ContinuousStructure from that (populateGeometry(), including its own
-    // setBoundaryConditions(true)) happens on *this* freshly-constructed Simulation's own `_fdtd`,
-    // not a reload of some other object's state -- unlike the old geometry.xml round trip (which
-    // only ever restored `_csx`, leaving `_fdtd`'s separate boundary-condition state at openEMS's
-    // own PEC default), there's no second, explicit setBoundaryConditions() call needed here.
+    // Deserializes the exact same SimulationData<Grid> (sliced board + placed grid lines -- see
+    // simulation_data.hpp) GeometryResult::build()/load() would have in memory in-process -- this
+    // worker is a genuinely separate process, so a file is the only way to get it. This rebuilds
+    // the worker's own ContinuousStructure directly from that cached geometry and grid.
     auto simDataResult = loadSimulationData(*simConfig, simulationDataFile(paths, simName));
     if (!simDataResult) {
         writeError(simPath, simDataResult.error());
@@ -127,12 +124,43 @@ int main(int argc, char** argv) {
         writeError(simPath, result.error());
         return EXIT_FAILURE;
     }
-    simulation.setExcitation();
     simulation.setupPorts(excitedPort);
 
-    if (auto result = simulation.runFDTDInPlace(excitedPort); !result) {
+    // prepareRunDirectory() chdirs into this port's simulation directory (and stays there on success
+    // -- see its own doc comment) so probe files land in the same place the GPU worker's would have.
+    const std::filesystem::path cwd = std::filesystem::current_path();
+    if (auto result = simulation.prepareRunDirectory(excitedPort); !result) {
         writeError(simPath, result.error());
         return EXIT_FAILURE;
+    }
+
+    const std::filesystem::path probeDir = std::filesystem::current_path();
+    // Pass pmlDepthCells explicitly so Copper and GridGenerator use the same CPML shell depth.
+    const double cpmlAlphaMax = copper::cpmlAlphaMaxForFrequency(simulation.config().frequency().start());
+    copper::CopperFDTDPortConfig portConfig;
+    portConfig.boundaryIsPEC = simulation.boundaryIsPEC();
+    portConfig.f0 = simulation.excitationF0();
+    portConfig.fc = simulation.excitationFc();
+    portConfig.maxTimesteps = simulation.maxTimesteps();
+    const copper::CopperFDTDRunResult cpuResult = copper::runFDTDPortOnCPU(
+        simulation.csx(), portConfig, {}, cpmlAlphaMax,
+        kiems::constants::pmlDepthCells);
+    std::filesystem::current_path(cwd);
+    if (!cpuResult.success) {
+        writeError(simPath, cpuResult.errorMessage);
+        return EXIT_FAILURE;
+    }
+
+    // runFDTDPortOnCPU() doesn't write probe files itself -- this worker is one of the callers that
+    // still needs them on disk (job.json's own contract is a directory of probe files), so it writes
+    // them explicitly from the returned in-memory result via CopperProbeResult::data().
+    for (const copper::CopperProbeResult& probeResult : cpuResult.probes) {
+        std::ofstream probeFile(probeDir / probeResult.name);
+        if (!probeFile.is_open()) {
+            writeError(simPath, "Failed to open probe file for writing: " + (probeDir / probeResult.name).string());
+            return EXIT_FAILURE;
+        }
+        probeFile << probeResult.data();
     }
     return EXIT_SUCCESS;
 }

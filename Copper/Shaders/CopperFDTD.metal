@@ -122,174 +122,11 @@ kernel void update_h_interior(constant CopperGridDimsGPU& dims [[buffer(CopperBu
                                                  Ex[copperIndex(dims, x, y + 1, z)]);
 }
 
-// PML (UPML) boundary kernels -- a direct GPU port of Engine_Ext_UPML's own
-// DoPre/PostVoltage/CurrentUpdatesImpl (engine_ext_upml.cpp), dispatched once per CopperPMLShell,
-// over that shell's own *local* (nx,ny,nz) index space. See CopperPML.hpp's file comment for the
-// two-stage algorithm this implements: update_e_interior/update_h_interior above *already* compute
-// the correct "flux" update for PML cells, unmodified, because Operator_Ext_UPML::BuildExtension()
-// overwrites the underlying Operator's own per-cell vv/vi/ii/iv for PML cells at setup time (before
-// CopperYeeGrid ever reads them) -- these four kernels only add the "sandwich" around that: swap the
-// real field for the old flux before the interior update runs (pml_pre_*), then reconstruct the real
-// field from old-and-new flux after it runs (pml_post_*), using this shell's own local
-// vv/vvfo/vvfn (voltage/E side) or ii/iifo/iifn (current/H side) coefficients.
-//
-// pmlCoeffA/B/C and flux buffers are axis-major: axis n's cell `localIdx` lives at
-// `n * (shell.nx*shell.ny*shell.nz) + localIdx`, mirroring CopperPMLShell's own per-axis
-// std::vector<float> vv[3] etc, just concatenated into one buffer per coefficient to stay well
-// within Metal's per-dispatch buffer-argument limit (see CopperShaderTypes.h's own comment on why
-// pml_pre_e/pml_post_e/pml_pre_h/pml_post_h all safely reuse the same few buffer-index slots).
-
-kernel void pml_pre_e(constant CopperGridDimsGPU& dims [[buffer(CopperBufferIndexDims)]],
-                       constant CopperPMLShellGPU& shell [[buffer(CopperBufferIndexPMLShell)]],
-                       device float* Ex [[buffer(CopperBufferIndexEx)]],
-                       device float* Ey [[buffer(CopperBufferIndexEy)]],
-                       device float* Ez [[buffer(CopperBufferIndexEz)]],
-                       device const float* pmlVV [[buffer(CopperBufferIndexPMLCoeffA)]],
-                       device const float* pmlVVFO [[buffer(CopperBufferIndexPMLCoeffB)]],
-                       device float* voltFlux [[buffer(CopperBufferIndexPMLFlux)]],
-                       uint3 lid [[thread_position_in_grid]]) {
-    if (lid.x >= shell.nx || lid.y >= shell.ny || lid.z >= shell.nz) {
-        return;
-    }
-    const uint32_t localCellCount = shell.nx * shell.ny * shell.nz;
-    const uint32_t localIdx = lid.x + shell.nx * (lid.y + shell.ny * lid.z);
-    const uint32_t globalIdx =
-        copperIndex(dims, lid.x + shell.startX, lid.y + shell.startY, lid.z + shell.startZ);
-
-    {
-        const uint32_t c = 0u * localCellCount + localIdx;
-        const float f_help = pmlVV[c] * Ex[globalIdx] - pmlVVFO[c] * voltFlux[c];
-        Ex[globalIdx] = voltFlux[c];
-        voltFlux[c] = f_help;
-    }
-    {
-        const uint32_t c = 1u * localCellCount + localIdx;
-        const float f_help = pmlVV[c] * Ey[globalIdx] - pmlVVFO[c] * voltFlux[c];
-        Ey[globalIdx] = voltFlux[c];
-        voltFlux[c] = f_help;
-    }
-    {
-        const uint32_t c = 2u * localCellCount + localIdx;
-        const float f_help = pmlVV[c] * Ez[globalIdx] - pmlVVFO[c] * voltFlux[c];
-        Ez[globalIdx] = voltFlux[c];
-        voltFlux[c] = f_help;
-    }
-}
-
-kernel void pml_post_e(constant CopperGridDimsGPU& dims [[buffer(CopperBufferIndexDims)]],
-                        constant CopperPMLShellGPU& shell [[buffer(CopperBufferIndexPMLShell)]],
-                        device float* Ex [[buffer(CopperBufferIndexEx)]],
-                        device float* Ey [[buffer(CopperBufferIndexEy)]],
-                        device float* Ez [[buffer(CopperBufferIndexEz)]],
-                        device const float* pmlVVFN [[buffer(CopperBufferIndexPMLCoeffC)]],
-                        device float* voltFlux [[buffer(CopperBufferIndexPMLFlux)]],
-                        uint3 lid [[thread_position_in_grid]]) {
-    if (lid.x >= shell.nx || lid.y >= shell.ny || lid.z >= shell.nz) {
-        return;
-    }
-    const uint32_t localCellCount = shell.nx * shell.ny * shell.nz;
-    const uint32_t localIdx = lid.x + shell.nx * (lid.y + shell.ny * lid.z);
-    const uint32_t globalIdx =
-        copperIndex(dims, lid.x + shell.startX, lid.y + shell.startY, lid.z + shell.startZ);
-
-    {
-        const uint32_t c = 0u * localCellCount + localIdx;
-        const float f_help = voltFlux[c];
-        voltFlux[c] = Ex[globalIdx];
-        Ex[globalIdx] = f_help + pmlVVFN[c] * voltFlux[c];
-    }
-    {
-        const uint32_t c = 1u * localCellCount + localIdx;
-        const float f_help = voltFlux[c];
-        voltFlux[c] = Ey[globalIdx];
-        Ey[globalIdx] = f_help + pmlVVFN[c] * voltFlux[c];
-    }
-    {
-        const uint32_t c = 2u * localCellCount + localIdx;
-        const float f_help = voltFlux[c];
-        voltFlux[c] = Ez[globalIdx];
-        Ez[globalIdx] = f_help + pmlVVFN[c] * voltFlux[c];
-    }
-}
-
-kernel void pml_pre_h(constant CopperGridDimsGPU& dims [[buffer(CopperBufferIndexDims)]],
-                       constant CopperPMLShellGPU& shell [[buffer(CopperBufferIndexPMLShell)]],
-                       device float* Hx [[buffer(CopperBufferIndexHx)]],
-                       device float* Hy [[buffer(CopperBufferIndexHy)]],
-                       device float* Hz [[buffer(CopperBufferIndexHz)]],
-                       device const float* pmlII [[buffer(CopperBufferIndexPMLCoeffA)]],
-                       device const float* pmlIIFO [[buffer(CopperBufferIndexPMLCoeffB)]],
-                       device float* currFlux [[buffer(CopperBufferIndexPMLFlux)]],
-                       uint3 lid [[thread_position_in_grid]]) {
-    if (lid.x >= shell.nx || lid.y >= shell.ny || lid.z >= shell.nz) {
-        return;
-    }
-    const uint32_t localCellCount = shell.nx * shell.ny * shell.nz;
-    const uint32_t localIdx = lid.x + shell.nx * (lid.y + shell.ny * lid.z);
-    const uint32_t globalIdx =
-        copperIndex(dims, lid.x + shell.startX, lid.y + shell.startY, lid.z + shell.startZ);
-
-    {
-        const uint32_t c = 0u * localCellCount + localIdx;
-        const float f_help = pmlII[c] * Hx[globalIdx] - pmlIIFO[c] * currFlux[c];
-        Hx[globalIdx] = currFlux[c];
-        currFlux[c] = f_help;
-    }
-    {
-        const uint32_t c = 1u * localCellCount + localIdx;
-        const float f_help = pmlII[c] * Hy[globalIdx] - pmlIIFO[c] * currFlux[c];
-        Hy[globalIdx] = currFlux[c];
-        currFlux[c] = f_help;
-    }
-    {
-        const uint32_t c = 2u * localCellCount + localIdx;
-        const float f_help = pmlII[c] * Hz[globalIdx] - pmlIIFO[c] * currFlux[c];
-        Hz[globalIdx] = currFlux[c];
-        currFlux[c] = f_help;
-    }
-}
-
-kernel void pml_post_h(constant CopperGridDimsGPU& dims [[buffer(CopperBufferIndexDims)]],
-                        constant CopperPMLShellGPU& shell [[buffer(CopperBufferIndexPMLShell)]],
-                        device float* Hx [[buffer(CopperBufferIndexHx)]],
-                        device float* Hy [[buffer(CopperBufferIndexHy)]],
-                        device float* Hz [[buffer(CopperBufferIndexHz)]],
-                        device const float* pmlIIFN [[buffer(CopperBufferIndexPMLCoeffC)]],
-                        device float* currFlux [[buffer(CopperBufferIndexPMLFlux)]],
-                        uint3 lid [[thread_position_in_grid]]) {
-    if (lid.x >= shell.nx || lid.y >= shell.ny || lid.z >= shell.nz) {
-        return;
-    }
-    const uint32_t localCellCount = shell.nx * shell.ny * shell.nz;
-    const uint32_t localIdx = lid.x + shell.nx * (lid.y + shell.ny * lid.z);
-    const uint32_t globalIdx =
-        copperIndex(dims, lid.x + shell.startX, lid.y + shell.startY, lid.z + shell.startZ);
-
-    {
-        const uint32_t c = 0u * localCellCount + localIdx;
-        const float f_help = currFlux[c];
-        currFlux[c] = Hx[globalIdx];
-        Hx[globalIdx] = f_help + pmlIIFN[c] * currFlux[c];
-    }
-    {
-        const uint32_t c = 1u * localCellCount + localIdx;
-        const float f_help = currFlux[c];
-        currFlux[c] = Hy[globalIdx];
-        Hy[globalIdx] = f_help + pmlIIFN[c] * currFlux[c];
-    }
-    {
-        const uint32_t c = 2u * localCellCount + localIdx;
-        const float f_help = currFlux[c];
-        currFlux[c] = Hz[globalIdx];
-        Hz[globalIdx] = f_help + pmlIIFN[c] * currFlux[c];
-    }
-}
-
 // CPML (real CFS-PML, Roden & Gedney 2000) correction kernels -- a direct port of Taflove & Hagness,
 // *Computational Electrodynamics* 3rd ed., eq. (7.101)/(7.105)/(7.106) for E and eq. (7.101)/(7.110)/
 // (7.108) for H, read from the actual text (see CopperCPML.hpp's own top comment for why this is a
-// structurally different formulation from the pml_pre/post_e/h kernels above, not a generalization of
-// them). Unlike those, these are dispatched *after* update_e_interior/update_h_interior (either order
+// convolutional perfectly matched layer. These are dispatched *after*
+// update_e_interior/update_h_interior (either order
 // relative to each other is fine -- neither reads a buffer the other writes) and never swap/replace a
 // field value: they only ever add a correction, using the exact same host-medium vi/iv coefficient
 // and the exact same two raw curl-difference terms (same shift-guard included) update_e_interior/
@@ -303,7 +140,7 @@ kernel void pml_post_h(constant CopperGridDimsGPU& dims [[buffer(CopperBufferInd
 // nPP=(n+2)%3) -- mirrored exactly below, including which raw difference feeds which slot.
 
 kernel void cpml_correct_e(constant CopperGridDimsGPU& dims [[buffer(CopperBufferIndexDims)]],
-                            constant CopperPMLShellGPU& shell [[buffer(CopperBufferIndexPMLShell)]],
+                            constant CopperCPMLShellGPU& shell [[buffer(CopperBufferIndexCPMLShell)]],
                             device float* Ex [[buffer(CopperBufferIndexEx)]],
                             device float* Ey [[buffer(CopperBufferIndexEy)]],
                             device float* Ez [[buffer(CopperBufferIndexEz)]],
@@ -366,7 +203,7 @@ kernel void cpml_correct_e(constant CopperGridDimsGPU& dims [[buffer(CopperBuffe
 }
 
 kernel void cpml_correct_h(constant CopperGridDimsGPU& dims [[buffer(CopperBufferIndexDims)]],
-                            constant CopperPMLShellGPU& shell [[buffer(CopperBufferIndexPMLShell)]],
+                            constant CopperCPMLShellGPU& shell [[buffer(CopperBufferIndexCPMLShell)]],
                             device const float* Ex [[buffer(CopperBufferIndexEx)]],
                             device const float* Ey [[buffer(CopperBufferIndexEy)]],
                             device const float* Ez [[buffer(CopperBufferIndexEz)]],

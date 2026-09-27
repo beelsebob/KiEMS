@@ -4,25 +4,51 @@
 // New feature, not ported from any Python source.
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <expected>
+#include <functional>
 #include <string>
 #include <vector>
 
 #include "config.hpp"
 #include "importer.hpp"
+#include "../../libkicad/libkicad.hpp"
 #include "paths_config.hpp"
+#include "polygon_geometry.hpp"
 
 namespace kiems {
+
+using Cu::BoundingBox;
+
+enum class GeometryProcessingPhase { PolygonOperations, Triangulation, Finishing };
+
+struct GeometryProcessingProgress {
+    GeometryProcessingPhase phase = GeometryProcessingPhase::PolygonOperations;
+    std::size_t completedPrimitives = 0;
+    std::size_t totalPrimitives = 0;
+};
+
+using GeometryProcessingProgressCallback = std::function<void(const GeometryProcessingProgress&)>;
 
 /// A via added purely to stitch a board-slicing cutout's newly-introduced edges back to a
 /// plausible ground return. Connects every copper layer where the ground net's own (already
 /// cutout-clipped) copper covers this position -- see sliceBoardForSimulation()'s doc comment.
+/// Deliberately not a Hole subclass (a stitching via is placed by this codebase itself, never
+/// loaded off the real board the way ViaHole/NPTHHole are) -- but path() has the same shape as
+/// Hole::path() (a degenerate, coincident-endpoint centerline: a stitching via is always round) so
+/// tessellateHoles() (board_slicing.cpp) can still tessellate a std::vector<StitchingVia> the same
+/// templated way, aggregate-initialization (see placeStitchingVias()'s own StitchingVia{...} calls)
+/// and JSON (de)serialization included, neither of which a Hole base class allows.
 struct StitchingVia {
     double x = 0;
     double y = 0;
     double diameter = 0;            // Drill hole, from EMSConfig::via().stitchingViaHoleDiameter().
     double annularRingDiameter = 0; // Pad OD, from EMSConfig::via().stitchingViaAnnularRingDiameter().
+
+    Cu::Polygon path() const {
+        return {{x, y}, {x, y}};
+    }
 };
 
 inline void to_json(nlohmann::json& j, const StitchingVia& v) {
@@ -37,9 +63,15 @@ inline void from_json(const nlohmann::json& j, StitchingVia& v) {
 }
 
 /// The board geometry actually fed to a Simulation for one SimulationConfig: only the involved
-/// nets' and the ground net's own copper survive, clipped to a padded region ("cutout") around the
-/// involved nets' own extent.
+/// nets' and the ground net's own copper survive, with substrate/context clipped to a padded region
+/// ("cutout") around every simulated net's own extent.
 struct SlicedBoard {
+    /// Per metal layer, the exact composited copper polygon loops after every hull/cutout Boolean
+    /// operation, before triangulation. These are the authoritative XY mesh-density input: deriving
+    /// density from the original KiCad board and clipping those hints later can retain fine spacing
+    /// demanded only by copper that no longer exists in the sliced simulation. Kept separately from
+    /// layerTriangles because triangle edges include artificial tessellation diagonals.
+    std::vector<Cu::PolygonSet> layerCopperLoops;
     /// Per metal layer, in the same order as EMSConfig::getMetals(), the final triangulated copper
     /// for that layer (involved-net copper, plus ground-net copper wherever it falls inside the
     /// cutout) -- what Simulation::addContours() actually feeds the real FDTD geometry. Deliberately
@@ -73,22 +105,26 @@ struct SlicedBoard {
     /// The true cutout region computed by sliceBoardForSimulation() -- every loop of it, not just
     /// the largest (unlike outline above): a spatially disjoint involved-net footprint produces more
     /// than one outer loop here, and Intersect()-ing against the real board outline can also leave
-    /// genuine holes (opposite winding from their enclosing outer loop, standard Clipper2Lib
-    /// convention). grid_gen.cpp uses this for a real point-in-polygon membership test (mesh-DENSITY
+    /// genuine holes (opposite winding from their enclosing outer loop). grid_gen.cpp uses this for
+    /// a real point-in-polygon membership test (mesh-DENSITY
     /// placement must only look at copper genuinely within the actual sliced geometry, not
     /// pre-cutout copper that happens to fall in outline's single-loop approximation's bounding
     /// region) -- ray-cast parity summed across every loop here handles both disjoint regions and
     /// holes correctly without needing to know which loops are holes ahead of time.
     std::vector<std::vector<Position>> cutoutLoops;
-    double xMin = 0;
-    double yMin = 0;
-    double width = 0;
-    double height = 0;
+    /// Axis-aligned bounding box of `outline` above, in the same coordinate frame (relative to the
+    /// *original* board's Edge_Cuts origin, not re-origined to its own bounding box) -- so
+    /// bounds.xMin/yMin are generally nonzero, unlike the whole-board [0,pcbWidth] x [0,pcbHeight]
+    /// convention. `bounds.xMax`/`bounds.yMax` replace the old separate width/height fields (still
+    /// xMin + width/yMin + height, just not stored redundantly).
+    BoundingBox<double> bounds;
     /// Ground-net stitching vias, placed only along cutout edges that don't already coincide with
     /// the board's real Edge_Cuts outline.
     std::vector<StitchingVia> stitchingVias;
     /// Every candidate stitching-via position that was considered along a new-cut edge but rejected
-    /// (no ground copper there, or too close to another via) -- see sliceBoardForSimulation()'s doc
+    /// (no ground copper there, intersecting non-ground trace/pad copper, or too close to another
+    /// via) -- see
+    /// sliceBoardForSimulation()'s doc
     /// comment and the "electrically floating" warning it logs
     /// when a whole run's candidates are all rejected. Kept purely for diagnostics/visualization (the
     /// geometry preview marks these with a black cross); never fed back into the FDTD geometry itself.
@@ -122,8 +158,8 @@ struct SlicedBoard {
 /// loadSimulationData(), which persist a SlicedBoard as part of a SimulationData<Grid>'s own
 /// on-disk representation, replacing the old geometry.xml CSXCAD dump.
 inline void to_json(nlohmann::json& j, const SlicedBoard& b) {
-    j = nlohmann::json{{"layerTriangles", b.layerTriangles}, {"outline", b.outline},       {"xMin", b.xMin},
-                        {"yMin", b.yMin},                     {"width", b.width},           {"height", b.height},
+    j = nlohmann::json{{"layerCopperLoops", b.layerCopperLoops}, {"layerTriangles", b.layerTriangles},
+                        {"outline", b.outline},       {"bounds", b.bounds},
                         {"stitchingVias", b.stitchingVias},   {"npthHoleLoops", b.npthHoleLoops},
                         {"failedStitchingViaAttempts", b.failedStitchingViaAttempts},
                         {"topMaskTriangles", b.topMaskTriangles}, {"bottomMaskTriangles", b.bottomMaskTriangles},
@@ -134,12 +170,29 @@ inline void to_json(nlohmann::json& j, const SlicedBoard& b) {
 }
 
 inline void from_json(const nlohmann::json& j, SlicedBoard& b) {
+    if (j.contains("layerCopperLoops")) {
+        j.at("layerCopperLoops").get_to(b.layerCopperLoops);
+    }
     j.at("layerTriangles").get_to(b.layerTriangles);
     j.at("outline").get_to(b.outline);
-    j.at("xMin").get_to(b.xMin);
-    j.at("yMin").get_to(b.yMin);
-    j.at("width").get_to(b.width);
-    j.at("height").get_to(b.height);
+    // "bounds" replaced the old flat xMin/yMin/width/height fields -- fall back to reconstructing
+    // it from those so a geometry.json cached before this field existed still loads.
+    if (j.contains("bounds")) {
+        j.at("bounds").get_to(b.bounds);
+    } else {
+        double xMin = 0;
+        double yMin = 0;
+        double width = 0;
+        double height = 0;
+        j.at("xMin").get_to(xMin);
+        j.at("yMin").get_to(yMin);
+        j.at("width").get_to(width);
+        j.at("height").get_to(height);
+        b.bounds.xMin = xMin;
+        b.bounds.yMin = yMin;
+        b.bounds.xMax = xMin + width;
+        b.bounds.yMax = yMin + height;
+    }
     j.at("stitchingVias").get_to(b.stitchingVias);
     j.at("npthHoleLoops").get_to(b.npthHoleLoops);
     // Absent in geometry.json written before this field existed -- defaults to empty rather than
@@ -178,37 +231,118 @@ inline void from_json(const nlohmann::json& j, SlicedBoard& b) {
     }
 }
 
-/// Slices `sim`'s board geometry. Algorithm:
-/// 1. Resolve involved-net and ground-net names (libkicad_query, same as port_resolution.cpp).
-/// 2. Per copper layer, union KiCad's filled polygons for involved-net and ground-net copper
+/// Everything sliceBoardForSimulation()/placeStitchingVias() (via_stitching.hpp) need from a
+/// SimulationConfig and an EMSConfig, pulled out into their own plain struct -- not the whole
+/// SimulationConfig/EMSConfig, whose every other field (net selectors, grid, frequency, substrate
+/// layers, ...) has nothing to do with slicing a board or stitching a via. Also carries no
+/// simulation name (unlike SimulationConfig) -- a caller that wants one in its logs should log it
+/// once, itself, before calling either function; see sliceBoardForSimulation()'s own doc comment for
+/// why neither logs one internally. Fields are named to match their SimulationConfig/EMSConfig
+/// source fields exactly, and are expected in the same simulation-unit space as the geometry passed
+/// alongside them (a caller reads these off SimulationConfig/EMSConfig after EMSConfig::
+/// scaledToSimulationUnits()).
+struct SlicingConfig {
+    double hullPadding = 0;
+    double viaEdgeDistance = 0;
+    double viaSpacing = 0;
+    /// Real via annular-ring half-width -- see ExistingVia::outerRadius's own use (via_stitching.cpp).
+    double platingThickness = 0;
+    double stitchingViaHoleDiameter = 0;
+    double stitchingViaAnnularRingDiameter = 0;
+    double viaClearance = 0;
+    /// Copper-geometry tessellation tolerance -- EMSConfig::pixelSize(), still in file units (a plain
+    /// pixel/micron count, not itself scaled by EMSConfig::scaledToSimulationUnits()); sliceBoardForSimulation()
+    /// multiplies it by constants::unitMultiplier itself, exactly as it always has.
+    std::int32_t pixelSize = 5;
+    /// Every metal layer's own KiCad layer name, in the same order as EMSConfig::getMetals() (and
+    /// thus SlicedBoard::layerTriangles) -- the only piece of an EMSConfig::getMetals() (a
+    /// std::vector<LayerConfig>, carrying substrate/mask thickness and epsilon fields no slicing code
+    /// ever reads) sliceBoardForSimulation() actually needs: which layer each involved/geometry-only/
+    /// ground CopperPolygon's own copperLayerName should be matched against, per output layer index.
+    std::vector<std::string> layerNames;
+
+    /// Builds one from `sim`'s own hullPadding()/viaEdgeDistance()/viaSpacing() and `config`'s own
+    /// via()/pixelSize()/getMetals() -- the two real sources every caller reads these fields off, so
+    /// this is the one place that mapping is written down rather than repeated at each call site.
+    static SlicingConfig from(const SimulationConfig& sim, const EMSConfig& config);
+};
+
+/// `sim`'s simulated-net, geometry-only-net, and ground-net copper, split
+/// out of a whole-board
+/// libkicad::BoardGeometry -- the (IO-performing) net-name-resolution step of board slicing,
+/// kept separate from sliceBoardForSimulation() itself so that function can stay a pure geometry
+/// algorithm exercisable directly against hand-built CopperPolygon fixtures, with no PathsConfig/
+/// board reload needed. See NetInclusionLevel's own doc comment (config.hpp) for
+/// what governs the involved/geometry-only split; a polygon is independently eligible for more than
+/// one bucket (e.g. nothing stops a net appearing in both an involved-net entry and the ground-net
+/// selector), matching how the selectors are resolved as independent net-name sets.
+struct ClassifiedCopper {
+    std::vector<libkicad::CopperPolygon> involved;
+    std::vector<libkicad::CopperPolygon> geometryOnly;
+    std::vector<libkicad::CopperPolygon> ground;
+};
+
+std::expected<BoundingBox<double>, std::string> boardBoundsInSimulationUnits(
+    const libkicad::BoardGeometry& geometry);
+
+std::expected<ClassifiedCopper, std::string> classifyCopperForSimulation(const SimulationConfig& sim,
+                                                                           const libkicad::BoardGeometry& geometry,
+                                                                           const PathsConfig& paths);
+
+std::expected<std::vector<std::string>, std::string> resolveInvolvedNetNames(
+    const PathsConfig& paths, const InvolvedNetConfig& entry);
+std::expected<std::vector<std::string>, std::string> resolveGroundNetNames(
+    const PathsConfig& paths, const GroundNetConfig& ground);
+
+/// Slices a simulation's board geometry, given `slicing` (see SlicingConfig's own doc comment).
+/// `geometry`, the three net-classified copper polygon lists (see classifyCopperForSimulation(),
+/// which is how a real caller obtains them), `existingVias`, and `npthHoles` are all supplied by the
+/// caller, already resolved against the real board -- this function itself performs no net-name
+/// resolution, does not load a libkicad::BoardGeometry, and takes no PathsConfig at all: a
+/// pure geometry algorithm, exercisable directly against hand-built fixtures with no board-load/
+/// subprocess IO anywhere in its own call graph. `existingVias`/`npthHoles` are the real board's own
+/// getVias()/getNPTHHoles() results (both ordinarily best-effort -- see boardBoundsInSimulationUnits()'s
+/// own doc comment for how a caller derives the origin to call them with; an empty vector here means
+/// either a board with none, or a caller that treated its own query failure as "found none", exactly
+/// as this function used to do internally). Takes no SimulationConfig/EMSConfig directly (nor logs a
+/// simulation name anywhere) for the same reason placeStitchingVias() doesn't -- see SlicingConfig's
+/// own doc comment; a caller that wants a name in its logs should log it once, itself, before
+/// calling. Algorithm:
+/// 1. Per copper layer, union each of involvedCopper/geometryOnlyCopper/groundCopper
 ///    separately.
-/// 3. Union the involved-net composite across every layer into one 2D shape and inflate it by
-///    sim.hullPadding() -- this is the cutout region. (No separate concave-hull/alpha-shape
-///    algorithm: inflating the involved nets' own copper union by a real physical distance already
+/// 2. Union every simulated net's copper across every layer into one 2D shape and inflate it by
+///    `slicing.hullPadding` -- this is the cutout region. Adding a net to the Simulated set therefore
+///    expands the surrounding substrate/ground region whether or not that net has an excitation.
+///    Geometry-only entries remain clipped to this cutout and never grow it. (No separate
+///    concave-hull/alpha-shape algorithm: inflating the simulated nets' own copper union by a real
+///    physical distance already
 ///    produces a reasonably-shaped, non-convex enclosing region without a new geometry-algorithm
 ///    dependency -- a deliberate approximation, worth revisiting if it looks too jagged on a real
-///    board.) Intersected against the board's real Edge_Cuts outline so the cutout never extends
-///    past the real board edge.
-/// 4. Per layer, final copper = involved-net composite (already inside the cutout by construction)
+///    board.) Intersected against the board's real Edge_Cuts outline (`geometry.outline`) so the
+///    cutout never extends past the real board edge.
+/// 3. Per layer, final copper = involved-net composite (already inside the cutout by construction)
 ///    unioned with ground-net composite intersected with the cutout, minus every non-plated
 ///    through-hole (NPTH) on the board -- a mechanical/alignment hole (e.g. a USB connector's
 ///    elongated mounting slots) has no copper of its own in KiCad's copper polygons, so
 ///    nothing upstream already carves it out of a zone/plane pour that happens to cover that area;
 ///    it's subtracted explicitly here, as a capsule/stadium shape so an elongated slot comes out
 ///    elongated rather than as a hole only at its center point.
-/// 5. Classify the cutout boundary against the real Edge_Cuts outline: segments lying on/near it
-///    are pre-existing edges (no stitching -- the real board already provides a return path there);
-///    every other segment is a new cut. Adjacent new-cut segments are joined into contiguous runs
-///    first (the boundary comes out of Clipper2 tessellated into many short segments, so spacing
-///    vias per raw segment would badly over-place them -- see the .cpp for detail); stitching vias
-///    are then placed along each run's own arc length, at sim.viaEdgeDistance() inward, spaced
-///    sim.viaSpacing() apart, connecting through whichever layers the (cutout-clipped) ground
-///    composite covers at that position. A candidate is dropped if it would sit closer than
-///    config.via().viaClearance() (edge-to-edge) to any other via -- real or already placed here,
-///    any net -- or closer than sim.viaSpacing() to any real or already-placed *ground-net* via
-///    specifically (a stitching via is itself always ground, so this keeps freshly-placed ones that
-///    spacing apart from each other too, not just from the board's own vias).
-std::expected<SlicedBoard, std::string> sliceBoardForSimulation(const SimulationConfig& sim, const EMSConfig& config,
-                                                                  const PathsConfig& paths);
+/// 4. Places stitching vias -- see placeStitchingVias() (via_stitching.hpp) for the full rule and
+///    rationale; `slicing` is forwarded to it unchanged. Routed traces and footprint pads on
+///    non-ground nets block a candidate when they intersect its annular ring; non-ground zones do
+///    not.
+std::expected<SlicedBoard, std::string> sliceBoardForSimulation(
+    const SlicingConfig& slicing, const libkicad::BoardGeometry& geometry,
+    const std::vector<libkicad::CopperPolygon>& involvedCopper,
+    const std::vector<libkicad::CopperPolygon>& geometryOnlyCopper,
+    const std::vector<libkicad::CopperPolygon>& groundCopper, const std::vector<ViaHole>& existingVias,
+    const std::vector<NPTHHole>& npthHoles,
+    const GeometryProcessingProgressCallback& onProgress = {});
+
+/// Removes auto-discovered lumped R/L/C components whose two pad centres both lie outside the
+/// board cutout. Called immediately after slicing (and after loading cached sliced geometry), so
+/// subsequent grid generation and FDTD construction see exactly the passives that physically
+/// intersect the retained simulation region.
+void restrictLumpedComponentsToCutout(SimulationConfig& simulation, const SlicedBoard& board);
 
 } // namespace kiems

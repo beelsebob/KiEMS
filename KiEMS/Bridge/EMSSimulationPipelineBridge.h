@@ -27,10 +27,8 @@ typedef NS_ENUM(NSInteger, EMSPipelineStage) {
 /// so a caller driving those rows' own progress indicators knows which one to update. Geometry
 /// covers board-slicing + grid placement (kiems::GeometryPhase, reported only at each phase's
 /// own start/end -- there's no finer-grained progress available for those); SettingUp covers
-/// kiems::Simulation::setupFDTDOperator() (openEMS's own SetupFDTD()/CalcECOperator(), which
-/// dominates a real board's total setup cost -- confirmed in practice to take minutes, not seconds --
-/// but is a single opaque call openEMS gives no progress hooks into at all, hence this only ever
-/// reports once, at the very start, with no fraction of any kind -- a caller should show an
+/// output-directory preparation and Copper operator construction. This reports once at the start,
+/// with no useful fractional estimate, so a caller should show an
 /// indeterminate ("barber pole") indicator for this phase rather than attempt to predict how long
 /// it'll take); Simulation covers the real FDTD run(s) (one per excited port) plus postprocessing,
 /// with `fraction` driven by actual timestep counts (see copper::CopperFDTDProgress) -- genuinely
@@ -47,11 +45,15 @@ typedef NS_ENUM(NSInteger, EMSPipelineProgressPhase) {
 /// (each phase restarts from 0, it does not continue accumulating across phase boundaries) -- see
 /// EMSPipelineProgressPhase's own doc comment for why (always 0 for SettingUp, which has no real
 /// advancing fraction to report at all -- deliberately not estimated either, see that phase's own
-/// doc comment). `energyChangeDB`/`targetEnergyChangeDB`/`absoluteEnergy`/`duringExcitation` are only
-/// meaningful when `phase` is Simulation (mirror copper::CopperFDTDProgress's own fields of the same
+/// doc comment). `energyChangeDB`/`targetEnergyChangeDB`/`absoluteEnergy`/`duringExcitation`/
+/// `simulationTimeSeconds`/`excitationEndTimeSeconds`/`plannedSimulationTimeSeconds` are only
+/// meaningful when `phase` is Simulation (mirror
+/// copper::CopperFDTDProgress's own fields of the same
 /// names -- the energy-decay end-criteria's current value and dB target, e.g. for a level-indicator
 /// display, the same unnormalized energy reading the dB figures are derived from, and whether the
-/// excitation pulse is still actively being injected); all read 0/NO otherwise.
+/// the run is still before the Gaussian pulse's maximum-amplitude/decay boundary, and the physical
+/// time reached by the solver);
+/// all read 0/NO otherwise.
 @interface EMSPipelineProgress : NSObject
 @property (nonatomic, readonly) EMSPipelineProgressPhase phase;
 @property (nonatomic, readonly) double fraction;
@@ -59,6 +61,11 @@ typedef NS_ENUM(NSInteger, EMSPipelineProgressPhase) {
 @property (nonatomic, readonly) double targetEnergyChangeDB;
 @property (nonatomic, readonly) double absoluteEnergy;
 @property (nonatomic, readonly) BOOL duringExcitation;
+@property (nonatomic, readonly) double simulationTimeSeconds;
+@property (nonatomic, readonly) double excitationEndTimeSeconds;
+@property (nonatomic, readonly) double plannedSimulationTimeSeconds;
+@property (nonatomic, readonly) double excitationF0Hz;
+@property (nonatomic, readonly) double excitationFcHz;
 /// Display name of the net driven by this setup/FDTD pass; nil during geometry generation.
 @property (nonatomic, copy, readonly, nullable) NSString *excitedNetName;
 @end
@@ -82,6 +89,11 @@ typedef void (^EMSPipelineProgressHandler)(EMSPipelineProgress *progress);
 /// (and a "Processing…" spinner) is even needed before calling ensureStage:.
 - (BOOL)hasStage:(EMSPipelineStage)stage;
 
+/// Whether the most recent ensureStage: call generated files that should be saved into the document
+/// package. False for an in-memory cache hit and for restoring an already-saved stage after reopen.
+/// JobScheduler uses this to mark the document edited only for genuinely new pipeline output.
+- (BOOL)lastEnsureStageWroteOutput;
+
 /// Runs whatever's still missing -- kicad-cli gerber export, stackup import, port resolution (once,
 /// the first time any stage is computed since construction or the last invalidateFromStage: call),
 /// then each pipeline stage up to and including `stage` -- to make that stage's data available. A
@@ -104,7 +116,6 @@ typedef void (^EMSPipelineProgressHandler)(EMSPipelineProgress *progress);
              config:(EMSConfigBridge *)config
          packageDir:(NSString *)packageDir
        kicadCliPath:(NSString *)kicadCliPath
-kicadQueryHelperPath:(NSString *)helperPath
            progress:(nullable EMSPipelineProgressHandler)progressHandler
               error:(NSError **)error;
 
@@ -122,6 +133,10 @@ kicadQueryHelperPath:(NSString *)helperPath
 
 /// A renderable geometry preview -- nil unless hasStage:EMSPipelineStageGeometry is true.
 - (nullable EMSGeometryPreview *)geometryPreview;
+
+/// One display-only KiCad layer, cropped to this simulation's already-built cutout. Nil until the
+/// Geometry stage exists; callers schedule these serially behind the initial preview.
+- (nullable EMSGeometryLayer *)geometryLayerNamed:(NSString *)layerName error:(NSError **)error;
 
 /// A renderable results preview -- nil unless hasStage:EMSPipelineStageResults is true.
 - (nullable EMSResultsPreview *)resultsPreview;

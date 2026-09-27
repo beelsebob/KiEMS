@@ -406,22 +406,29 @@ private:
     std::vector<TDF_Label>          m_pcb_labels;       // labels for the PCB model (one by main outline)
     MODEL_MAP                       m_models;           // map of file names to model labels
 
-    // (component instance label, model_key) for every footprint model added via the public
+    struct COMPONENT_MODEL_INSTANCE
+    {
+        TDF_Label label;
+        std::string modelKey;
+        std::string reference;
+    };
+
+    // Component instance data for every footprint model added via the public
     // AddComponent() -- a purpose-built parallel list for GetComponentTriangles() alone, since
     // m_pcb_labels above is shared with board-body/pad shapes GetComponentTriangles() must NOT
     // include (see its own doc comment), and doesn't carry the model_key needed to look up
     // m_modelFaceColors below. TDF_Label has no operator< of its own, hence a vector of pairs
     // rather than a map keyed by it.
-    std::vector<std::pair<TDF_Label, std::string>> m_pcb_component_models;
+    std::vector<COMPONENT_MODEL_INSTANCE> m_pcb_component_models;
 
     // model_key (same string getModelLabel()/AddComponent() use for m_models, keyed on filename+
     // scale) -> one entry per face, in the exact order a flat TopExp_Explorer(shape, TopAbs_FACE)
     // over that model's own (freshly read, pre-transfer) shape visits them, {aHasColor, aColor}.
     // See getModelLabel()'s own comment for why this exists: XCAFDoc_Editor::Extract (used to
-    // transfer a loaded model's shapes into the shared m_doc) does not preserve sub-shape/face-
-    // level colors, only label-level ones, so this project's own GetComponentTriangles() can't
-    // recover them from m_doc's XCAFDoc_ColorTool after the fact -- captured once, right after
-    // reading, while they're still there.
+    // transfer a loaded model's shapes into the shared m_doc) does not reliably preserve effective
+    // presentation styles through later component instancing, so GetComponentTriangles() can't
+    // recover them afterward. They are resolved through XCAFPrs (including inherited assembly,
+    // solid, shell, and face styles) and captured once while the freshly-read document is intact.
     std::map<std::string, std::vector<std::pair<bool, Quantity_ColorRGBA>>> m_modelFaceColors;
     int                             m_components;       // number of successfully loaded components;
     double                          m_precision;        // model (length unit) numeric precision

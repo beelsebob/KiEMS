@@ -1,30 +1,10 @@
-// Reaches into openEMS/CSXCAD internals that are `protected`, with no public getter, purely so
-// Copper can read the *setup* results (grid, coefficients, PML data, excitation signal) that
-// openEMS's own `Operator`/`Excitation`/`Operator_Ext_UPML` already compute -- Copper never
-// reimplements that math itself (see the Copper implementation plan's rationale for why: every
-// number here is openEMS's own already-computed answer, not a second, independently-derived path
-// that could silently drift from it).
+// Test/reference adapters that reach into openEMS/CSXCAD internals with no public getter. Copper's
+// production path builds its own operator; these shims retain an independent implementation for
+// parity and regression comparisons.
 //
 // `openEMS::FDTD_Op` access (CopperOpenEMS) is ordinary, well-defined protected-member access via
 // inheritance *when Copper constructs its own `openEMS` object as `CopperOpenEMS` from the start*
-// (every Copper_smoketest fixture does exactly this). `copper_fdtd_worker/main.cpp` is a different
-// situation: it reaches a `Simulation::fdtdEngine()`-returned `openEMS&` -- an object
-// libkiems itself constructed as plain `openEMS`, with no idea Copper exists -- via
-// `static_cast<CopperOpenEMS&>`, which *is* a downcast of an object never actually constructed as
-// that derived type. Same accepted, documented risk category as CopperUPMLAccess/
-// CopperExcitationAccess below (identical layout, no new data members, no vtable change), not a new
-// one -- worth calling out explicitly here since this class's own two accessors (GetOperatorForGPU/
-// GetEngineForCPU/GetNumberOfTimestepsForGPU) get used both ways depending on caller.
-//
-// `Operator_Ext_UPML`'s coefficient/geometry access (CopperUPMLAccess) is a different situation:
-// the actual `Operator_Ext_UPML` instance is constructed internally by openEMS's own PML-attachment
-// code (`Operator_Ext_UPML::Create_UPML`, invoked from boundary-condition setup), not by Copper --
-// so reaching its members via `static_cast<CopperUPMLAccess*>` is a downcast of an object that was
-// never actually constructed as a `CopperUPMLAccess`. Formally UB per the strict C++ object model,
-// but a long-established, practically-safe idiom given the derived class adds no data members and
-// no new virtuals (identical layout, no vtable change, no compiler mainstream or otherwise treats
-// this differently from the base type) -- accepted here as a deliberate, documented risk rather
-// than something to rediscover later.
+// (every Copper_smoketest fixture does exactly this).
 //
 // IMPORTANT for every file that includes this header (directly or transitively): openEMS's own
 // internal headers pull in CSXCAD via flat, unnamespaced includes (e.g. "ContinuousStructure.h"),
@@ -38,8 +18,10 @@
 
 #include "FDTD/engine.h"
 #include "FDTD/extensions/operator_ext_excitation.h"
-#include "FDTD/extensions/operator_ext_upml.h"
 #include "openems.h"
+
+#include "CopperExcitation.hpp"
+#include "CopperYeeGrid.hpp"
 
 namespace copper {
 
@@ -53,39 +35,20 @@ public:
     /// plan's Phase 2 pass criterion); not used by any shipped (non-test) Copper code path.
     Engine* GetEngineForCPU() { return FDTD_Eng; }
 
-    /// The configured max-timestep count (`openEMS::SetNumberOfTimeSteps`, e.g. from
-    /// `EMSConfig::maxSteps()`) -- how many iterations `copper_fdtd_worker` should run
-    /// `CopperEngine::runWithProbeSampling` for. openEMS's own CPU RunFDTD() additionally supports
-    /// stopping early once its own energy-decay end criterion is met; Copper's GPU worker doesn't
-    /// implement that yet and always runs the full configured count (see copper_fdtd_worker's own
-    /// file comment).
+    /// Test-only access to the configured max-timestep count.
     unsigned int GetNumberOfTimestepsForGPU() { return NrTS; }
 };
 
 /// Test-only access to CalcPEC's protected paint pass and counters. Same zero-data-member access
-/// pattern as CopperUPMLAccess below; production Copper code does not use this class.
+/// pattern as the other test-access shims below; production Copper code does not use this class.
 class CopperOperatorAccess : public Operator {
 public:
     using Operator::m_Nr_PEC;
     using Operator::PaintPECColumn;
 };
 
-class CopperUPMLAccess : public Operator_Ext_UPML {
-public:
-    using Operator_Ext_UPML::m_BC;
-    using Operator_Ext_UPML::m_Size;
-    using Operator_Ext_UPML::m_StartPos;
-    using Operator_Ext_UPML::m_numLines;
-    using Operator_Ext_UPML::GetVV;
-    using Operator_Ext_UPML::GetVVFO;
-    using Operator_Ext_UPML::GetVVFN;
-    using Operator_Ext_UPML::GetII;
-    using Operator_Ext_UPML::GetIIFO;
-    using Operator_Ext_UPML::GetIIFN;
-};
-
-/// Same downcast-of-an-object-Copper-didn't-construct situation as CopperUPMLAccess above (openEMS
-/// attaches this extension itself, inside SetupFDTD()) -- same accepted, documented risk.
+/// Downcast-of-an-object-Copper-didn't-construct situation (openEMS attaches this extension itself,
+/// inside SetupFDTD()) -- an accepted, documented test-only risk.
 class CopperExcitationAccess : public Operator_Ext_Excitation {
 public:
     using Operator_Ext_Excitation::Volt_Count;
@@ -99,5 +62,113 @@ public:
     using Operator_Ext_Excitation::Curr_amp;
     using Operator_Ext_Excitation::Curr_delay;
 };
+
+namespace reference {
+
+inline std::vector<float> primaryLines(Operator& op, int axis, std::uint32_t count, double gridDelta) {
+    std::vector<float> lines(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        lines[i] = static_cast<float>(op.GetDiscLine(axis, i, false) * gridDelta);
+    }
+    return lines;
+}
+
+inline std::vector<float> dualLines(Operator& op, int axis, std::uint32_t count, double gridDelta) {
+    std::vector<float> lines(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        lines[i] = static_cast<float>(op.GetDiscLine(axis, i, true) * gridDelta);
+    }
+    return lines;
+}
+
+inline void coefficients(Operator& op, const CopperGridDims& dims, unsigned int axis,
+                         std::vector<float>& vv, std::vector<float>& vi,
+                         std::vector<float>& ii, std::vector<float>& iv) {
+    const std::uint32_t count = dims.cellCount();
+    vv.resize(count);
+    vi.resize(count);
+    ii.resize(count);
+    iv.resize(count);
+    for (std::uint32_t z = 0; z < dims.nz; ++z) {
+        for (std::uint32_t y = 0; y < dims.ny; ++y) {
+            for (std::uint32_t x = 0; x < dims.nx; ++x) {
+                const std::uint32_t index = copperGridIndex(dims, x, y, z);
+                vv[index] = op.GetVV(axis, x, y, z);
+                vi[index] = op.GetVI(axis, x, y, z);
+                ii[index] = op.GetII(axis, x, y, z);
+                iv[index] = op.GetIV(axis, x, y, z);
+            }
+        }
+    }
+}
+
+inline std::vector<CopperExcitationCell> excitationCells(unsigned int count,
+                                                          unsigned int* const index[3],
+                                                          unsigned short* direction,
+                                                          FDTD_FLOAT* amplitude,
+                                                          unsigned int* delay) {
+    std::vector<CopperExcitationCell> cells(count);
+    for (unsigned int n = 0; n < count; ++n) {
+        cells[n].x = index[0][n];
+        cells[n].y = index[1][n];
+        cells[n].z = index[2][n];
+        cells[n].axis = direction[n];
+        cells[n].amplitude = amplitude[n];
+        cells[n].delaySteps = delay[n];
+    }
+    return cells;
+}
+
+} // namespace reference
+
+inline CopperYeeGrid buildYeeGrid(Operator& op) {
+    CopperYeeGrid grid;
+    grid.dims.nx = op.GetNumberOfLines(0);
+    grid.dims.ny = op.GetNumberOfLines(1);
+    grid.dims.nz = op.GetNumberOfLines(2);
+    grid.timestepSeconds = op.GetTimestep();
+
+    const double gridDelta = op.GetGridDelta();
+    grid.lineX = reference::primaryLines(op, 0, grid.dims.nx, gridDelta);
+    grid.lineY = reference::primaryLines(op, 1, grid.dims.ny, gridDelta);
+    grid.lineZ = reference::primaryLines(op, 2, grid.dims.nz, gridDelta);
+    grid.dualLineX = reference::dualLines(op, 0, grid.dims.nx, gridDelta);
+    grid.dualLineY = reference::dualLines(op, 1, grid.dims.ny, gridDelta);
+    grid.dualLineZ = reference::dualLines(op, 2, grid.dims.nz, gridDelta);
+    for (unsigned int axis = 0; axis < 3; ++axis) {
+        reference::coefficients(op, grid.dims, axis, grid.vv[axis], grid.vi[axis],
+                                grid.ii[axis], grid.iv[axis]);
+    }
+    return grid;
+}
+
+inline CopperExcitation buildExcitation(Operator& op) {
+    CopperExcitation result;
+    Excitation* excitation = op.GetExcitationSignal();
+    if (excitation == nullptr) {
+        return result;
+    }
+    const unsigned int length = excitation->GetLength();
+    result.voltageSignal.assign(excitation->GetVoltageSignal(), excitation->GetVoltageSignal() + length);
+    result.currentSignal.assign(excitation->GetCurrentSignal(), excitation->GetCurrentSignal() + length);
+    result.signalPeriodSeconds = excitation->GetSignalPeriod();
+
+    Operator_Ext_Excitation* extension = nullptr;
+    for (std::size_t i = 0; i < op.GetNumberOfExtentions(); ++i) {
+        if (auto* candidate = dynamic_cast<Operator_Ext_Excitation*>(op.GetExtension(i))) {
+            extension = candidate;
+            break;
+        }
+    }
+    if (extension == nullptr) {
+        return result;
+    }
+    auto* access = static_cast<CopperExcitationAccess*>(extension);
+    result.voltageCells = reference::excitationCells(
+        access->Volt_Count, access->Volt_index, access->Volt_dir, access->Volt_amp, access->Volt_delay);
+    result.currentCells = reference::excitationCells(
+        access->Curr_Count, access->Curr_index, access->Curr_dir, access->Curr_amp, access->Curr_delay);
+    return result;
+}
 
 } // namespace copper
