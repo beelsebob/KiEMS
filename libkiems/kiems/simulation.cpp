@@ -289,7 +289,8 @@ std::expected<void, std::string> Simulation::sliceBoard() {
 
     const SlicingConfig slicing = SlicingConfig::from(_simConfig, _config);
     auto result = sliceBoardForSimulation(slicing, *geometry, copper->involved,
-                                           copper->geometryOnly, copper->ground, existingVias, npthHoles);
+                                           copper->geometryOnly, copper->ground, copper->hullContributions,
+                                           existingVias, npthHoles);
     if (!result) {
         return std::unexpected(result.error());
     }

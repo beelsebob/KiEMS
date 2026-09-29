@@ -44,7 +44,7 @@ final class FieldView: MTKView, MTKViewDelegate {
             }
             rebuildVoxelGeometry()
             needsDisplay = true
-            prefetchAhead()
+            startRefinementCycle()
         }
     }
 
@@ -61,22 +61,129 @@ final class FieldView: MTKView, MTKViewDelegate {
     var currentFrameIndex: Int = 0 {
         didSet {
             guard !isReplacingSnapshot, currentFrameIndex != oldValue else { return }
-            updateVoxelColors(forFrame: currentFrameIndex)
+            // Prepared playback frames may contain a different set of adaptively refined cells, so
+            // their instance geometry changes as well as their colours. Cold scrubbing still takes
+            // the cheap all-preview path inside rebuildVoxelGeometry().
+            rebuildVoxelGeometry()
             needsDisplay = true
-            prefetchAhead()
+            startRefinementCycle()
         }
     }
 
-    /// Keep exactly the next playback frame warm. The reader deliberately retains only the current
-    /// frame and this one prefetched frame, bounding memory independently of series duration.
-    private static let prefetchLookaheadFrames = 1
+    private static let playbackDecodeBudget: TimeInterval = 0.1
+    private var refinementGeneration = 0
+    private var playbackIsActive = false
+    private var refinementIsEnabled = false
 
-    /// Kicks off (or no-ops, if already warm/in flight) an async decode of the next frame. Called
-    /// whenever the displayed frame or the whole snapshot changes.
-    private func prefetchAhead() {
-        guard let frames = fieldSnapshot?.frames, !frames.isEmpty else { return }
-        let aheadIndex = min(currentFrameIndex + Self.prefetchLookaheadFrames, frames.count - 1)
-        frames[aheadIndex].prefetch()
+    /// Enables background refinement only while this pane is visible. This is separate from
+    /// playback state: a paused, visible viewer deliberately keeps improving the next frame and
+    /// then the displayed frame, while a hidden viewer must do no field decoding at all.
+    func setRefinementEnabled(_ enabled: Bool) {
+        guard refinementIsEnabled != enabled else { return }
+        refinementIsEnabled = enabled
+        startRefinementCycle()
+    }
+
+    /// Switches between the bounded per-playback-frame decode budget and paused exhaustive
+    /// refinement. Changing this generation makes callbacks from the old policy harmless; the
+    /// underlying decode is bounded to one short chunk, so Play responds promptly even if pressed
+    /// while paused refinement is in flight.
+    func setPlaybackActive(_ active: Bool) {
+        guard playbackIsActive != active else { return }
+        playbackIsActive = active
+        startRefinementCycle()
+    }
+
+    private func startRefinementCycle() {
+        refinementGeneration += 1
+        let generation = refinementGeneration
+        guard refinementIsEnabled, let frames = fieldSnapshot?.frames,
+              frames.indices.contains(currentFrameIndex) else { return }
+        if playbackIsActive {
+            refineDuringPlayback(frames: frames, generation: generation)
+        } else {
+            refineWhilePaused(frames: frames, generation: generation)
+        }
+    }
+
+    /// Playback first spends the frame's 100 ms residency on its successor. If that successor is
+    /// already complete (or finishes early), the remaining wall-clock budget refines the frame
+    /// currently on screen. The playback timer and decoder use the same interval, so decoding can
+    /// never deliberately make the displayed frame overrun its target residency.
+    private func refineDuringPlayback(frames: [EMSFieldFrame], generation: Int) {
+        let deadline = Date().addingTimeInterval(Self.playbackDecodeBudget)
+        let nextIndex = min(currentFrameIndex + 1, frames.count - 1)
+        let currentIndex = currentFrameIndex
+
+        func refineCurrentWithRemainingBudget() {
+            guard refinementCycleIsCurrent(generation, frameIndex: currentIndex),
+                  playbackIsActive else { return }
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else { return }
+            frames[currentIndex].prepare(withBudget: remaining) { [weak self] _ in
+                self?.displayNewRefinement(generation: generation, frameIndex: currentIndex)
+            }
+        }
+
+        guard nextIndex != currentIndex else {
+            refineCurrentWithRemainingBudget()
+            return
+        }
+        frames[nextIndex].prepare(withBudget: Self.playbackDecodeBudget) { [weak self] complete in
+            guard let self, self.refinementCycleIsCurrent(generation, frameIndex: currentIndex),
+                  self.playbackIsActive, complete else { return }
+            refineCurrentWithRemainingBudget()
+        }
+    }
+
+    /// While paused there is no presentation deadline. Decode in short chunks so Play can change
+    /// policy promptly: finish the successor first, then continue the displayed frame until every
+    /// detail tile is present. Each current-frame chunk is installed immediately so the stationary
+    /// image visibly sharpens rather than changing only after the entire frame has decoded.
+    private func refineWhilePaused(frames: [EMSFieldFrame], generation: Int) {
+        let currentIndex = currentFrameIndex
+        let nextIndex = min(currentIndex + 1, frames.count - 1)
+        func refineCurrent() {
+            refineUntilComplete(frames: frames, frameIndex: currentIndex, generation: generation,
+                                redrawCurrent: true, completion: {})
+        }
+        guard nextIndex != currentIndex else {
+            refineCurrent()
+            return
+        }
+        refineUntilComplete(frames: frames, frameIndex: nextIndex, generation: generation,
+                            redrawCurrent: false, completion: refineCurrent)
+    }
+
+    private func refineUntilComplete(frames: [EMSFieldFrame], frameIndex: Int, generation: Int,
+                                     redrawCurrent: Bool, completion: @escaping () -> Void) {
+        guard refinementCycleIsCurrent(generation, frameIndex: currentFrameIndex),
+              !playbackIsActive else { return }
+        frames[frameIndex].prepare(withBudget: Self.playbackDecodeBudget) { [weak self] complete in
+            guard let self,
+                  self.refinementCycleIsCurrent(generation, frameIndex: self.currentFrameIndex),
+                  !self.playbackIsActive else { return }
+            if redrawCurrent {
+                self.displayNewRefinement(generation: generation, frameIndex: frameIndex)
+            }
+            if complete {
+                completion()
+            } else {
+                self.refineUntilComplete(frames: frames, frameIndex: frameIndex,
+                                         generation: generation, redrawCurrent: redrawCurrent,
+                                         completion: completion)
+            }
+        }
+    }
+
+    private func refinementCycleIsCurrent(_ generation: Int, frameIndex: Int) -> Bool {
+        refinementIsEnabled && refinementGeneration == generation && currentFrameIndex == frameIndex
+    }
+
+    private func displayNewRefinement(generation: Int, frameIndex: Int) {
+        guard refinementCycleIsCurrent(generation, frameIndex: frameIndex) else { return }
+        rebuildVoxelGeometry()
+        needsDisplay = true
     }
 
     /// Replaces the series and chooses its initial frame as one atomic viewer operation. Setting the
@@ -94,6 +201,7 @@ final class FieldView: MTKView, MTKViewDelegate {
     /// Drops large decoded buffers while retaining the current series/viewport so returning to the
     /// viewer can stream the selected frame again without rebuilding the surrounding UI state.
     func discardCachedFrameData() {
+        refinementGeneration += 1
         fieldSnapshot?.discardCachedFrameData()
     }
 
@@ -141,6 +249,10 @@ final class FieldView: MTKView, MTKViewDelegate {
     private var voxelCachedNx = 0
     private var voxelCachedNy = 0
     private var voxelCachedZRange: ClosedRange<Int>?
+    /// Preview-energy index for each geometry instance. Normally one preview voxel maps to one
+    /// value; boundary-straddling preview voxels are split into active full-resolution XY cells,
+    /// all sharing the preview value, while external children are omitted entirely.
+    private var voxelCachedEnergyIndices: [Int] = []
     /// The color scale's peak for the currently-displayed frame -- now always equal to
     /// seriesOnBoardMaxEnergy (see its own doc comment), not that one frame's own peak.
     private var voxelCachedMaxEnergy: Float = 0
@@ -735,6 +847,7 @@ final class FieldView: MTKView, MTKViewDelegate {
             Cu.logDebug("[FieldView] rebuildVoxelGeometry: bailing, device=\(device != nil) snapshot=\(fieldSnapshot != nil)")
             voxelInstanceCount = 0
             voxelCachedZRange = nil
+            voxelCachedEnergyIndices = []
             voxelZLayerDraws = []
             return
         }
@@ -762,9 +875,11 @@ final class FieldView: MTKView, MTKViewDelegate {
             Cu.logWarning("[FieldView] rebuildVoxelGeometry: bailing on dims/sample-count mismatch")
             voxelInstanceCount = 0
             voxelCachedZRange = nil
+            voxelCachedEnergyIndices = []
             voxelZLayerDraws = []
             return
         }
+        if rebuildRefinedVoxelGeometry(forFrame: currentFrameIndex) { return }
         let lineX = Self.cellBoundaries(from: sampleX)
         let lineY = Self.cellBoundaries(from: sampleY)
         let lineZ = Self.cellBoundaries(from: sampleZ)
@@ -790,6 +905,7 @@ final class FieldView: MTKView, MTKViewDelegate {
             Cu.logWarning("[FieldView] rebuildVoxelGeometry: bailing, zStart > zEnd (board Z crop produced an empty range)")
             voxelInstanceCount = 0
             voxelCachedZRange = nil
+            voxelCachedEnergyIndices = []
             voxelZLayerDraws = []
             return
         }
@@ -807,7 +923,19 @@ final class FieldView: MTKView, MTKViewDelegate {
         stretchedLineZ[stretchedLineZ.count - 1] += stretch
 
         var geometryInstances: [VoxelGeometryGPU] = []
-        geometryInstances.reserveCapacity(nx * ny * (zEnd - zStart + 1))
+        let estimatedInstanceCount = nx * ny * (zEnd - zStart + 1)
+        geometryInstances.reserveCapacity(estimatedInstanceCount)
+        var energyIndices: [Int] = []
+        energyIndices.reserveCapacity(estimatedInstanceCount)
+        let fullNx = Int(snapshot.fullNx), fullNy = Int(snapshot.fullNy)
+        let factorX = Int(snapshot.previewFactorX), factorY = Int(snapshot.previewFactorY)
+        let fullX = Self.cellBoundaries(from: snapshot.fullLineX.map(\.floatValue))
+        let fullY = Self.cellBoundaries(from: snapshot.fullLineY.map(\.floatValue))
+        let domain = snapshot.fullDomainXYClassData.withUnsafeBytes { Array($0) }
+        let hasDomain = domain.count == fullNx * fullNy && fullX.count == fullNx + 1 && fullY.count == fullNy + 1
+        func active(_ x: Int, _ y: Int) -> Bool {
+            !hasDomain || domain[x + fullNx * y] != 0
+        }
         var zLayerDraws: [(z: Float, instanceStart: Int, instanceCount: Int)] = []
         for iz in zStart...zEnd {
             let z0 = stretchedLineZ[iz - zStart]
@@ -821,10 +949,33 @@ final class FieldView: MTKView, MTKViewDelegate {
                 let yCenter = (y0 + y1) / 2
                 let ySize = y1 - y0
                 for ix in 0..<nx {
+                    let energyIndex = ix + nx * (iy + ny * iz)
+                    let startX = ix * factorX, endX = min(startX + factorX, fullNx)
+                    let startY = iy * factorY, endY = min(startY + factorY, fullNy)
+                    var activeCount = 0
+                    for gy in startY..<endY {
+                        for gx in startX..<endX where active(gx, gy) { activeCount += 1 }
+                    }
+                    if activeCount == 0 { continue }
+                    let blockCount = (endX - startX) * (endY - startY)
+                    if activeCount != blockCount {
+                        for gy in startY..<endY {
+                            for gx in startX..<endX where active(gx, gy) {
+                                geometryInstances.append(VoxelGeometryGPU(
+                                    center: Position3((fullX[gx] + fullX[gx + 1]) / 2,
+                                                      (fullY[gy] + fullY[gy + 1]) / 2, zCenter),
+                                    size: Position3(fullX[gx + 1] - fullX[gx],
+                                                    fullY[gy + 1] - fullY[gy], zSize)))
+                                energyIndices.append(energyIndex)
+                            }
+                        }
+                        continue
+                    }
                     let x0 = lineX[ix]
                     let x1 = lineX[ix + 1]
                     geometryInstances.append(VoxelGeometryGPU(center: Position3((x0 + x1) / 2, yCenter, zCenter),
                                                                 size: Position3(x1 - x0, ySize, zSize)))
+                    energyIndices.append(energyIndex)
                 }
             }
             zLayerDraws.append((z: zCenter, instanceStart: layerStart, instanceCount: geometryInstances.count - layerStart))
@@ -837,11 +988,155 @@ final class FieldView: MTKView, MTKViewDelegate {
         voxelCachedNx = nx
         voxelCachedNy = ny
         voxelCachedZRange = zStart...zEnd
+        voxelCachedEnergyIndices = energyIndices
         voxelCachedMaxEnergy = 0
         Cu.logDebug("[FieldView] rebuildVoxelGeometry: built \(voxelInstanceCount) instances, "
             + "voxelGeometryBuffer=\(voxelGeometryBuffer != nil)")
 
         updateVoxelColors(forFrame: currentFrameIndex)
+    }
+
+    /// Replaces preview cells prepared by the lookahead decoder with their full-resolution
+    /// 16x16x2 (edge-aware) children. Geometry and energy stay in matching per-Z buckets so the
+    /// existing painter-order draw path remains valid even when coarse and fine cells coexist.
+    @discardableResult
+    private func rebuildRefinedVoxelGeometry(forFrame frameIndex: Int) -> Bool {
+        guard let device, let snapshot = fieldSnapshot,
+              snapshot.frames.indices.contains(frameIndex) else { return false }
+        let decoded = snapshot.frames[frameIndex].decodedFrame
+        guard !decoded.refinements.isEmpty else { return false }
+
+        let nx = Int(snapshot.nx), ny = Int(snapshot.ny), nz = Int(snapshot.nz)
+        let factorX = Int(snapshot.previewFactorX)
+        let factorY = Int(snapshot.previewFactorY)
+        let factorZ = Int(snapshot.previewFactorZ)
+        let fullX = Self.cellBoundaries(from: snapshot.fullLineX.map(\.floatValue))
+        let fullY = Self.cellBoundaries(from: snapshot.fullLineY.map(\.floatValue))
+        let fullZ = Self.cellBoundaries(from: snapshot.fullLineZ.map(\.floatValue))
+        guard fullX.count == Int(snapshot.fullNx) + 1,
+              fullY.count == Int(snapshot.fullNy) + 1,
+              fullZ.count == Int(snapshot.fullNz) + 1 else { return false }
+
+        let previewEnergy = decoded.previewEnergyData.withUnsafeBytes {
+            Array($0.bindMemory(to: Float.self))
+        }
+        guard previewEnergy.count == nx * ny * nz else { return false }
+        let refinements = Dictionary(uniqueKeysWithValues: decoded.refinements.map {
+            (Int($0.previewCellIndex), $0)
+        })
+        let domain = snapshot.fullDomainXYClassData.withUnsafeBytes { Array($0) }
+        let hasDomain = domain.count == Int(snapshot.fullNx) * Int(snapshot.fullNy)
+        func active(_ x: Int, _ y: Int) -> Bool {
+            !hasDomain || domain[x + Int(snapshot.fullNx) * y] != 0
+        }
+        let boardMin = Float(snapshot.boardZMin)
+        let boardMax = Float(snapshot.boardZMax)
+        var buckets: [Float: [(VoxelGeometryGPU, Float)]] = [:]
+
+        for iz in 0..<nz {
+            let coarseStartZ = iz * factorZ
+            let coarseEndZ = min(coarseStartZ + factorZ, Int(snapshot.fullNz))
+            guard fullZ[coarseEndZ] >= boardMin, fullZ[coarseStartZ] <= boardMax else { continue }
+            for iy in 0..<ny {
+                for ix in 0..<nx {
+                    let previewIndex = ix + nx * (iy + ny * iz)
+                    guard let refinement = refinements[previewIndex] else {
+                        // Derive coarse extents from the exact full-grid block edges, not from
+                        // midpoints between reduced preview centres. This makes refined and coarse
+                        // neighbours meet exactly on nonuniform meshes.
+                        let startX = ix * factorX, startY = iy * factorY
+                        let endX = min(startX + factorX, Int(snapshot.fullNx))
+                        let endY = min(startY + factorY, Int(snapshot.fullNy))
+                        let z0 = fullZ[coarseStartZ], z1 = fullZ[coarseEndZ]
+                        let centerZ = (z0 + z1) / 2
+                        var activeCount = 0
+                        for gy in startY..<endY {
+                            for gx in startX..<endX where active(gx, gy) { activeCount += 1 }
+                        }
+                        if activeCount == 0 { continue }
+                        if activeCount != (endX - startX) * (endY - startY) {
+                            for gy in startY..<endY {
+                                for gx in startX..<endX where active(gx, gy) {
+                                    let geometry = VoxelGeometryGPU(
+                                        center: Position3((fullX[gx] + fullX[gx + 1]) / 2,
+                                                          (fullY[gy] + fullY[gy + 1]) / 2, centerZ),
+                                        size: Position3(fullX[gx + 1] - fullX[gx],
+                                                        fullY[gy + 1] - fullY[gy], z1 - z0))
+                                    buckets[centerZ, default: []].append((geometry, previewEnergy[previewIndex]))
+                                }
+                            }
+                            continue
+                        }
+                        let geometry = VoxelGeometryGPU(
+                            center: Position3((fullX[startX] + fullX[endX]) / 2,
+                                              (fullY[startY] + fullY[endY]) / 2, centerZ),
+                            size: Position3(fullX[endX] - fullX[startX],
+                                            fullY[endY] - fullY[startY], z1 - z0))
+                        buckets[centerZ, default: []].append((geometry, previewEnergy[previewIndex]))
+                        continue
+                    }
+                    let detailEnergy = refinement.cellEnergyData.withUnsafeBytes {
+                        Array($0.bindMemory(to: Float.self))
+                    }
+                    let detailNx = Int(refinement.nx), detailNy = Int(refinement.ny), detailNz = Int(refinement.nz)
+                    guard detailEnergy.count == detailNx * detailNy * detailNz else { continue }
+                    let startX = ix * factorX, startY = iy * factorY, startZ = iz * factorZ
+                    for dz in 0..<detailNz {
+                        let gz = startZ + dz
+                        let z0 = fullZ[gz], z1 = fullZ[gz + 1]
+                        guard z1 >= boardMin, z0 <= boardMax else { continue }
+                        let centerZ = (z0 + z1) / 2
+                        for dy in 0..<detailNy {
+                            let gy = startY + dy
+                            for dx in 0..<detailNx {
+                                let gx = startX + dx
+                                guard active(gx, gy) else { continue }
+                                let geometry = VoxelGeometryGPU(
+                                    center: Position3((fullX[gx] + fullX[gx + 1]) / 2,
+                                                      (fullY[gy] + fullY[gy + 1]) / 2, centerZ),
+                                    size: Position3(fullX[gx + 1] - fullX[gx],
+                                                    fullY[gy + 1] - fullY[gy], z1 - z0))
+                                let value = detailEnergy[dx + detailNx * (dy + detailNy * dz)]
+                                buckets[centerZ, default: []].append((geometry, value))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let orderedZ = buckets.keys.sorted()
+        let allEnergy = orderedZ.flatMap { buckets[$0, default: []].map(\.1) }
+        if let frameMax = allEnergy.max() { seriesOnBoardMaxEnergy = max(seriesOnBoardMaxEnergy, frameMax) }
+        let maxEnergy = seriesOnBoardMaxEnergy
+        let floorEnergy = maxEnergy > 0 ? maxEnergy * 1e-6 : 0
+        let logMax = log10(max(maxEnergy, Float.leastNormalMagnitude))
+        let logFloor = log10(max(floorEnergy, Float.leastNormalMagnitude))
+        let logSpan = max(logMax - logFloor, Float.leastNormalMagnitude)
+        var geometry: [VoxelGeometryGPU] = []
+        var colors: [Color4] = []
+        var draws: [(z: Float, instanceStart: Int, instanceCount: Int)] = []
+        geometry.reserveCapacity(allEnergy.count)
+        colors.reserveCapacity(allEnergy.count)
+        for z in orderedZ {
+            let start = geometry.count
+            for (instance, energy) in buckets[z, default: []] {
+                geometry.append(instance)
+                let t = min(max((log10(max(energy, Float.leastNormalMagnitude)) - logFloor) / logSpan, 0), 1)
+                let color = Self.gradientColor(t: t)
+                colors.append(Color4(color.x, color.y, color.z, color.w))
+            }
+            draws.append((z: z, instanceStart: start, instanceCount: geometry.count - start))
+        }
+        voxelInstanceCount = geometry.count
+        voxelGeometryBuffer = geometry.isEmpty ? nil : device.makeBuffer(
+            bytes: geometry, length: MemoryLayout<VoxelGeometryGPU>.stride * geometry.count)
+        voxelColorBuffer = colors.isEmpty ? nil : device.makeBuffer(
+            bytes: colors, length: MemoryLayout<Color4>.stride * colors.count)
+        voxelZLayerDraws = draws
+        voxelCachedMaxEnergy = maxEnergy
+        voxelCachedEnergyIndices = []
+        return true
     }
 
     /// Recomputes just the per-instance color buffer for one playback frame, reusing the cell-grid
@@ -878,7 +1173,10 @@ final class FieldView: MTKView, MTKViewDelegate {
         // while avoiding the old eager pass over every frame when the viewer opened.
         let onBoardStart = zRange.lowerBound * energyStride
         let onBoardEnd = (zRange.upperBound + 1) * energyStride
-        if let frameMax = cellEnergy[onBoardStart..<onBoardEnd].max() {
+        let displayedEnergy = voxelCachedEnergyIndices.compactMap { index in
+            index >= onBoardStart && index < onBoardEnd ? cellEnergy[index] : nil
+        }
+        if let frameMax = displayedEnergy.max() {
             seriesOnBoardMaxEnergy = max(seriesOnBoardMaxEnergy, frameMax)
         }
         let maxEnergy = seriesOnBoardMaxEnergy
@@ -896,17 +1194,13 @@ final class FieldView: MTKView, MTKViewDelegate {
         let logSpan = max(logMax - logFloor, Float.leastNormalMagnitude)
 
         var colors: [Color4] = []
-        colors.reserveCapacity(nx * ny * (zRange.upperBound - zRange.lowerBound + 1))
-        for iz in zRange {
-            for iy in 0..<ny {
-                for ix in 0..<nx {
-                    let energy = cellEnergy[ix + nx * iy + energyStride * iz]
-                    let logEnergy = log10(max(energy, Float.leastNormalMagnitude))
-                    let t = min(max((logEnergy - logFloor) / logSpan, 0), 1)
-                    let color = Self.gradientColor(t: t)
-                    colors.append(Color4(color.x, color.y, color.z, color.w))
-                }
-            }
+        colors.reserveCapacity(voxelCachedEnergyIndices.count)
+        for index in voxelCachedEnergyIndices {
+            let energy = cellEnergy[index]
+            let logEnergy = log10(max(energy, Float.leastNormalMagnitude))
+            let t = min(max((logEnergy - logFloor) / logSpan, 0), 1)
+            let color = Self.gradientColor(t: t)
+            colors.append(Color4(color.x, color.y, color.z, color.w))
         }
 
         voxelColorBuffer = colors.isEmpty ? nil : device.makeBuffer(

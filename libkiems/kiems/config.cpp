@@ -153,6 +153,7 @@ void to_json(nlohmann::json& j, const InvolvedNetConfig& p) {
     j["impedance"] = p._impedance;
     j["length"] = p._length;
     j["plane"] = p._plane;
+    j["hull_padding"] = p._hullPadding;
     // Written only for the non-default (GeometryOnly) case -- an entry predating this distinction
     // (or one nobody's touched the new checkbox on) round-trips with no new key at all, keeping an
     // old-style simulation.json textually unchanged.
@@ -231,6 +232,7 @@ void from_json(const nlohmann::json& j, InvolvedNetConfig& p) {
     p._impedance = j.value("impedance", def._impedance);
     p._length = j.value("length", def._length);
     p._plane = j.value("plane", def._plane);
+    p._hullPadding = j.value("hull_padding", def._hullPadding);
     p._inclusionLevel = j.value("geometry_only", false) ? NetInclusionLevel::GeometryOnly
                                                           : NetInclusionLevel::SimulationNet;
     p._probeImpedance = j.value("probe_impedance", def._probeImpedance);
@@ -309,9 +311,13 @@ void to_json(nlohmann::json& j, const ExcitationConfig& p) {
         {"start_time", p._startTime},
         {"duration", p._duration},
         {"phase", p._phaseDegrees},
-        {"footprint", p._footprint},
-        {"pin", p._pin},
     };
+    if (p._hullCutPortID.has_value()) {
+        j["hull_cut_port"] = *p._hullCutPortID;
+    } else {
+        j["footprint"] = p._footprint;
+        j["pin"] = p._pin;
+    }
     if (p._frequency.has_value()) {
         j["frequency"] = *p._frequency;
     }
@@ -332,8 +338,15 @@ void from_json(const nlohmann::json& j, ExcitationConfig& p) {
         p._duration = def._duration;
     }
     p._phaseDegrees = j.value("phase", def._phaseDegrees);
-    p._footprint = j.at("footprint").get<std::string>();
-    p._pin = _pinToString(j.at("pin"));
+    if (j.contains("hull_cut_port")) {
+        p._hullCutPortID = j.at("hull_cut_port").get<std::string>();
+        p._footprint.clear();
+        p._pin.clear();
+    } else {
+        p._hullCutPortID.reset();
+        p._footprint = j.at("footprint").get<std::string>();
+        p._pin = _pinToString(j.at("pin"));
+    }
 
     if (j.contains("frequency")) {
         p._frequency = j.at("frequency").get<double>();
@@ -342,9 +355,41 @@ void from_json(const nlohmann::json& j, ExcitationConfig& p) {
         p._amplitude = j.at("amplitude").get<double>();
     }
     if (!p._isMain && (!p._frequency.has_value() || !p._amplitude.has_value())) {
-        throw std::runtime_error("Non-main excitation on " + p._footprint + "." + p._pin +
+        const std::string target = p._hullCutPortID.value_or(p._footprint + "." + p._pin);
+        throw std::runtime_error("Non-main excitation on " + target +
                                   " must specify both \"frequency\" and \"amplitude\"");
     }
+}
+
+void HullCutPortConfig::scaleToSimulationUnits(std::int32_t unitMultiplier) {
+    _x *= unitMultiplier;
+    _y *= unitMultiplier;
+    _width *= unitMultiplier;
+    _length *= unitMultiplier;
+}
+
+void to_json(nlohmann::json& j, const HullCutPortConfig& p) {
+    j = nlohmann::json{{"id", p._id}, {"net", p._net}, {"layer", p._layer},
+                       {"x", p._x}, {"y", p._y}, {"direction", p._direction},
+                       {"width", p._width}, {"length", p._length}, {"plane", p._plane},
+                       {"impedance", p._impedance}, {"probe", p._probe},
+                       {"absorb_signal", p._absorbSignal}};
+}
+
+void from_json(const nlohmann::json& j, HullCutPortConfig& p) {
+    const HullCutPortConfig def;
+    p._id = j.at("id").get<std::string>();
+    p._net = j.at("net").get<std::string>();
+    p._layer = j.at("layer").get<std::string>();
+    p._x = j.at("x").get<double>();
+    p._y = j.at("y").get<double>();
+    p._direction = j.value("direction", def._direction);
+    p._width = j.value("width", def._width);
+    p._length = j.value("length", p._width);
+    p._plane = j.value("plane", def._plane);
+    p._impedance = j.value("impedance", def._impedance);
+    p._probe = j.value("probe", def._probe);
+    p._absorbSignal = j.value("absorb_signal", def._absorbSignal);
 }
 
 void to_json(nlohmann::json& j, const DiffPairNetMember& p) {
@@ -563,9 +608,14 @@ void from_json(const nlohmann::json& j, Grid& g) {
 }
 
 void SimulationConfig::scaleToSimulationUnits(std::int32_t unitMultiplier) {
-    _hullPadding *= unitMultiplier;
+    for (auto& net : _involvedNets) {
+        net.scaleHullPaddingToSimulationUnits(unitMultiplier);
+    }
     _viaEdgeDistance *= unitMultiplier;
     _viaSpacing *= unitMultiplier;
+    for (auto& port : _hullCutPorts) {
+        port.scaleToSimulationUnits(unitMultiplier);
+    }
     for (auto& port : _ports) {
         port.scaleToSimulationUnits(unitMultiplier);
     }
@@ -582,10 +632,10 @@ void to_json(nlohmann::json& j, const SimulationConfig& p) {
         {"name", p._name},
         {"involved_nets", p._involvedNets},
         {"ground_net", p._groundNet},
-        {"hull_padding", p._hullPadding},
         {"via_edge_distance", p._viaEdgeDistance},
         {"via_spacing", p._viaSpacing},
         {"excitations", p._excitations},
+        {"hull_cut_ports", p._hullCutPorts},
         {"traces", p._traces},
         {"differential_pairs", authoredDiffPairs},
     };
@@ -605,12 +655,25 @@ void from_json(const nlohmann::json& j, SimulationConfig& p) {
         throw std::runtime_error("Simulation \"" + p._name + "\" has no involved_nets");
     }
     p._groundNet = j.at("ground_net").get<GroundNetConfig>();
-    p._hullPadding = j.value("hull_padding", def._hullPadding);
+    // `hull_padding` used to live on the simulation. Migrate it into every full hull-contributing
+    // entry that does not already carry the new per-entry value. GeometryOnly entries retain their
+    // own default/explicit value for a possible later promotion, but do not contribute now.
+    if (j.contains("hull_padding")) {
+        const double legacyHullPadding = j.at("hull_padding").get<double>();
+        const auto& authoredEntries = j.at("involved_nets");
+        for (std::size_t index = 0; index < p._involvedNets.size(); ++index) {
+            if (p._involvedNets[index].inclusionLevel() == NetInclusionLevel::SimulationNet &&
+                (index >= authoredEntries.size() || !authoredEntries[index].contains("hull_padding"))) {
+                p._involvedNets[index].setHullPadding(legacyHullPadding);
+            }
+        }
+    }
     p._viaEdgeDistance = j.value("via_edge_distance", def._viaEdgeDistance);
     p._viaSpacing = j.value("via_spacing", def._viaSpacing);
     p._eyeBitRate = j.value("eye_bit_rate", def._eyeBitRate);
     p._isDifferentialPair = j.value("is_differential_pair", def._isDifferentialPair);
     p._excitations = j.value("excitations", std::vector<ExcitationConfig>{});
+    p._hullCutPorts = j.value("hull_cut_ports", std::vector<HullCutPortConfig>{});
     p._traces = j.value("traces", std::vector<SingleEndedConfig>{});
     p._diffPairs = j.value("differential_pairs", std::vector<DifferentialPairConfig>{});
 }

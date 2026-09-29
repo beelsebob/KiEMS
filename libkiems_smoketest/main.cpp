@@ -35,7 +35,6 @@ EMSConfig makeSyntheticConfig() {
 
     SimulationConfig sim;
     sim.setName("smoketest_sim");
-    sim.setHullPadding(2500);
     sim.setViaEdgeDistance(350);
     sim.setViaSpacing(550);
     sim.setEyeBitRate(5e9);
@@ -47,6 +46,7 @@ EMSConfig makeSyntheticConfig() {
     net.setNet("USB_DP");
     net.setImpedance(45);
     net.setLength(1200);
+    net.setHullPadding(2500);
     net.setProbeImpedance(true);
     net.setPinProbed("U8", "4", true);
     net.setPinProbed("U8", "5", false);
@@ -119,7 +119,8 @@ bool checkConfigMutateSaveRoundTrip() {
                    << reparsed.via().platingThickness() << ")\n";
         ok = false;
     }
-    if (reparsed.simulations().size() != 1 || reparsed.simulations().front().hullPadding() != 2500) {
+    if (reparsed.simulations().size() != 1 ||
+        reparsed.simulations().front().involvedNets().front().hullPadding() != 2500) {
         std::cerr << "FAIL: hullPadding() didn't round-trip, or was scaled\n";
         ok = false;
     }
@@ -226,15 +227,16 @@ bool checkScaledToSimulationUnitsIsAPureCopy() {
 
     bool ok = true;
     // Unscaled: parse()/scaledToSimulationUnits() must not have mutated the original.
-    if (original.simulations().front().hullPadding() != 2500) {
+    if (original.simulations().front().involvedNets().front().hullPadding() != 2500) {
         std::cerr << "FAIL: scaledToSimulationUnits() mutated the original EMSConfig\n";
         ok = false;
     }
     // Scaled: the returned copy's spatial fields are multiplied by unitMultiplier.
     const double expectedHullPadding = 2500.0 * constants::unitMultiplier;
-    if (scaled.simulations().front().hullPadding() != expectedHullPadding) {
+    if (scaled.simulations().front().involvedNets().front().hullPadding() != expectedHullPadding) {
         std::cerr << "FAIL: scaledToSimulationUnits() didn't scale hullPadding() (expected "
-                   << expectedHullPadding << ", got " << scaled.simulations().front().hullPadding() << ")\n";
+                   << expectedHullPadding << ", got "
+                   << scaled.simulations().front().involvedNets().front().hullPadding() << ")\n";
         ok = false;
     }
     const double expectedMax = 600.0 * constants::unitMultiplier;
@@ -261,6 +263,37 @@ bool checkScaledToSimulationUnitsIsAPureCopy() {
         ok = false;
     }
     return ok;
+}
+
+bool checkLegacyHullPaddingMigration() {
+    const nlohmann::json legacy = {
+        {"name", "legacy_padding"},
+        {"ground_net", {{"net", "GND"}}},
+        {"hull_padding", 2345.0},
+        {"involved_nets", nlohmann::json::array({
+            {{"net", "A"}},
+            {{"net", "B"}, {"geometry_only", true}},
+            {{"net", "C"}, {"hull_padding", 321.0}},
+        })},
+    };
+
+    const SimulationConfig simulation = legacy.get<SimulationConfig>();
+    if (simulation.involvedNets().size() != 3 ||
+        simulation.involvedNets()[0].hullPadding() != 2345.0 ||
+        simulation.involvedNets()[1].hullPadding() != 5000.0 ||
+        simulation.involvedNets()[2].hullPadding() != 321.0) {
+        std::cerr << "FAIL: legacy simulation-wide hull_padding was not migrated correctly\n";
+        return false;
+    }
+
+    const nlohmann::json saved = simulation;
+    if (saved.contains("hull_padding") ||
+        saved.at("involved_nets")[0].at("hull_padding").get<double>() != 2345.0 ||
+        saved.at("involved_nets")[2].at("hull_padding").get<double>() != 321.0) {
+        std::cerr << "FAIL: migrated hull padding was not saved per contributing net\n";
+        return false;
+    }
+    return true;
 }
 
 // Exercises the raw numeric accessors KiEMS's results GUI drives directly (frequencies,
@@ -455,6 +488,7 @@ int main() {
     ok &= checkConfigMutateSaveRoundTrip();
     ok &= checkInvolvedNetPinSelectionResolutionMode();
     ok &= checkScaledToSimulationUnitsIsAPureCopy();
+    ok &= checkLegacyHullPaddingMigration();
     ok &= checkPostprocessorRawAccessors();
     ok &= checkParseComponentValue();
     ok &= checkEyeDiagram();

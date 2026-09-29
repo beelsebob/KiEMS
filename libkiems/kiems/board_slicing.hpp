@@ -241,6 +241,9 @@ inline void from_json(const nlohmann::json& j, SlicedBoard& b) {
 /// alongside them (a caller reads these off SimulationConfig/EMSConfig after EMSConfig::
 /// scaledToSimulationUnits()).
 struct SlicingConfig {
+    /// Uniform fallback used only by the low-level overload that is handed flat copper rather than
+    /// ClassifiedCopper::hullContributions. Production configuration no longer has a simulation-
+    /// wide hull-padding option; SlicingConfig::from() leaves this at zero.
     double hullPadding = 0;
     double viaEdgeDistance = 0;
     double viaSpacing = 0;
@@ -260,7 +263,7 @@ struct SlicingConfig {
     /// ground CopperPolygon's own copperLayerName should be matched against, per output layer index.
     std::vector<std::string> layerNames;
 
-    /// Builds one from `sim`'s own hullPadding()/viaEdgeDistance()/viaSpacing() and `config`'s own
+    /// Builds one from `sim`'s own viaEdgeDistance()/viaSpacing() and `config`'s own
     /// via()/pixelSize()/getMetals() -- the two real sources every caller reads these fields off, so
     /// this is the one place that mapping is written down rather than repeated at each call site.
     static SlicingConfig from(const SimulationConfig& sim, const EMSConfig& config);
@@ -276,9 +279,17 @@ struct SlicingConfig {
 /// one bucket (e.g. nothing stops a net appearing in both an involved-net entry and the ground-net
 /// selector), matching how the selectors are resolved as independent net-name sets.
 struct ClassifiedCopper {
+    struct HullContribution {
+        std::vector<libkicad::CopperPolygon> copper;
+        double padding = 0;
+    };
     std::vector<libkicad::CopperPolygon> involved;
     std::vector<libkicad::CopperPolygon> geometryOnly;
     std::vector<libkicad::CopperPolygon> ground;
+    /// One group per SimulationNet entry, retaining its own padding so the cutout can be the union
+    /// of individually expanded selectors. Empty groups are harmless and diagnose naturally if
+    /// every contributing selector resolves to no copper.
+    std::vector<HullContribution> hullContributions;
 };
 
 std::expected<BoundingBox<double>, std::string> boardBoundsInSimulationUnits(
@@ -309,8 +320,8 @@ std::expected<std::vector<std::string>, std::string> resolveGroundNetNames(
 /// calling. Algorithm:
 /// 1. Per copper layer, union each of involvedCopper/geometryOnlyCopper/groundCopper
 ///    separately.
-/// 2. Union every simulated net's copper across every layer into one 2D shape and inflate it by
-///    `slicing.hullPadding` -- this is the cutout region. Adding a net to the Simulated set therefore
+/// 2. Expand each simulated selector's copper by its own HullContribution::padding, then union the
+///    results across every layer -- this is the cutout region. Adding a net to the Simulated set therefore
 ///    expands the surrounding substrate/ground region whether or not that net has an excitation.
 ///    Geometry-only entries remain clipped to this cutout and never grow it. (No separate
 ///    concave-hull/alpha-shape algorithm: inflating the simulated nets' own copper union by a real
@@ -330,6 +341,18 @@ std::expected<std::vector<std::string>, std::string> resolveGroundNetNames(
 ///    rationale; `slicing` is forwarded to it unchanged. Routed traces and footprint pads on
 ///    non-ground nets block a candidate when they intersect its annular ring; non-ground zones do
 ///    not.
+std::expected<SlicedBoard, std::string> sliceBoardForSimulation(
+    const SlicingConfig& slicing, const libkicad::BoardGeometry& geometry,
+    const std::vector<libkicad::CopperPolygon>& involvedCopper,
+    const std::vector<libkicad::CopperPolygon>& geometryOnlyCopper,
+    const std::vector<libkicad::CopperPolygon>& groundCopper,
+    const std::vector<ClassifiedCopper::HullContribution>& hullContributions,
+    const std::vector<ViaHole>& existingVias,
+    const std::vector<NPTHHole>& npthHoles,
+    const GeometryProcessingProgressCallback& onProgress = {});
+
+/// Low-level compatibility overload for geometry fixtures that provide one flat contributing
+/// copper set. Production callers pass ClassifiedCopper::hullContributions to the overload above.
 std::expected<SlicedBoard, std::string> sliceBoardForSimulation(
     const SlicingConfig& slicing, const libkicad::BoardGeometry& geometry,
     const std::vector<libkicad::CopperPolygon>& involvedCopper,

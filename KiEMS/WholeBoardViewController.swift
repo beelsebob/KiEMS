@@ -46,9 +46,13 @@ final class WholeBoardViewController: NSViewController {
     /// simulation's own signal path); this one promotes it to full participation -- growing the
     /// hull, entering resolvedNets(), and making its pads probe/absorb/excite-eligible.
     private let simulatedCheckbox = NSButton(checkboxWithTitle: "Contribute to Hull", target: nil, action: nil)
+    private let hullPaddingField = NSTextField(string: "")
+    private let hullPaddingFormatter = MicrometerValueFormatter()
     private let impedanceProbedCheckbox = NSButton(checkboxWithTitle: "Impedance Probed", target: nil, action: nil)
     private let netClassIncludedCheckbox = NSButton(checkboxWithTitle: "Included in simulation", target: nil, action: nil)
     private let netClassSimulatedCheckbox = NSButton(checkboxWithTitle: "Contribute to Hull", target: nil, action: nil)
+    private let netClassHullPaddingField = NSTextField(string: "")
+    private let netClassHullPaddingFormatter = MicrometerValueFormatter()
     private let netClassImpedanceProbedCheckbox = NSButton(checkboxWithTitle: "Impedance Probed", target: nil, action: nil)
     private let excitedCheckbox = NSButton(checkboxWithTitle: "Excited", target: nil, action: nil)
     private let mainExcitationCheckbox = NSButton(checkboxWithTitle: "Main Excitation", target: nil, action: nil)
@@ -104,7 +108,7 @@ final class WholeBoardViewController: NSViewController {
     /// main content with a spinner and reveal the current selection only after loading completes.
     var onLoadingStateChanged: ((Bool) -> Void)?
 
-    /// The kicadPcbPath refresh() last successfully loaded (or attempted for), so repeated calls
+    /// The kicadPcbPath refresh() last successfully loaded, so repeated calls
     /// from every simulation selection are a cheap no-op until invalidate() is called (the linked
     /// board actually changed on disk -- see DocumentWindowController.handleLinkedKicadFilesChanged)
     /// or a different board gets linked.
@@ -114,6 +118,7 @@ final class WholeBoardViewController: NSViewController {
     private var plannedStitchingViaPositions: [CGPoint] = []
     private var rejectedStitchingViaPositions: [CGPoint] = []
     private var plannedStitchingViaDiameter: CGFloat = 0
+    private var hullCutTracePoints: [KicadHullCutTracePoint] = []
 
     /// Fixed -- this column stays narrow in every state, net/pin info and simulation settings alike
     /// (propertiesViewController's own layout is a single field-per-row column now, specifically so
@@ -163,9 +168,18 @@ final class WholeBoardViewController: NSViewController {
         pinSeparator.boxType = .separator
         netSeparator.boxType = .separator
 
-        configureControlStack(netControls, views: [includedCheckbox, simulatedCheckbox, impedanceProbedCheckbox])
+        let hullContributionRow = NSStackView(views: [simulatedCheckbox, hullPaddingField])
+        hullContributionRow.orientation = .horizontal
+        hullContributionRow.alignment = .centerY
+        hullContributionRow.spacing = 6
+        let netClassHullContributionRow = NSStackView(views: [netClassSimulatedCheckbox, netClassHullPaddingField])
+        netClassHullContributionRow.orientation = .horizontal
+        netClassHullContributionRow.alignment = .centerY
+        netClassHullContributionRow.spacing = 6
+        configureControlStack(netControls, views: [includedCheckbox, hullContributionRow, impedanceProbedCheckbox])
         configureControlStack(netClassControls,
-                              views: [netClassIncludedCheckbox, netClassSimulatedCheckbox, netClassImpedanceProbedCheckbox])
+                              views: [netClassIncludedCheckbox, netClassHullContributionRow,
+                                      netClassImpedanceProbedCheckbox])
         for checkbox in [includedCheckbox, simulatedCheckbox, impedanceProbedCheckbox,
                          netClassIncludedCheckbox, netClassSimulatedCheckbox,
                          netClassImpedanceProbedCheckbox, excitedCheckbox,
@@ -218,12 +232,26 @@ final class WholeBoardViewController: NSViewController {
         includedCheckbox.action = #selector(includedToggled)
         simulatedCheckbox.target = self
         simulatedCheckbox.action = #selector(simulatedToggled)
+        hullPaddingField.formatter = hullPaddingFormatter
+        hullPaddingField.target = self
+        hullPaddingField.action = #selector(hullPaddingChanged(_:))
+        hullPaddingField.controlSize = .small
+        hullPaddingField.font = Self.formFont
+        hullPaddingField.alignment = .right
+        hullPaddingField.widthAnchor.constraint(equalToConstant: 74).isActive = true
         impedanceProbedCheckbox.target = self
         impedanceProbedCheckbox.action = #selector(impedanceProbedToggled)
         netClassIncludedCheckbox.target = self
         netClassIncludedCheckbox.action = #selector(netClassIncludedToggled)
         netClassSimulatedCheckbox.target = self
         netClassSimulatedCheckbox.action = #selector(netClassSimulatedToggled)
+        netClassHullPaddingField.formatter = netClassHullPaddingFormatter
+        netClassHullPaddingField.target = self
+        netClassHullPaddingField.action = #selector(hullPaddingChanged(_:))
+        netClassHullPaddingField.controlSize = .small
+        netClassHullPaddingField.font = Self.formFont
+        netClassHullPaddingField.alignment = .right
+        netClassHullPaddingField.widthAnchor.constraint(equalToConstant: 74).isActive = true
         netClassImpedanceProbedCheckbox.target = self
         netClassImpedanceProbedCheckbox.action = #selector(netClassImpedanceProbedToggled)
         excitedCheckbox.target = self
@@ -473,6 +501,41 @@ final class WholeBoardViewController: NSViewController {
         excitationIndex(reference: reference, pin: pin, in: simulation).map { simulation.excitations[$0] }
     }
 
+    private func hullCutPortIndex(identifier: String, in simulation: EMSSimulationBridge) -> Int? {
+        simulation.hullCutPorts.firstIndex { $0.identifier == identifier }
+    }
+
+    private func hullCutPort(identifier: String, in simulation: EMSSimulationBridge) -> EMSHullCutPortBridge? {
+        hullCutPortIndex(identifier: identifier, in: simulation).map { simulation.hullCutPorts[$0] }
+    }
+
+    private func hullCutExcitationIndex(identifier: String, in simulation: EMSSimulationBridge) -> Int? {
+        simulation.excitations.firstIndex { $0.hullCutPortID == identifier }
+    }
+
+    private func hullCutExcitation(identifier: String, in simulation: EMSSimulationBridge) -> EMSExcitationBridge? {
+        hullCutExcitationIndex(identifier: identifier, in: simulation).map { simulation.excitations[$0] }
+    }
+
+    private func hullCutPoint(identifier: String) -> KicadHullCutTracePoint? {
+        hullCutTracePoints.first { $0.identifier == identifier }
+    }
+
+    private func ensureHullCutPort(identifier: String, in simulation: EMSSimulationBridge) -> EMSHullCutPortBridge? {
+        if let existing = hullCutPort(identifier: identifier, in: simulation) { return existing }
+        guard let point = hullCutPoint(identifier: identifier) else { return nil }
+        // Candidate coordinates are simulation units (0.1um). Persist the port in configuration
+        // micrometres, inset by half its square footprint so it lies on retained trace copper.
+        let lengthSim = max(point.traceWidth, 1)
+        let radians = point.inwardDirection * .pi / 180
+        let centerX = point.position.x + cos(radians) * lengthSim / 2
+        let centerY = point.position.y + sin(radians) * lengthSim / 2
+        return simulation.addHullCutPort(withIdentifier: identifier, net: point.netName,
+                                         layer: point.layerName, x: centerX / 10, y: centerY / 10,
+                                         direction: point.inwardDirection,
+                                         width: point.traceWidth / 10, length: lengthSim / 10)
+    }
+
     // MARK: - Differential-pair mirroring
     //
     // Only reachable once the selected simulation is itself explicitly marked as a differential
@@ -580,9 +643,11 @@ final class WholeBoardViewController: NSViewController {
         let hasSimulation = selectedSimulation != nil
         includedCheckbox.isEnabled = false
         simulatedCheckbox.isEnabled = false
+        hullPaddingField.isEnabled = false
         impedanceProbedCheckbox.isEnabled = false
         netClassIncludedCheckbox.isEnabled = false
         netClassSimulatedCheckbox.isEnabled = false
+        netClassHullPaddingField.isEnabled = false
         netClassImpedanceProbedCheckbox.isEnabled = false
         excitedCheckbox.isEnabled = false
         mainExcitationCheckbox.isEnabled = false
@@ -592,9 +657,11 @@ final class WholeBoardViewController: NSViewController {
 
         includedCheckbox.state = .off
         simulatedCheckbox.state = .off
+        hullPaddingField.stringValue = ""
         impedanceProbedCheckbox.state = .off
         netClassIncludedCheckbox.state = .off
         netClassSimulatedCheckbox.state = .off
+        netClassHullPaddingField.stringValue = ""
         netClassImpedanceProbedCheckbox.state = .off
         excitedCheckbox.state = .off
         mainExcitationCheckbox.state = .off
@@ -655,7 +722,7 @@ final class WholeBoardViewController: NSViewController {
                 } else {
                     componentValueLabel.isHidden = true
                 }
-            case .net, .pin:
+            case .net, .pin, .hullCutPort:
                 break // unreachable -- isComponentSelection is only true for .component
             }
             return
@@ -669,6 +736,8 @@ final class WholeBoardViewController: NSViewController {
             includedCheckbox.state = .on
             simulatedCheckbox.state = simulated ? .on : .off
             simulatedCheckbox.isEnabled = true
+            hullPaddingField.doubleValue = entry.hullPadding
+            hullPaddingField.isEnabled = simulated
             impedanceProbedCheckbox.state = entry.probeImpedance ? .on : .off
             impedanceProbedCheckbox.isEnabled = simulated
         }
@@ -689,6 +758,8 @@ final class WholeBoardViewController: NSViewController {
                 netClassIncludedCheckbox.state = .on
                 netClassSimulatedCheckbox.state = simulated ? .on : .off
                 netClassSimulatedCheckbox.isEnabled = true
+                netClassHullPaddingField.doubleValue = entry.hullPadding
+                netClassHullPaddingField.isEnabled = simulated
                 netClassImpedanceProbedCheckbox.state = entry.probeImpedance ? .on : .off
                 netClassImpedanceProbedCheckbox.isEnabled = simulated
             }
@@ -703,6 +774,34 @@ final class WholeBoardViewController: NSViewController {
 
         case .component:
             break // handled above, before isComponentSelection's early return
+
+        case let .hullCutPort(identifier):
+            pinHeading.isHidden = false
+            pinHeading.stringValue = "Hull Cut Port"
+            pinSeparator.isHidden = false
+            pinControls.isHidden = false
+            componentValueLabel.isHidden = true
+            excitedCheckbox.isEnabled = hasSimulation
+            probedCheckbox.isEnabled = hasSimulation
+            absorbingCheckbox.isEnabled = hasSimulation
+            pinImpedanceField.isEnabled = hasSimulation
+            guard let simulation = selectedSimulation else { return }
+            if let port = hullCutPort(identifier: identifier, in: simulation) {
+                probedCheckbox.state = port.probe ? .on : .off
+                absorbingCheckbox.state = port.absorbSignal ? .on : .off
+                pinImpedanceField.doubleValue = port.impedance
+            }
+            if let excitation = hullCutExcitation(identifier: identifier, in: simulation) {
+                excitedCheckbox.state = .on
+                absorbingCheckbox.state = .on
+                excitationControls.isHidden = false
+                mainExcitationCheckbox.isEnabled = true
+                mainExcitationCheckbox.state = excitation.isMain ? .on : .off
+                phaseField.doubleValue = excitation.phaseDegrees
+                relativeAmplitudeField.objectValue = excitation.amplitude ?? NSNumber(value: 1)
+                frequencyField.objectValue = excitation.frequency ?? NSNumber(value: document?.config.frequencyStart ?? 0)
+                frequencyRow.isHidden = excitation.isMain
+            }
 
         case let .pin(reference, number):
             pinHeading.isHidden = false
@@ -800,10 +899,16 @@ final class WholeBoardViewController: NSViewController {
         guard let simulation = selectedSimulation else { return BoardActivityHighlight() }
         var highlight = BoardActivityHighlight()
         highlight.hasSelectedSimulation = true
-        highlight.hullPadding = simulation.hullPadding
         highlight.plannedStitchingViaPositions = plannedStitchingViaPositions
         highlight.rejectedStitchingViaPositions = rejectedStitchingViaPositions
         highlight.plannedStitchingViaDiameter = plannedStitchingViaDiameter
+        for point in hullCutTracePoints {
+            let port = hullCutPort(identifier: point.identifier, in: simulation)
+            highlight.hullCutPortSpots.append(BoardActivityHighlight.HullCutPortSpot(
+                identifier: point.identifier, netName: point.netName, position: point.position,
+                excited: hullCutExcitation(identifier: point.identifier, in: simulation) != nil,
+                probed: port?.probe ?? false, absorbing: port?.absorbSignal ?? false))
+        }
         var groundNets = Set<String>()
         if simulation.groundNetKind == .net,
            let groundNetName = simulation.groundNetName, !groundNetName.isEmpty {
@@ -832,6 +937,10 @@ final class WholeBoardViewController: NSViewController {
             highlight.configurationIncludedNets.formUnion(memberNets)
             if entry.inclusionLevel == .simulationNet {
                 highlight.includedNets.formUnion(memberNets)
+                for net in memberNets {
+                    highlight.hullPaddingByNet[net] = max(highlight.hullPaddingByNet[net] ?? 0,
+                                                          entry.hullPadding)
+                }
             }
         }
         // The setup preview uses the same rule as board_slicing.cpp: every full simulation net,
@@ -1015,6 +1124,7 @@ final class WholeBoardViewController: NSViewController {
         plannedStitchingViaPositions = []
         rejectedStitchingViaPositions = []
         plannedStitchingViaDiameter = 0
+        hullCutTracePoints = []
         guard let document, let selectedSimulationIndex,
               let boardPath = document.config.kicadPcbPath,
               loadedForPath == boardPath, boardView.preview != nil,
@@ -1026,14 +1136,30 @@ final class WholeBoardViewController: NSViewController {
         }
         boardView.activity = computeActivityHighlight()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let plan = try? request.compute(forBoard: boardPath)
+            let plan: KicadStitchingViaPlan?
+            let planningError: Error?
+            do {
+                plan = try request.compute(forBoard: boardPath)
+                planningError = nil
+            } catch {
+                plan = nil
+                planningError = error
+            }
             DispatchQueue.main.async {
                 guard let self, self.stitchingViaPlanRevision == revision,
                       self.loadedForPath == boardPath,
                       self.selectedSimulationIndex == selectedSimulationIndex else { return }
+                if let planningError {
+                    NSLog("Hull-cut/via planning failed: %@", planningError.localizedDescription)
+                }
+#if DEBUG
+                NSLog("Hull-cut planning found %ld candidate(s) for simulation index %ld",
+                      plan?.hullCutTracePoints.count ?? 0, selectedSimulationIndex)
+#endif
                 self.plannedStitchingViaPositions = plan?.placedPositions.map(\.pointValue) ?? []
                 self.rejectedStitchingViaPositions = plan?.rejectedPositions.map(\.pointValue) ?? []
                 self.plannedStitchingViaDiameter = CGFloat(plan?.annularRingDiameter ?? 0)
+                self.hullCutTracePoints = plan?.hullCutTracePoints ?? []
                 self.boardView.activity = self.computeActivityHighlight()
             }
         }
@@ -1109,6 +1235,24 @@ final class WholeBoardViewController: NSViewController {
         configurationChanged()
     }
 
+    @objc private func hullPaddingChanged(_ sender: NSTextField) {
+        guard let simulation = selectedSimulation else { return }
+        let padding = max(sender.doubleValue, 0)
+        if sender === hullPaddingField, let netName = selection?.netName,
+           let entry = involvedNet(named: netName, in: simulation),
+           entry.inclusionLevel == .simulationNet {
+            entry.hullPadding = padding
+        } else if sender === netClassHullPaddingField, let netClassName = selectedNetClassName,
+                  let entry = involvedNetClass(named: netClassName, in: simulation),
+                  entry.inclusionLevel == .simulationNet {
+            entry.hullPadding = padding
+        } else {
+            return
+        }
+        sender.doubleValue = padding
+        configurationChanged()
+    }
+
     @objc private func impedanceProbedToggled() {
         guard let netName = selection?.netName, !netName.isEmpty,
               let simulation = selectedSimulation, let entry = involvedNet(named: netName, in: simulation)
@@ -1170,6 +1314,21 @@ final class WholeBoardViewController: NSViewController {
     }
 
     @objc private func excitedToggled() {
+        if case let .hullCutPort(identifier)? = selection?.kind,
+           let simulation = selectedSimulation {
+            if excitedCheckbox.state == .on {
+                guard let port = ensureHullCutPort(identifier: identifier, in: simulation) else { return }
+                port.absorbSignal = true
+                port.probe = true
+                if hullCutExcitationIndex(identifier: identifier, in: simulation) == nil {
+                    _ = simulation.addExcitation(forHullCutPort: identifier)
+                }
+            } else if let index = hullCutExcitationIndex(identifier: identifier, in: simulation) {
+                simulation.removeExcitation(at: index)
+            }
+            configurationChanged()
+            return
+        }
         guard case let .pin(reference, number)? = selection?.kind, let netName = selection?.netName,
               let simulation = selectedSimulation
         else { return }
@@ -1195,6 +1354,19 @@ final class WholeBoardViewController: NSViewController {
     }
 
     @objc private func mainExcitationToggled() {
+        if case let .hullCutPort(identifier)? = selection?.kind,
+           let simulation = selectedSimulation,
+           let excitation = hullCutExcitation(identifier: identifier, in: simulation) {
+            excitation.isMain = mainExcitationCheckbox.state == .on
+            if !excitation.isMain {
+                if excitation.frequency == nil || excitation.frequency?.doubleValue == 0 {
+                    excitation.frequency = NSNumber(value: document?.config.frequencyStart ?? 0)
+                }
+                if excitation.amplitude == nil { excitation.amplitude = NSNumber(value: 1) }
+            }
+            configurationChanged()
+            return
+        }
         guard case let .pin(reference, number)? = selection?.kind,
               let simulation = selectedSimulation,
               let excitation = excitation(reference: reference, pin: number, in: simulation)
@@ -1213,6 +1385,18 @@ final class WholeBoardViewController: NSViewController {
     }
 
     @objc private func excitationFieldChanged(_ sender: NSTextField) {
+        if case let .hullCutPort(identifier)? = selection?.kind,
+           let simulation = selectedSimulation,
+           let excitation = hullCutExcitation(identifier: identifier, in: simulation) {
+            switch sender {
+            case phaseField: excitation.phaseDegrees = sender.doubleValue
+            case relativeAmplitudeField: excitation.amplitude = NSNumber(value: sender.doubleValue)
+            case frequencyField: excitation.frequency = NSNumber(value: sender.doubleValue)
+            default: return
+            }
+            configurationChanged()
+            return
+        }
         guard case let .pin(reference, number)? = selection?.kind,
               let simulation = selectedSimulation,
               let excitation = excitation(reference: reference, pin: number, in: simulation)
@@ -1259,6 +1443,13 @@ final class WholeBoardViewController: NSViewController {
     }
 
     @objc private func probedToggled() {
+        if case let .hullCutPort(identifier)? = selection?.kind,
+           let simulation = selectedSimulation,
+           let port = ensureHullCutPort(identifier: identifier, in: simulation) {
+            port.probe = probedCheckbox.state == .on
+            configurationChanged()
+            return
+        }
         guard case let .pin(reference, number)? = selection?.kind, let netName = selection?.netName,
               let simulation = selectedSimulation
         else { return }
@@ -1302,6 +1493,13 @@ final class WholeBoardViewController: NSViewController {
     }
 
     @objc private func absorbingToggled() {
+        if case let .hullCutPort(identifier)? = selection?.kind,
+           let simulation = selectedSimulation,
+           let port = ensureHullCutPort(identifier: identifier, in: simulation) {
+            port.absorbSignal = absorbingCheckbox.state == .on
+            configurationChanged()
+            return
+        }
         guard case let .pin(reference, number)? = selection?.kind, let netName = selection?.netName,
               let simulation = selectedSimulation
         else { return }
@@ -1332,6 +1530,15 @@ final class WholeBoardViewController: NSViewController {
     }
 
     @objc private func pinImpedanceChanged() {
+        if case let .hullCutPort(identifier)? = selection?.kind,
+           let simulation = selectedSimulation,
+           let port = ensureHullCutPort(identifier: identifier, in: simulation) {
+            let value = max(0, pinImpedanceField.doubleValue)
+            pinImpedanceField.doubleValue = value
+            port.impedance = value
+            configurationChanged()
+            return
+        }
         guard case let .pin(reference, number)? = selection?.kind,
               let netName = selection?.netName, !netName.isEmpty,
               let simulation = selectedSimulation
@@ -1364,11 +1571,27 @@ final class WholeBoardViewController: NSViewController {
         // Publish the cheap KiCad layer catalog first. The visible setup layers are then generated
         // first; every other layer trickles in behind them without holding the screen hostage.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let catalog = try? KicadBoardBridge.layerCatalogPreview(
-                forBoard: kicadPcbPath, wholeBoard: true)
+            let catalog: EMSGeometryPreview?
+            let loadError: Error?
+            do {
+                catalog = try KicadBoardBridge.layerCatalogPreview(
+                    forBoard: kicadPcbPath, wholeBoard: true)
+                loadError = nil
+            } catch {
+                catalog = nil
+                loadError = error
+            }
             DispatchQueue.main.async {
                 guard let self, self.loadedForPath == kicadPcbPath else { return }
-                guard let catalog else { self.onLoadingStateChanged?(false); return }
+                guard let catalog else {
+                    // A linked board can disappear, become unreadable, or live on an unavailable
+                    // volume between document saves. Keep the path retryable and surface the
+                    // NSError returned by libkicad instead of presenting a permanently blank view.
+                    self.loadedForPath = nil
+                    self.onLoadingStateChanged?(false)
+                    if let loadError { NSApp.presentError(loadError) }
+                    return
+                }
                 self.boardView.preview = catalog
                 let visible = ["F.Cu", "F.Adhesive", "F.Adhes", "F.Mask", "F.Fab", "Edge.Cuts"]
                 let loader = BoardLayerGeometryLoader(boardPath: kicadPcbPath, preview: catalog,

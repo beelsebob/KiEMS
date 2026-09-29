@@ -42,6 +42,9 @@ public:
         std::vector<double> lineX;
         std::vector<double> lineY;
         std::vector<double> lineZ;
+        /// Full-resolution XY domain classification, x-fastest. Zero is external; non-zero is an
+        /// active interior/CPML node. Empty means a conventional rectangular domain (all active).
+        std::vector<std::uint8_t> domainXYClass;
     };
 
     /// Creates (truncating any existing file at `path`) and writes the static header/grid content

@@ -25,6 +25,12 @@ struct FieldComponentRange {
     bool operator==(const FieldComponentRange&) const = default;
 };
 
+struct FieldPreviewCellDetail {
+    std::uint32_t previewCellIndex = 0;
+    std::uint32_t nx = 0, ny = 0, nz = 0;
+    std::array<std::vector<float>, 6> components;
+};
+
 /// Reads a field frame-series file written by FieldFrameSeriesWriter. Opens once; header() and
 /// every scalar per-frame metadata array (timestep/time/energy and component ranges) is read eagerly
 /// at open() time. Refinement permutations and field samples remain on disk: readFrame() reads and retains only
@@ -48,6 +54,9 @@ public:
     /// Downsampled grid used for normal playback. X/Y are reduced by 16 and Z by 2 (ceil at
     /// boundaries); its coordinates are the centres of the represented full-resolution spans.
     const FieldFrameSeriesWriter::Header& previewHeader() const;
+    std::uint32_t previewFactorX() const;
+    std::uint32_t previewFactorY() const;
+    std::uint32_t previewFactorZ() const;
     /// Refreshes this SWMR reader and returns the number of complete frames the writer has
     /// published. A completed 16-frame block becomes visible atomically; the final partial block
     /// becomes visible when the writer closes it.
@@ -82,6 +91,12 @@ public:
         std::uint32_t frameIndex, std::uint32_t previewCellIndex,
         std::vector<float>& ex, std::vector<float>& ey, std::vector<float>& ez,
         std::vector<float>& hx, std::vector<float>& hy, std::vector<float>& hz) const;
+
+    /// Reads compressed payloads for several independent preview-cell tiles while holding the
+    /// HDF5 lock, then decompresses and reconstructs those tiles concurrently after releasing it.
+    /// Results retain `previewCellIndices` order.
+    std::expected<std::vector<FieldPreviewCellDetail>, std::string> readPreviewCellDetails(
+        std::uint32_t frameIndex, const std::vector<std::uint32_t>& previewCellIndices) const;
 
     /// Reads only a full-resolution cuboid. HDF5 touches the independently compressed 16x16x2
     /// chunks intersecting this region, providing the bounded detail path a zoomed viewer needs.

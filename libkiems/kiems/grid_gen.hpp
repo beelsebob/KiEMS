@@ -17,6 +17,20 @@
 namespace kiems {
 
 namespace grid_detail {
+struct HullCutTrace {
+    TraceSegment segment;
+    std::string netName;
+    std::string layerName;
+};
+
+struct HullCutPoint {
+    Cu::Position position;
+    std::string netName;
+    std::string layerName;
+    double inwardDirectionDegrees = 0;
+    double width = 0;
+};
+
 /// Converts the authoritative post-cut copper loops into density segments without introducing the
 /// artificial internal edges that would result from using the triangulated representation.
 std::vector<TraceSegment> copperBoundarySegments(const std::vector<Cu::PolygonSet>& layerCopperLoops);
@@ -25,6 +39,14 @@ std::vector<TraceSegment> copperBoundarySegments(const std::vector<Cu::PolygonSe
 /// simulation geometry itself is still clipped separately by board_slicing.cpp.
 std::vector<TraceSegment> clipTraceSegmentsToCutout(
     const std::vector<TraceSegment>& segments,
+    const std::vector<std::vector<Cu::Position>>& cutoutLoops,
+    double boundaryTolerance = 0.0);
+
+/// Finds the newly-created endpoints where routed trace centrelines cross the hull. The returned
+/// direction points from the boundary into the retained trace, which lets a synthetic port place
+/// its whole footprint on copper rather than half in the discarded region.
+std::vector<HullCutPoint> hullCutTracePoints(
+    const std::vector<HullCutTrace>& traces,
     const std::vector<std::vector<Cu::Position>>& cutoutLoops,
     double boundaryTolerance = 0.0);
 

@@ -189,8 +189,9 @@ CopperFDTDRunResult runFDTDPortImpl(ContinuousStructure& csx, const CopperFDTDPo
         // PARALLEL branch of Operator_Ext_LumpedRLC (see Internal/CopperOperator.hpp's own top
         // comment) -- config built directly from `portConfig` (see CopperFDTDPortConfig's own doc
         // comment for why that no longer means reading it back off a real, already-built Operator).
-        // CPML never touches `grid` at all: it is a pure additive correction on top of the host medium's own, unmodified
-        // coefficients) -- grid stays a plain, single, const build for both boundary kinds.
+        // CPML never touches `grid` at all: its convolutional correction and matched residual decay
+        // operate on top of the host medium's unmodified coefficients, so grid stays a plain,
+        // single, const build for both boundary kinds.
         CopperOperator newOp(csx, copperOperatorConfig(portConfig));
         const CopperYeeGrid& grid = newOp.grid();
         if (!onProgress) {
@@ -344,6 +345,7 @@ CopperFDTDRunResult runFDTDPortImpl(ContinuousStructure& csx, const CopperFDTDPo
             header.lineX.assign(grid.lineX.begin(), grid.lineX.end());
             header.lineY.assign(grid.lineY.begin(), grid.lineY.end());
             header.lineZ.assign(grid.lineZ.begin(), grid.lineZ.end());
+            header.domainXYClass = domainMask.xyClass;
             errno = 0;
             auto writer = FieldFrameSeriesWriter::create(fieldFrameSeries->path, header, fieldFrameSeries->chunkFrames);
             const int writerCreationErrno = errno;

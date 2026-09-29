@@ -40,14 +40,19 @@ struct GeometryPBRUniformsGPU {
     /// independent of the visible camera means simulated copper remains a seed while off screen.
     var regionWorldMin: SIMD2<Float> = .zero
     var regionWorldInverseSize: SIMD2<Float> = .zero
-    /// Hull padding expressed in distance-texture pixels. Negative disables the region test.
-    var hullPaddingPixels: Float = -1
+    /// Threshold for the union mask. Negative disables the region test.
+    var regionMaskThreshold: Float = -1
 }
 
 /// Projects board-space seed geometry into the padded distance-field texture.
 struct RegionSeedUniformsGPU {
     var worldMin: SIMD2<Float>
     var worldInverseSize: SIMD2<Float>
+}
+
+/// Converts one per-padding distance transform into the final union mask.
+struct RegionUnionUniformsGPU {
+    var paddingPixels: Float
 }
 
 /// Right-handed view matrix: camera at `eye` looking toward `center`, `up` fixed as the reference

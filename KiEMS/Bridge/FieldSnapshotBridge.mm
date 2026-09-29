@@ -1,23 +1,80 @@
 #import "FieldSnapshotBridge+Private.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <thread>
 
 #include "FieldFrameSeriesReader.hpp"
 #include "kiems/constants.hpp"
 #include "CopperUtils/logging.hpp"
+
+@interface EMSFieldFrameRefinement ()
+- (instancetype)initWithPreviewCellIndex:(NSUInteger)previewCellIndex
+                                       nx:(NSUInteger)nx ny:(NSUInteger)ny nz:(NSUInteger)nz
+                               energyData:(NSData*)energyData;
+@end
+
+@implementation EMSFieldFrameRefinement
+- (instancetype)initWithPreviewCellIndex:(NSUInteger)previewCellIndex
+                                       nx:(NSUInteger)nx ny:(NSUInteger)ny nz:(NSUInteger)nz
+                               energyData:(NSData*)energyData {
+    if ((self = [super init])) {
+        _previewCellIndex = previewCellIndex;
+        _nx = nx; _ny = ny; _nz = nz;
+        _cellEnergyData = [energyData copy];
+    }
+    return self;
+}
+@end
+
+@interface EMSDecodedFieldFrame ()
+- (instancetype)initWithPreviewEnergyData:(NSData*)energyData
+                                refinements:(NSArray<EMSFieldFrameRefinement*>*)refinements
+                               fullyDecoded:(BOOL)fullyDecoded;
+@end
+
+@implementation EMSDecodedFieldFrame
+- (instancetype)initWithPreviewEnergyData:(NSData*)energyData
+                                refinements:(NSArray<EMSFieldFrameRefinement*>*)refinements
+                               fullyDecoded:(BOOL)fullyDecoded {
+    if ((self = [super init])) {
+        _previewEnergyData = [energyData copy];
+        _refinements = [refinements copy];
+        _fullyDecoded = fullyDecoded;
+    }
+    return self;
+}
+@end
+
+static NSData* energyData(const std::vector<float>& ex, const std::vector<float>& ey,
+                          const std::vector<float>& ez, const std::vector<float>& hx,
+                          const std::vector<float>& hy, const std::vector<float>& hz) {
+    if (ex.size() != ey.size() || ex.size() != ez.size() || ex.size() != hx.size() ||
+        ex.size() != hy.size() || ex.size() != hz.size()) return [NSData data];
+    NSMutableData* result = [NSMutableData dataWithLength:ex.size() * sizeof(float)];
+    auto* values = static_cast<float*>(result.mutableBytes);
+    constexpr float kEps0 = 8.8541878128e-12F;
+    constexpr float kMu0 = 1.25663706212e-6F;
+    for (std::size_t i = 0; i < ex.size(); ++i) {
+        values[i] = kEps0 * (ex[i] * ex[i] + ey[i] * ey[i] + ez[i] * ez[i]) +
+                    kMu0 * (hx[i] * hx[i] + hy[i] * hy[i] + hz[i] * hz[i]);
+    }
+    return result;
+}
 
 /// Common interface EMSFieldFrame needs from whatever is actually behind it: either a single run's
 /// own EMSFieldFrameDataSource, or an EMSCombinedFieldFrameDataSource combining two of them into a
 /// differential-mode view. Frame indices are meaningful only within one data source; a combined
 /// source's own frame `i` is derived from its two legs' own frame `i`, not looked up by timestep.
 @protocol EMSFieldFrameDataSourcing <NSObject>
-- (NSData*)energyDataForFrame:(NSUInteger)frameIndex;
-- (void)prefetchFrame:(NSUInteger)frameIndex;
+- (EMSDecodedFieldFrame*)decodedFrameForFrame:(NSUInteger)frameIndex;
+- (void)prepareFrame:(NSUInteger)frameIndex budget:(NSTimeInterval)seconds
+           completion:(void (^ _Nullable)(BOOL fullyDecoded))completion;
 - (void)discardCachedFrameData;
 @end
 
@@ -26,11 +83,16 @@
     std::optional<copper::FieldFrameSeriesReader> _reader;
     std::mutex _mutex;
     NSUInteger _cachedFrameIndex;
-    NSData* _cachedEnergyData;
+    EMSDecodedFieldFrame* _cachedFrame;
+    NSUInteger _preparedFrameIndex;
+    EMSDecodedFieldFrame* _preparedFrame;
+    NSUInteger _preparingFrameIndex;
+    dispatch_queue_t _decodeQueue;
+    NSUInteger _cacheGeneration;
 }
 - (instancetype)initWithReader:(copper::FieldFrameSeriesReader&&)reader;
-- (NSData*)energyDataForFrame:(NSUInteger)frameIndex;
-- (void)prefetchFrame:(NSUInteger)frameIndex;
+- (EMSDecodedFieldFrame*)decodeFrame:(NSUInteger)frameIndex budget:(NSTimeInterval)seconds
+                            resuming:(EMSDecodedFieldFrame* _Nullable)existing;
 /// The wrapped reader, for buildFieldSnapshot() to query metadata from (and to refresh, when
 /// reusing this data source for a live update of the same series instead of reopening one) --
 /// every public FieldFrameSeriesReader method is internally synchronized (see its own doc comment),
@@ -45,38 +107,146 @@
     if (self) {
         _reader.emplace(std::move(reader));
         _cachedFrameIndex = NSNotFound;
+        _preparedFrameIndex = NSNotFound;
+        _preparingFrameIndex = NSNotFound;
+        _cacheGeneration = 0;
+        _decodeQueue = dispatch_queue_create("com.kiems.field-frame-decode", DISPATCH_QUEUE_SERIAL);
     }
     return self;
 }
 
-- (NSData*)energyDataForFrame:(NSUInteger)frameIndex {
+- (EMSDecodedFieldFrame*)decodedFrameForFrame:(NSUInteger)frameIndex {
+    bool waitForPreparation = false;
+    {
+        std::lock_guard lock(_mutex);
+        if (_cachedFrameIndex == frameIndex && _cachedFrame != nil) return _cachedFrame;
+        if (_preparedFrameIndex == frameIndex && _preparedFrame != nil) {
+            _cachedFrameIndex = frameIndex;
+            _cachedFrame = _preparedFrame;
+            _preparedFrameIndex = NSNotFound;
+            _preparedFrame = nil;
+            return _cachedFrame;
+        }
+        waitForPreparation = _preparingFrameIndex == frameIndex;
+    }
+    // If playback is just reaching a frame whose bounded preparation is still finishing, wait for
+    // that one serial decode rather than redundantly reading a cold preview on the UI thread.
+    if (waitForPreparation) dispatch_sync(_decodeQueue, ^{});
+    {
+        std::lock_guard lock(_mutex);
+        if (_preparedFrameIndex == frameIndex && _preparedFrame != nil) {
+            _cachedFrameIndex = frameIndex;
+            _cachedFrame = _preparedFrame;
+            _preparedFrameIndex = NSNotFound;
+            _preparedFrame = nil;
+            return _cachedFrame;
+        }
+    }
+    EMSDecodedFieldFrame* decoded = [self decodeFrame:frameIndex budget:0 resuming:nil];
     std::lock_guard lock(_mutex);
-    if (_cachedFrameIndex == frameIndex && _cachedEnergyData != nil) {
-        return _cachedEnergyData;
-    }
-    std::vector<float> energy, ex, ey, ez, hx, hy, hz;
-    auto read = _reader->readPreviewFrame(static_cast<std::uint32_t>(frameIndex), energy,
-                                          ex, ey, ez, hx, hy, hz);
-    if (!read) {
-        Cu::logError() << "Could not read frame " << std::to_string(frameIndex) << ": " << read.error();
-        return [NSData data];
-    }
-
-    NSData* result = [NSData dataWithBytes:energy.data() length:energy.size() * sizeof(float)];
     _cachedFrameIndex = frameIndex;
-    _cachedEnergyData = result;
-    return _cachedEnergyData;
+    _cachedFrame = decoded;
+    return decoded;
 }
 
-- (void)prefetchFrame:(NSUInteger)frameIndex {
-    // Preview frames are deliberately small and streamed synchronously when displayed. Do not
-    // invoke the full-resolution prefetch path: that is reserved for a future zoomed tile request.
+- (EMSDecodedFieldFrame*)decodeFrame:(NSUInteger)frameIndex budget:(NSTimeInterval)seconds
+                            resuming:(EMSDecodedFieldFrame*)existing {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
+    NSArray<EMSFieldFrameRefinement*>* existingRefinements =
+        existing != nil ? existing.refinements : @[];
+    NSData* preview = existing.previewEnergyData;
+    if (preview == nil) {
+        std::vector<float> energy, ex, ey, ez, hx, hy, hz;
+        auto read = _reader->readPreviewFrame(static_cast<std::uint32_t>(frameIndex), energy,
+                                              ex, ey, ez, hx, hy, hz);
+        if (!read) {
+            Cu::logError() << "Could not read frame " << std::to_string(frameIndex) << ": " << read.error();
+            return [[EMSDecodedFieldFrame alloc] initWithPreviewEnergyData:[NSData data]
+                                                                refinements:@[] fullyDecoded:YES];
+        }
+        preview = [NSData dataWithBytes:energy.data() length:energy.size() * sizeof(float)];
+    }
+    if (seconds <= 0) return [[EMSDecodedFieldFrame alloc]
+        initWithPreviewEnergyData:preview refinements:existingRefinements fullyDecoded:NO];
+
+    auto order = _reader->readRefinementOrder(static_cast<std::uint32_t>(frameIndex));
+    if (!order) {
+        Cu::logWarning() << "Could not read refinement order for frame " << frameIndex << ": " << order.error();
+        return [[EMSDecodedFieldFrame alloc] initWithPreviewEnergyData:preview
+                                                            refinements:existingRefinements fullyDecoded:YES];
+    }
+    NSMutableArray<EMSFieldFrameRefinement*>* refinements =
+        [NSMutableArray arrayWithArray:existingRefinements];
+    const std::size_t batchSize = std::max<std::size_t>(1, std::thread::hardware_concurrency());
+    std::size_t orderIndex = refinements.count;
+    while (orderIndex < order->size() && std::chrono::steady_clock::now() < deadline) {
+        const std::size_t batchEnd = std::min(orderIndex + batchSize, order->size());
+        std::vector<std::uint32_t> cells(order->begin() + static_cast<std::ptrdiff_t>(orderIndex),
+                                         order->begin() + static_cast<std::ptrdiff_t>(batchEnd));
+        auto details = _reader->readPreviewCellDetails(static_cast<std::uint32_t>(frameIndex), cells);
+        if (!details) {
+            Cu::logWarning() << "Could not decode field-detail batch: " << details.error();
+            break;
+        }
+        for (auto& detail : *details) {
+            [refinements addObject:[[EMSFieldFrameRefinement alloc]
+                initWithPreviewCellIndex:detail.previewCellIndex
+                nx:detail.nx ny:detail.ny nz:detail.nz
+                energyData:energyData(detail.components[0], detail.components[1], detail.components[2],
+                                      detail.components[3], detail.components[4], detail.components[5])]];
+        }
+        orderIndex = batchEnd;
+    }
+    return [[EMSDecodedFieldFrame alloc] initWithPreviewEnergyData:preview refinements:refinements
+                                                       fullyDecoded:refinements.count == order->size()];
+}
+
+- (void)prepareFrame:(NSUInteger)frameIndex budget:(NSTimeInterval)seconds
+           completion:(void (^)(BOOL))completion {
+    NSUInteger generation;
+    EMSDecodedFieldFrame* existing = nil;
+    {
+        std::lock_guard lock(_mutex);
+        if (_cachedFrameIndex == frameIndex) existing = _cachedFrame;
+        else if (_preparedFrameIndex == frameIndex) existing = _preparedFrame;
+        if (existing.fullyDecoded) {
+            if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(YES); });
+            return;
+        }
+        generation = ++_cacheGeneration;
+        _preparingFrameIndex = frameIndex;
+    }
+    dispatch_async(_decodeQueue, ^{
+        {
+            std::lock_guard lock(self->_mutex);
+            if (generation != self->_cacheGeneration) return;
+        }
+        EMSDecodedFieldFrame* decoded = [self decodeFrame:frameIndex budget:seconds resuming:existing];
+        BOOL accepted = NO;
+        {
+            std::lock_guard lock(self->_mutex);
+            if (self->_preparingFrameIndex == frameIndex) self->_preparingFrameIndex = NSNotFound;
+            if (generation == self->_cacheGeneration) {
+                if (self->_cachedFrameIndex == frameIndex) self->_cachedFrame = decoded;
+                else {
+                    self->_preparedFrameIndex = frameIndex;
+                    self->_preparedFrame = decoded;
+                }
+                accepted = YES;
+            }
+        }
+        if (accepted && completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(decoded.fullyDecoded); });
+    });
 }
 
 - (void)discardCachedFrameData {
     std::lock_guard lock(_mutex);
+    ++_cacheGeneration;
     _cachedFrameIndex = NSNotFound;
-    _cachedEnergyData = nil;
+    _cachedFrame = nil;
+    _preparedFrameIndex = NSNotFound;
+    _preparedFrame = nil;
+    _preparingFrameIndex = NSNotFound;
     _reader->clearFrameCache();
 }
 
@@ -99,12 +269,19 @@
     double _coefficientN;
     std::mutex _mutex;
     NSUInteger _cachedFrameIndex;
-    NSData* _cachedEnergyData;
+    EMSDecodedFieldFrame* _cachedFrame;
+    NSUInteger _preparedFrameIndex;
+    EMSDecodedFieldFrame* _preparedFrame;
+    NSUInteger _preparingFrameIndex;
+    dispatch_queue_t _decodeQueue;
+    NSUInteger _cacheGeneration;
 }
 - (instancetype)initWithSourceP:(EMSFieldFrameDataSource*)sourceP
                         sourceN:(EMSFieldFrameDataSource*)sourceN
                     coefficientP:(double)coefficientP
                     coefficientN:(double)coefficientN;
+- (EMSDecodedFieldFrame*)decodeFrame:(NSUInteger)frameIndex budget:(NSTimeInterval)seconds
+                            resuming:(EMSDecodedFieldFrame* _Nullable)existing;
 @end
 
 @implementation EMSCombinedFieldFrameDataSource
@@ -120,67 +297,170 @@
         _coefficientP = coefficientP;
         _coefficientN = coefficientN;
         _cachedFrameIndex = NSNotFound;
+        _preparedFrameIndex = NSNotFound;
+        _preparingFrameIndex = NSNotFound;
+        _cacheGeneration = 0;
+        _decodeQueue = dispatch_queue_create("com.kiems.combined-field-frame-decode", DISPATCH_QUEUE_SERIAL);
     }
     return self;
 }
 
-- (NSData*)energyDataForFrame:(NSUInteger)frameIndex {
+- (EMSDecodedFieldFrame*)decodedFrameForFrame:(NSUInteger)frameIndex {
+    bool waitForPreparation = false;
+    {
+        std::lock_guard lock(_mutex);
+        if (_cachedFrameIndex == frameIndex && _cachedFrame != nil) return _cachedFrame;
+        if (_preparedFrameIndex == frameIndex && _preparedFrame != nil) {
+            _cachedFrameIndex = frameIndex;
+            _cachedFrame = _preparedFrame;
+            _preparedFrameIndex = NSNotFound;
+            _preparedFrame = nil;
+            return _cachedFrame;
+        }
+        waitForPreparation = _preparingFrameIndex == frameIndex;
+    }
+    if (waitForPreparation) dispatch_sync(_decodeQueue, ^{});
+    {
+        std::lock_guard lock(_mutex);
+        if (_preparedFrameIndex == frameIndex && _preparedFrame != nil) {
+            _cachedFrameIndex = frameIndex;
+            _cachedFrame = _preparedFrame;
+            _preparedFrameIndex = NSNotFound;
+            _preparedFrame = nil;
+            return _cachedFrame;
+        }
+    }
+    EMSDecodedFieldFrame* decoded = [self decodeFrame:frameIndex budget:0 resuming:nil];
     std::lock_guard lock(_mutex);
-    if (_cachedFrameIndex == frameIndex && _cachedEnergyData != nil) {
-        return _cachedEnergyData;
-    }
-    std::vector<float> pEx, pEy, pEz, pHx, pHy, pHz;
-    std::vector<float> nEx, nEy, nEz, nHx, nHy, nHz;
-    std::vector<float> pEnergy;
-    auto readP = _sourceP.reader.readPreviewFrame(static_cast<std::uint32_t>(frameIndex), pEnergy,
-                                                  pEx, pEy, pEz, pHx, pHy, pHz);
-    if (!readP) {
-        Cu::logError() << "Could not read P-leg frame " << std::to_string(frameIndex) << ": " << readP.error();
-        return [NSData data];
-    }
-    std::vector<float> nEnergy;
-    auto readN = _sourceN.reader.readPreviewFrame(static_cast<std::uint32_t>(frameIndex), nEnergy,
-                                                  nEx, nEy, nEz, nHx, nHy, nHz);
-    if (!readN) {
-        Cu::logError() << "Could not read N-leg frame " << std::to_string(frameIndex) << ": " << readN.error();
-        return [NSData data];
-    }
-    if (pEx.size() != nEx.size()) {
-        Cu::logError() << "Differential field combine: leg cell counts differ (" << pEx.size() << " vs "
-                        << nEx.size() << ") at frame " << std::to_string(frameIndex);
-        return [NSData data];
-    }
+    _cachedFrameIndex = frameIndex;
+    _cachedFrame = decoded;
+    return decoded;
+}
 
-    NSMutableData* result = [NSMutableData dataWithLength:pEx.size() * sizeof(float)];
-    auto* energy = static_cast<float*>(result.mutableBytes);
+- (EMSDecodedFieldFrame*)decodeFrame:(NSUInteger)frameIndex budget:(NSTimeInterval)seconds
+                            resuming:(EMSDecodedFieldFrame*)existing {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
+    NSArray<EMSFieldFrameRefinement*>* existingRefinements =
+        existing != nil ? existing.refinements : @[];
     constexpr float kEps0 = 8.8541878128e-12F;
     constexpr float kMu0 = 1.25663706212e-6F;
     const auto cP = static_cast<float>(_coefficientP);
     const auto cN = static_cast<float>(_coefficientN);
-    for (std::size_t i = 0; i < pEx.size(); ++i) {
-        const float ex = cP * pEx[i] + cN * nEx[i];
-        const float ey = cP * pEy[i] + cN * nEy[i];
-        const float ez = cP * pEz[i] + cN * nEz[i];
-        const float hx = cP * pHx[i] + cN * nHx[i];
-        const float hy = cP * pHy[i] + cN * nHy[i];
-        const float hz = cP * pHz[i] + cN * nHz[i];
-        energy[i] = kEps0 * (ex * ex + ey * ey + ez * ez) + kMu0 * (hx * hx + hy * hy + hz * hz);
+    NSData* result = existing.previewEnergyData;
+    if (result == nil) {
+        std::vector<float> pEx, pEy, pEz, pHx, pHy, pHz;
+        std::vector<float> nEx, nEy, nEz, nHx, nHy, nHz;
+        std::vector<float> pEnergy, nEnergy;
+        auto readP = _sourceP.reader.readPreviewFrame(static_cast<std::uint32_t>(frameIndex), pEnergy,
+                                                      pEx, pEy, pEz, pHx, pHy, pHz);
+        auto readN = _sourceN.reader.readPreviewFrame(static_cast<std::uint32_t>(frameIndex), nEnergy,
+                                                      nEx, nEy, nEz, nHx, nHy, nHz);
+        if (!readP || !readN || pEx.size() != nEx.size()) {
+            Cu::logError() << "Could not combine differential preview frame " << std::to_string(frameIndex);
+            return [[EMSDecodedFieldFrame alloc] initWithPreviewEnergyData:[NSData data]
+                                                                refinements:@[] fullyDecoded:YES];
+        }
+        NSMutableData* combined = [NSMutableData dataWithLength:pEx.size() * sizeof(float)];
+        auto* energy = static_cast<float*>(combined.mutableBytes);
+        for (std::size_t i = 0; i < pEx.size(); ++i) {
+            const float ex = cP * pEx[i] + cN * nEx[i];
+            const float ey = cP * pEy[i] + cN * nEy[i];
+            const float ez = cP * pEz[i] + cN * nEz[i];
+            const float hx = cP * pHx[i] + cN * nHx[i];
+            const float hy = cP * pHy[i] + cN * nHy[i];
+            const float hz = cP * pHz[i] + cN * nHz[i];
+            energy[i] = kEps0 * (ex * ex + ey * ey + ez * ez) + kMu0 * (hx * hx + hy * hy + hz * hz);
+        }
+        result = combined;
     }
-    _cachedFrameIndex = frameIndex;
-    _cachedEnergyData = result;
-    return _cachedEnergyData;
+    if (seconds <= 0) return [[EMSDecodedFieldFrame alloc]
+        initWithPreviewEnergyData:result refinements:existingRefinements fullyDecoded:NO];
+
+    auto order = _sourceP.reader.readRefinementOrder(static_cast<std::uint32_t>(frameIndex));
+    if (!order) return [[EMSDecodedFieldFrame alloc] initWithPreviewEnergyData:result
+                                                          refinements:existingRefinements fullyDecoded:YES];
+    NSMutableArray<EMSFieldFrameRefinement*>* refinements =
+        [NSMutableArray arrayWithArray:existingRefinements];
+    const std::size_t batchSize = std::max<std::size_t>(1, std::thread::hardware_concurrency());
+    std::size_t orderIndex = refinements.count;
+    while (orderIndex < order->size() && std::chrono::steady_clock::now() < deadline) {
+        const std::size_t batchEnd = std::min(orderIndex + batchSize, order->size());
+        std::vector<std::uint32_t> cells(order->begin() + static_cast<std::ptrdiff_t>(orderIndex),
+                                         order->begin() + static_cast<std::ptrdiff_t>(batchEnd));
+        auto pDetails = _sourceP.reader.readPreviewCellDetails(static_cast<std::uint32_t>(frameIndex), cells);
+        auto nDetails = _sourceN.reader.readPreviewCellDetails(static_cast<std::uint32_t>(frameIndex), cells);
+        if (!pDetails || !nDetails || pDetails->size() != nDetails->size()) {
+            Cu::logWarning() << "Could not decode differential field-detail batch";
+            break;
+        }
+        for (std::size_t detailIndex = 0; detailIndex < pDetails->size(); ++detailIndex) {
+            auto& p = (*pDetails)[detailIndex];
+            auto& n = (*nDetails)[detailIndex];
+            if (p.components[0].size() != n.components[0].size()) break;
+            for (std::size_t component = 0; component < 6; ++component) {
+                for (std::size_t i = 0; i < p.components[component].size(); ++i) {
+                    p.components[component][i] = cP * p.components[component][i] +
+                                                 cN * n.components[component][i];
+                }
+            }
+            [refinements addObject:[[EMSFieldFrameRefinement alloc]
+                initWithPreviewCellIndex:p.previewCellIndex nx:p.nx ny:p.ny nz:p.nz
+                energyData:energyData(p.components[0], p.components[1], p.components[2],
+                                      p.components[3], p.components[4], p.components[5])]];
+        }
+        orderIndex = batchEnd;
+    }
+    return [[EMSDecodedFieldFrame alloc] initWithPreviewEnergyData:result refinements:refinements
+                                                       fullyDecoded:refinements.count == order->size()];
 }
 
-- (void)prefetchFrame:(NSUInteger)frameIndex {
-    [_sourceP prefetchFrame:frameIndex];
-    [_sourceN prefetchFrame:frameIndex];
+- (void)prepareFrame:(NSUInteger)frameIndex budget:(NSTimeInterval)seconds
+           completion:(void (^)(BOOL))completion {
+    NSUInteger generation;
+    EMSDecodedFieldFrame* existing = nil;
+    {
+        std::lock_guard lock(_mutex);
+        if (_cachedFrameIndex == frameIndex) existing = _cachedFrame;
+        else if (_preparedFrameIndex == frameIndex) existing = _preparedFrame;
+        if (existing.fullyDecoded) {
+            if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(YES); });
+            return;
+        }
+        generation = ++_cacheGeneration;
+        _preparingFrameIndex = frameIndex;
+    }
+    dispatch_async(_decodeQueue, ^{
+        {
+            std::lock_guard lock(self->_mutex);
+            if (generation != self->_cacheGeneration) return;
+        }
+        EMSDecodedFieldFrame* decoded = [self decodeFrame:frameIndex budget:seconds resuming:existing];
+        BOOL accepted = NO;
+        {
+            std::lock_guard lock(self->_mutex);
+            if (self->_preparingFrameIndex == frameIndex) self->_preparingFrameIndex = NSNotFound;
+            if (generation == self->_cacheGeneration) {
+                if (self->_cachedFrameIndex == frameIndex) self->_cachedFrame = decoded;
+                else {
+                    self->_preparedFrameIndex = frameIndex;
+                    self->_preparedFrame = decoded;
+                }
+                accepted = YES;
+            }
+        }
+        if (accepted && completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(decoded.fullyDecoded); });
+    });
 }
 
 - (void)discardCachedFrameData {
     {
         std::lock_guard lock(_mutex);
+        ++_cacheGeneration;
         _cachedFrameIndex = NSNotFound;
-        _cachedEnergyData = nil;
+        _cachedFrame = nil;
+        _preparedFrameIndex = NSNotFound;
+        _preparedFrame = nil;
+        _preparingFrameIndex = NSNotFound;
     }
     [_sourceP discardCachedFrameData];
     [_sourceN discardCachedFrameData];
@@ -214,15 +494,23 @@
 }
 
 - (NSData*)cellEnergyData {
-    return [_dataSource energyDataForFrame:_frameIndex];
+    return self.decodedFrame.previewEnergyData;
+}
+
+- (EMSDecodedFieldFrame*)decodedFrame {
+    return [_dataSource decodedFrameForFrame:_frameIndex];
 }
 
 @end
 
 @implementation EMSFieldFrame (Prefetch)
 
-- (void)prefetch {
-    [self.dataSource prefetchFrame:self.frameIndex];
+- (void)prepareWithBudget:(NSTimeInterval)seconds {
+    [self prepareWithBudget:seconds completion:nil];
+}
+
+- (void)prepareWithBudget:(NSTimeInterval)seconds completion:(void (^)(BOOL))completion {
+    [self.dataSource prepareFrame:self.frameIndex budget:seconds completion:completion];
 }
 
 @end
@@ -238,6 +526,14 @@
                       lineX:(NSArray<NSNumber*>*)lineX
                       lineY:(NSArray<NSNumber*>*)lineY
                       lineZ:(NSArray<NSNumber*>*)lineZ
+                     fullNx:(NSUInteger)fullNx fullNy:(NSUInteger)fullNy fullNz:(NSUInteger)fullNz
+             previewFactorX:(NSUInteger)previewFactorX
+             previewFactorY:(NSUInteger)previewFactorY
+             previewFactorZ:(NSUInteger)previewFactorZ
+                  fullLineX:(NSArray<NSNumber*>*)fullLineX
+                  fullLineY:(NSArray<NSNumber*>*)fullLineY
+                  fullLineZ:(NSArray<NSNumber*>*)fullLineZ
+      fullDomainXYClassData:(NSData*)fullDomainXYClassData
                   boardZMin:(double)boardZMin
                   boardZMax:(double)boardZMax
                      frames:(NSArray<EMSFieldFrame*>*)frames
@@ -254,6 +550,14 @@
         _lineX = [lineX copy];
         _lineY = [lineY copy];
         _lineZ = [lineZ copy];
+        _fullNx = fullNx; _fullNy = fullNy; _fullNz = fullNz;
+        _previewFactorX = previewFactorX;
+        _previewFactorY = previewFactorY;
+        _previewFactorZ = previewFactorZ;
+        _fullLineX = [fullLineX copy];
+        _fullLineY = [fullLineY copy];
+        _fullLineZ = [fullLineZ copy];
+        _fullDomainXYClassData = [fullDomainXYClassData copy];
         _boardZMin = boardZMin;
         _boardZMax = boardZMax;
         _frames = [frames copy];
@@ -323,6 +627,7 @@ EMSFieldSnapshot* buildFieldSnapshot(const std::filesystem::path& seriesPath,
 
     copper::FieldFrameSeriesReader& reader = dataSource.reader;
     const copper::FieldFrameSeriesWriter::Header header = reader.previewHeader();
+    const copper::FieldFrameSeriesWriter::Header fullHeader = reader.header();
     const std::uint32_t frameCount = reader.frameCount();
     // A newly-created SWMR file is discoverable before its first complete block is published.
     // Keep showing setup/progress until there is an actual frame to display; close() publishes a
@@ -357,6 +662,15 @@ EMSFieldSnapshot* buildFieldSnapshot(const std::filesystem::path& seriesPath,
                                            lineX:convertLine(header.lineX)
                                            lineY:convertLine(header.lineY)
                                            lineZ:convertLine(header.lineZ)
+                                          fullNx:fullHeader.nx fullNy:fullHeader.ny fullNz:fullHeader.nz
+                                  previewFactorX:reader.previewFactorX()
+                                  previewFactorY:reader.previewFactorY()
+                                  previewFactorZ:reader.previewFactorZ()
+                                       fullLineX:convertLine(fullHeader.lineX)
+                                       fullLineY:convertLine(fullHeader.lineY)
+                                       fullLineZ:convertLine(fullHeader.lineZ)
+                           fullDomainXYClassData:[NSData dataWithBytes:fullHeader.domainXYClass.data()
+                                                                  length:fullHeader.domainXYClass.size()]
                                        boardZMin:header.boardZMin * kMetersToSimUnits
                                        boardZMax:header.boardZMax * kMetersToSimUnits
                                           frames:frames
@@ -422,6 +736,14 @@ EMSFieldSnapshot* buildCombinedFieldSnapshot(EMSFieldSnapshot* legP, EMSFieldSna
                                            lineX:legP.lineX
                                            lineY:legP.lineY
                                            lineZ:legP.lineZ
+                                          fullNx:legP.fullNx fullNy:legP.fullNy fullNz:legP.fullNz
+                                  previewFactorX:legP.previewFactorX
+                                  previewFactorY:legP.previewFactorY
+                                  previewFactorZ:legP.previewFactorZ
+                                       fullLineX:legP.fullLineX
+                                       fullLineY:legP.fullLineY
+                                       fullLineZ:legP.fullLineZ
+                           fullDomainXYClassData:legP.fullDomainXYClassData
                                        boardZMin:legP.boardZMin
                                        boardZMax:legP.boardZMax
                                           frames:frames

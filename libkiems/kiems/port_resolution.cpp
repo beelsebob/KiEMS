@@ -5,10 +5,12 @@
 #include <cmath>
 #include <cstdlib>
 #include <expected>
+#include <iomanip>
 #include <limits>
 #include <map>
 #include <numbers>
 #include <optional>
+#include <sstream>
 #include <set>
 #include <string>
 #include <string_view>
@@ -675,6 +677,9 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
         // itself kept growing, excitation/trace/diff-pair resolved indices would silently point at
         // the wrong (stale, duplicate) entries too.
         sim.ports().clear();
+        for (ExcitationConfig& excitation : sim.excitations()) {
+            excitation.clearDrivenPortIndex();
+        }
         std::erase_if(sim.diffPairs(), [](const DifferentialPairConfig& pair) { return pair.automatic(); });
         _PortIndex portIndex;
 
@@ -1065,7 +1070,70 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
             }
         }
 
+        std::unordered_set<std::string> excitedHullCutPorts;
+        for (const ExcitationConfig& excitation : sim.excitations()) {
+            if (excitation.hullCutPortID().has_value()) {
+                excitedHullCutPorts.insert(*excitation.hullCutPortID());
+            }
+        }
+
+        std::unordered_map<std::string, std::int32_t> hullCutPortIndices;
+        for (const HullCutPortConfig& authored : sim.hullCutPorts()) {
+            if (authored.id().empty()) {
+                return std::unexpected("Simulation \"" + sim.name() + "\": hull-cut port has no id");
+            }
+            // Keep an authored marker around so its impedance and future role choices survive,
+            // but do not turn a completely disabled marker into an implicit passive probe.
+            if (!authored.probe() && !authored.absorbSignal() &&
+                !excitedHullCutPorts.contains(authored.id())) {
+                continue;
+            }
+            const auto layer = config.metalLayerIndexForFileName(_normalizeLayerName(authored.layer()));
+            if (!layer.has_value()) {
+                return std::unexpected("Simulation \"" + sim.name() + "\": hull-cut port \"" + authored.id() +
+                                       "\" references copper layer \"" + authored.layer() +
+                                       "\" which is not present in the stackup");
+            }
+            PortConfig port;
+            std::ostringstream portName;
+            portName << _unescapeForDisplay(authored.net()) << " hull cut (" << authored.layer()
+                     << " @ " << std::fixed << std::setprecision(3) << authored.x() / 1000.0
+                     << ", " << authored.y() / 1000.0 << " mm)";
+            port.setName(portName.str());
+            port.setNetName(_unescapeForDisplay(authored.net()));
+            port.setPosition({authored.x() * constants::unitMultiplier,
+                              authored.y() * constants::unitMultiplier});
+            port.setDirection(authored.direction());
+            port.setWidth(authored.width());
+            port.setLength(authored.length());
+            port.setLayer(*layer);
+            port.setPlane(authored.plane());
+            port.setImpedance(authored.impedance());
+            port.setAbsorbSignal(authored.absorbSignal());
+            port.setProbe(authored.probe());
+            port.setExcite(false);
+            const auto index = static_cast<std::int32_t>(sim.ports().size());
+            if (!hullCutPortIndices.emplace(authored.id(), index).second) {
+                return std::unexpected("Simulation \"" + sim.name() + "\": duplicate hull-cut port id \"" +
+                                       authored.id() + "\"");
+            }
+            sim.ports().push_back(std::move(port));
+        }
+
         for (ExcitationConfig& excitation : sim.excitations()) {
+            if (excitation.hullCutPortID().has_value()) {
+                const auto index = hullCutPortIndices.find(*excitation.hullCutPortID());
+                if (index == hullCutPortIndices.end()) {
+                    return std::unexpected("Simulation \"" + sim.name() + "\": excitation references missing "
+                                           "hull-cut port \"" + *excitation.hullCutPortID() + "\"");
+                }
+                excitation.setDrivenPortIndex(index->second);
+                PortConfig& drivenPort = sim.ports()[static_cast<std::size_t>(index->second)];
+                drivenPort.setExcite(true);
+                drivenPort.setAbsorbSignal(true);
+                drivenPort.setProbe(true);
+                continue;
+            }
             auto resolvedResult = libkicad::resolvePin(paths.kicadBoardPaths(), excitation.footprint(),
                                                        excitation.pin());
             if (!resolvedResult) return std::unexpected(std::move(resolvedResult).error());

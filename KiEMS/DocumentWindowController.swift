@@ -864,6 +864,7 @@ final class DocumentWindowController: NSWindowController {
         projectPathField.isEnabled = true
         boardPopUp.isEnabled = true
         statusLabel.stringValue = "Link failed: \(error.localizedDescription)"
+        NSApp.presentError(error)
     }
 
     private static func siblingProjectURL(among siblings: [URL]) -> URL? {

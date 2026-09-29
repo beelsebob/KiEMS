@@ -1,6 +1,6 @@
 import Cocoa
 
-/// The "simulation-wide properties" panel: name, ground net, hull padding, frequency range, via
+/// The "simulation-wide properties" panel: name, ground net, frequency range, via
 /// settings. Edits whichever simulation SimulationListViewController has selected (see
 /// setSelectedSimulationIndex) -- viaPlatingThickness/viaFillingEpsilon/frequencyStart/frequencyStop
 /// stay editable regardless (they're document-level, not per-simulation), but the rest disable
@@ -16,7 +16,7 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
     var onNameChanged: (() -> Void)?
 
     /// Fired (with the changed simulation's index) whenever a field that affects the *shape* of the
-    /// geometry step's output changes -- hull padding, via edge distance/spacing, or the ground net
+    /// geometry step's output changes -- via edge distance/spacing or the ground net
     /// itself. DocumentWindowController wires this to GeometryViewController.invalidateCache(
     /// forSimulationIndex:), so a stale cached geometry/error from before the edit doesn't keep
     /// being shown. Deliberately not fired for platingThickness/fillingEpsilon/frequency fields --
@@ -47,7 +47,6 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
     private let gridDensityField = NSTextField(string: "")
     private let maxTimestepValueLabel = NSTextField(labelWithString: "")
     private let simulationRealTimeValueLabel = NSTextField(labelWithString: "")
-    private let hullPaddingField = NSTextField(string: "")
     private let viaEdgeDistanceField = NSTextField(string: "")
     private let viaSpacingField = NSTextField(string: "")
     private let platingThicknessField = NSTextField(string: "")
@@ -63,7 +62,6 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
     // per-instance state (see MicrometerValueFormatter), so sharing one across fields would make
     // them all switch units together whenever any single field's unit changed.
     private let gridDensityFormatter = MicrometerValueFormatter()
-    private let hullPaddingFormatter = MicrometerValueFormatter()
     private let viaEdgeDistanceFormatter = MicrometerValueFormatter()
     private let viaSpacingFormatter = MicrometerValueFormatter()
     private let platingThicknessFormatter = MicrometerValueFormatter()
@@ -174,7 +172,6 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
         groundNameComboBox.font = Self.formFont
         groundNameComboBox.completes = true
 
-        hullPaddingField.formatter = hullPaddingFormatter
         viaEdgeDistanceField.formatter = viaEdgeDistanceFormatter
         viaSpacingField.formatter = viaSpacingFormatter
         platingThicknessField.formatter = platingThicknessFormatter
@@ -185,7 +182,7 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
         maxStepsField.formatter = maxStepsFormatter
         gridDensityField.formatter = gridDensityFormatter
 
-        for field in [hullPaddingField, viaEdgeDistanceField, viaSpacingField, platingThicknessField,
+        for field in [viaEdgeDistanceField, viaSpacingField, platingThicknessField,
                       fillingEpsilonField, frequencyStartField, frequencyStopField, maxStepsField,
                       gridDensityField, eyeBitRateField] {
             field.controlSize = .small
@@ -223,7 +220,6 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
                 labeled("Ground Net:", groundNameComboBox),
             ])
         let geometrySection = section("Geometry", views: [
-                labeled("Padding:", hullPaddingField),
                 labeled("Stitching Inset:", viaEdgeDistanceField),
                 labeled("Stitching Spacing:", viaSpacingField),
                 labeled("Via Plating Thickness:", platingThicknessField),
@@ -302,7 +298,6 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
 
         guard let sim = selectedSimulation else {
             nameField.stringValue = ""
-            hullPaddingField.stringValue = ""
             viaEdgeDistanceField.stringValue = ""
             viaSpacingField.stringValue = ""
             eyeBitRateField.stringValue = ""
@@ -316,7 +311,6 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
 
         nameField.stringValue = sim.name
         differentialPairCheckbox.state = sim.isDifferentialPair ? .on : .off
-        hullPaddingField.doubleValue = sim.hullPadding
         viaEdgeDistanceField.doubleValue = sim.viaEdgeDistance
         viaSpacingField.doubleValue = sim.viaSpacing
         eyeBitRateField.doubleValue = sim.eyeBitRate
@@ -343,7 +337,7 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
     }
 
     private func setPerSimulationFieldsEnabled(_ enabled: Bool) {
-        for control in [nameField, differentialPairCheckbox, groundNameComboBox, hullPaddingField,
+        for control in [nameField, differentialPairCheckbox, groundNameComboBox,
                          viaEdgeDistanceField, viaSpacingField, eyeBitRateField] as [NSControl] {
             control.isEnabled = enabled
         }
@@ -495,9 +489,6 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
         var affectsFDTD = false
         var affectsResults = false
         switch sender {
-        case hullPaddingField:
-            selectedSimulation?.hullPadding = sender.doubleValue
-            affectsGeometry = true
         case viaEdgeDistanceField:
             selectedSimulation?.viaEdgeDistance = sender.doubleValue
             affectsGeometry = true

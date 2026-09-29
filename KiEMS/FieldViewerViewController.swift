@@ -88,7 +88,7 @@ final class FieldViewerViewController: NSViewController {
     private var currentFrames: [EMSFieldFrame] = []
     /// Fixed playback rate -- see startPlayback()'s own doc comment for why this isn't derived from
     /// each frame's own real (highly non-uniform) timeSeconds spacing.
-    private static let playbackInterval: TimeInterval = 0.12
+    private static let playbackInterval: TimeInterval = 0.1
 
     private var errors: [Int: String] = [:]
     private var runningIndices: Set<Int> = []
@@ -141,6 +141,7 @@ final class FieldViewerViewController: NSViewController {
     override func viewDidDisappear() {
         super.viewDidDisappear()
         stopPlayback()
+        fieldView.setRefinementEnabled(false)
         fieldView.discardCachedFrameData()
     }
 
@@ -153,8 +154,10 @@ final class FieldViewerViewController: NSViewController {
         isViewerVisible = visible
         if visible {
             refreshDisplay()
+            fieldView.setRefinementEnabled(true)
         } else {
             stopPlayback()
+            fieldView.setRefinementEnabled(false)
             fieldView.discardCachedFrameData()
         }
     }
@@ -502,12 +505,20 @@ final class FieldViewerViewController: NSViewController {
     private func startPlayback() {
         guard currentFrames.count > 1 else { return }
         isPlaying = true
+        fieldView.setPlaybackActive(true)
         // If already at the last frame, restart from the beginning rather than doing nothing.
         if fieldView.currentFrameIndex >= currentFrames.count - 1 {
             setFrame(0)
         }
+        schedulePlaybackAdvance()
+    }
+
+    /// Arm each interval only after the previous frame has actually been installed. A repeating
+    /// timer measures from its scheduled fire date, so a slower buffer upload can otherwise make
+    /// the following frame flash past in less than 100ms while the timer catches up.
+    private func schedulePlaybackAdvance() {
         playbackTimer?.invalidate()
-        playbackTimer = Timer.scheduledTimer(withTimeInterval: Self.playbackInterval, repeats: true) { [weak self] _ in
+        playbackTimer = Timer.scheduledTimer(withTimeInterval: Self.playbackInterval, repeats: false) { [weak self] _ in
             self?.advanceFrame()
         }
     }
@@ -516,6 +527,7 @@ final class FieldViewerViewController: NSViewController {
         playbackTimer?.invalidate()
         playbackTimer = nil
         isPlaying = false
+        fieldView.setPlaybackActive(false)
     }
 
     private func advanceFrame() {
@@ -527,6 +539,7 @@ final class FieldViewerViewController: NSViewController {
             return
         }
         setFrame(next)
+        if isPlaying { schedulePlaybackAdvance() }
     }
 
     @objc private func sliderChanged() {

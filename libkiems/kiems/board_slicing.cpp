@@ -236,7 +236,6 @@ SlicingConfig SlicingConfig::from(const SimulationConfig& sim, const EMSConfig& 
         layerNames.push_back(layer.name());
     }
     return SlicingConfig{
-        .hullPadding = sim.hullPadding(),
         .viaEdgeDistance = sim.viaEdgeDistance(),
         .viaSpacing = sim.viaSpacing(),
         .platingThickness = config.via().platingThickness(),
@@ -298,12 +297,18 @@ std::expected<ClassifiedCopper, std::string> classifyCopperForSimulation(const S
                                                                            const PathsConfig& paths) {
     std::unordered_set<NetName, NetNameHash> involvedNets;
     std::unordered_set<NetName, NetNameHash> geometryOnlyNets;
+    std::vector<std::pair<std::unordered_set<NetName, NetNameHash>, double>> hullSelectors;
     for (const InvolvedNetConfig& entry : sim.involvedNets()) {
         auto nets = resolveInvolvedNetNames(paths, entry);
         if (!nets) return std::unexpected(std::move(nets).error());
         auto& target = entry.inclusionLevel() == NetInclusionLevel::GeometryOnly ? geometryOnlyNets : involvedNets;
+        std::unordered_set<NetName, NetNameHash> selectorNets;
         for (const std::string& net : *nets) {
             target.insert(NetName(net));
+            selectorNets.insert(NetName(net));
+        }
+        if (entry.inclusionLevel() == NetInclusionLevel::SimulationNet) {
+            hullSelectors.emplace_back(std::move(selectorNets), entry.hullPadding());
         }
     }
     std::unordered_set<NetName, NetNameHash> groundNets;
@@ -316,6 +321,10 @@ std::expected<ClassifiedCopper, std::string> classifyCopperForSimulation(const S
     }
 
     ClassifiedCopper result;
+    result.hullContributions.resize(hullSelectors.size());
+    for (std::size_t index = 0; index < hullSelectors.size(); ++index) {
+        result.hullContributions[index].padding = hullSelectors[index].second;
+    }
     for (const libkicad::CopperPolygon& polygon : geometry.copper) {
         const NetName net(polygon.netName);
         if (involvedNets.count(net) != 0) {
@@ -327,6 +336,11 @@ std::expected<ClassifiedCopper, std::string> classifyCopperForSimulation(const S
         if (groundNets.count(net) != 0) {
             result.ground.push_back(polygon);
         }
+        for (std::size_t index = 0; index < hullSelectors.size(); ++index) {
+            if (hullSelectors[index].first.count(net) != 0) {
+                result.hullContributions[index].copper.push_back(polygon);
+            }
+        }
     }
     return result;
 }
@@ -335,7 +349,9 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(
     const SlicingConfig& slicing, const libkicad::BoardGeometry& geometry,
     const std::vector<libkicad::CopperPolygon>& involvedCopper,
     const std::vector<libkicad::CopperPolygon>& geometryOnlyCopper,
-    const std::vector<libkicad::CopperPolygon>& groundCopper, const std::vector<ViaHole>& existingVias,
+    const std::vector<libkicad::CopperPolygon>& groundCopper,
+    const std::vector<ClassifiedCopper::HullContribution>& hullContributions,
+    const std::vector<ViaHole>& existingVias,
     const std::vector<NPTHHole>& npthHoles,
     const GeometryProcessingProgressCallback& onProgress) {
     const double tessellationTolerance = static_cast<double>(slicing.pixelSize) * constants::unitMultiplier;
@@ -404,10 +420,29 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(
         return std::unexpected("Involved nets have no copper on any layer");
     }
 
-    // Every net in the Simulated set grows the surrounding board region, regardless of whether it
-    // owns an excitation. Geometry-only copper is deliberately absent here and remains clipped to
-    // the cutout these full simulation nets produce.
-    const PolygonSet cutoutSource = offsetPolygons(signalUnionAllLayers, slicing.hullPadding, tessellationTolerance);
+    // Each full simulation selector grows the hull by its own configured amount. In particular,
+    // zero is not the same as GeometryOnly: a zero-padding contribution is unioned into the cutout
+    // at its exact copper edge and therefore survives clipping. GeometryOnly copper is absent here
+    // and remains clipped to the union these contributors produce.
+    PolygonSet cutoutSource;
+    for (const auto& contribution : hullContributions) {
+        PolygonSet source;
+        for (const auto& layerName : layerNames) {
+            PolygonSet onLayer = _copperOnLayer(contribution.copper, layerName, origin.xMin, origin.yMin);
+            source.insert(source.end(), onLayer.begin(), onLayer.end());
+        }
+        source = unionPolygons(source);
+        if (!source.empty()) {
+            // Preserve the exact union for a zero-padding contributor. Apart from avoiding an
+            // unnecessary GEOS operation, this makes the semantic distinction explicit: zero is
+            // still a hull contribution, whereas GeometryOnly copper never enters this loop.
+            PolygonSet expanded = contribution.padding > 0.0
+                                      ? offsetPolygons(source, contribution.padding, tessellationTolerance)
+                                      : source;
+            cutoutSource.insert(cutoutSource.end(), expanded.begin(), expanded.end());
+        }
+    }
+    cutoutSource = unionPolygons(cutoutSource);
     polygonPrimitiveDone();
     const PolygonSet cutout = intersectPolygons(cutoutSource, realOutline);
     polygonPrimitiveDone();
@@ -530,6 +565,21 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(
     // overall sliced-board bbox.
     logInfo("Sliced board bbox = " + to_string(result.bounds) + " sim units");
     return result;
+}
+
+std::expected<SlicedBoard, std::string> sliceBoardForSimulation(
+    const SlicingConfig& slicing, const libkicad::BoardGeometry& geometry,
+    const std::vector<libkicad::CopperPolygon>& involvedCopper,
+    const std::vector<libkicad::CopperPolygon>& geometryOnlyCopper,
+    const std::vector<libkicad::CopperPolygon>& groundCopper, const std::vector<ViaHole>& existingVias,
+    const std::vector<NPTHHole>& npthHoles,
+    const GeometryProcessingProgressCallback& onProgress) {
+    std::vector<ClassifiedCopper::HullContribution> contributions;
+    if (!involvedCopper.empty()) {
+        contributions.push_back({involvedCopper, slicing.hullPadding});
+    }
+    return sliceBoardForSimulation(slicing, geometry, involvedCopper, geometryOnlyCopper, groundCopper,
+                                   contributions, existingVias, npthHoles, onProgress);
 }
 
 void restrictLumpedComponentsToCutout(SimulationConfig& simulation, const SlicedBoard& board) {

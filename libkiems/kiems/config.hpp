@@ -428,6 +428,13 @@ public:
     /// with exactly its old, only-ever-had behavior. See NetInclusionLevel's own doc comment.
     NetInclusionLevel inclusionLevel() const { return _inclusionLevel; }
     void setInclusionLevel(NetInclusionLevel value) { _inclusionLevel = value; }
+    /// Distance by which this entry's copper expands the simulation hull, in micrometers in a
+    /// saved configuration and simulation units in a scaled working copy. Zero is meaningful: the
+    /// copper still contributes, and therefore survives clipping, but the hull follows its edge.
+    /// GeometryOnly entries do not contribute at all, irrespective of this retained value.
+    double hullPadding() const { return _hullPadding; }
+    void setHullPadding(double value) { _hullPadding = value; }
+    void scaleHullPaddingToSimulationUnits(std::int32_t unitMultiplier) { _hullPadding *= unitMultiplier; }
     const std::optional<std::string>& netClass() const { return _netClass; }
     const std::optional<std::string>& net() const { return _net; }
     const std::optional<std::string>& footprint() const { return _footprint; }
@@ -603,6 +610,7 @@ private:
 
     NetSelectorKind _kind = NetSelectorKind::Net;
     NetInclusionLevel _inclusionLevel = NetInclusionLevel::SimulationNet;
+    double _hullPadding = 5000;
     std::optional<std::string> _netClass;
     std::optional<std::string> _net;
     std::optional<std::string> _footprint;
@@ -656,9 +664,9 @@ private:
 void to_json(nlohmann::json& j, const GroundNetConfig& p);
 void from_json(const nlohmann::json& j, GroundNetConfig& p);
 
-/// One entry in a SimulationConfig's excitations list. Purely a postprocessing input (see
-/// excitation_postprocess.hpp) -- it plays no role in which ports get excited during the actual
-/// FDTD sweep (every involved-net port always does).
+/// One entry in a SimulationConfig's excitations list. It identifies either an ordinary pad by
+/// footprint/pin or an authored hull-cut port by id. The resolved port index is derived for the
+/// FDTD run and is never persisted.
 class ExcitationConfig {
 public:
     double startTime() const { return _startTime; }
@@ -669,9 +677,11 @@ public:
     double phaseDegrees() const { return _phaseDegrees; }
     const std::string& footprint() const { return _footprint; }
     const std::string& pin() const { return _pin; }
+    const std::optional<std::string>& hullCutPortID() const { return _hullCutPortID; }
 
     const std::optional<std::int32_t>& drivenPortIndex() const { return _drivenPortIndex; }
     void setDrivenPortIndex(std::int32_t index) { _drivenPortIndex = index; }
+    void clearDrivenPortIndex() { _drivenPortIndex.reset(); }
 
     void setStartTime(double value) { _startTime = value; }
     void setDuration(double value) { _duration = value; }
@@ -681,6 +691,7 @@ public:
     void setPhaseDegrees(double value) { _phaseDegrees = value; }
     void setFootprint(std::string value) { _footprint = std::move(value); }
     void setPin(std::string value) { _pin = std::move(value); }
+    void setHullCutPortID(std::optional<std::string> value) { _hullCutPortID = std::move(value); }
 
 private:
     friend void to_json(nlohmann::json& j, const ExcitationConfig& p);
@@ -694,11 +705,65 @@ private:
     double _phaseDegrees = 0;
     std::string _footprint;
     std::string _pin;
+    std::optional<std::string> _hullCutPortID;
     std::optional<std::int32_t> _drivenPortIndex; // not (de)serialized
 };
 
 void to_json(nlohmann::json& j, const ExcitationConfig& p);
 void from_json(const nlohmann::json& j, ExcitationConfig& p);
+
+/// A user-authored port at a routed trace's intersection with the simulation hull. Unlike an
+/// ordinary pad port it has no footprint/pin identity, so its complete placement is persisted.
+/// Positions, width and length are in configuration micrometres and are scaled at the same
+/// FDTD-facing boundary as every other authored length.
+class HullCutPortConfig {
+public:
+    const std::string& id() const { return _id; }
+    const std::string& net() const { return _net; }
+    const std::string& layer() const { return _layer; }
+    double x() const { return _x; }
+    double y() const { return _y; }
+    double direction() const { return _direction; }
+    double width() const { return _width; }
+    double length() const { return _length; }
+    std::int32_t plane() const { return _plane; }
+    double impedance() const { return _impedance; }
+    bool probe() const { return _probe; }
+    bool absorbSignal() const { return _absorbSignal; }
+
+    void setID(std::string value) { _id = std::move(value); }
+    void setNet(std::string value) { _net = std::move(value); }
+    void setLayer(std::string value) { _layer = std::move(value); }
+    void setX(double value) { _x = value; }
+    void setY(double value) { _y = value; }
+    void setDirection(double value) { _direction = value; }
+    void setWidth(double value) { _width = value; }
+    void setLength(double value) { _length = value; }
+    void setPlane(std::int32_t value) { _plane = value; }
+    void setImpedance(double value) { _impedance = value; }
+    void setProbe(bool value) { _probe = value; }
+    void setAbsorbSignal(bool value) { _absorbSignal = value; }
+    void scaleToSimulationUnits(std::int32_t unitMultiplier);
+
+private:
+    friend void to_json(nlohmann::json& j, const HullCutPortConfig& p);
+    friend void from_json(const nlohmann::json& j, HullCutPortConfig& p);
+    std::string _id;
+    std::string _net;
+    std::string _layer;
+    double _x = 0;
+    double _y = 0;
+    double _direction = 0;
+    double _width = 200;
+    double _length = 200;
+    std::int32_t _plane = 1;
+    double _impedance = 45;
+    bool _probe = false;
+    bool _absorbSignal = false;
+};
+
+void to_json(nlohmann::json& j, const HullCutPortConfig& p);
+void from_json(const nlohmann::json& j, HullCutPortConfig& p);
 
 /// Which of DiffPairNetMember's mutually-exclusive selector fields is populated.
 enum class DiffPairNetKind {
@@ -1037,8 +1102,6 @@ public:
     const GroundNetConfig& groundNet() const { return _groundNet; }
     GroundNetConfig& groundNet() { return _groundNet; }
 
-    double hullPadding() const { return _hullPadding; }
-    void setHullPadding(double value) { _hullPadding = value; }
     double viaEdgeDistance() const { return _viaEdgeDistance; }
     void setViaEdgeDistance(double value) { _viaEdgeDistance = value; }
     double viaSpacing() const { return _viaSpacing; }
@@ -1062,6 +1125,8 @@ public:
 
     std::vector<ExcitationConfig>& excitations() { return _excitations; }
     const std::vector<ExcitationConfig>& excitations() const { return _excitations; }
+    std::vector<HullCutPortConfig>& hullCutPorts() { return _hullCutPorts; }
+    const std::vector<HullCutPortConfig>& hullCutPorts() const { return _hullCutPorts; }
     std::vector<SingleEndedConfig>& traces() { return _traces; }
     const std::vector<SingleEndedConfig>& traces() const { return _traces; }
     std::vector<DifferentialPairConfig>& diffPairs() { return _diffPairs; }
@@ -1086,12 +1151,12 @@ public:
     std::vector<std::string>& resolvedNets() { return _resolvedNets; }
     const std::vector<std::string>& resolvedNets() const { return _resolvedNets; }
 
-    /// Scales hullPadding/viaEdgeDistance/viaSpacing, and every resolved port's width/length
-    /// (PortConfig::scaleToSimulationUnits), into simulation units. Does not touch involvedNets(),
-    /// which stays in file units even after this call -- it's copied verbatim into a PortConfig by
-    /// port_resolution.cpp, itself scaled independently (see InvolvedNetConfig). Only ever called by
-    /// EMSConfig::scaledToSimulationUnits(), on a scratch copy -- never on the canonical, edited/
-    /// saved EMSConfig a caller holds.
+    /// Scales every involved net's hull padding, viaEdgeDistance/viaSpacing, and every resolved
+    /// port's width/length (PortConfig::scaleToSimulationUnits), into simulation units. The other
+    /// InvolvedNetConfig fields stay in file units: impedance/length/width are copied verbatim into
+    /// a PortConfig by port_resolution.cpp and scaled with that port exactly once. Only ever called
+    /// by EMSConfig::scaledToSimulationUnits(), on a scratch copy -- never on the canonical,
+    /// edited/saved EMSConfig a caller holds.
     void scaleToSimulationUnits(std::int32_t unitMultiplier);
 
 private:
@@ -1101,13 +1166,13 @@ private:
     std::string _name;
     std::vector<InvolvedNetConfig> _involvedNets;
     GroundNetConfig _groundNet;
-    // In micrometers, like every other length-like field (see constants::baseUnit) -- 5/1.5/1.5 mm.
-    double _hullPadding = 5000;
+    // In micrometers, like every other length-like field (see constants::baseUnit) -- 1.5/1.5 mm.
     double _viaEdgeDistance = 1500;
     double _viaSpacing = 1500;
     double _eyeBitRate = 0;
     bool _isDifferentialPair = false;
     std::vector<ExcitationConfig> _excitations;
+    std::vector<HullCutPortConfig> _hullCutPorts;
     std::vector<SingleEndedConfig> _traces;
     std::vector<DifferentialPairConfig> _diffPairs;
 
@@ -1152,7 +1217,7 @@ public:
     /// unscaling to do here; a save() is just to_json() on `self`, verbatim.
     std::expected<void, std::string> save(const std::filesystem::path& cfgPath) const;
 
-    /// A copy of `self` with every spatial field (grid, via, and each simulation's hull padding/
+    /// A copy of `self` with every spatial field (grid, via, and each involved net's hull padding/
     /// via edge distance/via spacing/resolved ports' width+length) scaled from file units into FDTD
     /// simulation units. `self` itself is never mutated -- called once, by GeometryResult::build()/
     /// load(), right before any FDTD-facing code runs; every other caller (a document editor, this

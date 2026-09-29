@@ -1,6 +1,6 @@
-# Field frame-series format (version 3)
+# Field frame-series format (version 4)
 
-One HDF5 file stores the captured field time series for one simulation/excited-port pair. Version 3
+One HDF5 file stores the captured field time series for one simulation/excited-port pair. Version 4
 is intentionally the only supported revision while the format is still a prototype; opening an old
 file reports that the simulation must be rerun.
 
@@ -20,7 +20,7 @@ one per cell (`line_x.count == nx`, etc.), in metres—not `nx+1` cell boundarie
 
 | Attribute | Type | Meaning |
 |---|---|---|
-| `format_version` | int32 | `3` |
+| `format_version` | int32 | `4` |
 | `simulation_name` | string | Simulation identity |
 | `excited_port` | int32 | Driven port index |
 | `nx`, `ny`, `nz` | int32 | Full-resolution dimensions |
@@ -31,6 +31,11 @@ one per cell (`line_x.count == nx`, etc.), in metres—not `nx+1` cell boundarie
 
 `/grid/line_x`, `/grid/line_y`, and `/grid/line_z` are the full-resolution sample coordinates. A
 preview coordinate is the midpoint of the first and last sample represented by that preview cell.
+`/grid/domain_xy_class` is a full-resolution, X-fastest `uint8[nx*ny]` array. Zero marks external
+space which is never simulated and must always render with zero energy; non-zero values mark active
+interior or CPML nodes. Keeping this full-resolution mask alongside the preview prevents a
+max-pooled preview cell that straddles the CPML edge from visually leaking energy into external
+space.
 
 ## Preview datasets
 
@@ -84,8 +89,11 @@ small enough that Blosc2 never receives a whole-grid buffer.
 publication group, all datasets are flushed before `published_frame_count` advances. The final
 partial group is published by `close()`.
 
-The Field Viewer streams one preview frame on demand and retains only its derived energy buffer.
-Full-resolution reads remain available to detail tooling, but playback does not prefetch them.
+The Field Viewer retains only the displayed frame and one prepared successor. While the displayed
+frame remains on screen for approximately 100ms, a serial background decoder reads the successor's
+preview and refinement order, then decodes greatest-variation-first detail tiles until that same
+100ms deadline. Playback promotes the prepared frame without rereading it. Direct timeline scrubbing
+remains responsive by decoding only the requested low-resolution preview.
 
 ## Filtering choice and future detail refinement
 

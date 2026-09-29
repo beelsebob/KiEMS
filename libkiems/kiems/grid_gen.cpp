@@ -1006,6 +1006,40 @@ std::vector<TraceSegment> grid_detail::clipTraceSegmentsToCutout(
     return clipped;
 }
 
+std::vector<grid_detail::HullCutPoint> grid_detail::hullCutTracePoints(
+    const std::vector<HullCutTrace>& traces,
+    const std::vector<std::vector<Position>>& cutoutLoops,
+    double boundaryTolerance) {
+    std::vector<HullCutPoint> result;
+    const double comparisonTolerance = std::max(boundaryTolerance, 1e-6);
+    auto distance = [](const Position& a, const Position& b) {
+        return std::hypot(a.x() - b.x(), a.y() - b.y());
+    };
+    auto append = [&](const HullCutTrace& trace, const Position& boundary, const Position& inside) {
+        for (const HullCutPoint& existing : result) {
+            if (existing.netName == trace.netName && existing.layerName == trace.layerName &&
+                distance(existing.position, boundary) <= comparisonTolerance) {
+                return;
+            }
+        }
+        const double direction = std::atan2(inside.y() - boundary.y(), inside.x() - boundary.x()) * 180.0 / M_PI;
+        result.push_back({boundary, trace.netName, trace.layerName,
+                          direction < 0 ? direction + 360.0 : direction, trace.segment.width()});
+    };
+    for (const HullCutTrace& trace : traces) {
+        const auto pieces = clipTraceSegmentsToCutout({trace.segment}, cutoutLoops, boundaryTolerance);
+        for (const TraceSegment& piece : pieces) {
+            const bool startWasCreated = distance(piece.start(), trace.segment.start()) > comparisonTolerance &&
+                                         distance(piece.start(), trace.segment.stop()) > comparisonTolerance;
+            const bool stopWasCreated = distance(piece.stop(), trace.segment.start()) > comparisonTolerance &&
+                                        distance(piece.stop(), trace.segment.stop()) > comparisonTolerance;
+            if (startWasCreated) append(trace, piece.start(), piece.stop());
+            if (stopWasCreated) append(trace, piece.stop(), piece.start());
+        }
+    }
+    return result;
+}
+
 std::vector<double> grid_detail::growGridBoundaryCellsToSize(std::vector<double> lines,
                                                               double targetCellSize,
                                                               double maximumCellRatio) {

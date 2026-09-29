@@ -22,6 +22,7 @@
 #include "kiems/port_resolution.hpp"
 #include "kiems/ports.hpp"
 #include "kiems/via_stitching.hpp"
+#include "../libkicad/libkicad.hpp"
 #include "polygon_geometry.hpp"
 
 namespace {
@@ -499,6 +500,24 @@ double triangulateLastCallArea(const std::vector<TriangulateCall>& sequence) {
 
 @implementation LibkiemsTests
 
+- (void)testMissingKiCadProjectReturnsAnErrorInsteadOfEnteringBoardLoader {
+    const auto geometry = libkicad::boardGeometry(
+        "/private/tmp/kiems-definitely-missing-project.kicad_pro",
+        "/private/tmp/kiems-definitely-missing-board.kicad_pcb");
+    XCTAssertFalse(geometry.has_value());
+    XCTAssertNotEqual(geometry.error().find("project file does not exist"), std::string::npos);
+}
+
+- (void)testMissingKiCadBoardReturnsAnErrorInsteadOfEnteringBoardLoader {
+    // __FILE__ is an existing readable regular file, which gets this request through the project
+    // preflight without invoking KiCad; the absent board must then be rejected at the shared file
+    // boundary before PCB_IO_KICAD_SEXPR::LoadBoard can throw across it.
+    const auto geometry = libkicad::boardGeometry(
+        __FILE__, "/private/tmp/kiems-definitely-missing-board.kicad_pcb");
+    XCTAssertFalse(geometry.has_value());
+    XCTAssertNotEqual(geometry.error().find("board file does not exist"), std::string::npos);
+}
+
 - (void)testPortGridFootprintIsCentredAndPositiveAt270Degrees {
     kiems::PortConfig port;
     port.setPosition({1234.0, 5678.0});
@@ -713,6 +732,28 @@ double triangulateLastCallArea(const std::vector<TriangulateCall>& sequence) {
     XCTAssertTrue(classified->geometryOnly.empty());
     XCTAssertTrue(classified->involved.front().netName == "SIG");
     XCTAssertTrue(classified->ground.front().netName == "GND");
+}
+
+- (void)testLegacySimulationHullPaddingMigratesToContributingEntries {
+    const nlohmann::json authored = {
+        {"name", "legacy"},
+        {"hull_padding", 2345.0},
+        {"ground_net", {{"net", "GND"}}},
+        {"involved_nets", nlohmann::json::array({
+            {{"net", "A"}},
+            {{"net", "B"}, {"geometry_only", true}},
+            {{"net", "C"}, {"hull_padding", 321.0}},
+        })},
+    };
+    const kiems::SimulationConfig simulation = authored.get<kiems::SimulationConfig>();
+    XCTAssertEqualWithAccuracy(simulation.involvedNets()[0].hullPadding(), 2345.0, 1e-9);
+    XCTAssertEqualWithAccuracy(simulation.involvedNets()[1].hullPadding(), 5000.0, 1e-9);
+    XCTAssertEqualWithAccuracy(simulation.involvedNets()[2].hullPadding(), 321.0, 1e-9);
+
+    const nlohmann::json saved = simulation;
+    XCTAssertFalse(saved.contains("hull_padding"));
+    XCTAssertEqualWithAccuracy(saved.at("involved_nets")[0].at("hull_padding").get<double>(), 2345.0, 1e-9);
+    XCTAssertEqualWithAccuracy(saved.at("involved_nets")[1].at("hull_padding").get<double>(), 5000.0, 1e-9);
 }
 
 - (void)testSliceBoardForSimulationProducesGeometryAndStitchingVias {
@@ -1658,6 +1699,37 @@ double triangulateLastCallArea(const std::vector<TriangulateCall>& sequence) {
     XCTAssertTrue(retainsNonMainFootprint);
 }
 
+- (void)testSliceBoardForSimulationUsesIndependentPerNetHullPaddingIncludingZero {
+    const kiems::SlicingConfig slicing{
+        .viaEdgeDistance = 0.5 * kSimUnitsPerMm,
+        .viaSpacing = 1.0 * kSimUnitsPerMm,
+        .platingThickness = 50,
+        .stitchingViaHoleDiameter = 300,
+        .stitchingViaAnnularRingDiameter = 600,
+        .viaClearance = 200,
+        .pixelSize = 5,
+        .layerNames = {"F.Cu"},
+    };
+    libkicad::BoardGeometry geometry;
+    geometry.outline = {rectMm(0, 0, 50, 40)};
+    const libkicad::CopperPolygon exact = copperRectMm("EXACT", "F.Cu", 9, 19, 11, 21);
+    const libkicad::CopperPolygon padded = copperRectMm("PADDED", "F.Cu", 29, 19, 31, 21);
+    const std::vector<libkicad::CopperPolygon> involved = {exact, padded};
+    const std::vector<kiems::ClassifiedCopper::HullContribution> contributions = {
+        {{exact}, 0},
+        {{padded}, 2.0 * kSimUnitsPerMm},
+    };
+
+    auto sliced = kiems::sliceBoardForSimulation(slicing, geometry, involved, {}, {}, contributions, {}, {});
+    XCTAssertTrue(sliced.has_value());
+    if (!sliced.has_value()) return;
+
+    // EXACT participates even at 0mm, so its copper is retained but there is no vacuum halo to its
+    // left. PADDED independently receives its own 2mm halo.
+    XCTAssertEqualWithAccuracy(sliced->bounds.xMin, 9.0 * kSimUnitsPerMm, 1.0);
+    XCTAssertEqualWithAccuracy(sliced->bounds.xMax, 33.0 * kSimUnitsPerMm, 1.0);
+}
+
 - (void)testLumpedComponentsRequireAtLeastOnePinInsideCutout {
     kiems::SimulationConfig simulation;
     simulation.setName("Cutout filter");
@@ -1893,6 +1965,60 @@ double triangulateLastCallArea(const std::vector<TriangulateCall>& sequence) {
     XCTAssertEqualWithAccuracy(clipped[0].start().y(), 5.0, 1e-12);
     XCTAssertEqualWithAccuracy(clipped[0].stop().y(), 5.0, 1e-12);
     XCTAssertEqualWithAccuracy(clipped[0].width(), 2.0, 1e-12);
+}
+
+- (void)testHullCutTracePointIsPlacedAtNewEndpointAndPointsInward {
+    const std::vector<std::vector<Cu::Position>> cutout = {{{0, 0}, {10, 0}, {10, 10}, {0, 10}}};
+    const kiems::grid_detail::HullCutTrace trace{
+        kiems::TraceSegment({5, 5}, {25, 5}, "", 2.0), "DATA", "F.Cu"};
+    const auto points = kiems::grid_detail::hullCutTracePoints({trace}, cutout);
+    XCTAssertEqual(points.size(), 1U);
+    XCTAssertEqual(points[0].netName, "DATA");
+    XCTAssertEqual(points[0].layerName, "F.Cu");
+    XCTAssertEqualWithAccuracy(points[0].position.x(), 10.0, 1e-12);
+    XCTAssertEqualWithAccuracy(points[0].position.y(), 5.0, 1e-12);
+    XCTAssertEqualWithAccuracy(points[0].inwardDirectionDegrees, 180.0, 1e-12);
+    XCTAssertEqualWithAccuracy(points[0].width, 2.0, 1e-12);
+}
+
+- (void)testHullCutTracePointsIncludeBothSidesOfAThroughTrace {
+    const std::vector<std::vector<Cu::Position>> cutout = {{{0, 0}, {10, 0}, {10, 10}, {0, 10}}};
+    const kiems::grid_detail::HullCutTrace trace{
+        kiems::TraceSegment({-5, 5}, {15, 5}, "", 1.0), "DATA", "In1.Cu"};
+    const auto points = kiems::grid_detail::hullCutTracePoints({trace}, cutout);
+    XCTAssertEqual(points.size(), 2U);
+    XCTAssertEqualWithAccuracy(points[0].position.x(), 0.0, 1e-12);
+    XCTAssertEqualWithAccuracy(points[0].inwardDirectionDegrees, 0.0, 1e-12);
+    XCTAssertEqualWithAccuracy(points[1].position.x(), 10.0, 1e-12);
+    XCTAssertEqualWithAccuracy(points[1].inwardDirectionDegrees, 180.0, 1e-12);
+}
+
+- (void)testHullCutPortAndExcitationRoundTripWithoutFakePinIdentity {
+    kiems::HullCutPortConfig port;
+    port.setID("DATA|F.Cu|100|200");
+    port.setNet("DATA");
+    port.setLayer("F.Cu");
+    port.setX(10.5);
+    port.setY(20.5);
+    port.setDirection(180);
+    port.setWidth(125);
+    port.setLength(125);
+    port.setProbe(true);
+    port.setAbsorbSignal(true);
+    const auto decodedPort = nlohmann::json(port).get<kiems::HullCutPortConfig>();
+    XCTAssertEqual(decodedPort.id(), port.id());
+    XCTAssertEqual(decodedPort.net(), "DATA");
+    XCTAssertTrue(decodedPort.probe());
+    XCTAssertTrue(decodedPort.absorbSignal());
+
+    kiems::ExcitationConfig excitation;
+    excitation.setHullCutPortID(port.id());
+    excitation.setIsMain(true);
+    const auto decodedExcitation = nlohmann::json(excitation).get<kiems::ExcitationConfig>();
+    XCTAssertTrue(decodedExcitation.hullCutPortID().has_value());
+    XCTAssertEqual(*decodedExcitation.hullCutPortID(), port.id());
+    XCTAssertTrue(decodedExcitation.footprint().empty());
+    XCTAssertTrue(decodedExcitation.pin().empty());
 }
 
 - (void)testGridDensityIsDerivedOnlyFromPostCutCopperLoops {

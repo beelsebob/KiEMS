@@ -94,6 +94,7 @@ struct GeometrySelection: Equatable {
         case net
         case pin(reference: String, number: String)
         case component(reference: String)
+        case hullCutPort(identifier: String)
     }
 
     let kind: Kind
@@ -133,10 +134,22 @@ struct BoardActivityHighlight: Equatable {
         let padNumber: String
         let netName: String
     }
+    struct HullCutPortSpot: Equatable {
+        let identifier: String
+        let netName: String
+        let position: CGPoint
+        let excited: Bool
+        let probed: Bool
+        let absorbing: Bool
+    }
     var includedNets: Set<String> = []
     /// Full simulation nets which seed the distance field used to preview the padded slicing hull.
     /// Geometry-only nets remain visible context but do not expand that hull.
     var hullExpandingNets: Set<String> = []
+    /// Per-concrete-net hull expansion in configuration micrometers. A zero-valued entry is still
+    /// a contributor; absence means the net is clipped by the hull made by other entries.
+    var hullPaddingByNet: [String: Double] = [:]
+    var maximumHullPadding: Double? { hullPaddingByNet.values.max() }
     /// Nets whose copper is present at either inclusion level. This drives the muted/non-muted
     /// board colours independently of `includedNets`, which remains the narrower set that receives
     /// the animated simulation-path overlay.
@@ -150,6 +163,7 @@ struct BoardActivityHighlight: Equatable {
     var excitedPins: [ExcitedPin] = []
     var probedPins: [ProbedPin] = []
     var absorbingPins: [AbsorbingPin] = []
+    var hullCutPortSpots: [HullCutPortSpot] = []
     var passiveBridges: [PassiveBridge] = []
     /// R/L/C-prefixed footprints whose Value field cannot produce a usable lumped component.
     /// Component bodies use this warning state; pins deliberately do not, because their colors
@@ -163,15 +177,6 @@ struct BoardActivityHighlight: Equatable {
     /// Distinguishes "no simulation selected" from a selected simulation that currently has no
     /// included nets. Only the latter should mute every net on the board.
     var hasSelectedSimulation = false
-    /// The selected simulation's own hull padding (SimulationConfig.hullPadding, in *micrometers*
-    /// like every other length-like config field -- NOT the 0.1-micron "simulation units" every
-    /// position in this view is in; see GeometryView.simUnitsPerMicrometer's own doc comment for the
-    /// scaling this needs before it's compared against a computed distance) -- the extra distance
-    /// beyond configurationIncludedNets' own copper that the real (slow) board-slicing pass would
-    /// still capture. nil disables the exact region-highlight pass entirely (see GeometryView.
-    /// updateRegionHighlight(commandBuffer:)) -- GeometryViewController's own per-simulation
-    /// GeometryView never sets this, only WholeBoardViewController's setup-screen boardView does.
-    var hullPadding: Double?
 }
 
 /// Renders an EMSGeometryPreview -- the sliced board geometry the geometry pipeline step just
@@ -330,6 +335,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
     private var highlightPipelineState: MTLRenderPipelineState!
     private var pickingPipelineState: MTLRenderPipelineState!
     private var activityPipelineState: MTLRenderPipelineState!
+    private var regionUnionPipelineState: MTLRenderPipelineState!
     /// Real depth test *and* write -- unlike FieldView's own translucent overlay/voxel passes
     /// (which can't use a real depth test at all, see paintersDepthStencilState's own doc comment
     /// there), every *opaque* draw in this view is fully opaque, so a standard depth-tested
@@ -387,18 +393,21 @@ final class GeometryView: MTKView, MTKViewDelegate {
 
     private var regionSeedPipelineState: MTLRenderPipelineState!
     private var regionDistanceTransform: MPSImageEuclideanDistanceTransform!
-    // Simulated-net copper triangle positions in world/board space. They are rasterized into a
-    // padded top-down board texture only when this geometry or its simulation selection changes;
-    // the result does not move with the visible camera.
-    private var regionSeedPositionBuffer: MTLBuffer?
-    private var regionSeedVertexCount = 0
-    private var regionDistanceTextures: (MTLTexture, MTLTexture)?
+    private struct RegionSeedGroup {
+        let paddingMicrometers: Double
+        let positionBuffer: MTLBuffer
+        let vertexCount: Int
+    }
+    // One group per distinct padding value. Each is distance-transformed independently and then
+    // combined into the final union mask, so a 0mm net does not inherit another net's 5mm halo.
+    private var regionSeedGroups: [RegionSeedGroup] = []
+    private var regionDistanceTextures: (seed: MTLTexture, distance: MTLTexture, union: MTLTexture)?
     private var regionDistanceTextureResolution: (width: Int, height: Int) = (0, 0)
     private var regionWorldMin = SIMD2<Float>.zero
     private var regionWorldInverseSize = SIMD2<Float>.zero
     private var regionWorldPerTexel: Float = 1
     private var regionHighlightNeedsUpdate = true
-    // Bound whenever the region highlight is inactive (see GeometryPBRUniformsGPU.hullPaddingPixels's own
+    // Bound whenever the region highlight is inactive (see GeometryPBRUniformsGPU.regionMaskThreshold's own
     // sentinel) -- geometry_pbr_fragment's texture argument still needs a valid binding even when its
     // sampled value is discarded, so this avoids allocating/tearing down a real region texture pair
     // just to satisfy that.
@@ -409,6 +418,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
         case net(String)
         case zone(String?)
         case component(String)
+        case hullCutPort(identifier: String, net: String)
 
         var netName: String? {
             switch self {
@@ -416,6 +426,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
             case let .net(net): return net
             case let .zone(net): return net
             case .component: return nil
+            case let .hullCutPort(_, net): return net
             }
         }
 
@@ -423,7 +434,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
         /// makes a pad win over a nominally coplanar trace without disabling the depth test.
         var hasPickPriority: Bool {
             switch self {
-            case .pin, .component: return true
+            case .pin, .component, .hullCutPort: return true
             case .net, .zone: return false
             }
         }
@@ -449,6 +460,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
                 selection = GeometrySelection(kind: .net, netName: net)
             case let .component(reference):
                 selection = GeometrySelection(kind: .component(reference: reference), netName: nil)
+            case let .hullCutPort(identifier, net):
+                selection = GeometrySelection(kind: .hullCutPort(identifier: identifier), netName: net)
             case .zone, nil:
                 selection = nil
             }
@@ -566,6 +579,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
             pickingPipelineState = Self.makePickingPipelineState(device: device)
             activityPipelineState = Self.makeActivityPipelineState(device: device, pixelFormat: colorPixelFormat)
             regionSeedPipelineState = Self.makeRegionSeedPipelineState(device: device)
+            regionUnionPipelineState = Self.makeRegionUnionPipelineState(device: device)
             regionDistanceTransform = MPSImageEuclideanDistanceTransform(device: device)
             regionDummyTexture = Self.makeRegionDummyTexture(device: device)
             let depthDescriptor = MTLDepthStencilDescriptor()
@@ -752,19 +766,38 @@ final class GeometryView: MTKView, MTKViewDelegate {
         return try? device.makeRenderPipelineState(descriptor: descriptor)
     }
 
+    /// Thresholds one exact distance field into the accumulated union of all per-net paddings.
+    private static func makeRegionUnionPipelineState(device: MTLDevice) -> MTLRenderPipelineState? {
+        guard let library = device.makeDefaultLibrary(),
+              let vertexFunction = library.makeFunction(name: "board_region_union_vertex"),
+              let fragmentFunction = library.makeFunction(name: "board_region_union_fragment") else { return nil }
+        let descriptor = MTLRenderPipelineDescriptor()
+        descriptor.vertexFunction = vertexFunction
+        descriptor.fragmentFunction = fragmentFunction
+        descriptor.colorAttachments[0].pixelFormat = .r8Unorm
+        descriptor.colorAttachments[0].isBlendingEnabled = true
+        descriptor.colorAttachments[0].rgbBlendOperation = .max
+        descriptor.colorAttachments[0].alphaBlendOperation = .max
+        descriptor.colorAttachments[0].sourceRGBBlendFactor = .one
+        descriptor.colorAttachments[0].destinationRGBBlendFactor = .one
+        descriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+        descriptor.colorAttachments[0].destinationAlphaBlendFactor = .one
+        return try? device.makeRenderPipelineState(descriptor: descriptor)
+    }
+
     /// A 1x1 stand-in for geometry_pbr_fragment's region-texture argument whenever the real
     /// region texture isn't available (the highlight is off, or this configuration has nothing to
     /// seed from) -- its own value is never actually read in that case (see
-    /// GeometryPBRUniformsGPU.hullPaddingPixels's own sentinel), this just keeps the binding valid.
+    /// GeometryPBRUniformsGPU.regionMaskThreshold's own sentinel), this just keeps the binding valid.
     private static func makeRegionDummyTexture(device: MTLDevice) -> MTLTexture? {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .r16Float, width: 1, height: 1, mipmapped: false)
+            pixelFormat: .r8Unorm, width: 1, height: 1, mipmapped: false)
         descriptor.usage = [.shaderRead]
         descriptor.storageMode = .shared
         guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
-        var zero: Float16 = 0
+        var zero: UInt8 = 0
         texture.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0, withBytes: &zero,
-                         bytesPerRow: MemoryLayout<Float16>.stride)
+                         bytesPerRow: MemoryLayout<UInt8>.stride)
         return texture
     }
 
@@ -808,10 +841,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
             lightDirection: SIMD4<Float>(-0.30, -0.35, -0.88, 0),
             regionWorldMin: regionWorldMin,
             regionWorldInverseSize: regionWorldInverseSize,
-            hullPaddingPixels: regionTexture != nil
-                ? (activity?.hullPadding.map {
-                    Float($0 * Self.simUnitsPerMicrometer) / regionWorldPerTexel
-                } ?? -1) : -1)
+            regionMaskThreshold: regionTexture != nil ? 0.5 : -1)
         let regionTextureToBind = regionTexture ?? regionDummyTexture
 
         encoder.setVertexBytes(&pbrUniforms, length: MemoryLayout<GeometryPBRUniformsGPU>.stride, index: 3)
@@ -940,16 +970,15 @@ final class GeometryView: MTKView, MTKViewDelegate {
     /// (matches: a "5mm" padding was rendering as ~0.5mm).
     private static let simUnitsPerMicrometer: Double = 10
 
-    /// Exact Euclidean distance from every board-space texel to simulated copper. The seed view is
-    /// an orthographic top-down view of the board expanded on all sides by hullPadding, rather than
-    /// the visible camera. Consequently a trace remains present even when the user pans it just off
-    /// screen, and orbiting cannot distort the distance metric. MPS computes the exact EDT; its
-    /// search radius is limited just beyond hullPadding because values farther away are all
-    /// equivalent to this renderer (they are dimmed), substantially reducing the slow pass count
-    /// without changing a single inside/outside result.
+    /// Builds the union of each contributing net's independently padded region. The seed view is an
+    /// orthographic top-down view expanded by the largest padding, rather than the visible camera,
+    /// so panning/orbiting cannot alter the result. Each distinct padding group gets an exact MPS
+    /// distance transform, which is thresholded into a shared mask before the next group reuses the
+    /// scratch textures.
     private func updateRegionHighlight(commandBuffer: MTLCommandBuffer) -> MTLTexture? {
-        guard let device, let preview, let regionSeedPipelineState, let regionDistanceTransform,
-              let hullPadding = activity?.hullPadding else { return nil }
+        guard let device, let preview, let regionSeedPipelineState, let regionUnionPipelineState,
+              let regionDistanceTransform, let hullPadding = activity?.maximumHullPadding,
+              !regionSeedGroups.isEmpty else { return nil }
 
         let padding = max(Float(hullPadding * Self.simUnitsPerMicrometer), 0)
         let boardWidth = max(Float(preview.width), 1)
@@ -963,7 +992,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
             regionDistanceTextureResolution = resolution
             regionHighlightNeedsUpdate = true
         }
-        guard let (textureA, textureB) = regionDistanceTextures else { return nil }
+        guard let textures = regionDistanceTextures else { return nil }
 
         let actualWidth = Float(resolution.width) * layout.worldPerTexel
         let actualHeight = Float(resolution.height) * layout.worldPerTexel
@@ -973,43 +1002,59 @@ final class GeometryView: MTKView, MTKViewDelegate {
         regionWorldInverseSize = SIMD2<Float>(1 / actualWidth, 1 / actualHeight)
         regionWorldPerTexel = layout.worldPerTexel
 
-        guard regionHighlightNeedsUpdate else { return textureB }
+        guard regionHighlightNeedsUpdate else { return textures.union }
 
         var seedUniforms = RegionSeedUniformsGPU(
             worldMin: regionWorldMin, worldInverseSize: regionWorldInverseSize)
-        let seedPass = MTLRenderPassDescriptor()
-        seedPass.colorAttachments[0].texture = textureA
-        seedPass.colorAttachments[0].loadAction = .clear
-        seedPass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1)
-        seedPass.colorAttachments[0].storeAction = .store
-        guard let seedEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: seedPass) else { return nil }
-        if regionSeedVertexCount > 0, let seedPositions = regionSeedPositionBuffer {
+        for (index, group) in regionSeedGroups.enumerated() {
+            let seedPass = MTLRenderPassDescriptor()
+            seedPass.colorAttachments[0].texture = textures.seed
+            seedPass.colorAttachments[0].loadAction = .clear
+            seedPass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1)
+            seedPass.colorAttachments[0].storeAction = .store
+            guard let seedEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: seedPass) else { return nil }
             seedEncoder.setRenderPipelineState(regionSeedPipelineState)
-            seedEncoder.setVertexBuffer(seedPositions, offset: 0, index: 0)
+            seedEncoder.setVertexBuffer(group.positionBuffer, offset: 0, index: 0)
             seedEncoder.setVertexBytes(&seedUniforms, length: MemoryLayout<RegionSeedUniformsGPU>.stride, index: 2)
-            seedEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: regionSeedVertexCount)
-        }
-        seedEncoder.endEncoding()
+            seedEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: group.vertexCount)
+            seedEncoder.endEncoding()
 
-        // Limiting the exact search just past the only threshold we inspect preserves correctness
-        // while giving MPS a large, finite kernel from which it can minimize its internal passes.
-        regionDistanceTransform.searchLimitRadius = max(padding / layout.worldPerTexel + 2, 32)
-        regionDistanceTransform.encode(commandBuffer: commandBuffer, sourceTexture: textureA,
-                                       destinationTexture: textureB)
+            let groupPadding = max(Float(group.paddingMicrometers * Self.simUnitsPerMicrometer), 0)
+            // Limiting the exact search just past this group's threshold preserves correctness while
+            // substantially reducing MPS's internal pass count.
+            regionDistanceTransform.searchLimitRadius = max(groupPadding / layout.worldPerTexel + 2, 32)
+            regionDistanceTransform.encode(commandBuffer: commandBuffer, sourceTexture: textures.seed,
+                                           destinationTexture: textures.distance)
+
+            var unionUniforms = RegionUnionUniformsGPU(paddingPixels: groupPadding / layout.worldPerTexel)
+            let unionPass = MTLRenderPassDescriptor()
+            unionPass.colorAttachments[0].texture = textures.union
+            unionPass.colorAttachments[0].loadAction = index == 0 ? .clear : .load
+            unionPass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1)
+            unionPass.colorAttachments[0].storeAction = .store
+            guard let unionEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: unionPass) else { return nil }
+            unionEncoder.setRenderPipelineState(regionUnionPipelineState)
+            unionEncoder.setFragmentBytes(&unionUniforms,
+                                          length: MemoryLayout<RegionUnionUniformsGPU>.stride, index: 0)
+            unionEncoder.setFragmentTexture(textures.distance, index: 0)
+            unionEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            unionEncoder.endEncoding()
+        }
         regionHighlightNeedsUpdate = false
-        return textureB
+        return textures.union
     }
 
     private static func regionTextureLayout(worldWidth: Float, worldHeight: Float)
         -> (resolution: (width: Int, height: Int), worldPerTexel: Float) {
-        let maxDimension: Float = 2048
+        let maxDimension: Float = 4096
         let worldPerTexel = max(worldWidth, worldHeight, 1) / maxDimension
         return ((max(Int(ceil(worldWidth / worldPerTexel)), 1),
                  max(Int(ceil(worldHeight / worldPerTexel)), 1)), worldPerTexel)
     }
 
     private static func makeRegionTexturePair(device: MTLDevice,
-                                               resolution: (width: Int, height: Int)) -> (MTLTexture, MTLTexture)? {
+                                               resolution: (width: Int, height: Int))
+        -> (seed: MTLTexture, distance: MTLTexture, union: MTLTexture)? {
         let seedDescriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .r8Unorm, width: resolution.width, height: resolution.height, mipmapped: false)
         seedDescriptor.usage = [.renderTarget, .shaderRead]
@@ -1018,9 +1063,14 @@ final class GeometryView: MTKView, MTKViewDelegate {
             pixelFormat: .r16Float, width: resolution.width, height: resolution.height, mipmapped: false)
         distanceDescriptor.usage = [.shaderRead, .shaderWrite]
         distanceDescriptor.storageMode = .private
+        let unionDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .r8Unorm, width: resolution.width, height: resolution.height, mipmapped: false)
+        unionDescriptor.usage = [.renderTarget, .shaderRead]
+        unionDescriptor.storageMode = .private
         guard let a = device.makeTexture(descriptor: seedDescriptor),
-              let b = device.makeTexture(descriptor: distanceDescriptor) else { return nil }
-        return (a, b)
+              let b = device.makeTexture(descriptor: distanceDescriptor),
+              let c = device.makeTexture(descriptor: unionDescriptor) else { return nil }
+        return (a, b, c)
     }
 
     // MARK: - Camera math
@@ -1214,13 +1264,27 @@ final class GeometryView: MTKView, MTKViewDelegate {
     /// clicked pixel. The pass uses the same camera and depth rules as the visible board, but a
     /// one-pixel scissor keeps a click proportional to one fragment rather than the whole window.
     private func pick(at point: CGPoint) {
-        guard let device, let commandQueue, let pickingPipelineState, let pickingDepthStencilState,
-              let positions = pickingPositionBuffer, let identifiers = pickingIdentifierBuffer,
-              pickingVertexCount > 0, bounds.width > 0, bounds.height > 0 else {
+        guard bounds.width > 0, bounds.height > 0 else {
             selectedTarget = nil
             return
         }
         resetCameraIfNeeded()
+
+        // Hull-cut candidates are UI controls over the board, rather than board geometry. Resolve
+        // their screen-space hit discs first -- including inactive candidates with no visible role
+        // marker -- so an exactly coincident trace cannot win the depth-buffer ID pass. Keep a
+        // small minimum radius when the whole board is fitted on screen.
+        if let target = hullCutPortTarget(at: point) {
+            selectedTarget = target
+            return
+        }
+
+        guard let device, let commandQueue, let pickingPipelineState, let pickingDepthStencilState,
+              let positions = pickingPositionBuffer, let identifiers = pickingIdentifierBuffer,
+              pickingVertexCount > 0 else {
+            selectedTarget = nil
+            return
+        }
 
         let pixelWidth = max(Int(drawableSize.width), 1)
         let pixelHeight = max(Int(drawableSize.height), 1)
@@ -1293,6 +1357,55 @@ final class GeometryView: MTKView, MTKViewDelegate {
         } else {
             selectedTarget = picked
         }
+    }
+
+    private func hullCutPortTarget(at point: CGPoint) -> PickTarget? {
+        guard let preview, let spots = activity?.hullCutPortSpots, !spots.isEmpty,
+              bounds.width > 0, bounds.height > 0 else { return nil }
+
+        let eye = currentEyePosition()
+        let viewProjection = currentProjectionMatrix() * lookAt(
+            eye: eye, center: SIMD3(target.x, target.y, target.z),
+            up: -currentOrientation().act(SIMD3<Float>(1, 0, 0)))
+        let layerZValues = preview.layers.map { Float($0.z) }
+        let topZ = layerZValues.max() ?? 0
+        let bottomZ = layerZValues.min() ?? 0
+        let markerZ = topZ + max(topZ - bottomZ, 1) * 0.01
+
+        func project(_ world: Position3) -> (point: CGPoint, depth: Float)? {
+            let clip = viewProjection * SIMD4<Float>(world.x, world.y, world.z, 1)
+            guard abs(clip.w) > 1e-8 else { return nil }
+            let ndc = SIMD3<Float>(clip.x, clip.y, clip.z) / clip.w
+            guard ndc.z >= 0, ndc.z <= 1 else { return nil }
+            let x = CGFloat((ndc.x + 1) * 0.5) * bounds.width
+            let bottomOriginY = CGFloat((ndc.y + 1) * 0.5) * bounds.height
+            let y = isFlipped ? bounds.height - bottomOriginY : bottomOriginY
+            return (CGPoint(x: x, y: y), ndc.z)
+        }
+
+        var best: (target: PickTarget, distance: CGFloat, depth: Float)?
+        for spot in spots {
+            let centerWorld = Position3(Float(spot.position.x), Float(spot.position.y), markerZ)
+            guard let center = project(centerWorld) else { continue }
+            let radius = Float(Self.absorbingPinMarkerRadius)
+            let projectedX = project(Position3(centerWorld.x + radius, centerWorld.y, centerWorld.z))?.point
+            let projectedY = project(Position3(centerWorld.x, centerWorld.y + radius, centerWorld.z))?.point
+            let xRadius: CGFloat = projectedX.map {
+                hypot($0.x - center.point.x, $0.y - center.point.y)
+            } ?? 0
+            let yRadius: CGFloat = projectedY.map {
+                hypot($0.x - center.point.x, $0.y - center.point.y)
+            } ?? 0
+            let projectedRadius: CGFloat = max(6, max(xRadius, yRadius))
+            let distance = hypot(point.x - center.point.x, point.y - center.point.y)
+            guard distance <= projectedRadius else { continue }
+            let candidate = PickTarget.hullCutPort(identifier: spot.identifier, net: spot.netName)
+            if best == nil || distance < best!.distance ||
+                (distance == best!.distance && center.depth < best!.depth) {
+                best = (candidate, distance, center.depth)
+            }
+        }
+        return best?.target
     }
 
     /// Pan: shifts `target` (the orbit center) along the camera's own current right/up axes, scaled
@@ -1437,8 +1550,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
             outlineVertexCount = 0
             crossVertexCount = 0
             maskVertexCount = 0
-            regionSeedVertexCount = 0
-            regionSeedPositionBuffer = nil
+            regionSeedGroups = []
             return
         }
 
@@ -1462,9 +1574,9 @@ final class GeometryView: MTKView, MTKViewDelegate {
         var zoneColors: [SIMD4<Float>] = []
         var zoneNormals: [Position3] = []
         var zoneMuteFlags: [Float] = []
-        // Simulated-net copper only (see regionSeedPositionBuffer's own doc comment) -- rasterized
-        // into a camera-independent board-space texture when this buffer changes.
-        var regionSeedPositions: [Position3] = []
+        // Simulation-net copper grouped by its own padding, rasterized into a camera-independent
+        // board-space mask when these buffers change.
+        var regionSeedPositionsByPadding: [Double: [Position3]] = [:]
         var pickingPositions: [Position3] = []
         var pickingIdentifiers: [UInt32] = []
         // Pins are appended to the combined picking buffers last so they deterministically win
@@ -1521,13 +1633,15 @@ final class GeometryView: MTKView, MTKViewDelegate {
                 var isMuted = false
                 var isHullSeedCopper = false
                 var isSimulatedCopper = false
+                var hullPaddingMicrometers: Double?
                 if let netName = triangle.netName {
                     let netIncluded = activity?.configurationIncludedNets.contains(netName) == true
                         || activity?.fullySaturatedNets.contains(netName) == true
                     isMuted = activity?.hasSelectedSimulation == true && !netIncluded
                     // Every full simulation net grows the real slicing hull. Geometry-only and
                     // ground nets remain context and must not seed this distance field.
-                    isHullSeedCopper = activity?.hullExpandingNets.contains(netName) == true
+                    hullPaddingMicrometers = activity?.hullPaddingByNet[netName]
+                    isHullSeedCopper = hullPaddingMicrometers != nil
                     isSimulatedCopper = activity?.includedNets.contains(netName) == true
                 }
                 if activity?.hasSelectedSimulation == true,
@@ -1610,7 +1724,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
                         positionsByTarget[pickTarget, default: []].append(contentsOf: [pickA, pickB, pickC])
                     }
                     if isHullSeedCopper {
-                        regionSeedPositions.append(contentsOf: [pickA, pickB, pickC])
+                        regionSeedPositionsByPadding[hullPaddingMicrometers!, default: []]
+                            .append(contentsOf: [pickA, pickB, pickC])
                     }
                 } else {
                     Self.appendLitTriangle(a, b, c, color: color, muted: isMuted,
@@ -1633,7 +1748,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
                         positionsByTarget[pickTarget, default: []].append(contentsOf: [a, b, c])
                     }
                     if isHullSeedCopper {
-                        regionSeedPositions.append(contentsOf: [a, b, c])
+                        regionSeedPositionsByPadding[hullPaddingMicrometers!, default: []]
+                            .append(contentsOf: [a, b, c])
                     }
                 }
             }
@@ -1689,12 +1805,14 @@ final class GeometryView: MTKView, MTKViewDelegate {
             var isMuted = false
             var isHullSeedCopper = false
             var isSimulatedCopper = false
+            var hullPaddingMicrometers: Double?
             if let netName = triangle.netName {
                 let netIncluded = activity?.configurationIncludedNets.contains(netName) == true
                     || activity?.fullySaturatedNets.contains(netName) == true
                 isMuted = activity?.hasSelectedSimulation == true && !netIncluded
                 // Match layer copper above: every full simulation net seeds the slicing boundary.
-                isHullSeedCopper = activity?.hullExpandingNets.contains(netName) == true
+                hullPaddingMicrometers = activity?.hullPaddingByNet[netName]
+                isHullSeedCopper = hullPaddingMicrometers != nil
                 isSimulatedCopper = activity?.includedNets.contains(netName) == true
             }
             let a = Position3(Float(triangle.a.x), Float(triangle.a.y), Float(triangle.a.z))
@@ -1705,7 +1823,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
                                     positions: &positions, colors: &colors, normals: &normals,
                                     muteFlags: &muteFlags)
             if isHullSeedCopper {
-                regionSeedPositions.append(contentsOf: [a, b, c])
+                regionSeedPositionsByPadding[hullPaddingMicrometers!, default: []]
+                    .append(contentsOf: [a, b, c])
             }
             guard let netName = triangle.netName else { continue }
             let pickTarget = PickTarget.net(netName)
@@ -1730,6 +1849,50 @@ final class GeometryView: MTKView, MTKViewDelegate {
             Self.appendDisc(center: point, radius: plannedViaRadius, z: markerZ,
                             color: Self.plannedViaColor, positions: &positions, colors: &colors,
                             normals: &normals, muteFlags: &muteFlags)
+        }
+
+        // Every trace/hull intersection remains pickable even before it has a port role, but an
+        // inactive candidate is deliberately invisible. Configured roles use the same concentric
+        // blue/yellow/red language as pin ports.
+        for spot in activity?.hullCutPortSpots ?? [] {
+            let target = PickTarget.hullCutPort(identifier: spot.identifier, net: spot.netName)
+            let identifier: UInt32
+            if let existing = identifierByTarget[target] {
+                identifier = existing
+            } else {
+                identifier = nextPickingIdentifier
+                nextPickingIdentifier += 1
+                identifierByTarget[target] = identifier
+                targetsByIdentifier[identifier] = target
+            }
+            var discPositions: [Position3] = []
+            var discColors: [SIMD4<Float>] = []
+            var discNormals: [Position3] = []
+            var discMuteFlags: [Float] = []
+            Self.appendDisc(center: spot.position, radius: Self.absorbingPinMarkerRadius, z: markerZ,
+                            color: Self.absorbingPinColor, positions: &discPositions, colors: &discColors,
+                            normals: &discNormals, muteFlags: &discMuteFlags)
+            if spot.absorbing {
+                positions.append(contentsOf: discPositions)
+                colors.append(contentsOf: discColors)
+                normals.append(contentsOf: discNormals)
+                muteFlags.append(contentsOf: discMuteFlags)
+            }
+            priorityPickingPositions.append(contentsOf: discPositions)
+            priorityPickingIdentifiers.append(contentsOf: repeatElement(identifier, count: discPositions.count))
+            positionsByTarget[target, default: []].append(contentsOf: discPositions)
+            if spot.probed {
+                Self.appendDisc(center: spot.position, radius: Self.probedPinMarkerRadius,
+                                z: markerZ + markerDepthStep, color: Self.probedPinColor,
+                                positions: &positions, colors: &colors, normals: &normals,
+                                muteFlags: &muteFlags)
+            }
+            if spot.excited {
+                Self.appendDisc(center: spot.position, radius: Self.excitedPinMarkerRadius,
+                                z: markerZ + 2 * markerDepthStep, color: Self.excitedPinColor,
+                                positions: &positions, colors: &colors, normals: &normals,
+                                muteFlags: &muteFlags)
+            }
         }
 
         for port in preview.ports {
@@ -1788,38 +1951,40 @@ final class GeometryView: MTKView, MTKViewDelegate {
         let eligiblePassiveReferences = Set((activity?.passiveBridges ?? []).map(\.reference))
         var passiveReferencesInsideCut = Set<String>()
         if let activity {
-            let padding = Float((activity.hullPadding ?? 0) * Self.simUnitsPerMicrometer)
             func pointSegmentDistance(_ p: SIMD2<Float>, _ a: SIMD2<Float>, _ b: SIMD2<Float>) -> Float {
                 let ab = b - a
                 let lengthSquared = simd_length_squared(ab)
                 let t = lengthSquared > 0 ? max(0, min(1, simd_dot(p - a, ab) / lengthSquared)) : 0
                 return simd_distance(p, a + t * ab)
             }
-            func distanceToSeed(_ point: SIMD2<Float>) -> Float {
-                var best = Float.infinity
-                var index = 0
-                while index + 2 < regionSeedPositions.count {
-                    let a = SIMD2<Float>(regionSeedPositions[index].x, regionSeedPositions[index].y)
-                    let b = SIMD2<Float>(regionSeedPositions[index + 1].x, regionSeedPositions[index + 1].y)
-                    let c = SIMD2<Float>(regionSeedPositions[index + 2].x, regionSeedPositions[index + 2].y)
-                    let ab = b - a
-                    let bc = c - b
-                    let ca = a - c
-                    let ap = point - a
-                    let bp = point - b
-                    let cp = point - c
-                    let crosses = [ab.x * ap.y - ab.y * ap.x,
-                                   bc.x * bp.y - bc.y * bp.x,
-                                   ca.x * cp.y - ca.y * cp.x]
-                    let inside = crosses.allSatisfy { $0 >= 0 } || crosses.allSatisfy { $0 <= 0 }
-                    if inside { return 0 }
-                    best = min(best, min(pointSegmentDistance(point, a, b),
-                                         min(pointSegmentDistance(point, b, c),
-                                             pointSegmentDistance(point, c, a))))
-                    if best <= padding { return best }
-                    index += 3
+            func pointIsInsideCut(_ point: SIMD2<Float>) -> Bool {
+                for (paddingMicrometers, positions) in regionSeedPositionsByPadding {
+                    let padding = Float(paddingMicrometers * Self.simUnitsPerMicrometer)
+                    var index = 0
+                    while index + 2 < positions.count {
+                        let a = SIMD2<Float>(positions[index].x, positions[index].y)
+                        let b = SIMD2<Float>(positions[index + 1].x, positions[index + 1].y)
+                        let c = SIMD2<Float>(positions[index + 2].x, positions[index + 2].y)
+                        let ab = b - a
+                        let bc = c - b
+                        let ca = a - c
+                        let ap = point - a
+                        let bp = point - b
+                        let cp = point - c
+                        let crosses = [ab.x * ap.y - ab.y * ap.x,
+                                       bc.x * bp.y - bc.y * bp.x,
+                                       ca.x * cp.y - ca.y * cp.x]
+                        if crosses.allSatisfy({ $0 >= 0 }) || crosses.allSatisfy({ $0 <= 0 }) {
+                            return true
+                        }
+                        let distance = min(pointSegmentDistance(point, a, b),
+                                           min(pointSegmentDistance(point, b, c),
+                                               pointSegmentDistance(point, c, a)))
+                        if distance <= padding { return true }
+                        index += 3
+                    }
                 }
-                return best
+                return false
             }
             func pinInsideCut(reference: String, pad: String, net: String) -> Bool {
                 if activity.includedNets.contains(net) { return true }
@@ -1827,7 +1992,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
                                                         in: positionsByTarget),
                       let center = Self.centroid(of: pinPositions)
                 else { return false }
-                return distanceToSeed(SIMD2<Float>(center.x, center.y)) <= padding
+                return pointIsInsideCut(SIMD2<Float>(center.x, center.y))
             }
             for bridge in activity.passiveBridges
                 where pinInsideCut(reference: bridge.reference, pad: bridge.firstPad, net: bridge.firstNet)
@@ -1890,9 +2055,13 @@ final class GeometryView: MTKView, MTKViewDelegate {
         boardMuteFlagBuffer = muteFlags.isEmpty ? nil : device.makeBuffer(
             bytes: muteFlags, length: MemoryLayout<Float>.stride * muteFlags.count)
 
-        regionSeedVertexCount = regionSeedPositions.count
-        regionSeedPositionBuffer = regionSeedPositions.isEmpty ? nil : device.makeBuffer(
-            bytes: regionSeedPositions, length: MemoryLayout<Position3>.stride * regionSeedPositions.count)
+        regionSeedGroups = regionSeedPositionsByPadding.compactMap { padding, positions in
+            guard !positions.isEmpty, let buffer = device.makeBuffer(
+                bytes: positions, length: MemoryLayout<Position3>.stride * positions.count)
+            else { return nil }
+            return RegionSeedGroup(paddingMicrometers: padding, positionBuffer: buffer,
+                                   vertexCount: positions.count)
+        }.sorted { $0.paddingMicrometers < $1.paddingMicrometers }
 
         // Record the split before appending pins. pick(at:) submits the two ranges separately so
         // the pin range can receive its small, explicit depth bias.
@@ -1955,7 +2124,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
 
         var positions: [Position3] = []
         switch selectedTarget {
-        case .pin, .component:
+        case .pin, .component, .hullCutPort:
             positions = pickPositionsByTarget[selectedTarget] ?? []
         case let .net(selectedNet):
             for (target, targetPositions) in pickPositionsByTarget where target.netName == selectedNet {
@@ -2337,21 +2506,24 @@ final class GeometryView: MTKView, MTKViewDelegate {
         // The only cross-net graph edges are real two-pin passives. Net membership was filtered by
         // the controller; finish the same spatial test as the real slicer here so a passive on a
         // broad included/ground net cannot connect the activity graph from outside the cut area.
-        let cutPadding = Float((activity.hullPadding ?? 0) * Self.simUnitsPerMicrometer)
-        let hullLandmarks = landmarks.filter { activity.hullExpandingNets.contains($0.net) }
         func landmarkIsInsideCut(_ landmark: ActivityLandmark) -> Bool {
             if activity.includedNets.contains(landmark.net) { return true }
             for net in activity.hullExpandingNets {
+                let cutPadding = Float((activity.hullPaddingByNet[net] ?? 0) * Self.simUnitsPerMicrometer)
                 for segment in segmentsByNet[net] ?? []
                     where projection(ofX: landmark.x, y: landmark.y, onto: segment).distance <= cutPadding {
                     return true
                 }
+                if landmarks.contains(where: {
+                    guard $0.net == net else { return false }
+                    let dx = landmark.x - $0.x
+                    let dy = landmark.y - $0.y
+                    return (dx * dx + dy * dy).squareRoot() <= cutPadding
+                }) {
+                    return true
+                }
             }
-            return hullLandmarks.contains {
-                let dx = landmark.x - $0.x
-                let dy = landmark.y - $0.y
-                return (dx * dx + dy * dy).squareRoot() <= cutPadding
-            }
+            return false
         }
         for bridge in activity.passiveBridges {
             let firstKey = ActivityLandmarkKey.pin(reference: bridge.reference, number: bridge.firstPad)

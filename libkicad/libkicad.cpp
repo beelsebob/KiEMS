@@ -2,8 +2,10 @@
 #include "libkicad_result.hpp"
 
 #include <cstdint>
+#include <cerrno>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -282,6 +284,39 @@ struct BoardCacheEntry {
 
 std::optional<BoardCacheEntry> g_boardCache;
 
+std::optional<std::string> _unreadableFileError(const std::string& path, const char* description) {
+    if (path.empty()) {
+        return std::string("No ") + description + " file was specified";
+    }
+
+    std::error_code statusError;
+    const std::filesystem::file_status status = std::filesystem::status(path, statusError);
+    if (statusError) {
+        if (statusError == std::errc::no_such_file_or_directory) {
+            return "The KiCad " + std::string(description) + " file does not exist: \"" + path + "\"";
+        }
+        return "Cannot access the KiCad " + std::string(description) + " file \"" + path +
+               "\": " + statusError.message();
+    }
+    if (!std::filesystem::exists(status)) {
+        return "The KiCad " + std::string(description) + " file does not exist: \"" + path + "\"";
+    }
+    if (!std::filesystem::is_regular_file(status)) {
+        return "The KiCad " + std::string(description) + " path is not a regular file: \"" + path + "\"";
+    }
+
+    errno = 0;
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream.is_open()) {
+        const std::string reason = errno != 0
+            ? std::error_code(errno, std::generic_category()).message()
+            : "permission denied or the file is unavailable";
+        return "Cannot read the KiCad " + std::string(description) + " file \"" + path +
+               "\": " + reason;
+    }
+    return std::nullopt;
+}
+
 // Shared board-loading sequence: wx init, SETTINGS_MANAGER project load, PCB_IO_KICAD_SEXPR board
 // load, HEADLESS_PCB_CONTEXT construction (this is what wires BOARD::SetProject(), needed before
 // any netclass query -- see netsInNetClassRaw). Bypasses PCB_IO_MGR's format registry (which
@@ -292,6 +327,15 @@ std::optional<BoardCacheEntry> g_boardCache;
 std::optional<LoadedBoard> _loadBoard(const std::string& projectPath, const std::string& boardPath,
                                        std::string& error) {
     std::unique_lock<std::mutex> lock(g_kicadMutex);
+
+    if (auto accessError = _unreadableFileError(projectPath, "project")) {
+        error = std::move(*accessError);
+        return std::nullopt;
+    }
+    if (auto accessError = _unreadableFileError(boardPath, "board")) {
+        error = std::move(*accessError);
+        return std::nullopt;
+    }
 
     bool wxInitialized = _ensureWxInitialized();
     if (!wxInitialized) {
@@ -327,7 +371,16 @@ std::optional<LoadedBoard> _loadBoard(const std::string& projectPath, const std:
     SETTINGS_MANAGER& settingsManager = Pgm().GetSettingsManager();
     wxString wxProjectPath = wxString::FromUTF8(projectPath);
 
-    bool projectLoaded = settingsManager.LoadProject(wxProjectPath);
+    bool projectLoaded = false;
+    try {
+        projectLoaded = settingsManager.LoadProject(wxProjectPath);
+    } catch (const std::exception& exception) {
+        error = "Could not load the KiCad project file \"" + projectPath + "\": " + exception.what();
+        return std::nullopt;
+    } catch (...) {
+        error = "Could not load the KiCad project file \"" + projectPath + "\"";
+        return std::nullopt;
+    }
     if (!projectLoaded) {
         error = "LoadProject failed";
         return std::nullopt;
@@ -341,7 +394,16 @@ std::optional<LoadedBoard> _loadBoard(const std::string& projectPath, const std:
 
     PCB_IO_KICAD_SEXPR plugin;
     wxString wxBoardPath = wxString::FromUTF8(boardPath);
-    std::unique_ptr<BOARD> board(plugin.LoadBoard(wxBoardPath, nullptr, nullptr, project));
+    std::unique_ptr<BOARD> board;
+    try {
+        board.reset(plugin.LoadBoard(wxBoardPath, nullptr, nullptr, project));
+    } catch (const std::exception& exception) {
+        error = "Could not load the KiCad board file \"" + boardPath + "\": " + exception.what();
+        return std::nullopt;
+    } catch (...) {
+        error = "Could not load the KiCad board file \"" + boardPath + "\"";
+        return std::nullopt;
+    }
     if (!board) {
         error = "LoadBoard failed";
         return std::nullopt;

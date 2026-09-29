@@ -7,6 +7,8 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+@class KicadHullCutTracePoint;
+
 @interface KicadFootprintPin : NSObject
 @property (nonatomic, copy, readonly) NSString* number;
 /// Empty if the pad has no assigned schematic pin function.
@@ -30,6 +32,18 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, readonly) NSArray<NSValue*>* placedPositions;
 @property (nonatomic, copy, readonly) NSArray<NSValue*>* rejectedPositions;
 @property (nonatomic, readonly) double annularRingDiameter;
+@property (nonatomic, copy, readonly) NSArray<KicadHullCutTracePoint*>* hullCutTracePoints;
+@end
+
+/// A routed trace centreline crossing the simulation hull. Position is the visible/clickable
+/// boundary point; inwardDirection points along retained copper.
+@interface KicadHullCutTracePoint : NSObject
+@property (nonatomic, copy, readonly) NSString* identifier;
+@property (nonatomic, copy, readonly) NSString* netName;
+@property (nonatomic, copy, readonly) NSString* layerName;
+@property (nonatomic, readonly) NSPoint position;
+@property (nonatomic, readonly) double inwardDirection;
+@property (nonatomic, readonly) double traceWidth;
 @end
 
 /// Immutable configuration snapshot created cheaply on the main thread, then evaluated off-thread.

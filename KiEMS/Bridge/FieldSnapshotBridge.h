@@ -6,8 +6,30 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// One captured instant's low-resolution playback energy state. Full-resolution detail remains in
-/// independently compressed storage tiles and is not decoded by ordinary playback.
+/// One full-resolution detail tile decoded for a preview cell. Tiles are emitted in the persisted
+/// greatest-variation-first order and contain edge-aware dimensions (normally 16x16x2).
+@interface EMSFieldFrameRefinement : NSObject
+
+@property (nonatomic, readonly) NSUInteger previewCellIndex;
+@property (nonatomic, readonly) NSUInteger nx;
+@property (nonatomic, readonly) NSUInteger ny;
+@property (nonatomic, readonly) NSUInteger nz;
+@property (nonatomic, copy, readonly) NSData *cellEnergyData;
+
+@end
+
+/// A playback-ready frame: the complete low-resolution image plus as many prioritized detail tiles
+/// as could be decoded within the caller's preparation budget.
+@interface EMSDecodedFieldFrame : NSObject
+
+@property (nonatomic, copy, readonly) NSData *previewEnergyData;
+@property (nonatomic, copy, readonly) NSArray<EMSFieldFrameRefinement *> *refinements;
+@property (nonatomic, readonly, getter=isFullyDecoded) BOOL fullyDecoded;
+
+@end
+
+/// One captured instant's playback energy state. Its preview is always available; normal playback
+/// can also attach a bounded set of independently decoded full-resolution detail tiles.
 @interface EMSFieldFrame : NSObject
 
 @property (nonatomic, readonly) NSUInteger timestep;
@@ -20,12 +42,19 @@ NS_ASSUME_NONNULL_BEGIN
 /// is loaded from disk for this frame only; accessing another frame does not retain this one.
 @property (nonatomic, copy, readonly) NSData *cellEnergyData;
 
+/// Returns the same low-resolution data as cellEnergyData together with any detail prepared by the
+/// playback lookahead. A cold/scrubbed frame is decoded without detail so direct seeking remains
+/// responsive; normal playback calls prepareWithBudget: one frame ahead.
+@property (nonatomic, strong, readonly) EMSDecodedFieldFrame *decodedFrame;
+
 @end
 
-/// Playback hint. Preview frames are small and currently streamed when displayed, so this is a
-/// no-op and—critically—never triggers a full-resolution prefetch.
+/// Asynchronously prepares this frame. The preview is always decoded first, then full-resolution
+/// tiles are decoded in greatest-variation-first order until `seconds` has elapsed.
 @interface EMSFieldFrame (Prefetch)
-- (void)prefetch;
+- (void)prepareWithBudget:(NSTimeInterval)seconds;
+- (void)prepareWithBudget:(NSTimeInterval)seconds
+                completion:(void (^ _Nullable)(BOOL fullyDecoded))completion;
 @end
 
 /// Everything a 3D field/energy viewer needs, in the same board-relative simulation-unit frame as
@@ -42,6 +71,20 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) NSUInteger nx;
 @property (nonatomic, readonly) NSUInteger ny;
 @property (nonatomic, readonly) NSUInteger nz;
+
+/// Full-resolution grid metadata used to place independently refined preview cells.
+@property (nonatomic, readonly) NSUInteger fullNx;
+@property (nonatomic, readonly) NSUInteger fullNy;
+@property (nonatomic, readonly) NSUInteger fullNz;
+@property (nonatomic, readonly) NSUInteger previewFactorX;
+@property (nonatomic, readonly) NSUInteger previewFactorY;
+@property (nonatomic, readonly) NSUInteger previewFactorZ;
+@property (nonatomic, copy, readonly) NSArray<NSNumber *> *fullLineX;
+@property (nonatomic, copy, readonly) NSArray<NSNumber *> *fullLineY;
+@property (nonatomic, copy, readonly) NSArray<NSNumber *> *fullLineZ;
+/// Full-resolution X-fastest XY domain mask. Zero-valued nodes are external to the CPML and must
+/// never be rendered as carrying field energy.
+@property (nonatomic, copy, readonly) NSData *fullDomainXYClassData;
 
 /// Primary (E) mesh sample positions along each axis -- `lineX.count == nx`, etc., simulation
 /// units, same absolute (Edge_Cuts-relative) frame as EMSGeometryPreview's own gridLinesX/Y.

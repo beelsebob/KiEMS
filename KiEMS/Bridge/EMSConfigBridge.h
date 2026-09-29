@@ -57,6 +57,9 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 /// termination (see that method's own doc comment) without the net itself becoming
 /// port/probe/excitation-eligible or entering resolvedNets().
 @property (nonatomic) EMSNetInclusionLevel inclusionLevel;
+/// Per-entry hull expansion in micrometers. Zero still contributes: the hull follows the copper's
+/// edge. Ignored while inclusionLevel is GeometryOnly.
+@property (nonatomic) double hullPadding;
 /// Populated depending on kind: netClass for .NetClass, net for .Net, footprintReference+pins for
 /// .FootprintPin. Setting the wrong one for the current kind is harmless (it's just unused until
 /// kind changes to match) -- to_json()/kiems only ever reads the field matching kind.
@@ -150,6 +153,8 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 
 @property (nonatomic, copy) NSString *footprintReference;
 @property (nonatomic, copy) NSString *pin;
+/// Non-nil for an excitation attached to a hull-cut trace port instead of a component pin.
+@property (nonatomic, copy, nullable) NSString *hullCutPortID;
 
 @property (nonatomic) BOOL isMain;
 @property (nonatomic) double startTime;
@@ -159,6 +164,22 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 @property (nonatomic, nullable) NSNumber *frequency;
 @property (nonatomic, nullable) NSNumber *amplitude;
 
+@end
+
+
+@interface EMSHullCutPortBridge : NSObject
+@property (nonatomic, copy, readonly) NSString *identifier;
+@property (nonatomic, copy, readonly) NSString *netName;
+@property (nonatomic, copy, readonly) NSString *layerName;
+@property (nonatomic, readonly) double x;
+@property (nonatomic, readonly) double y;
+@property (nonatomic, readonly) double direction;
+@property (nonatomic, readonly) double width;
+@property (nonatomic, readonly) double length;
+@property (nonatomic) NSInteger plane;
+@property (nonatomic) double impedance;
+@property (nonatomic) BOOL probe;
+@property (nonatomic) BOOL absorbSignal;
 @end
 
 /// One SimulationConfig within an EMSConfig. Never holds a raw pointer into the parent's C++
@@ -172,7 +193,6 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 /// The net or net-class name ground_net selects, depending on groundNetKind.
 @property (nonatomic, copy, nullable) NSString *groundNetName;
 
-@property (nonatomic) double hullPadding;
 @property (nonatomic) double viaEdgeDistance;
 @property (nonatomic) double viaSpacing;
 /// Serial data rate used for eye-diagram synthesis. Existing configurations without an explicit
@@ -191,7 +211,17 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 
 @property (nonatomic, readonly) NSArray<EMSExcitationBridge *> *excitations;
 - (EMSExcitationBridge *)addExcitationForFootprint:(NSString *)footprint pin:(NSString *)pin;
+- (EMSExcitationBridge *)addExcitationForHullCutPort:(NSString *)identifier;
 - (void)removeExcitationAtIndex:(NSInteger)index;
+
+@property (nonatomic, readonly) NSArray<EMSHullCutPortBridge *> *hullCutPorts;
+- (EMSHullCutPortBridge *)addHullCutPortWithIdentifier:(NSString *)identifier
+                                                   net:(NSString *)net
+                                                 layer:(NSString *)layer
+                                                     x:(double)x y:(double)y
+                                             direction:(double)direction
+                                                 width:(double)width length:(double)length;
+- (void)removeHullCutPortAtIndex:(NSInteger)index;
 
 @end
 

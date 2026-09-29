@@ -349,7 +349,7 @@ StitchingViaPlacement placeStitchingVias(const SlicingConfig& slicing, const Pol
                            " um cut edge of the ground/power plane got no stitching vias at all (every "
                            "candidate position was rejected) -- this leaves that plane segment "
                            "electrically floating, which can trap energy and prevent FDTD convergence. "
-                           "Consider a smaller via, tighter via_spacing, or more hull_padding so the cut "
+                           "Consider a smaller via, tighter via_spacing, or more per-net hull padding so the cut "
                            "falls somewhere with room to stitch.");
             }
         }

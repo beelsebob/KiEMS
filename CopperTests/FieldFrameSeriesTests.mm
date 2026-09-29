@@ -32,6 +32,8 @@ copper::FieldFrameSeriesWriter::Header makeHeader() {
     for (std::uint32_t i = 0; i < kNx; ++i) header.lineX.push_back(static_cast<double>(i) * 1e-4);
     for (std::uint32_t i = 0; i < kNy; ++i) header.lineY.push_back(static_cast<double>(i) * 2e-4);
     for (std::uint32_t i = 0; i < kNz; ++i) header.lineZ.push_back(static_cast<double>(i) * 3e-4);
+    header.domainXYClass.assign(static_cast<std::size_t>(kNx) * kNy, 1);
+    header.domainXYClass.front() = 0;
     return header;
 }
 
@@ -106,6 +108,10 @@ std::expected<void, std::string> writeSyntheticFrame(copper::FieldFrameSeriesWri
     XCTAssertEqual(readHeader.lineX, header.lineX);
     XCTAssertEqual(readHeader.lineY, header.lineY);
     XCTAssertEqual(readHeader.lineZ, header.lineZ);
+    XCTAssertEqual(readHeader.domainXYClass.size(), header.domainXYClass.size());
+    for (std::size_t i = 0; i < std::min(readHeader.domainXYClass.size(), header.domainXYClass.size()); ++i) {
+        XCTAssertEqual(readHeader.domainXYClass[i], header.domainXYClass[i], @"domain class mismatch at %zu", i);
+    }
 
     for (std::uint32_t f = 0; f < kFrameCount; ++f) {
         std::vector<float> ex, ey, ez, hx, hy, hz;
@@ -222,6 +228,9 @@ std::expected<void, std::string> writeSyntheticFrame(copper::FieldFrameSeriesWri
     XCTAssertEqual(reader->previewHeader().nx, 2U);
     XCTAssertEqual(reader->previewHeader().ny, 2U);
     XCTAssertEqual(reader->previewHeader().nz, 2U);
+    XCTAssertEqual(reader->previewFactorX(), 16U);
+    XCTAssertEqual(reader->previewFactorY(), 16U);
+    XCTAssertEqual(reader->previewFactorZ(), 2U);
     std::vector<float> energy, pEx, ey, ez, hx, hy, hz;
     XCTAssertTrue(reader->readPreviewFrame(0, energy, pEx, ey, ez, hx, hy, hz).has_value());
     XCTAssertEqual(energy.size(), 8U);
@@ -231,6 +240,19 @@ std::expected<void, std::string> writeSyntheticFrame(copper::FieldFrameSeriesWri
     auto order = reader->readRefinementOrder(0);
     XCTAssertTrue(order.has_value());
     XCTAssertEqual(*order, std::vector<std::uint32_t>({0, 1, 2, 3, 4, 5, 6, 7}));
+
+    auto batch = reader->readPreviewCellDetails(0, *order);
+    XCTAssertTrue(batch.has_value());
+    XCTAssertEqual(batch->size(), order->size());
+    for (std::size_t i = 0; i < batch->size(); ++i) {
+        std::vector<float> dEx, dEy, dEz, dHx, dHy, dHz;
+        XCTAssertTrue(reader->readPreviewCellDetail(0, (*order)[i], dEx, dEy, dEz, dHx, dHy, dHz).has_value());
+        const std::array<const std::vector<float>*, 6> expected = {&dEx, &dEy, &dEz, &dHx, &dHy, &dHz};
+        XCTAssertEqual((*batch)[i].previewCellIndex, (*order)[i]);
+        for (std::size_t component = 0; component < expected.size(); ++component) {
+            XCTAssertEqual((*batch)[i].components[component], *expected[component]);
+        }
+    }
 }
 
 - (void)testRefinementOrderPrioritizesThePreviewCellWithMostSignedDetail {

@@ -4,6 +4,10 @@
 
 #include "kiems/importer.hpp"
 #include "kiems/board_slicing.hpp"
+#include "kiems/grid_gen.hpp"
+#include "kiems/constants.hpp"
+#include "kiems/net_name.hpp"
+#include <unordered_set>
 #include "libkicad/libkicad.hpp"
 #include "kiems/paths_config.hpp"
 
@@ -73,12 +77,31 @@ NSArray<NSString*>* toNSStringArray(const std::vector<std::string>& values) {
 @implementation KicadStitchingViaPlan
 - (instancetype)initWithPlacedPositions:(NSArray<NSValue*>*)placedPositions
                        rejectedPositions:(NSArray<NSValue*>*)rejectedPositions
-                     annularRingDiameter:(double)annularRingDiameter {
+                     annularRingDiameter:(double)annularRingDiameter
+                      hullCutTracePoints:(NSArray<KicadHullCutTracePoint*>*)hullCutTracePoints {
     self = [super init];
     if (self) {
         _placedPositions = [placedPositions copy];
         _rejectedPositions = [rejectedPositions copy];
         _annularRingDiameter = annularRingDiameter;
+        _hullCutTracePoints = [hullCutTracePoints copy];
+    }
+    return self;
+}
+@end
+
+@implementation KicadHullCutTracePoint
+- (instancetype)initWithIdentifier:(NSString*)identifier netName:(NSString*)netName
+                         layerName:(NSString*)layerName position:(NSPoint)position
+                    inwardDirection:(double)inwardDirection traceWidth:(double)traceWidth {
+    self = [super init];
+    if (self) {
+        _identifier = [identifier copy];
+        _netName = [netName copy];
+        _layerName = [layerName copy];
+        _position = position;
+        _inwardDirection = inwardDirection;
+        _traceWidth = traceWidth;
     }
     return self;
 }
@@ -102,10 +125,19 @@ NSArray<NSString*>* toNSStringArray(const std::vector<std::string>& values) {
             if (error != nil) *error = makeError("The selected simulation no longer exists");
             return nil;
         }
+        const PathsConfig paths = pathsForBoard(kicadPcbPath);
+        // Saved app documents intentionally do not persist the imported stackup. The real geometry
+        // pipeline imports it before slicing, but this lightweight setup-screen planning path used
+        // the document config directly. That left SlicingConfig::layerNames empty after reopening a
+        // document, so otherwise correctly-classified copper was never examined on any layer and
+        // the whole plan failed with "Involved nets have no copper on any layer".
+        if (auto imported = kiems::importStackup(paths, config); !imported) {
+            if (error != nil) *error = makeError(imported.error());
+            return nil;
+        }
         config = config.scaledToSimulationUnits();
         const kiems::SimulationConfig& simulation =
             config.simulations()[static_cast<std::size_t>(self.simulationIndex)];
-        const PathsConfig paths = pathsForBoard(kicadPcbPath);
         auto geometry = libkicad::boardGeometry(paths.kicadBoardPaths());
         if (!geometry) {
             if (error != nil) *error = makeError(geometry.error());
@@ -132,7 +164,7 @@ NSArray<NSString*>* toNSStringArray(const std::vector<std::string>& values) {
         const kiems::SlicingConfig slicing = kiems::SlicingConfig::from(simulation, config);
         auto sliced = kiems::sliceBoardForSimulation(
             slicing, *geometry, copper->involved, copper->geometryOnly,
-            copper->ground, existingVias, npthHoles);
+            copper->ground, copper->hullContributions, existingVias, npthHoles);
         if (!sliced) {
             if (error != nil) *error = makeError(sliced.error());
             return nil;
@@ -146,9 +178,61 @@ NSArray<NSString*>* toNSStringArray(const std::vector<std::string>& values) {
         for (const kiems::Position& position : sliced->failedStitchingViaAttempts) {
             [rejected addObject:[NSValue valueWithPoint:NSMakePoint(position.x(), position.y())]];
         }
+        std::unordered_set<kiems::NetName, kiems::NetNameHash> includedNets;
+        for (const kiems::InvolvedNetConfig& entry : simulation.involvedNets()) {
+            auto names = kiems::resolveInvolvedNetNames(paths, entry);
+            if (!names) {
+                if (error != nil) *error = makeError(names.error());
+                return nil;
+            }
+            for (const std::string& name : *names) {
+                includedNets.insert(kiems::NetName(name));
+            }
+        }
+        auto groundNames = kiems::resolveGroundNetNames(paths, simulation.groundNet());
+        if (!groundNames) {
+            if (error != nil) *error = makeError(groundNames.error());
+            return nil;
+        }
+        std::unordered_set<kiems::NetName, kiems::NetNameHash> groundNets;
+        for (const std::string& name : *groundNames) {
+            groundNets.insert(kiems::NetName(name));
+        }
+        auto tracks = libkicad::allTracks(paths.kicadBoardPaths());
+        if (!tracks) {
+            if (error != nil) *error = makeError(tracks.error());
+            return nil;
+        }
+        std::vector<kiems::grid_detail::HullCutTrace> traceInputs;
+        for (const auto& [netName, track] : *tracks) {
+            const kiems::NetName normalizedNet(netName);
+            if (!includedNets.contains(normalizedNet) || groundNets.contains(normalizedNet)) continue;
+            auto point = [&](double xMm, double yMm) {
+                return Cu::Position(xMm * 10000.0 - origin->xMin, yMm * 10000.0 - origin->yMin);
+            };
+            traceInputs.push_back({kiems::TraceSegment(point(track.startXMm, track.startYMm),
+                                                       point(track.endXMm, track.endYMm), "",
+                                                       track.widthMm * 10000.0),
+                                   netName, track.copperLayerName});
+        }
+        const auto cutPoints = kiems::grid_detail::hullCutTracePoints(traceInputs, sliced->cutoutLoops, 10.0);
+        NSMutableArray<KicadHullCutTracePoint*>* bridgedCutPoints =
+            [NSMutableArray arrayWithCapacity:cutPoints.size()];
+        for (const auto& point : cutPoints) {
+            const long long roundedX = std::llround(point.position.x());
+            const long long roundedY = std::llround(point.position.y());
+            const std::string identifier = point.netName + "|" + point.layerName + "|" +
+                std::to_string(roundedX) + "|" + std::to_string(roundedY);
+            [bridgedCutPoints addObject:[[KicadHullCutTracePoint alloc]
+                initWithIdentifier:@(identifier.c_str()) netName:@(point.netName.c_str())
+                layerName:@(point.layerName.c_str())
+                position:NSMakePoint(point.position.x(), point.position.y())
+                inwardDirection:point.inwardDirectionDegrees traceWidth:point.width]];
+        }
         return [[KicadStitchingViaPlan alloc]
             initWithPlacedPositions:placed rejectedPositions:rejected
-            annularRingDiameter:slicing.stitchingViaAnnularRingDiameter];
+            annularRingDiameter:slicing.stitchingViaAnnularRingDiameter
+            hullCutTracePoints:bridgedCutPoints];
     } catch (const std::exception& exception) {
         if (error != nil) *error = makeError(exception.what());
         return nil;

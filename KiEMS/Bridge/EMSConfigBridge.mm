@@ -7,6 +7,7 @@
 using kiems::EMSConfig;
 using kiems::ExcitationConfig;
 using kiems::GroundSelectorKind;
+using kiems::HullCutPortConfig;
 using kiems::InvolvedNetConfig;
 using kiems::NetInclusionLevel;
 using kiems::NetSelectorKind;
@@ -53,6 +54,15 @@ NSErrorDomain const EMSConfigErrorDomain = @"EMSConfigErrorDomain";
     NSInteger _index;
 }
 - (ExcitationConfig&)cxxExcitation;
+@end
+
+
+@interface EMSHullCutPortBridge () {
+@public
+    EMSSimulationBridge* _parentSim;
+    NSInteger _index;
+}
+- (HullCutPortConfig&)cxxPort;
 @end
 
 namespace {
@@ -145,6 +155,13 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
         case EMSNetInclusionLevelSimulationNet: self.cxxNet.setInclusionLevel(NetInclusionLevel::SimulationNet); break;
         case EMSNetInclusionLevelGeometryOnly: self.cxxNet.setInclusionLevel(NetInclusionLevel::GeometryOnly); break;
     }
+}
+
+- (double)hullPadding {
+    return self.cxxNet.hullPadding();
+}
+- (void)setHullPadding:(double)value {
+    self.cxxNet.setHullPadding(value);
 }
 
 - (nullable NSString*)netClass {
@@ -341,6 +358,14 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
     self.cxxExcitation.setPin(value.UTF8String);
 }
 
+- (nullable NSString*)hullCutPortID {
+    const auto& value = self.cxxExcitation.hullCutPortID();
+    return value.has_value() ? @(value->c_str()) : nil;
+}
+- (void)setHullCutPortID:(nullable NSString*)value {
+    self.cxxExcitation.setHullCutPortID(value != nil ? std::optional<std::string>(value.UTF8String) : std::nullopt);
+}
+
 - (BOOL)isMain {
     return self.cxxExcitation.isMain();
 }
@@ -387,6 +412,29 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
 
 @end
 
+
+@implementation EMSHullCutPortBridge
+- (HullCutPortConfig&)cxxPort {
+    return _parentSim.cxxSim.hullCutPorts().at(static_cast<std::size_t>(_index));
+}
+- (NSString*)identifier { return @(self.cxxPort.id().c_str()); }
+- (NSString*)netName { return @(self.cxxPort.net().c_str()); }
+- (NSString*)layerName { return @(self.cxxPort.layer().c_str()); }
+- (double)x { return self.cxxPort.x(); }
+- (double)y { return self.cxxPort.y(); }
+- (double)direction { return self.cxxPort.direction(); }
+- (double)width { return self.cxxPort.width(); }
+- (double)length { return self.cxxPort.length(); }
+- (NSInteger)plane { return self.cxxPort.plane(); }
+- (void)setPlane:(NSInteger)value { self.cxxPort.setPlane(static_cast<std::int32_t>(value)); }
+- (double)impedance { return self.cxxPort.impedance(); }
+- (void)setImpedance:(double)value { self.cxxPort.setImpedance(value); }
+- (BOOL)probe { return self.cxxPort.probe(); }
+- (void)setProbe:(BOOL)value { self.cxxPort.setProbe(value); }
+- (BOOL)absorbSignal { return self.cxxPort.absorbSignal(); }
+- (void)setAbsorbSignal:(BOOL)value { self.cxxPort.setAbsorbSignal(value); }
+@end
+
 @implementation EMSSimulationBridge
 
 - (SimulationConfig&)cxxSim {
@@ -425,13 +473,6 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
     } else {
         ground.setNet(value);
     }
-}
-
-- (double)hullPadding {
-    return self.cxxSim.hullPadding();
-}
-- (void)setHullPadding:(double)value {
-    self.cxxSim.setHullPadding(value);
 }
 
 - (double)viaEdgeDistance {
@@ -543,12 +584,67 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
     return [self _wrapperForExcitationIndex:static_cast<NSInteger>(self.cxxSim.excitations().size() - 1)];
 }
 
+- (EMSExcitationBridge*)addExcitationForHullCutPort:(NSString*)identifier {
+    ExcitationConfig excitation;
+    excitation.setHullCutPortID(std::string(identifier.UTF8String));
+    excitation.setIsMain(true);
+    excitation.setAmplitude(1.0);
+    const double lowestFrequency = std::min(_parent.frequencyStart, _parent.frequencyStop);
+    excitation.setDuration(lowestFrequency > 0 ? 5.0 / lowestFrequency : 0.0);
+    self.cxxSim.excitations().push_back(std::move(excitation));
+    return [self _wrapperForExcitationIndex:static_cast<NSInteger>(self.cxxSim.excitations().size() - 1)];
+}
+
 - (void)removeExcitationAtIndex:(NSInteger)index {
     auto& excitations = self.cxxSim.excitations();
     if (index < 0 || static_cast<std::size_t>(index) >= excitations.size()) {
         return;
     }
     excitations.erase(excitations.begin() + index);
+}
+
+- (EMSHullCutPortBridge*)_wrapperForHullCutPortIndex:(NSInteger)index {
+    EMSHullCutPortBridge* wrapper = [[EMSHullCutPortBridge alloc] init];
+    wrapper->_parentSim = self;
+    wrapper->_index = index;
+    return wrapper;
+}
+
+- (NSArray<EMSHullCutPortBridge*>*)hullCutPorts {
+    NSMutableArray<EMSHullCutPortBridge*>* result =
+        [NSMutableArray arrayWithCapacity:self.cxxSim.hullCutPorts().size()];
+    for (std::size_t i = 0; i < self.cxxSim.hullCutPorts().size(); ++i) {
+        [result addObject:[self _wrapperForHullCutPortIndex:static_cast<NSInteger>(i)]];
+    }
+    return result;
+}
+
+- (EMSHullCutPortBridge*)addHullCutPortWithIdentifier:(NSString*)identifier
+                                                   net:(NSString*)net layer:(NSString*)layer
+                                                     x:(double)x y:(double)y
+                                             direction:(double)direction
+                                                 width:(double)width length:(double)length {
+    HullCutPortConfig port;
+    port.setID(identifier.UTF8String);
+    port.setNet(net.UTF8String);
+    port.setLayer(layer.UTF8String);
+    port.setX(x);
+    port.setY(y);
+    port.setDirection(direction);
+    port.setWidth(width);
+    port.setLength(length);
+    self.cxxSim.hullCutPorts().push_back(std::move(port));
+    return [self _wrapperForHullCutPortIndex:static_cast<NSInteger>(self.cxxSim.hullCutPorts().size() - 1)];
+}
+
+- (void)removeHullCutPortAtIndex:(NSInteger)index {
+    auto& ports = self.cxxSim.hullCutPorts();
+    if (index < 0 || static_cast<std::size_t>(index) >= ports.size()) return;
+    const std::string identifier = ports[static_cast<std::size_t>(index)].id();
+    std::erase_if(self.cxxSim.excitations(), [&](const ExcitationConfig& excitation) {
+        return excitation.hullCutPortID().has_value() && *excitation.hullCutPortID() == identifier;
+    });
+    ports.erase(ports.begin() + index);
 }
 
 @end

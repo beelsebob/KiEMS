@@ -41,7 +41,8 @@ std::expected<SimulationGeometry, std::string> generateGeometry(const Simulation
 
     const SlicingConfig slicing = SlicingConfig::from(data.configuration(), config);
     auto sliced = sliceBoardForSimulation(slicing, *geometry, copper->involved,
-                                           copper->geometryOnly, copper->ground, existingVias, npthHoles,
+                                           copper->geometryOnly, copper->ground, copper->hullContributions,
+                                           existingVias, npthHoles,
                                            onProgress);
     if (!sliced) {
         return std::unexpected(sliced.error());

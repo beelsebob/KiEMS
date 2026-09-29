@@ -141,6 +141,19 @@ std::expected<void, std::string> writeDoubleArrayDataset(hid_t file, const char*
     return {};
 }
 
+std::expected<void, std::string> writeUInt8ArrayDataset(hid_t file, const char* name,
+                                                         const std::vector<std::uint8_t>& values) {
+    const hsize_t dims[1] = {values.size()};
+    HId space(H5Screate_simple(1, dims, nullptr), H5Sclose);
+    HId dataset(H5Dcreate2(file, name, H5T_NATIVE_UINT8, space.get(), H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT),
+                H5Dclose);
+    if (!space.valid() || !dataset.valid() ||
+        H5Dwrite(dataset.get(), H5T_NATIVE_UINT8, H5S_ALL, H5S_ALL, H5P_DEFAULT, values.data()) < 0) {
+        return std::unexpected(std::string("Could not write ") + name);
+    }
+    return {};
+}
+
 } // namespace
 
 /// Every open HDF5 handle this writer holds for the file's lifetime, plus running frame count.
@@ -209,6 +222,10 @@ std::expected<FieldFrameSeriesWriter, std::string> FieldFrameSeriesWriter::creat
     if (header.lineX.size() != header.nx || header.lineY.size() != header.ny || header.lineZ.size() != header.nz) {
         return std::unexpected("FieldFrameSeriesWriter::create: lineX/Y/Z must have exactly nx/ny/nz entries");
     }
+    const std::size_t xyCount = static_cast<std::size_t>(header.nx) * header.ny;
+    if (!header.domainXYClass.empty() && header.domainXYClass.size() != xyCount) {
+        return std::unexpected("FieldFrameSeriesWriter::create: domainXYClass must be empty or contain nx*ny entries");
+    }
     if (chunkFrames == 0) {
         chunkFrames = 1;
     }
@@ -260,7 +277,7 @@ std::expected<FieldFrameSeriesWriter, std::string> FieldFrameSeriesWriter::creat
     const hid_t file = impl->file.get();
 
     // Root attributes.
-    if (auto r = writeScalarAttribute<std::int32_t>(file, "format_version", H5T_NATIVE_INT32, 3); !r) return std::unexpected(r.error());
+    if (auto r = writeScalarAttribute<std::int32_t>(file, "format_version", H5T_NATIVE_INT32, 4); !r) return std::unexpected(r.error());
     if (auto r = writeStringAttribute(file, "simulation_name", header.simulationName); !r) return std::unexpected(r.error());
     if (auto r = writeScalarAttribute<std::int32_t>(file, "excited_port", H5T_NATIVE_INT32, header.excitedPort); !r) return std::unexpected(r.error());
     if (auto r = writeScalarAttribute<std::int32_t>(file, "nx", H5T_NATIVE_INT32, static_cast<std::int32_t>(header.nx)); !r) return std::unexpected(r.error());
@@ -285,6 +302,10 @@ std::expected<FieldFrameSeriesWriter, std::string> FieldFrameSeriesWriter::creat
         if (auto r = writeDoubleArrayDataset(file, "/grid/line_x", header.lineX); !r) return std::unexpected(r.error());
         if (auto r = writeDoubleArrayDataset(file, "/grid/line_y", header.lineY); !r) return std::unexpected(r.error());
         if (auto r = writeDoubleArrayDataset(file, "/grid/line_z", header.lineZ); !r) return std::unexpected(r.error());
+        const std::vector<std::uint8_t> rectangularDomain = header.domainXYClass.empty()
+            ? std::vector<std::uint8_t>(xyCount, 1) : header.domainXYClass;
+        if (auto r = writeUInt8ArrayDataset(file, "/grid/domain_xy_class", rectangularDomain); !r)
+            return std::unexpected(r.error());
     }
 
     // The viewer normally reads only this small pyramid base. Energy is max pooled so a thin,

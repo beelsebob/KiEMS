@@ -110,7 +110,7 @@ struct GeometryPBRUniforms {
     float4 lightDirection;
     float2 regionWorldMin;
     float2 regionWorldInverseSize;
-    float hullPaddingPixels;
+    float regionMaskThreshold;
 };
 
 struct GeometryPBRVertexOut {
@@ -150,14 +150,14 @@ fragment float4 geometry_pbr_fragment(GeometryPBRVertexOut in [[stage_in]],
     // applying the same "40% saturation/value" dim either reason uses.
     const bool forceInsideRegion = in.muteFlag < -0.5;
     bool dimmed = in.muteFlag > 0.5;
-    if (uniforms.hullPaddingPixels >= 0.0 && !forceInsideRegion) {
+    if (uniforms.regionMaskThreshold >= 0.0 && !forceInsideRegion) {
         constexpr sampler regionSampler(coord::normalized, filter::linear, address::clamp_to_edge);
         float2 uv = (in.worldPosition.xy - uniforms.regionWorldMin) * uniforms.regionWorldInverseSize;
         if (any(uv < 0.0) || any(uv > 1.0)) {
             dimmed = true;
         } else {
-            float regionDistanceValue = float(regionDistance.sample(regionSampler, uv).r);
-            dimmed = dimmed || regionDistanceValue > uniforms.hullPaddingPixels;
+            float regionMaskValue = float(regionDistance.sample(regionSampler, uv).r);
+            dimmed = dimmed || regionMaskValue < uniforms.regionMaskThreshold;
         }
     }
     float4 baseColor = in.baseColor;
@@ -220,6 +220,22 @@ vertex RegionSeedVertexOut board_region_seed_vertex(uint vertexID [[vertex_id]],
 
 fragment half board_region_seed_fragment() {
     return 1.0h;
+}
+
+struct RegionUnionUniforms {
+    float paddingPixels;
+};
+
+vertex float4 board_region_union_vertex(uint vertexID [[vertex_id]]) {
+    constexpr float2 positions[] = {float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0)};
+    return float4(positions[vertexID], 0.0, 1.0);
+}
+
+fragment half board_region_union_fragment(float4 position [[position]],
+                                           constant RegionUnionUniforms& uniforms [[buffer(0)]],
+                                           texture2d<half, access::read> distance [[texture(0)]]) {
+    uint2 pixel = min(uint2(position.xy), uint2(distance.get_width() - 1, distance.get_height() - 1));
+    return distance.read(pixel).r <= uniforms.paddingPixels ? 1.0h : 0.0h;
 }
 
 // MARK: - Geometry picking

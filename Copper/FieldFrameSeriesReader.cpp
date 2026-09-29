@@ -2,9 +2,13 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
+#include <cstring>
 #include <limits>
 #include <mutex>
+#include <thread>
+#include <blosc2.h>
 #include <hdf5.h>
 
 #include "Internal/CopperFieldFrameSignposts.hpp"
@@ -127,6 +131,22 @@ std::expected<std::vector<double>, std::string> readDoubleArrayDataset(hid_t fil
     return values;
 }
 
+std::expected<std::vector<std::uint8_t>, std::string> readUInt8ArrayDataset(
+    hid_t file, const char* name, std::size_t expectedCount) {
+    HId dataset(H5Dopen2(file, name, H5P_DEFAULT), H5Dclose);
+    if (!dataset.valid()) return std::unexpected(std::string("H5Dopen2 failed for ") + name);
+    HId space(H5Dget_space(dataset.get()), H5Sclose);
+    hsize_t dims[1] = {0};
+    if (!space.valid() || H5Sget_simple_extent_ndims(space.get()) != 1 ||
+        H5Sget_simple_extent_dims(space.get(), dims, nullptr) < 0 || dims[0] != expectedCount) {
+        return std::unexpected(std::string("Dataset extent mismatch for ") + name);
+    }
+    std::vector<std::uint8_t> values(expectedCount);
+    if (H5Dread(dataset.get(), H5T_NATIVE_UINT8, H5S_ALL, H5S_ALL, H5P_DEFAULT, values.data()) < 0)
+        return std::unexpected(std::string("H5Dread failed for ") + name);
+    return values;
+}
+
 /// Reads the published prefix of a small (one value per frame) 1D dataset eagerly. During SWMR the
 /// physical dataset may already contain a later, not-yet-published block, so an extent larger than
 /// frameCount is valid; only an extent smaller than the authoritative published count is corrupt.
@@ -183,6 +203,9 @@ struct FieldFrameSeriesReader::Impl {
     std::array<std::optional<FieldComponentRange>, 6> seriesComponentRange;
     mutable std::uint32_t cachedFrameIndex = std::numeric_limits<std::uint32_t>::max();
     mutable std::array<std::vector<float>, 6> cachedComponents;
+    mutable std::uint32_t cachedPreviewFrameIndex = std::numeric_limits<std::uint32_t>::max();
+    mutable std::vector<float> cachedPreviewEnergy;
+    mutable std::array<std::vector<float>, 6> cachedPreviewComponents;
     // Second, independent slot warmed by prefetchFrame() -- kept separate so a background read of
     // the next frame never evicts the frame still being displayed.
     mutable std::uint32_t prefetchedFrameIndex = std::numeric_limits<std::uint32_t>::max();
@@ -411,9 +434,9 @@ std::expected<FieldFrameSeriesReader, std::string> FieldFrameSeriesReader::open(
 
     auto formatVersion = readInt32Attribute(file, "format_version");
     if (!formatVersion) return std::unexpected(formatVersion.error());
-    if (*formatVersion != 3) {
+    if (*formatVersion != 4) {
         return std::unexpected("Obsolete field frame-series format_version " + std::to_string(*formatVersion) +
-                               "; rerun the simulation to create format version 3");
+                               "; rerun the simulation to create format version 4");
     }
     auto simulationName = readStringAttribute(file, "simulation_name");
     if (!simulationName) return std::unexpected(simulationName.error());
@@ -449,6 +472,10 @@ std::expected<FieldFrameSeriesReader, std::string> FieldFrameSeriesReader::open(
     impl->header.lineX = std::move(*lineX);
     impl->header.lineY = std::move(*lineY);
     impl->header.lineZ = std::move(*lineZ);
+    auto domainXYClass = readUInt8ArrayDataset(
+        file, "/grid/domain_xy_class", static_cast<std::size_t>(impl->header.nx) * impl->header.ny);
+    if (!domainXYClass) return std::unexpected(domainXYClass.error());
+    impl->header.domainXYClass = std::move(*domainXYClass);
 
     auto previewNx = readInt32Attribute(file, "preview_nx");
     auto previewNy = readInt32Attribute(file, "preview_ny");
@@ -576,6 +603,9 @@ std::expected<FieldFrameSeriesReader, std::string> FieldFrameSeriesReader::open(
 
 const FieldFrameSeriesWriter::Header& FieldFrameSeriesReader::header() const { return _impl->header; }
 const FieldFrameSeriesWriter::Header& FieldFrameSeriesReader::previewHeader() const { return _impl->previewHeader; }
+std::uint32_t FieldFrameSeriesReader::previewFactorX() const { return _impl->previewFactorX; }
+std::uint32_t FieldFrameSeriesReader::previewFactorY() const { return _impl->previewFactorY; }
+std::uint32_t FieldFrameSeriesReader::previewFactorZ() const { return _impl->previewFactorZ; }
 std::expected<std::uint32_t, std::string> FieldFrameSeriesReader::refresh() const {
     // Take the HDF5 lock first, without excluding cached reads while waiting for an in-progress
     // prefetch. No other path holds the cache mutex while acquiring hdf5Mutex.
@@ -637,14 +667,26 @@ std::expected<void, std::string> FieldFrameSeriesReader::readPreviewFrame(
     std::uint32_t index, std::vector<float>& energy, std::vector<float>& ex, std::vector<float>& ey,
     std::vector<float>& ez, std::vector<float>& hx, std::vector<float>& hy, std::vector<float>& hz) const {
     std::uint32_t availableFrameCount = 0;
+    const std::array<std::vector<float>*, 6> outputs = {&ex, &ey, &ez, &hx, &hy, &hz};
     {
         std::lock_guard lock(_impl->mutex);
         if (index >= _impl->frameCount) {
             return std::unexpected("FieldFrameSeriesReader::readPreviewFrame: index out of range");
         }
         availableFrameCount = _impl->frameCount;
+        if (_impl->cachedPreviewFrameIndex == index) {
+            energy = _impl->cachedPreviewEnergy;
+            for (std::size_t i = 0; i < outputs.size(); ++i) *outputs[i] = _impl->cachedPreviewComponents[i];
+            return {};
+        }
     }
-    return _impl->decodePreviewFrame(index, availableFrameCount, energy, {&ex, &ey, &ez, &hx, &hy, &hz});
+    auto decoded = _impl->decodePreviewFrame(index, availableFrameCount, energy, outputs);
+    if (!decoded) return decoded;
+    std::lock_guard lock(_impl->mutex);
+    _impl->cachedPreviewFrameIndex = index;
+    _impl->cachedPreviewEnergy = energy;
+    for (std::size_t i = 0; i < outputs.size(); ++i) _impl->cachedPreviewComponents[i] = *outputs[i];
+    return {};
 }
 
 std::expected<std::vector<std::uint32_t>, std::string>
@@ -702,6 +744,180 @@ std::expected<void, std::string> FieldFrameSeriesReader::readPreviewCellDetail(
                       std::min(impl.previewFactorY, impl.header.ny - y),
                       std::min(impl.previewFactorZ, impl.header.nz - z),
                       ex, ey, ez, hx, hy, hz);
+}
+
+std::expected<std::vector<FieldPreviewCellDetail>, std::string>
+FieldFrameSeriesReader::readPreviewCellDetails(
+    std::uint32_t frameIndex, const std::vector<std::uint32_t>& previewCellIndices) const {
+    if (previewCellIndices.empty()) return std::vector<FieldPreviewCellDetail>{};
+    Impl& impl = *_impl;
+    const std::uint64_t previewCellCount =
+        static_cast<std::uint64_t>(impl.previewHeader.nx) * impl.previewHeader.ny * impl.previewHeader.nz;
+    {
+        std::lock_guard lock(impl.mutex);
+        if (frameIndex >= impl.frameCount) return std::unexpected("Field detail frame is out of range");
+    }
+    for (const std::uint32_t cell : previewCellIndices) {
+        if (cell >= previewCellCount) return std::unexpected("Preview-cell detail index is outside the grid");
+    }
+
+    // Ensure the small signed preview is resident. Besides making ordinary playback cheap, this
+    // supplies the exact XOR baseline for reconstruction without asking HDF5 to decompress the
+    // whole preview chunk again for every tile batch.
+    bool previewIsCached = false;
+    {
+        std::lock_guard lock(impl.mutex);
+        previewIsCached = impl.cachedPreviewFrameIndex == frameIndex;
+    }
+    if (!previewIsCached) {
+        std::vector<float> energy, ex, ey, ez, hx, hy, hz;
+        auto preview = readPreviewFrame(frameIndex, energy, ex, ey, ez, hx, hy, hz);
+        if (!preview) return std::unexpected(preview.error());
+    }
+
+    struct RawTile {
+        std::array<std::vector<std::uint8_t>, 6> payloads;
+        std::array<std::uint32_t, 6> filterMasks{};
+    };
+    std::vector<RawTile> raw(previewCellIndices.size());
+    std::vector<FieldPreviewCellDetail> details(previewCellIndices.size());
+    std::vector<std::array<float, 6>> baselines(previewCellIndices.size());
+
+    {
+        std::lock_guard lock(impl.mutex);
+        if (impl.cachedPreviewFrameIndex != frameIndex) {
+            return std::unexpected("Preview cache changed while preparing field-detail batch");
+        }
+        for (std::size_t tileIndex = 0; tileIndex < previewCellIndices.size(); ++tileIndex) {
+            const std::uint32_t cell = previewCellIndices[tileIndex];
+            for (std::size_t component = 0; component < 6; ++component) {
+                baselines[tileIndex][component] = impl.cachedPreviewComponents[component][cell];
+            }
+        }
+    }
+
+    // HDF5 object access remains serialized for SWMR safety, but only long enough to copy each
+    // compressed chunk. The expensive Blosc2 decode happens below, outside this lock.
+    {
+        std::lock_guard hdf5Lock(impl.hdf5Mutex);
+        for (std::size_t tileIndex = 0; tileIndex < previewCellIndices.size(); ++tileIndex) {
+            const std::uint32_t cell = previewCellIndices[tileIndex];
+            const std::uint32_t px = cell % impl.previewHeader.nx;
+            const std::uint32_t yz = cell / impl.previewHeader.nx;
+            const std::uint32_t py = yz % impl.previewHeader.ny;
+            const std::uint32_t pz = yz / impl.previewHeader.ny;
+            const std::uint32_t x = px * impl.previewFactorX;
+            const std::uint32_t y = py * impl.previewFactorY;
+            const std::uint32_t z = pz * impl.previewFactorZ;
+            details[tileIndex].previewCellIndex = cell;
+            details[tileIndex].nx = std::min(impl.previewFactorX, impl.header.nx - x);
+            details[tileIndex].ny = std::min(impl.previewFactorY, impl.header.ny - y);
+            details[tileIndex].nz = std::min(impl.previewFactorZ, impl.header.nz - z);
+            const hsize_t offset[4] = {frameIndex, z, y, x};
+            for (std::size_t component = 0; component < 6; ++component) {
+                hsize_t storedBytes = 0;
+                if (H5Dget_chunk_storage_size(impl.component[component].get(), offset, &storedBytes) < 0 ||
+                    storedBytes == 0) {
+                    return std::unexpected(std::string("Could not size raw field-detail chunk from ") +
+                                           kComponentNames[component]);
+                }
+                auto& payload = raw[tileIndex].payloads[component];
+                payload.resize(static_cast<std::size_t>(storedBytes));
+                std::size_t readBytes = payload.size();
+                if (H5Dread_chunk(impl.component[component].get(), H5P_DEFAULT, offset,
+                                  &raw[tileIndex].filterMasks[component], payload.data(), &readBytes) < 0) {
+                    return std::unexpected(std::string("Could not read raw field-detail chunk from ") +
+                                           kComponentNames[component]);
+                }
+                payload.resize(readBytes);
+            }
+        }
+    }
+
+    std::atomic<std::size_t> nextTile{0};
+    std::atomic<bool> failed{false};
+    std::mutex errorMutex;
+    std::string error;
+    const unsigned int workerCount = std::min<unsigned int>(
+        static_cast<unsigned int>(previewCellIndices.size()),
+        std::max(1U, std::thread::hardware_concurrency()));
+    auto worker = [&] {
+        thread_local blosc2_context* context = [] {
+            blosc2_dparams params = BLOSC2_DPARAMS_DEFAULTS;
+            // Parallelism is across tiles here. Giving every tile another hardware-sized Blosc2
+            // pool would massively oversubscribe the machine.
+            params.nthreads = 1;
+            return blosc2_create_dctx(params);
+        }();
+        while (!failed.load(std::memory_order_relaxed)) {
+            const std::size_t tileIndex = nextTile.fetch_add(1, std::memory_order_relaxed);
+            if (tileIndex >= details.size()) break;
+            auto& detail = details[tileIndex];
+            const std::size_t actualCount = static_cast<std::size_t>(detail.nx) * detail.ny * detail.nz;
+            for (std::size_t component = 0; component < 6; ++component) {
+                const auto& payload = raw[tileIndex].payloads[component];
+                std::vector<std::uint32_t> decoded;
+                if ((raw[tileIndex].filterMasks[component] & 1U) != 0) {
+                    if (payload.size() % sizeof(std::uint32_t) != 0) {
+                        failed.store(true, std::memory_order_relaxed);
+                        std::lock_guard lock(errorMutex);
+                        error = "Unfiltered field-detail chunk has an invalid byte count";
+                        break;
+                    }
+                    decoded.resize(payload.size() / sizeof(std::uint32_t));
+                    std::memcpy(decoded.data(), payload.data(), payload.size());
+                } else {
+                    std::int32_t outputBytes = 0, encodedBytes = 0;
+                    if (context == nullptr ||
+                        blosc2_cbuffer_sizes(payload.data(), &outputBytes, &encodedBytes, nullptr) < 0 ||
+                        outputBytes <= 0 || static_cast<std::size_t>(outputBytes) % sizeof(std::uint32_t) != 0) {
+                        failed.store(true, std::memory_order_relaxed);
+                        std::lock_guard lock(errorMutex);
+                        error = "Could not inspect compressed field-detail chunk";
+                        break;
+                    }
+                    decoded.resize(static_cast<std::size_t>(outputBytes) / sizeof(std::uint32_t));
+                    const int result = blosc2_decompress_ctx(context, payload.data(), encodedBytes,
+                                                             decoded.data(), outputBytes);
+                    if (result != outputBytes) {
+                        failed.store(true, std::memory_order_relaxed);
+                        std::lock_guard lock(errorMutex);
+                        error = "Could not decompress field-detail chunk";
+                        break;
+                    }
+                }
+                const bool compactEdge = decoded.size() == actualCount;
+                const std::uint32_t strideX = compactEdge ? detail.nx : impl.previewFactorX;
+                const std::uint32_t strideY = compactEdge ? detail.ny : impl.previewFactorY;
+                auto& output = detail.components[component];
+                output.resize(actualCount);
+                for (std::uint32_t z = 0; z < detail.nz; ++z) {
+                    for (std::uint32_t y = 0; y < detail.ny; ++y) {
+                        for (std::uint32_t x = 0; x < detail.nx; ++x) {
+                            const std::size_t destination = x + static_cast<std::size_t>(detail.nx) *
+                                (y + static_cast<std::size_t>(detail.ny) * z);
+                            const std::size_t source = x + static_cast<std::size_t>(strideX) *
+                                (y + static_cast<std::size_t>(strideY) * z);
+                            if (source >= decoded.size()) {
+                                failed.store(true, std::memory_order_relaxed);
+                                std::lock_guard lock(errorMutex);
+                                error = "Decoded field-detail chunk has unexpected dimensions";
+                                break;
+                            }
+                            output[destination] = std::bit_cast<float>(decoded[source] ^
+                                std::bit_cast<std::uint32_t>(baselines[tileIndex][component]));
+                        }
+                    }
+                }
+            }
+        }
+    };
+    std::vector<std::jthread> workers;
+    workers.reserve(workerCount);
+    for (unsigned int i = 0; i < workerCount; ++i) workers.emplace_back(worker);
+    workers.clear(); // jthread joins here, before the failure check/result move.
+    if (failed.load(std::memory_order_relaxed)) return std::unexpected(error);
+    return details;
 }
 
 std::expected<void, std::string> FieldFrameSeriesReader::readRegion(
@@ -818,6 +1034,7 @@ void FieldFrameSeriesReader::clearFrameCache() const {
     std::lock_guard lock(impl.mutex);
     ++impl.cacheGeneration;
     impl.cachedFrameIndex = std::numeric_limits<std::uint32_t>::max();
+    impl.cachedPreviewFrameIndex = std::numeric_limits<std::uint32_t>::max();
     impl.prefetchedFrameIndex = std::numeric_limits<std::uint32_t>::max();
     // Swap with empty vectors rather than clear(): capacity is the expensive part and would
     // otherwise keep the full frame allocations resident after leaving/switching the viewer.
@@ -825,6 +1042,10 @@ void FieldFrameSeriesReader::clearFrameCache() const {
         std::vector<float>().swap(component);
     }
     for (std::vector<float>& component : impl.prefetchedComponents) {
+        std::vector<float>().swap(component);
+    }
+    std::vector<float>().swap(impl.cachedPreviewEnergy);
+    for (std::vector<float>& component : impl.cachedPreviewComponents) {
         std::vector<float>().swap(component);
     }
 }
