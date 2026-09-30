@@ -100,6 +100,13 @@ int main(int argc, char** argv) {
         writeError(simPath, result.error());
         return EXIT_FAILURE;
     }
+    // Simulation takes simulation-unit values, exactly as GeometryResult::build()/load() hand them
+    // to the in-process path -- the parsed config is still in file units (see
+    // EMSConfig::scaledToSimulationUnits()). Without this, every port, lumped component, via and
+    // grid setting (including the irregular domain's absorbing-ring cell size below) came out a
+    // factor of constants::unitMultiplier too small relative to the cached sliced geometry and grid
+    // lines, which are already in simulation units.
+    config = config.scaledToSimulationUnits();
 
     SimulationConfig* simConfig = nullptr;
     for (auto& sim : config.simulations()) {
