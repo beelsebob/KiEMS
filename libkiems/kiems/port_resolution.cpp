@@ -712,6 +712,32 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
         std::unordered_map<std::string, const InvolvedNetConfig*> netOwner;
         std::vector<std::string> orderedNets;
 
+        for (const InvolvedNetConfig& entry : sim.involvedNets()) {
+            // GeometryOnly-kind entries ("Included in Simulation") deliberately never reach this
+            // loop at all -- their whole point is to exist in the simulated geometry (handled
+            // entirely by board_slicing.cpp/grid_gen.cpp's own separate treatment) without becoming
+            // port/probe/excitation-eligible or entering resolvedNets(). Their pins can still get an
+            // absorb-only termination port, but that's handled entirely by the separate pass just
+            // below -- see its own doc comment. See NetInclusionLevel's own doc comment.
+            if (entry.inclusionLevel() == NetInclusionLevel::GeometryOnly) {
+                continue;
+            }
+            auto nets = resolveInvolvedNetNames(paths, entry);
+            if (!nets) return std::unexpected(std::move(nets).error());
+            for (const std::string& netName : *nets) {
+                const auto [it, inserted] = netOwner.emplace(netName, &entry);
+                if (!inserted) {
+                    return std::unexpected("Simulation \"" + sim.name() + "\": net \"" + _unescapeForDisplay(netName) +
+                                            "\" is claimed by more than one involved_nets entry");
+                }
+                orderedNets.push_back(netName);
+            }
+        }
+        if (orderedNets.empty()) {
+            return std::unexpected("Simulation \"" + sim.name() + "\": involved_nets resolved to zero nets");
+        }
+        sim.resolvedNets() = orderedNets;
+
         // GeometryOnly-kind entries ("Included in Simulation") never grow resolvedNets()/the hull --
         // that's still entirely handled by board_slicing.cpp/grid_gen.cpp's own separate treatment,
         // untouched by this pass -- but a pin explicitly marked absorb-only via setPinAbsorbOnly()
@@ -739,6 +765,11 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
             auto nets = resolveInvolvedNetNames(paths, entry);
             if (!nets) return std::unexpected(std::move(nets).error());
             for (const std::string& netName : *nets) {
+                // A broad geometry-only selector (typically a net class) can also cover a net that
+                // another entry fully involves. That net's pads get their real ports from the main
+                // per-pad loop below; terminating them here too would put a second lumped load on
+                // the same pad, doubling every result column and loading the driven port.
+                if (netOwner.contains(netName)) continue;
                 auto padsResult = libkicad::padsOnNet(paths.kicadBoardPaths(), netName);
                 if (!padsResult) return std::unexpected(std::move(padsResult).error());
                 for (const PadIdentity& pad : *padsResult) {
@@ -815,32 +846,6 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                 }
             }
         }
-
-        for (const InvolvedNetConfig& entry : sim.involvedNets()) {
-            // GeometryOnly-kind entries ("Included in Simulation") deliberately never reach this
-            // loop at all -- their whole point is to exist in the simulated geometry (handled
-            // entirely by board_slicing.cpp/grid_gen.cpp's own separate treatment) without becoming
-            // port/probe/excitation-eligible or entering resolvedNets(). Their pins can still get an
-            // absorb-only termination port, but that's handled entirely by the separate pass just
-            // above -- see its own doc comment. See NetInclusionLevel's own doc comment.
-            if (entry.inclusionLevel() == NetInclusionLevel::GeometryOnly) {
-                continue;
-            }
-            auto nets = resolveInvolvedNetNames(paths, entry);
-            if (!nets) return std::unexpected(std::move(nets).error());
-            for (const std::string& netName : *nets) {
-                const auto [it, inserted] = netOwner.emplace(netName, &entry);
-                if (!inserted) {
-                    return std::unexpected("Simulation \"" + sim.name() + "\": net \"" + _unescapeForDisplay(netName) +
-                                            "\" is claimed by more than one involved_nets entry");
-                }
-                orderedNets.push_back(netName);
-            }
-        }
-        if (orderedNets.empty()) {
-            return std::unexpected("Simulation \"" + sim.name() + "\": involved_nets resolved to zero nets");
-        }
-        sim.resolvedNets() = orderedNets;
 
         // Every pad targeted by a SimulationConfig-level excitation always gets a PortConfig (with
         // absorbSignal()==true) regardless of that net's own Probe/Absorb Signal selections -- see
