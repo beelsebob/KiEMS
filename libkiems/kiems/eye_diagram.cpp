@@ -10,26 +10,82 @@ namespace kiems {
 
 namespace {
 
-std::complex<double> interpolateTransfer(
+constexpr double kTwoPi = 6.283185307179586476925286766559;
+
+// The channel in polar form with its phase unwrapped along frequency. Interpolating real and
+// imaginary parts linearly cuts the chord across each sample's phase rotation (a delayed channel
+// rotates quickly), dipping the magnitude between samples; magnitude and unwrapped phase follow
+// the actual response.
+struct PolarTransfer {
+    std::vector<double> frequencies;
+    std::vector<double> magnitude;
+    std::vector<double> phase;
+};
+
+PolarTransfer makePolarTransfer(
     const std::vector<double>& frequencies,
-    const std::vector<std::complex<double>>& transferFunction,
-    double frequency) {
+    const std::vector<std::complex<double>>& transferFunction) {
+    PolarTransfer polar;
+    polar.frequencies = frequencies;
+    polar.magnitude.resize(frequencies.size());
+    polar.phase.resize(frequencies.size());
+    for (std::size_t f = 0; f < frequencies.size(); ++f) {
+        polar.magnitude[f] = std::abs(transferFunction[f]);
+        double phase = std::arg(transferFunction[f]);
+        if (f > 0) {
+            phase += kTwoPi * std::round((polar.phase[f - 1] - phase) / kTwoPi);
+        }
+        polar.phase[f] = phase;
+    }
+
+    // Simulated sweeps usually start well above DC, but most of an NRZ pattern's energy sits below
+    // the first sample. Holding the first complex value there applies that sample's delay-induced
+    // phase to every low-frequency bin, which scrambles the bit history into heavy false ISI.
+    // Instead the band below is extended as a pure delay down to a real DC gain, so the phase at
+    // the first sample must be the one consistent with the delay: the principal value only fixes
+    // it modulo 2*pi, so pick the branch nearest the delay implied by the phase slope.
+    if (frequencies.size() >= 2 && frequencies.front() > 0) {
+        const std::size_t slopeEnd = std::min<std::size_t>(frequencies.size() - 1, 4);
+        const double slope = (polar.phase[slopeEnd] - polar.phase[0]) /
+                             (frequencies[slopeEnd] - frequencies[0]);
+        if (std::isfinite(slope)) {
+            const double expected = slope * frequencies.front();
+            const double shift = kTwoPi * std::round((expected - polar.phase.front()) / kTwoPi);
+            for (double& phase : polar.phase) {
+                phase += shift;
+            }
+        }
+    }
+    return polar;
+}
+
+std::complex<double> interpolateTransfer(const PolarTransfer& transfer, double frequency) {
+    const std::vector<double>& frequencies = transfer.frequencies;
     if (frequency <= frequencies.front()) {
-        return transferFunction.front();
+        if (!(frequencies.front() > 0)) {
+            return std::polar(transfer.magnitude.front(), transfer.phase.front());
+        }
+        // Constant magnitude and linear phase from zero at DC: a pure delay matching the first
+        // sample. Magnitude is held because loss below the sweep cannot be less than at its start.
+        const double fraction = std::max(frequency, 0.0) / frequencies.front();
+        return std::polar(transfer.magnitude.front(), transfer.phase.front() * fraction);
     }
     if (frequency >= frequencies.back()) {
-        return transferFunction.back();
+        return std::polar(transfer.magnitude.back(), transfer.phase.back());
     }
     const auto upper = std::lower_bound(frequencies.begin(), frequencies.end(), frequency);
     const std::size_t upperIndex = static_cast<std::size_t>(upper - frequencies.begin());
     const std::size_t lowerIndex = upperIndex - 1;
     const double span = frequencies[upperIndex] - frequencies[lowerIndex];
     if (!(span > 0)) {
-        return transferFunction[lowerIndex];
+        return std::polar(transfer.magnitude[lowerIndex], transfer.phase[lowerIndex]);
     }
     const double fraction = (frequency - frequencies[lowerIndex]) / span;
-    return transferFunction[lowerIndex] +
-           (transferFunction[upperIndex] - transferFunction[lowerIndex]) * fraction;
+    const double magnitude = transfer.magnitude[lowerIndex] +
+                             (transfer.magnitude[upperIndex] - transfer.magnitude[lowerIndex]) * fraction;
+    const double phase = transfer.phase[lowerIndex] +
+                         (transfer.phase[upperIndex] - transfer.phase[lowerIndex]) * fraction;
+    return std::polar(magnitude, phase);
 }
 
 } // namespace
@@ -77,11 +133,12 @@ std::optional<EyeDiagramData> computeEyeDiagram(
     if (transformFrequencyCount < 2) {
         return std::nullopt;
     }
+    const PolarTransfer polarTransfer = makePolarTransfer(frequencies, transferFunction);
     std::vector<double> transformFrequencies(transformFrequencyCount);
     std::vector<std::complex<double>> resampledTransfer(transformFrequencyCount);
     for (std::size_t f = 0; f < transformFrequencyCount; ++f) {
         transformFrequencies[f] = static_cast<double>(f) * transformDf;
-        resampledTransfer[f] = interpolateTransfer(frequencies, transferFunction, transformFrequencies[f]);
+        resampledTransfer[f] = interpolateTransfer(polarTransfer, transformFrequencies[f]);
     }
 
     std::vector<std::complex<double>> spectrum = forwardTransform(source, transformFrequencies);

@@ -700,6 +700,40 @@ double triangulateLastCallArea(const std::vector<TriangulateCall>& sequence) {
     XCTAssertLessThanOrEqual(*mostCommon - *leastCommon, static_cast<std::size_t>(1));
 }
 
+- (void)testEyeDiagramDelayedChannelSweptAboveDC {
+    // A lossless 150 ps delay sampled only from 1 to 10 GHz, like a typical simulation sweep.
+    // Holding the 1 GHz complex value below the sweep used to close this eye to ~30%.
+    constexpr std::size_t frequencyCount = 1001;
+    constexpr double delay = 150e-12;
+    std::vector<double> frequencies(frequencyCount);
+    std::vector<std::complex<double>> transfer(frequencyCount);
+    for (std::size_t index = 0; index < frequencyCount; ++index) {
+        frequencies[index] = 1e9 + static_cast<double>(index) * 9e9 / static_cast<double>(frequencyCount - 1);
+        transfer[index] = std::polar(1.0, -2.0 * M_PI * frequencies[index] * delay);
+    }
+
+    const auto eye = kiems::computeEyeDiagram(frequencies, transfer, 5e9);
+    XCTAssertTrue(eye.has_value());
+    if (!eye.has_value()) {
+        return;
+    }
+    // Inner opening (half the gap between the lowest "1" and highest "0") at the best sample phase.
+    double innerOpening = -std::numeric_limits<double>::infinity();
+    for (std::size_t sample = 0; sample < eye->timeUI.size(); ++sample) {
+        double lowestOne = std::numeric_limits<double>::infinity();
+        double highestZero = -std::numeric_limits<double>::infinity();
+        for (const auto& trace : eye->traces) {
+            if (trace[sample] >= 0) {
+                lowestOne = std::min(lowestOne, trace[sample]);
+            } else {
+                highestZero = std::max(highestZero, trace[sample]);
+            }
+        }
+        innerOpening = std::max(innerOpening, 0.5 * (lowestOne - highestZero));
+    }
+    XCTAssertGreaterThan(innerOpening, 0.9);
+}
+
 - (void)testClassifyCopperForSimulationSplitsByNetInclusion {
     kiems::SimulationConfig sim;
     kiems::InvolvedNetConfig involved;
