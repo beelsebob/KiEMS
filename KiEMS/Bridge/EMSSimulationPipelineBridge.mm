@@ -1012,6 +1012,9 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
     // _simConfig is null until -ensurePrepared: has actually run (eg a simulation whose results
     // haven't been generated yet, selected before any job has queued/run for it) -- snapshots is
     // then still empty too (nothing in _fieldFrameSeries yet), so there's nothing to combine.
+    // Differential-pair entries are listed ahead of every single-ended series (the field viewer's
+    // selector shows them in this order).
+    NSMutableArray<EMSFieldSnapshot*>* combinedSnapshots = [NSMutableArray array];
     if (_simConfig != nullptr) {
         NSMutableDictionary<NSString*, EMSFieldSnapshot*>* refreshedCombinedCache =
             [NSMutableDictionary dictionaryWithCapacity:_simConfig->diffPairs().size()];
@@ -1064,7 +1067,7 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
                 combined = buildCombinedFieldSnapshot(legP, legN, name, excitedPort, 0.5, -0.5);
             }
             if (combined != nil) {
-                [snapshots addObject:combined];
+                [combinedSnapshots addObject:combined];
                 refreshedCombinedCache[pairKey] = combined;
             }
         }
@@ -1074,7 +1077,8 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
         }
     }
 
-    return [snapshots copy];
+    [combinedSnapshots addObjectsFromArray:snapshots];
+    return [combinedSnapshots copy];
 }
 
 - (void)invalidateFromStage:(EMSPipelineStage)stage {

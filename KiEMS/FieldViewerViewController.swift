@@ -542,6 +542,23 @@ final class FieldViewerViewController: NSViewController {
         if isPlaying { schedulePlaybackAdvance() }
     }
 
+    /// Left/right arrows step one frame at a time. FieldView doesn't handle keyDown, so arrow presses
+    /// while it (or the transport) is first responder travel up the responder chain to here.
+    override func keyDown(with event: NSEvent) {
+        let delta: Int
+        switch event.specialKey {
+        case .leftArrow?: delta = -1
+        case .rightArrow?: delta = 1
+        default:
+            super.keyDown(with: event)
+            return
+        }
+        guard !currentFrames.isEmpty else { return }
+        stopPlayback()
+        updatePlayPauseIcon()
+        setFrame(min(max(fieldView.currentFrameIndex + delta, 0), currentFrames.count - 1))
+    }
+
     @objc private func sliderChanged() {
         stopPlayback()
         updatePlayPauseIcon()
@@ -562,7 +579,7 @@ final class FieldViewerViewController: NSViewController {
         let index = min(max(fieldView.currentFrameIndex, 0), currentFrames.count - 1)
         let frame = currentFrames[index]
         let nanoseconds = frame.timeSeconds * 1e9
-        frameLabel.stringValue = String(format: "Frame %d/%d — %.2f ns", index + 1, currentFrames.count, nanoseconds)
+        frameLabel.stringValue = String(format: "Step %lu — %.2f ns", UInt(frame.timestep), nanoseconds)
     }
 
     private func updatePlayPauseIcon() {

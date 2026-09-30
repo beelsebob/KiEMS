@@ -1,4 +1,5 @@
 import AppKit
+import Metal
 
 /// The shared field-energy colour ramp. Keeping the interpolation here lets density plots and the
 /// 3D field viewer use identical colours without sharing either renderer's implementation details.
@@ -43,6 +44,13 @@ public enum EnergyColorMap {
 public final class EyeDiagramView: NSView {
     private var timeUI: [Double] = []
     private var traces: [[Double]] = []
+    /// Symmetric y extent of the traces; nil when there is no finite sample. Computed once per
+    /// setData rather than rescanning every sample on each draw.
+    private var magnitude: Double?
+    /// The rendered density image and the pixel size it was rendered at. Rasterizing every trace is
+    /// by far the most expensive part of drawing, so it is only redone when the data changes or the
+    /// plot's pixel dimensions do (resize or a move to a display with a different backing scale).
+    private var cachedDensity: (image: CGImage, width: Int, height: Int)?
 
     public override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -62,6 +70,21 @@ public final class EyeDiagramView: NSView {
     public func setData(timeUI: [Double], traces: [[Double]]) {
         self.timeUI = timeUI
         self.traces = traces.filter { $0.count == timeUI.count }
+        var rawMin = Double.infinity
+        var rawMax = -Double.infinity
+        for trace in self.traces {
+            for value in trace where value.isFinite {
+                rawMin = min(rawMin, value)
+                rawMax = max(rawMax, value)
+            }
+        }
+        magnitude = rawMin <= rawMax ? max(abs(rawMin), abs(rawMax), 1e-12) * 1.08 : nil
+        cachedDensity = nil
+        needsDisplay = true
+    }
+
+    public override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
         needsDisplay = true
     }
 
@@ -72,9 +95,7 @@ public final class EyeDiagramView: NSView {
         let plot = bounds.insetBy(dx: 52, dy: 30).offsetBy(dx: 8, dy: 8)
         guard plot.width > 1, plot.height > 1 else { return }
 
-        let finiteValues = traces.flatMap { $0 }.filter(\.isFinite)
-        guard let rawMin = finiteValues.min(), let rawMax = finiteValues.max() else { return }
-        let magnitude = max(abs(rawMin), abs(rawMax), 1e-12) * 1.08
+        guard let magnitude else { return }
         let xMin = timeUI.first ?? -0.5
         let xMax = timeUI.last ?? 1.5
 
@@ -90,7 +111,7 @@ public final class EyeDiagramView: NSView {
         // Accumulate every trace into a grayscale density image first. Ten-percent white strokes
         // over black naturally encode overlap count as brightness; converting that finished image
         // through EnergyColorMap afterwards avoids alpha-order artefacts in the final display.
-        if let density = densityImage(size: plot.size, magnitude: magnitude, xMin: xMin, xMax: xMax) {
+        if let density = cachedDensityImage(size: plot.size, magnitude: magnitude, xMin: xMin, xMax: xMax) {
             context.interpolationQuality = .none
             context.draw(density, in: plot)
         }
@@ -139,10 +160,21 @@ public final class EyeDiagramView: NSView {
                   withAttributes: labelAttributes)
     }
 
-    private func densityImage(size: CGSize, magnitude: Double, xMin: Double, xMax: Double) -> CGImage? {
+    private func cachedDensityImage(size: CGSize, magnitude: Double, xMin: Double, xMax: Double) -> CGImage? {
         let scale = max(window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1, 1)
         let width = max(Int((size.width * scale).rounded(.up)), 1)
         let height = max(Int((size.height * scale).rounded(.up)), 1)
+        if let cachedDensity, cachedDensity.width == width, cachedDensity.height == height {
+            return cachedDensity.image
+        }
+        guard let image = densityImage(width: width, height: height, scale: scale,
+                                       magnitude: magnitude, xMin: xMin, xMax: xMax) else { return nil }
+        cachedDensity = (image, width, height)
+        return image
+    }
+
+    private func densityImage(width: Int, height: Int, scale: CGFloat,
+                              magnitude: Double, xMin: Double, xMax: Double) -> CGImage? {
         var grayscale = [UInt8](repeating: 0, count: width * height)
 
         let graySpace = CGColorSpaceCreateDeviceGray()
@@ -184,11 +216,23 @@ public final class EyeDiagramView: NSView {
         // applying the colour ramp so the strongest path always reaches the top of the palette,
         // while preserving every lesser path's density relative to it.
         let peakDensity = grayscale.max() ?? 0
-        let densityScale = peakDensity > 0 ? 1 / CGFloat(peakDensity) : 0
-        var rgba = [UInt8](repeating: 0, count: width * height * 4)
+        let densityScale = peakDensity > 0 ? 1 / Float(peakDensity) : 0
+        var rgba = EyeDensityColorizer.shared?.colorize(grayscale, densityScale: densityScale)
+            ?? Self.colorizeOnCPU(grayscale, densityScale: densityScale)
+        let rgbSpace = CGColorSpaceCreateDeviceRGB()
+        guard let colorContext = CGContext(data: &rgba, width: width, height: height,
+                                           bitsPerComponent: 8, bytesPerRow: width * 4,
+                                           space: rgbSpace,
+                                           bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        return colorContext.makeImage()
+    }
+
+    /// Fallback for when no Metal device is available; produces the same premultiplied RGBA8 as
+    /// EyeDensityColorize.metal.
+    private static func colorizeOnCPU(_ grayscale: [UInt8], densityScale: Float) -> [UInt8] {
+        var rgba = [UInt8](repeating: 0, count: grayscale.count * 4)
         for pixel in grayscale.indices {
-            let normalizedDensity = CGFloat(grayscale[pixel]) * densityScale
-            let color = EnergyColorMap.rgba(at: normalizedDensity)
+            let color = EnergyColorMap.rgba(at: CGFloat(Float(grayscale[pixel]) * densityScale))
             let offset = pixel * 4
             // premultipliedLast is Core Graphics' native compositing format. Premultiplying here
             // keeps the low-alpha end free from coloured fringes when drawn over the chart grid.
@@ -197,11 +241,78 @@ public final class EyeDiagramView: NSView {
             rgba[offset + 2] = UInt8((color.blue * color.alpha * 255).rounded())
             rgba[offset + 3] = UInt8((color.alpha * 255).rounded())
         }
-        let rgbSpace = CGColorSpaceCreateDeviceRGB()
-        guard let colorContext = CGContext(data: &rgba, width: width, height: height,
-                                           bitsPerComponent: 8, bytesPerRow: width * 4,
-                                           space: rgbSpace,
-                                           bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
-        return colorContext.makeImage()
+        return rgba
+    }
+}
+
+/// Runs EyeDensityColorize.metal: the per-pixel EnergyColorMap lookup that dominated eye-diagram
+/// drawing time on the CPU. nil when Metal (or the framework's compiled shader) is unavailable.
+private final class EyeDensityColorizer {
+    static let shared = EyeDensityColorizer()
+
+    /// Texel count of the colour-ramp texture; the kernel filters linearly between texels, so this
+    /// only needs to resolve EnergyColorMap's piecewise-linear stops, not every density level.
+    private static let rampWidth = 1024
+
+    private let device: MTLDevice
+    private let queue: MTLCommandQueue
+    private let pipeline: MTLComputePipelineState
+    private let ramp: MTLTexture
+
+    private init?() {
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let queue = device.makeCommandQueue(),
+              let library = try? device.makeDefaultLibrary(bundle: Bundle(for: EyeDiagramView.self)),
+              let function = library.makeFunction(name: "colorizeEyeDensity"),
+              let pipeline = try? device.makeComputePipelineState(function: function)
+        else { return nil }
+        let descriptor = MTLTextureDescriptor()
+        descriptor.textureType = .type1D
+        descriptor.pixelFormat = .rgba32Float
+        descriptor.width = Self.rampWidth
+        descriptor.usage = .shaderRead
+        guard let ramp = device.makeTexture(descriptor: descriptor) else { return nil }
+        var texels = [Float](repeating: 1, count: Self.rampWidth * 4)
+        for index in 0..<Self.rampWidth {
+            let rgb = EnergyColorMap.rgb(at: CGFloat(index) / CGFloat(Self.rampWidth - 1))
+            texels[index * 4] = Float(rgb.red)
+            texels[index * 4 + 1] = Float(rgb.green)
+            texels[index * 4 + 2] = Float(rgb.blue)
+        }
+        ramp.replace(region: MTLRegionMake1D(0, Self.rampWidth), mipmapLevel: 0,
+                     withBytes: texels, bytesPerRow: Self.rampWidth * 4 * MemoryLayout<Float>.size)
+        self.device = device
+        self.queue = queue
+        self.pipeline = pipeline
+        self.ramp = ramp
+    }
+
+    /// Premultiplied RGBA8 for `grayscale`, or nil if the GPU work could not be set up/completed.
+    func colorize(_ grayscale: [UInt8], densityScale: Float) -> [UInt8]? {
+        let pixelCount = grayscale.count
+        guard pixelCount > 0,
+              let input = grayscale.withUnsafeBytes({
+                  device.makeBuffer(bytes: $0.baseAddress!, length: pixelCount, options: .storageModeShared)
+              }),
+              let output = device.makeBuffer(length: pixelCount * 4, options: .storageModeShared),
+              let commandBuffer = queue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder()
+        else { return nil }
+        var scale = densityScale
+        var count = UInt32(pixelCount)
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(input, offset: 0, index: 0)
+        encoder.setBuffer(output, offset: 0, index: 1)
+        encoder.setBytes(&scale, length: MemoryLayout<Float>.size, index: 2)
+        encoder.setBytes(&count, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setTexture(ramp, index: 0)
+        let threadsPerGroup = MTLSize(width: pipeline.threadExecutionWidth, height: 1, depth: 1)
+        encoder.dispatchThreads(MTLSize(width: pixelCount, height: 1, depth: 1),
+                                threadsPerThreadgroup: threadsPerGroup)
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        guard commandBuffer.status == .completed else { return nil }
+        return [UInt8](UnsafeRawBufferPointer(start: output.contents(), count: pixelCount * 4))
     }
 }

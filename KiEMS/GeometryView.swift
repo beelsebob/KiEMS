@@ -406,6 +406,9 @@ final class GeometryView: MTKView, MTKViewDelegate {
     private var regionWorldMin = SIMD2<Float>.zero
     private var regionWorldInverseSize = SIMD2<Float>.zero
     private var regionWorldPerTexel: Float = 1
+    // Board-space rect currently rasterized into the region textures (see updateRegionHighlight).
+    private var regionCropMin = SIMD2<Float>.zero
+    private var regionCropMax = SIMD2<Float>.zero
     private var regionHighlightNeedsUpdate = true
     // Bound whenever the region highlight is inactive (see GeometryPBRUniformsGPU.regionMaskThreshold's own
     // sentinel) -- geometry_pbr_fragment's texture argument still needs a valid binding even when its
@@ -974,18 +977,44 @@ final class GeometryView: MTKView, MTKViewDelegate {
     /// orthographic top-down view expanded by the largest padding, rather than the visible camera,
     /// so panning/orbiting cannot alter the result. Each distinct padding group gets an exact MPS
     /// distance transform, which is thresholded into a shared mask before the next group reuses the
-    /// scratch textures.
+    /// scratch textures. The textures cover only the on-screen part of that padded board (plus
+    /// margin), so zooming in spends their resolution on what's visible.
     private func updateRegionHighlight(commandBuffer: MTLCommandBuffer) -> MTLTexture? {
         guard let device, let preview, let regionSeedPipelineState, let regionUnionPipelineState,
               let regionDistanceTransform, let hullPadding = activity?.maximumHullPadding,
               !regionSeedGroups.isEmpty else { return nil }
 
         let padding = max(Float(hullPadding * Self.simUnitsPerMicrometer), 0)
-        let boardWidth = max(Float(preview.width), 1)
-        let boardHeight = max(Float(preview.height), 1)
-        let paddedWidth = boardWidth + 2 * padding
-        let paddedHeight = boardHeight + 2 * padding
-        let layout = Self.regionTextureLayout(worldWidth: paddedWidth, worldHeight: paddedHeight)
+        let paddedBoardMin = SIMD2<Float>(Float(preview.xMin) - padding, Float(preview.yMin) - padding)
+        let paddedBoardMax = SIMD2<Float>(Float(preview.xMin + preview.width) + padding,
+                                          Float(preview.yMin + preview.height) + padding)
+        // Only the on-screen part of the board is rasterized. The crop keeps a further `padding`
+        // margin around the visible area so seeds just off screen still reach visible texels
+        // through the distance transform; anything farther out can't affect what's visible.
+        var cropMin = paddedBoardMin, cropMax = paddedBoardMax
+        if let visible = visibleBoardRect() {
+            cropMin = simd_max(cropMin, visible.min - padding)
+            cropMax = simd_min(cropMax, visible.max + padding)
+        }
+        guard cropMax.x > cropMin.x, cropMax.y > cropMin.y else { return nil }
+
+        // Reuse the current crop while it still covers what's needed at a comparable texel size,
+        // so small pans/zooms don't re-run the transform every frame. Otherwise re-crop with some
+        // slack around the needed rect (clamped to the padded board) for the same reason.
+        let neededSize = cropMax - cropMin
+        let idealWorldPerTexel = max(neededSize.x, neededSize.y, 1) / Self.regionTextureMaxDimension
+        let covered = regionCropMin.x <= cropMin.x && regionCropMin.y <= cropMin.y
+            && regionCropMax.x >= cropMax.x && regionCropMax.y >= cropMax.y
+        let texelRatio = regionWorldPerTexel / idealWorldPerTexel
+        if !covered || texelRatio > 1.5 || texelRatio < 0.5 {
+            let slack = neededSize * 0.25
+            regionCropMin = simd_max(paddedBoardMin, cropMin - slack)
+            regionCropMax = simd_min(paddedBoardMax, cropMax + slack)
+            regionHighlightNeedsUpdate = true
+        }
+        let cropWidth = regionCropMax.x - regionCropMin.x
+        let cropHeight = regionCropMax.y - regionCropMin.y
+        let layout = Self.regionTextureLayout(worldWidth: cropWidth, worldHeight: cropHeight)
         let resolution = layout.resolution
         if regionDistanceTextureResolution != resolution {
             regionDistanceTextures = Self.makeRegionTexturePair(device: device, resolution: resolution)
@@ -997,8 +1026,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
         let actualWidth = Float(resolution.width) * layout.worldPerTexel
         let actualHeight = Float(resolution.height) * layout.worldPerTexel
         regionWorldMin = SIMD2<Float>(
-            Float(preview.xMin) - padding - (actualWidth - paddedWidth) * 0.5,
-            Float(preview.yMin) - padding - (actualHeight - paddedHeight) * 0.5)
+            regionCropMin.x - (actualWidth - cropWidth) * 0.5,
+            regionCropMin.y - (actualHeight - cropHeight) * 0.5)
         regionWorldInverseSize = SIMD2<Float>(1 / actualWidth, 1 / actualHeight)
         regionWorldPerTexel = layout.worldPerTexel
 
@@ -1044,10 +1073,41 @@ final class GeometryView: MTKView, MTKViewDelegate {
         return textures.union
     }
 
+    private static let regionTextureMaxDimension: Float = 4096
+
+    /// The board-plane XY bounding box of everything currently on screen, found by casting the
+    /// viewport's corner rays (parallel, since the camera is orthographic) onto the lowest and
+    /// highest copper layers. Nil when the view is too close to edge-on for that to be bounded,
+    /// in which case the caller falls back to the whole board.
+    private func visibleBoardRect() -> (min: SIMD2<Float>, max: SIMD2<Float>)? {
+        guard let preview else { return nil }
+        let forward = -eyeOffsetDirection()
+        guard abs(forward.z) > 0.05 else { return nil }
+        let zValues = preview.layers.map { Float($0.z) }
+        let zRange = [zValues.min() ?? 0, zValues.max() ?? 0]
+        let aspect = Float(max(drawableSize.width, 1) / max(drawableSize.height, 1))
+        let halfHeight = distance * 0.4
+        let halfWidth = halfHeight * aspect
+        let (right, up) = cameraRightAndUp()
+        let center = SIMD3<Float>(target.x, target.y, target.z)
+        var lo = SIMD2<Float>(repeating: .greatestFiniteMagnitude)
+        var hi = SIMD2<Float>(repeating: -.greatestFiniteMagnitude)
+        for sx: Float in [-1, 1] {
+            for sy: Float in [-1, 1] {
+                let origin = center + right * (sx * halfWidth) + up * (sy * halfHeight)
+                for z in zRange {
+                    let hit = origin + forward * ((z - origin.z) / forward.z)
+                    lo = simd_min(lo, SIMD2(hit.x, hit.y))
+                    hi = simd_max(hi, SIMD2(hit.x, hit.y))
+                }
+            }
+        }
+        return (lo, hi)
+    }
+
     private static func regionTextureLayout(worldWidth: Float, worldHeight: Float)
         -> (resolution: (width: Int, height: Int), worldPerTexel: Float) {
-        let maxDimension: Float = 4096
-        let worldPerTexel = max(worldWidth, worldHeight, 1) / maxDimension
+        let worldPerTexel = max(worldWidth, worldHeight, 1) / regionTextureMaxDimension
         return ((max(Int(ceil(worldWidth / worldPerTexel)), 1),
                  max(Int(ceil(worldHeight / worldPerTexel)), 1)), worldPerTexel)
     }

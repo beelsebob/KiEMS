@@ -711,7 +711,24 @@ final class SimulationResultsViewController: NSViewController {
 
         switch category {
         case .sParameters:
-            var sections = preview.sParamSets.map { set in
+            var sections: [NSView] = preview.diffPairs.compactMap { pair in
+                var curves: [ChartCurve] = []
+                if let sdd11 = pair.sdd11Db {
+                    curves.append(ChartCurve(label: "Returned to Source", values: sdd11.map(\.doubleValue),
+                                             lineWidth: 0.5))
+                }
+                if let sdd21 = pair.sdd21Db {
+                    curves.append(ChartCurve(label: "Received", values: sdd21.map(\.doubleValue),
+                                             lineWidth: 1.5, emphasized: true))
+                }
+                guard !curves.isEmpty else { return nil }
+                let chart = MultiCurveLineChartView()
+                chart.configure(yAxisLabel: "Magnitude (dB)", showsLabel: false)
+                // Matches postprocess.cpp's own renderDiffPairSParams ylim convention.
+                chart.setStyledCurves(xValuesGHz: freqGHz, curves: curves, minRange: (-60, 5))
+                return makeSection(title: pair.name, graphs: [("Magnitude (dB)", chart)])
+            }
+            sections += preview.sParamSets.map { set in
                 let magChart = MultiCurveLineChartView()
                 magChart.configure(yAxisLabel: "Magnitude (dB)", showsLabel: false)
                 // Matches postprocess.cpp's own renderSParams ylim convention: always show at least
@@ -755,27 +772,12 @@ final class SimulationResultsViewController: NSViewController {
                     title: "Excited Port: \(portDisplayName(index: set.excitedPort, preview: preview))",
                     graphs: [("Magnitude (dB)", magChart), ("Phase (°)", phaseChart)])
             }
-            sections += preview.diffPairs.compactMap { pair in
-                var curves: [ChartCurve] = []
-                if let sdd11 = pair.sdd11Db {
-                    curves.append(ChartCurve(label: "Returned to Source", values: sdd11.map(\.doubleValue),
-                                             lineWidth: 0.5))
-                }
-                if let sdd21 = pair.sdd21Db {
-                    curves.append(ChartCurve(label: "Received", values: sdd21.map(\.doubleValue),
-                                             lineWidth: 1.5, emphasized: true))
-                }
-                guard !curves.isEmpty else { return nil }
-                let chart = MultiCurveLineChartView()
-                chart.configure(yAxisLabel: "Magnitude (dB)", showsLabel: false)
-                // Matches postprocess.cpp's own renderDiffPairSParams ylim convention.
-                chart.setStyledCurves(xValuesGHz: freqGHz, curves: curves, minRange: (-60, 5))
-                return makeSection(title: pair.name, graphs: [("Magnitude (dB)", chart)])
-            }
             return sections
 
         case .eyeDiagrams:
-            return preview.eyeDiagrams.map { eye in
+            // Differential eyes first; stable within each group.
+            let eyes = preview.eyeDiagrams.filter(\.isDifferential) + preview.eyeDiagrams.filter { !$0.isDifferential }
+            return eyes.map { eye in
                 let chart = EyeDiagramView()
                 chart.setData(timeUI: eye.timeUI.map(\.doubleValue),
                               traces: eye.traces.map { $0.map(\.doubleValue) })
@@ -785,11 +787,31 @@ final class SimulationResultsViewController: NSViewController {
             }
 
         case .impedance:
+            var sections: [NSView] = preview.diffPairs.compactMap { pair in
+                guard let mag = pair.impedanceMagnitudeOhm, let angle = pair.impedanceAngleDeg else { return nil }
+                let magnitudeChart = MultiCurveLineChartView()
+                magnitudeChart.configure(yAxisLabel: "Magnitude (Ω)", showsLabel: false)
+                // Differential impedance uses the wider 0...200Ω default from postprocess.cpp.
+                magnitudeChart.setCurves(
+                    xValuesGHz: freqGHz,
+                    curves: [(label: "|Z diff|", values: mag.map(\.doubleValue))],
+                    minRange: (0, 200), xAxisLabel: nil)
+
+                let phaseChart = MultiCurveLineChartView()
+                phaseChart.configure(yAxisLabel: "Phase (°)", showsLabel: false)
+                phaseChart.setCurves(
+                    xValuesGHz: freqGHz,
+                    curves: [(label: "Phase", values: angle.map(\.doubleValue))],
+                    minRange: (-90, 90))
+
+                return makeSection(title: pair.name,
+                                   graphs: [("Magnitude (Ω)", magnitudeChart), ("Phase (°)", phaseChart)])
+            }
             // Per net (a direct characteristic-impedance measurement from one or more non-loading
             // trace probes -- see EMSResultsNetImpedance's own doc comment), not per absorbing port
             // -- an average line, a shaded min/max band across that net's own probes, and each
             // probe's own curve drawn thin underneath.
-            var sections = preview.netImpedances.map { netImpedance in
+            sections += preview.netImpedances.map { netImpedance in
                 let probeMagnitudes = netImpedance.probes.map { $0.magnitudeOhm.map(\.doubleValue) }
                 let probeAngles = netImpedance.probes.map { $0.angleDeg.map(\.doubleValue) }
                 let probeLabels = netImpedance.probes.indices.map { "Probe \($0 + 1)" }
@@ -817,26 +839,6 @@ final class SimulationResultsViewController: NSViewController {
                 return makeSection(title: "Net: \(netImpedance.netName)",
                                    graphs: [("Magnitude (Ω)", magnitudeChart), ("Phase (°)", angleChart)])
             }
-            sections += preview.diffPairs.compactMap { pair in
-                guard let mag = pair.impedanceMagnitudeOhm, let angle = pair.impedanceAngleDeg else { return nil }
-                let magnitudeChart = MultiCurveLineChartView()
-                magnitudeChart.configure(yAxisLabel: "Magnitude (Ω)", showsLabel: false)
-                // Differential impedance uses the wider 0...200Ω default from postprocess.cpp.
-                magnitudeChart.setCurves(
-                    xValuesGHz: freqGHz,
-                    curves: [(label: "|Z diff|", values: mag.map(\.doubleValue))],
-                    minRange: (0, 200), xAxisLabel: nil)
-
-                let phaseChart = MultiCurveLineChartView()
-                phaseChart.configure(yAxisLabel: "Phase (°)", showsLabel: false)
-                phaseChart.setCurves(
-                    xValuesGHz: freqGHz,
-                    curves: [(label: "Phase", values: angle.map(\.doubleValue))],
-                    minRange: (-90, 90))
-
-                return makeSection(title: pair.name,
-                                   graphs: [("Magnitude (Ω)", magnitudeChart), ("Phase (°)", phaseChart)])
-            }
             return sections
 
         case .smith:
@@ -849,13 +851,7 @@ final class SimulationResultsViewController: NSViewController {
             }
 
         case .traceDelays:
-            var sections = preview.traces.map { trace in
-                let chart = MultiCurveLineChartView()
-                chart.configure(yAxisLabel: "Delay (ns)", showsLabel: false)
-                chart.setCurves(xValuesGHz: freqGHz, curves: [(label: trace.name, values: trace.delayNs.map(\.doubleValue))])
-                return makeSection(title: trace.name, graphs: [("Delay (ns)", chart)])
-            }
-            sections += preview.diffPairs.compactMap { pair in
+            var sections: [NSView] = preview.diffPairs.compactMap { pair in
                 var curves: [(label: String, values: [Double])] = []
                 if let n = pair.nDelayNs { curves.append((label: "N", values: n.map(\.doubleValue))) }
                 if let p = pair.pDelayNs { curves.append((label: "P", values: p.map(\.doubleValue))) }
@@ -864,6 +860,12 @@ final class SimulationResultsViewController: NSViewController {
                 chart.configure(yAxisLabel: "Delay (ns)", showsLabel: false)
                 chart.setCurves(xValuesGHz: freqGHz, curves: curves)
                 return makeSection(title: pair.name, graphs: [("Delay (ns)", chart)])
+            }
+            sections += preview.traces.map { trace in
+                let chart = MultiCurveLineChartView()
+                chart.configure(yAxisLabel: "Delay (ns)", showsLabel: false)
+                chart.setCurves(xValuesGHz: freqGHz, curves: [(label: trace.name, values: trace.delayNs.map(\.doubleValue))])
+                return makeSection(title: trace.name, graphs: [("Delay (ns)", chart)])
             }
             return sections
 

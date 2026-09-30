@@ -473,10 +473,37 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
     /// diffPairs() with, which downstream Results/Field Viewer state depends on, so any cache from
     /// before the edit is just as stale.
     @objc private func differentialPairToggled() {
-        selectedSimulation?.isDifferentialPair = differentialPairCheckbox.state == .on
+        guard let sim = selectedSimulation else { return }
+        sim.isDifferentialPair = differentialPairCheckbox.state == .on
+        if sim.isDifferentialPair {
+            pairExistingDifferentialNets(in: sim)
+        }
         document?.updateChangeCount(.changeDone)
         if let selectedIndex {
             onGeometryParametersChanged?(selectedIndex)
+        }
+    }
+
+    /// WholeBoardViewController only records reciprocal pair metadata when a net/pin is added while
+    /// isDifferentialPair is already on, so nets added *before* ticking the checkbox would otherwise
+    /// stay single-ended (port_resolution.cpp only pairs entries carrying that metadata). Pairs up
+    /// already-involved Net-kind entries by DifferentialPairNetHeuristic, leaving any entry that
+    /// already has a (different) recorded partner alone.
+    private func pairExistingDifferentialNets(in sim: EMSSimulationBridge) {
+        let netEntries = sim.involvedNets.filter { $0.kind == .net && $0.net != nil }
+        for entry in netEntries {
+            guard let name = entry.net, entry.differentialPairPartner == nil else { continue }
+            for candidate in DifferentialPairNetHeuristic.partnerCandidates(for: name) {
+                guard let partner = netEntries.first(where: { $0.net == candidate }),
+                      partner !== entry,
+                      partner.differentialPairPartner == nil || partner.differentialPairPartner == name
+                else { continue }
+                entry.differentialPairPartner = candidate
+                partner.differentialPairPartner = name
+                entry.simulateAsDifferentialPair = true
+                partner.simulateAsDifferentialPair = true
+                break
+            }
         }
     }
 
