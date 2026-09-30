@@ -7,8 +7,10 @@
 
 #include <cmath>
 
+#include "CopperFDTDRunner.h"
 #include "CopperTestFixtures.hpp"
 #include "Internal/CopperCPML.hpp"
+#include "Internal/CopperDomain.hpp"
 #include "Internal/CopperOpenEMSAccess.hpp"
 #include "Internal/CopperOperator.hpp"
 #include "Internal/CopperYeeGrid.hpp"
@@ -134,6 +136,79 @@ using namespace copper::test;
     }
     XCTAssertLessThanOrEqual(energyAfter, energyAtStart,
                              @"CPML run's energy grew instead of decaying -- the boundary is amplifying, not absorbing");
+}
+
+/// A stretched-coordinate PML is only stable when each axis's stretch depends on that axis alone
+/// (see CopperCPML.hpp): a grading that varies along another axis drives exponential or late-time
+/// growth pinned to where it varies. Checks every cell of the grid -- including cells no shell
+/// covers, whose grading is implicitly zero -- so both a missing plane at a face's inner edge and an
+/// outline-following grading fail it.
+- (void)testCPMLGradingOfEachAxisDependsOnThatAxisAlone {
+    copper::CopperOperator::Config config;
+    config.f0 = 2.5e9;
+    config.fc = 2.5e9;
+    config.maxTimesteps = 30;
+    copper::CopperOperator op(*buildCpmlCavityNoExcitation(), config);
+    constexpr std::uint32_t depth = 8;
+    const copper::CopperGridDims dims = op.dims();
+
+    auto checkSeparable = [&](const std::vector<copper::CopperCPMLShell>& shells, NSString* label) {
+        std::vector<float> grading[2][3]; // [E/H][axis] -> c per global cell, 0 where no shell
+        for (auto& side : grading) {
+            for (auto& axis : side) axis.assign(dims.cellCount(), 0.0F);
+        }
+        for (const auto& shell : shells) {
+            for (std::uint32_t lz = 0; lz < shell.dims.nz; ++lz) {
+                for (std::uint32_t ly = 0; ly < shell.dims.ny; ++ly) {
+                    for (std::uint32_t lx = 0; lx < shell.dims.nx; ++lx) {
+                        const std::size_t local = copper::copperGridIndex(shell.dims, lx, ly, lz);
+                        const std::size_t global = copper::copperGridIndex(dims, lx + shell.startX, ly + shell.startY,
+                                                                           lz + shell.startZ);
+                        for (int axis = 0; axis < 3; ++axis) {
+                            grading[0][axis][global] += shell.cE[axis][local];
+                            grading[1][axis][global] += shell.cH[axis][local];
+                        }
+                    }
+                }
+            }
+        }
+        const std::uint32_t n[3] = {dims.nx, dims.ny, dims.nz};
+        std::size_t mismatches = 0;
+        for (int side = 0; side < 2; ++side) {
+            for (int axis = 0; axis < 3; ++axis) {
+                for (std::uint32_t z = 0; z < dims.nz; ++z) {
+                    for (std::uint32_t y = 0; y < dims.ny; ++y) {
+                        for (std::uint32_t x = 0; x < dims.nx; ++x) {
+                            const std::uint32_t pos[3] = {x, y, z};
+                            // Reference: the cell with the same coordinate along `axis` at the
+                            // domain's centre on the other two.
+                            std::uint32_t ref[3] = {n[0] / 2, n[1] / 2, n[2] / 2};
+                            ref[axis] = pos[axis];
+                            const float value = grading[side][axis][copper::copperGridIndex(dims, x, y, z)];
+                            const float expected =
+                                grading[side][axis][copper::copperGridIndex(dims, ref[0], ref[1], ref[2])];
+                            if (value != expected) ++mismatches;
+                        }
+                    }
+                }
+            }
+        }
+        XCTAssertEqual(mismatches, static_cast<std::size_t>(0), @"%@: a CPML axis's grading varies off-axis", label);
+    };
+
+    checkSeparable(copper::buildCPMLShells(op, 2 * M_PI * 100e6 * EPS0, depth), @"rectangular");
+
+    // The irregular form grades Z only, so its Z grading must be separable too -- over the active
+    // columns (external columns are never updated, so their implicit zero doesn't count). Check it by
+    // building the mask for a cutout that leaves the whole grid active except nothing: a cutout
+    // covering every node makes every column interior.
+    copper::CopperFDTDPortConfig portConfig;
+    const double lo = op.discLine(0, 0) - 100.0, hi = op.discLine(0, dims.nx - 1) + 100.0;
+    portConfig.domainCutoutLoops = {{{lo, lo}, {hi, lo}, {hi, hi}, {lo, hi}}};
+    portConfig.domainCPMLCellSize = op.discLine(0, 1) - op.discLine(0, 0);
+    const copper::CopperDomainMask mask = copper::buildDomainMask(op, portConfig, depth);
+    XCTAssertFalse(mask.empty());
+    checkSeparable(copper::buildCPMLShells(op, 2 * M_PI * 100e6 * EPS0, depth, mask), @"irregular Z slabs");
 }
 
 @end

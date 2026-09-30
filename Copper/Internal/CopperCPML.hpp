@@ -98,10 +98,41 @@ struct CopperCPMLShell {
 /// with no Operator_Ext_UPML extension involved at all. 0 returns no shells (a caller with no PML on
 /// this run -- e.g. a MUR-only smoketest -- can pass 0 rather than special-casing the call away).
 std::vector<CopperCPMLShell> buildCPMLShells(CopperOperator& op, double alphaMax, std::uint32_t pmlDepthCells);
-/// Irregular-domain form: XY grading follows domainMask's successive offset rings, decomposed into
-/// class-pure rectangular dispatch boxes; the conventional lower/upper Z slabs cover only the XY
-/// interior. Empty masks delegate to the rectangular overload above.
+/// Irregular-domain form: only the conventional lower/upper Z slabs, one pair per dispatch cuboid
+/// (ring and interior alike), graded along Z alone. Absorption across the irregular XY outline is
+/// NOT a CPML -- it's applyRingAbsorber() below. Empty masks delegate to the rectangular overload
+/// above.
+///
+/// Why the XY rings can't be a CPML: the stretched-coordinate PML this file implements is only
+/// stable when each axis's stretch depends on that axis alone -- sigma_x(x), sigma_y(y),
+/// sigma_z(z) -- because only then is it a genuine complex coordinate transformation of Maxwell's
+/// equations (the stretched derivatives d/dx~ and d/dy~ commute, so div(curl) stays zero). An
+/// outline-following ring necessarily makes sigma_x vary along y (every curved or diagonal
+/// section, and wherever an axis's grading switches on or off), and then any field variation along
+/// z drives an exponentially growing mode pinned to where sigma_x varies with y (or sigma_y with
+/// x). This is not a tuning problem: an earlier ring-graded CPML here diverged from roundoff within
+/// a few hundred steps whatever sigma/alpha/grading-selection rule was used, stayed stable in pure
+/// 2D (kz=0) runs, and a plain rectangular CPML whose X-lo face was merely truncated halfway along y
+/// diverges the same way, with the growing mode sitting exactly on the truncation line. Z grading
+/// is still separable (the ring absorber is Z-invariant), which is why the Z slabs stay a CPML.
 std::vector<CopperCPMLShell> buildCPMLShells(CopperOperator& op, double alphaMax, std::uint32_t pmlDepthCells,
                                              const CopperDomainMask& domainMask);
+
+/// Folds the irregular domain's XY absorbing rings into one engine backend's own copies of the
+/// Yee coefficients (both backends call this at construction; `vv`/`vi`/`ii`/`iv` are per-axis
+/// cellCount-length arrays in copperGridIndex() layout, `timestepSeconds` is grid.timestepSeconds).
+/// No-op for an empty mask or one without a physical ring thickness (a preview-only mask).
+///
+/// The rings are an isotropic, impedance-matched lossy medium: every component gains the damping
+/// rate sigma/eps0 = sigma_m/mu0 (added on top of whatever loss the host medium already has, so a
+/// dielectric host stays matched too), with sigma graded over the ring depth by the same profile
+/// the rectangular CPML uses and sampled at each component's own staggered XY position (see
+/// CopperDomainMask::staggeredLayer). A passive lossy medium is energy-dissipative for any spatial
+/// profile, so unlike an outline-following CPML (see above) it is unconditionally stable. It is
+/// reflectionless only at normal incidence, though -- oblique incidence reflects more than a true
+/// PML, and so does quasi-static near-field content, which at low frequency sees the lossy ring
+/// as a conducting shell. Keep the ring well clear of the board.
+void applyRingAbsorber(const CopperDomainMask& domainMask, double timestepSeconds, const CopperGridDims& dims,
+                       float* const vv[3], float* const vi[3], float* const ii[3], float* const iv[3]);
 
 } // namespace copper

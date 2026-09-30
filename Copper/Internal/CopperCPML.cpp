@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <utility>
 
 #include "CopperPhysicalConstants.hpp"
 
@@ -138,6 +139,12 @@ void calcGrading(CopperOperator& op, std::uint32_t pmlDepthCells, int ny, const 
 // sigma=alpha=0 (outside any graded region) gives b=1, c=0 -- psi's own recursive update (eq. 7.101,
 // psi[n] = b*psi[n-1] + c*curlTerm) then leaves psi permanently at its zero initial value, so this is
 // a true no-op there, not an approximation of one.
+// computeBaseGrading() puts line `pmlDepthCells` of the lower face and line `n-1-pmlDepthCells` of
+// the upper face on the PML's inner edge. At the lower one both E (on the line) and H (half a cell
+// further in) grade to zero, but the upper one's H sits half a cell *inside* the PML and grades to
+// sigma(dl/2) -- so an upper face needs that extra plane to own every nonzero grading of its axis.
+std::uint32_t upperFaceDepth(std::uint32_t pmlDepthCells) { return pmlDepthCells + 1; }
+
 void computeBC(const Grading& g, double dT, float& b, float& c) {
     const double sigmaEff = g.sigmaEff; // sigma + alpha
     if (sigmaEff <= 0) {
@@ -191,16 +198,25 @@ std::vector<CopperCPMLShell> buildCPMLShells(CopperOperator& op, double alphaMax
     // here instead of a second real one, and is left off subsequent shells' psi-driving grading
     // entirely -- each cell's correction is computed and applied exactly once, regardless of how many
     // faces' PML regions it geometrically falls within.
+    //
+    // The upper faces are one cell deeper than the lower ones (see upperFaceDepth()): their first
+    // plane carries only the H-side half-cell grading, but it must be *in* the face. Otherwise a cell
+    // on that plane only gets its grading where some other face happens to claim it first (edges and
+    // corners), so e.g. sigma_x on the plane x = nx-1-depth varies with y and z -- a non-separable
+    // stretch, which feeds slow late-time growth pinned to where two such planes meet (see
+    // CopperCPML.hpp's irregular-domain overload for why a stretch must depend on its own axis
+    // alone).
+    const std::uint32_t upperDepth = upperFaceDepth(pmlDepthCells);
     struct FaceSpec {
         std::uint32_t startX, startY, startZ, nX, nY, nZ;
     };
     const std::array<FaceSpec, 6> faces = {{
         {0, 0, 0, pmlDepthCells, domainNy, domainNz},                              // X-lo
-        {domainNx - pmlDepthCells, 0, 0, pmlDepthCells, domainNy, domainNz},       // X-hi
+        {domainNx - upperDepth, 0, 0, upperDepth, domainNy, domainNz},             // X-hi
         {0, 0, 0, domainNx, pmlDepthCells, domainNz},                              // Y-lo
-        {0, domainNy - pmlDepthCells, 0, domainNx, pmlDepthCells, domainNz},       // Y-hi
+        {0, domainNy - upperDepth, 0, domainNx, upperDepth, domainNz},             // Y-hi
         {0, 0, 0, domainNx, domainNy, pmlDepthCells},                              // Z-lo
-        {0, 0, domainNz - pmlDepthCells, domainNx, domainNy, pmlDepthCells},       // Z-hi
+        {0, 0, domainNz - upperDepth, domainNx, domainNy, upperDepth},             // Z-hi
     }};
 
     std::vector<bool> claimed(static_cast<std::size_t>(domainNx) * domainNy * domainNz, false);
@@ -293,106 +309,108 @@ std::vector<CopperCPMLShell> buildCPMLShells(CopperOperator& op, double alphaMax
     const auto nz = static_cast<std::uint32_t>(op.numberOfLines(2));
     if (domainMask.nx != nx || domainMask.ny != ny || nz <= 2 * pmlDepthCells) return {};
 
-    struct Box { std::uint32_t x, y, z, w, h, d; bool xy; };
-    std::vector<Box> boxes;
-    for (const auto& r : domainMask.dispatchBoxes) {
-        if (r.region == CopperDomainMask::Region::CPML) {
-            boxes.push_back({r.startX, r.startY, 0, r.width, r.height, nz, true});
-        } else {
-            // XY-interior columns still need the conventional top and bottom Z CPML slabs. Because
-            // the domain decomposition is class-pure, these never overlap an XY-CPML shell and
-            // never contain an external node.
-            boxes.push_back({r.startX, r.startY, 0, r.width, r.height, pmlDepthCells, false});
-            boxes.push_back({r.startX, r.startY, nz - pmlDepthCells,
-                             r.width, r.height, pmlDepthCells, false});
+    // One lower and one upper Z slab per dispatch cuboid. The decomposition is class-pure and
+    // non-overlapping, so the slabs are too, and none contains an external node. Only the Z axis is
+    // graded (see this overload's doc comment in CopperCPML.hpp for why X/Y must not be); the
+    // X/Y coefficient slots stay at the inert b=1/c=0. The upper slab is one plane deeper, exactly
+    // like the rectangular builder's upper faces (see upperFaceDepth()).
+    const double dT = op.timestepSeconds();
+    const std::uint32_t upperDepth = upperFaceDepth(pmlDepthCells);
+    const std::array<std::pair<std::uint32_t, std::uint32_t>, 2> slabs = {{{0u, pmlDepthCells},
+                                                                             {nz - upperDepth, upperDepth}}};
+    std::vector<CopperCPMLShell> shells;
+    shells.reserve(2 * domainMask.dispatchBoxes.size());
+    for (const auto& box : domainMask.dispatchBoxes) {
+        for (const auto& [startZ, slabDepth] : slabs) {
+            CopperCPMLShell shell;
+            shell.startX = box.startX;
+            shell.startY = box.startY;
+            shell.startZ = startZ;
+            shell.dims = {box.width, box.height, slabDepth};
+            const auto count = shell.dims.cellCount();
+            for (int a = 0; a < 3; ++a) {
+                shell.bE[a].assign(count, 1.0F); shell.cE[a].assign(count, 0.0F);
+                shell.bH[a].assign(count, 1.0F); shell.cH[a].assign(count, 0.0F);
+                shell.psiE0[a].assign(count, 0.0F); shell.psiE1[a].assign(count, 0.0F);
+                shell.psiH0[a].assign(count, 0.0F); shell.psiH1[a].assign(count, 0.0F);
+            }
+            // Z grading depends on z alone, so compute each layer once and broadcast it across
+            // the slab's XY extent.
+            unsigned int pos[3] = {box.startX, box.startY, 0};
+            for (std::uint32_t lz = 0; lz < slabDepth; ++lz) {
+                pos[2] = startZ + lz;
+                const int component = 0; // any off-axis component gives the required CPML staggering
+                const BaseGrading base = computeBaseGrading(op, pmlDepthCells, 2, pos);
+                float bE, cE, bH, cH;
+                computeBC(finishGrading(base, op, 2, pos, true, component, alphaMax), dT, bE, cE);
+                computeBC(finishGrading(base, op, 2, pos, false, component, alphaMax), dT, bH, cH);
+                const std::size_t layerCells = static_cast<std::size_t>(box.width) * box.height;
+                const std::size_t layerStart = static_cast<std::size_t>(lz) * layerCells;
+                std::fill_n(shell.bE[2].data() + layerStart, layerCells, bE);
+                std::fill_n(shell.cE[2].data() + layerStart, layerCells, cE);
+                std::fill_n(shell.bH[2].data() + layerStart, layerCells, bH);
+                std::fill_n(shell.cH[2].data() + layerStart, layerCells, cH);
+            }
+            shells.push_back(std::move(shell));
         }
     }
+    return shells;
+}
 
-    auto layerAt = [&](int x, int y) -> int {
-        if (x < 0 || y < 0 || x >= static_cast<int>(nx) || y >= static_cast<int>(ny))
-            return static_cast<int>(pmlDepthCells) + 1;
-        const auto c = domainMask.at(static_cast<std::uint32_t>(x), static_cast<std::uint32_t>(y));
-        return c == 0 ? static_cast<int>(pmlDepthCells) + 1 : std::max(0, static_cast<int>(c) - 1);
+void applyRingAbsorber(const CopperDomainMask& domainMask, double timestepSeconds, const CopperGridDims& dims,
+                       float* const vv[3], float* const vi[3], float* const ii[3], float* const iv[3]) {
+    const std::uint32_t depth = domainMask.pmlDepth;
+    if (domainMask.empty() || domainMask.ringLayerMetres <= 0.0 || depth == 0 || domainMask.nx != dims.nx ||
+        domainMask.ny != dims.ny) {
+        return;
+    }
+
+    // Per-layer half-step damping q = (sigma/eps0)*dt/2, sigma taken at the layer's centre from the
+    // same depth profile the rectangular CPML uses (whose round-trip normal-incidence attenuation
+    // exp(-2*Z0*integral(sigma)) is the designed 1e-6 -- identical for a matched lossy layer).
+    const double dl = domainMask.ringLayerMetres;
+    const double width = dl * depth;
+    std::vector<double> q(static_cast<std::size_t>(depth) + 1, 0.0);
+    for (std::uint32_t layer = 1; layer <= depth; ++layer) {
+        const double sigma =
+            defaultSigmaGrading((static_cast<double>(layer) - 0.5) * dl, dl, width, physical::impedance0);
+        q[layer] = sigma / physical::epsilon0 * timestepSeconds / 2.0;
+    }
+
+    // Adds q to an existing (a, b) = (vv, vi) or (ii, iv) pair: with g = G*dt/(2C) the host's own
+    // loss, a = (1-g)/(1+g) and b = (dt/C)/(1+g), so recover g and dt/C, add q, and rebuild. Adding
+    // the same *rate* to both the E and H sides keeps sigma_e/eps = sigma_m/mu (impedance matched)
+    // whatever the host permittivity/permeability. a=b=0 marks a PEC edge or the never-updated
+    // outer H layer -- left alone.
+    auto fold = [](float& a, float& b, double qAdd) {
+        if (qAdd == 0.0 || (a == 0.0F && b == 0.0F) || a <= -1.0F) return;
+        const double g = (1.0 - a) / (1.0 + a);
+        const double dtOverC = b * (1.0 + g);
+        const double total = g + qAdd;
+        a = static_cast<float>((1.0 - total) / (1.0 + total));
+        b = static_cast<float>(dtOverC / (1.0 + total));
     };
-    const double xyDl = [&] {
-        double largest = 0.0;
-        for (std::uint32_t x = 1; x < nx; ++x) largest = std::max(largest, op.discLine(0, x) - op.discLine(0, x - 1));
-        for (std::uint32_t y = 1; y < ny; ++y) largest = std::max(largest, op.discLine(1, y) - op.discLine(1, y - 1));
-        return largest * op.gridDeltaMetres();
-    }();
-    const double xyWidth = xyDl * pmlDepthCells;
-    auto layerVariesAlongAxis = [&](std::uint32_t x, std::uint32_t y, int axis, int layer) {
-        const double origin = op.discLine(axis, axis == 0 ? x : y);
-        for (int direction : {-1, 1}) {
-            int coordinate = static_cast<int>(axis == 0 ? x : y);
-            const int limit = static_cast<int>(axis == 0 ? nx : ny);
-            while (true) {
-                coordinate += direction;
-                if (coordinate < 0 || coordinate >= limit) break;
-                const double distance = std::abs(op.discLine(axis, static_cast<unsigned int>(coordinate)) - origin) *
-                                        op.gridDeltaMetres();
-                const int sample = axis == 0 ? layerAt(coordinate, static_cast<int>(y))
-                                             : layerAt(static_cast<int>(x), coordinate);
-                if (sample != layer) return true;
-                if (distance >= xyDl) break;
-            }
-        }
-        return false;
-    };
-    const double dT = op.timestepSeconds();
-    std::vector<CopperCPMLShell> shells;
-    shells.reserve(boxes.size());
-    for (const Box& box : boxes) {
-        CopperCPMLShell shell;
-        shell.startX = box.x; shell.startY = box.y; shell.startZ = box.z;
-        shell.dims = {box.w, box.h, box.d};
-        const auto count = shell.dims.cellCount();
-        for (int a = 0; a < 3; ++a) {
-            shell.bE[a].assign(count, 1.0F); shell.cE[a].assign(count, 0.0F);
-            shell.bH[a].assign(count, 1.0F); shell.cH[a].assign(count, 0.0F);
-            shell.psiE0[a].assign(count, 0.0F); shell.psiE1[a].assign(count, 0.0F);
-            shell.psiH0[a].assign(count, 0.0F); shell.psiH1[a].assign(count, 0.0F);
-        }
-        unsigned int pos[3];
-        for (std::uint32_t lz = 0; lz < box.d; ++lz) {
-            pos[2] = box.z + lz;
-            for (std::uint32_t ly = 0; ly < box.h; ++ly) {
-                pos[1] = box.y + ly;
-                for (std::uint32_t lx = 0; lx < box.w; ++lx) {
-                    pos[0] = box.x + lx;
-                    const auto i = copperGridIndex(shell.dims, lx, ly, lz);
-                    for (int axis = 0; axis < 3; ++axis) {
-                        Grading e{}, h{};
-                        if (axis == 2) {
-                            const int component = 0; // any off-axis component gives the required CPML staggering
-                            const BaseGrading base = computeBaseGrading(op, pmlDepthCells, axis, pos);
-                            e = finishGrading(base, op, axis, pos, true, component, alphaMax);
-                            h = finishGrading(base, op, axis, pos, false, component, alphaMax);
-                        } else if (box.xy) {
-                            const int layer = layerAt(static_cast<int>(pos[0]), static_cast<int>(pos[1]));
-                            // A tensor mesh can carry many fine X lines through a coarse Y-side
-                            // CPML ring (and vice versa). Looking only at immediate class neighbours
-                            // would therefore see a broad same-layer plateau and incorrectly turn
-                            // absorption off. Probe up to one coarse-cell width along each axis:
-                            // the true normal axis crosses an offset ring within that distance,
-                            // while the tangential axis on a straight section remains in the same
-                            // ring. Rounded/diagonal sections correctly grade both axes.
-                            const bool varies = layerVariesAlongAxis(pos[0], pos[1], axis, layer);
-                            if (varies && layer > 0 && layer <= static_cast<int>(pmlDepthCells)) {
-                                const double depth = (static_cast<double>(layer) - 0.5) * xyDl;
-                                const double sigma = defaultSigmaGrading(depth, xyDl, xyWidth, physical::impedance0);
-                                e = h = {sigma, sigma + alphaGrading(depth, xyWidth, alphaMax)};
-                            }
-                        }
-                        computeBC(e, dT, shell.bE[axis][i], shell.cE[axis][i]);
-                        computeBC(h, dT, shell.bH[axis][i], shell.cH[axis][i]);
-                    }
+
+    // Where each component lives in XY (see CopperDomainMask::StaggeredPosition).
+    constexpr CopperDomainMask::StaggeredPosition ePosition[3] = {CopperDomainMask::HalfX, CopperDomainMask::HalfY,
+                                                                  CopperDomainMask::Node};
+    constexpr CopperDomainMask::StaggeredPosition hPosition[3] = {CopperDomainMask::HalfY, CopperDomainMask::HalfX,
+                                                                  CopperDomainMask::HalfXY};
+    for (std::uint32_t y = 0; y < dims.ny; ++y) {
+        for (std::uint32_t x = 0; x < dims.nx; ++x) {
+            if (domainMask.at(x, y) == 0) continue; // external: never updated
+            for (int n = 0; n < 3; ++n) {
+                const double qE = q[std::min<std::uint32_t>(domainMask.layerAt(ePosition[n], x, y), depth)];
+                const double qH = q[std::min<std::uint32_t>(domainMask.layerAt(hPosition[n], x, y), depth)];
+                if (qE == 0.0 && qH == 0.0) continue;
+                for (std::uint32_t z = 0; z < dims.nz; ++z) {
+                    const std::size_t i = copperGridIndex(dims, x, y, z);
+                    fold(vv[n][i], vi[n][i], qE);
+                    fold(ii[n][i], iv[n][i], qH);
                 }
             }
         }
-        shells.push_back(std::move(shell));
     }
-    return shells;
 }
 
 } // namespace copper

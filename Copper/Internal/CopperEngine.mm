@@ -212,6 +212,17 @@ MetalEngineImpl::MetalEngineImpl(const CopperYeeGrid& grid, const CopperExcitati
         _ii[axis] = makeUploadedBuffer(_device, grid.ii[axis]);
         _iv[axis] = makeUploadedBuffer(_device, grid.iv[axis]);
     }
+    // Shared storage: fold the irregular domain's ring absorber into the uploaded copies in place
+    // rather than duplicating the whole grid's coefficients first.
+    float* const vv[3] = {static_cast<float*>(_vv[0].contents), static_cast<float*>(_vv[1].contents),
+                          static_cast<float*>(_vv[2].contents)};
+    float* const vi[3] = {static_cast<float*>(_vi[0].contents), static_cast<float*>(_vi[1].contents),
+                          static_cast<float*>(_vi[2].contents)};
+    float* const ii[3] = {static_cast<float*>(_ii[0].contents), static_cast<float*>(_ii[1].contents),
+                          static_cast<float*>(_ii[2].contents)};
+    float* const iv[3] = {static_cast<float*>(_iv[0].contents), static_cast<float*>(_iv[1].contents),
+                          static_cast<float*>(_iv[2].contents)};
+    applyRingAbsorber(domainMask, grid.timestepSeconds, grid.dims, vv, vi, ii, iv);
 
     _cpmlShells.reserve(cpmlShells.size());
     for (const CopperCPMLShell& shell : cpmlShells) {

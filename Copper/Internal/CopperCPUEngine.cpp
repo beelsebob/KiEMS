@@ -174,6 +174,11 @@ CPUEngineImpl::CPUEngineImpl(const CopperYeeGrid& grid, const CopperExcitation& 
             }
         }
     }
+    float* const vv[3] = {_vv[0].data(), _vv[1].data(), _vv[2].data()};
+    float* const vi[3] = {_vi[0].data(), _vi[1].data(), _vi[2].data()};
+    float* const ii[3] = {_ii[0].data(), _ii[1].data(), _ii[2].data()};
+    float* const iv[3] = {_iv[0].data(), _iv[1].data(), _iv[2].data()};
+    applyRingAbsorber(domainMask, grid.timestepSeconds, _dims, vv, vi, ii, iv);
 
     _scratch0.assign(_dims.nx, 0.0F);
     _scratch1.assign(_dims.nx, 0.0F);
