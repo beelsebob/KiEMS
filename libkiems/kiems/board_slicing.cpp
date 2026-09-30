@@ -613,7 +613,18 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(
     }
 
     result.outline = *largestOuter;
+    // The domain, though, must span every outer loop: bounds sizes the grid and the plane/substrate
+    // boxes, and cutoutLoops below keeps the smaller disjoint regions' copper, which would otherwise
+    // fall outside the simulated volume.
     result.bounds = bounds(*largestOuter);
+    for (const Polygon& loop : cutout) {
+        if (signedArea(loop) <= 0) continue;
+        const auto loopBounds = bounds(loop);
+        result.bounds.xMin = std::min(result.bounds.xMin, loopBounds.xMin);
+        result.bounds.yMin = std::min(result.bounds.yMin, loopBounds.yMin);
+        result.bounds.xMax = std::max(result.bounds.xMax, loopBounds.xMax);
+        result.bounds.yMax = std::max(result.bounds.yMax, loopBounds.yMax);
+    }
     // Every loop of the true cutout, not just the largest -- see cutoutLoops' own doc comment
     // (board_slicing.hpp) for why grid_gen.cpp needs this rather than `outline` above.
     result.cutoutLoops = cutout;
