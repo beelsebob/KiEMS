@@ -244,6 +244,15 @@ PolygonSet readPolygonSet(const GEOSGeometry* geometry) {
 }
 
 PolygonSet booleanOperation(const PolygonSet& subject, const PolygonSet* clip, int operation) {
+    // Empty operands are answered here rather than handed to GEOS: 3.15's collection overlay
+    // asserts ("Unable to determine overlay result geometry dimension") when an empty operand
+    // leaves it no dimension for the result -- e.g. a layer with no ground copper intersected
+    // with the cutout. The answers are trivial anyway.
+    if (subject.empty()) return {};
+    if (clip != nullptr && clip->empty()) {
+        if (operation == 0) return {};
+        clip = nullptr; // Difference with nothing: just the subject's regularized union.
+    }
     GeometryPtr a = makeValid(makeGeometry(subject), "Boolean subject");
     GeometryPtr result;
     if (clip == nullptr) {
@@ -258,6 +267,7 @@ PolygonSet booleanOperation(const PolygonSet& subject, const PolygonSet* clip, i
 }
 
 PolygonSet compositedDifference(const PolygonSet& subject, const PolygonSet& clip) {
+    if (subject.empty()) return {}; // See booleanOperation(): GEOS 3.15 asserts on empty overlay operands.
     GeometryPtr a = makeGeometry(subject, GeometryInput::Composited);
     GeometryPtr b = makeGeometry(clip, GeometryInput::Composited);
     GeometryPtr result(GEOSDifference_r(gGeos.handle, a.get(), b.get()));
