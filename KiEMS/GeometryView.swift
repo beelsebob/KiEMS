@@ -1662,11 +1662,22 @@ final class GeometryView: MTKView, MTKViewDelegate {
         }
         for index in backToFrontLayerIndices {
             let layer = preview.layers[index]
-            guard !hiddenLayerIndices.contains(index) else { continue }
+            // Hidden layers still seed the hull distance field: the slicing hull is one shared
+            // board-wide region built from every layer's copper, whichever layers are shown.
+            let isLayerHidden = hiddenLayerIndices.contains(index)
             let layerColor = Self.simdColor(for: layer, index: index, total: preview.layers.count)
             let z = Float(layer.z)
             let isSolderMaskLayer = layer.name == "F.Mask" || layer.name == "B.Mask"
             for triangle in layer.triangles {
+                if isLayerHidden {
+                    if let netName = triangle.netName, let padding = activity?.hullPaddingByNet[netName] {
+                        regionSeedPositionsByPadding[padding, default: []].append(contentsOf: [
+                            Position3(Float(triangle.a.x), Float(triangle.a.y), z),
+                            Position3(Float(triangle.b.x), Float(triangle.b.y), z),
+                            Position3(Float(triangle.c.x), Float(triangle.c.y), z)])
+                    }
+                    continue
+                }
                 // Dynamically loaded mask lives in preview.layers so the list exactly mirrors
                 // KiCad, but it must still use the dedicated mask pass. Treating its 0.45 opacity
                 // as an ordinary zone put it in zonePositionBuffer, where it blended over copper.
