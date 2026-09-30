@@ -934,8 +934,18 @@ double triangulateLastCallArea(const std::vector<TriangulateCall>& sequence) {
     const kiems::StitchingViaPlacement blocked = kiems::placeStitchingVias(
         slicing, cutout, boardOutline, groundPerLayer, nonGroundTracesPerLayer, {});
 
-    XCTAssertLessThan(blocked.vias.size(), baseline.vias.size());
-    XCTAssertFalse(blocked.failedAttempts.empty());
+    // The total can legitimately stay the same: freeing the blocked slot can let a candidate that
+    // was previously too close to it be placed instead. What must hold is that the blocked position
+    // is rejected and no placed via's annular ring overlaps the trace.
+    const double ringRadius = slicing.stitchingViaAnnularRingDiameter / 2;
+    XCTAssertTrue(std::any_of(blocked.failedAttempts.begin(), blocked.failedAttempts.end(), [&](const auto& attempt) {
+        return std::hypot(attempt.x() - x, attempt.y() - y) < 1.0;
+    }));
+    for (const auto& via : blocked.vias) {
+        const double dx = std::max({x + 250 - via.x, 0.0, via.x - (x + 500)});
+        const double dy = std::max({y - 1000 - via.y, 0.0, via.y - (y + 1000)});
+        XCTAssertGreaterThan(std::hypot(dx, dy), ringRadius);
+    }
 }
 
 - (void)testSliceBoardViaPlacementIgnoresNonGroundZonesButRejectsOtherNonGroundCopper {
