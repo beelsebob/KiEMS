@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -103,7 +104,28 @@ PolygonSet offsetPolygons(const PolygonSet& polygons, double distance, double ar
 PolygonSet bufferOpenPaths(const PolygonSet& paths, double radius, double arcTolerance);
 
 /// True for points in filled areas, false for points in holes or outside all components.
+/// Rebuilds (and validates) the whole geometry on every call -- use PointLocator for more than a
+/// handful of queries against the same polygon set.
 bool containsPoint(const PolygonSet& polygons, const Position& point);
+
+/// Repeated containsPoint() queries against one polygon set, with identical answers: the geometry
+/// is built once and each component is prepared (indexed) for point queries. Must be created,
+/// queried, and destroyed on one thread -- the underlying GEOS context is thread-local.
+class PointLocator {
+public:
+    explicit PointLocator(const PolygonSet& polygons);
+    ~PointLocator();
+    PointLocator(PointLocator&&) noexcept;
+    PointLocator& operator=(PointLocator&&) noexcept;
+    PointLocator(const PointLocator&) = delete;
+    PointLocator& operator=(const PointLocator&) = delete;
+
+    bool contains(const Position& point) const;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> _impl;
+};
 
 /// Constrained Delaunay triangulation of an already-composited polygon set. GEOS preserves every
 /// exterior and hole boundary; simplification is topology-preserving.

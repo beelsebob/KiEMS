@@ -5,7 +5,12 @@ import Cocoa
 /// setSelectedSimulationIndex) -- viaPlatingThickness/viaFillingEpsilon/frequencyStart/frequencyStop
 /// stay editable regardless (they're document-level, not per-simulation), but the rest disable
 /// themselves when nothing is selected.
-final class SimulationPropertiesViewController: NSViewController, NSComboBoxDelegate {
+/// One row's net picker in the edge-terminated-nets table -- a distinct type so the shared
+/// NSComboBoxDelegate callbacks below can tell these apart from the ground-net combo box.
+private final class EdgeTerminationComboBox: NSComboBox {}
+
+final class SimulationPropertiesViewController: NSViewController, NSComboBoxDelegate, NSTableViewDataSource,
+    NSTableViewDelegate {
     private static let formFont = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
     private weak var document: Document?
     private var selectedIndex: Int?
@@ -38,6 +43,12 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
     private let differentialPairCheckbox = NSButton(checkboxWithTitle: "Differential Pair", target: nil, action: nil)
     private let nameField = NSTextField(string: "")
     private let groundNameComboBox = NSComboBox()
+    // kiems::SimulationConfig::edgeTerminatedNets(): one row per net, each picked with a combo box.
+    private let edgeTerminationTable = NSTableView()
+    private let edgeTerminationScroll = NSScrollView()
+    private let addEdgeTerminationButton = NSButton()
+    private let removeEdgeTerminationButton = NSButton()
+    private var edgeTerminatedNetRows: [String] = []
     private let maxStepsField = NSTextField(string: "")
     // The FDTD grid's own base target cell size -- document-level (EMSConfig), not per-simulation,
     // same as maxStepsField beside it. maxTimestepValueLabel/simulationRealTimeValueLabel are
@@ -218,6 +229,7 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
         let networksSection = section("Networks", views: [
                 labeled("", differentialPairCheckbox),
                 labeled("Ground Net:", groundNameComboBox),
+                labeled("Edge Terminated Nets:", buildEdgeTerminationTable()),
             ])
         let geometrySection = section("Geometry", views: [
                 labeled("Stitching Inset:", viaEdgeDistanceField),
@@ -253,6 +265,50 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
             stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 4),
             stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -4),
         ])
+    }
+
+    private func buildEdgeTerminationTable() -> NSView {
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("net"))
+        column.resizingMask = .autoresizingMask
+        edgeTerminationTable.addTableColumn(column)
+        edgeTerminationTable.headerView = nil
+        edgeTerminationTable.rowHeight = 22
+        edgeTerminationTable.intercellSpacing = NSSize(width: 0, height: 2)
+        edgeTerminationTable.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+        edgeTerminationTable.usesAlternatingRowBackgroundColors = true
+        edgeTerminationTable.dataSource = self
+        edgeTerminationTable.delegate = self
+
+        edgeTerminationScroll.documentView = edgeTerminationTable
+        edgeTerminationScroll.hasVerticalScroller = true
+        edgeTerminationScroll.autohidesScrollers = true
+        edgeTerminationScroll.borderType = .bezelBorder
+        edgeTerminationScroll.heightAnchor.constraint(equalToConstant: 76).isActive = true
+
+        for (button, symbol, description, action) in [
+            (addEdgeTerminationButton, "plus", "Add edge-terminated net", #selector(addEdgeTerminatedNet)),
+            (removeEdgeTerminationButton, "minus", "Remove edge-terminated net", #selector(removeEdgeTerminatedNet)),
+        ] {
+            button.bezelStyle = .circular
+            button.isBordered = true
+            button.imagePosition = .imageOnly
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)
+            button.controlSize = .small
+            button.target = self
+            button.action = action
+            button.widthAnchor.constraint(equalToConstant: 20).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 20).isActive = true
+        }
+        let buttonRow = NSStackView(views: [addEdgeTerminationButton, removeEdgeTerminationButton])
+        buttonRow.orientation = .horizontal
+        buttonRow.spacing = 4
+
+        let container = NSStackView(views: [edgeTerminationScroll, buttonRow])
+        container.orientation = .vertical
+        container.alignment = .leading
+        container.spacing = 4
+        edgeTerminationScroll.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
+        return container
     }
 
     private static let plainNumberFormatter: NumberFormatter = {
@@ -304,6 +360,8 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
             differentialPairCheckbox.state = .off
             groundNameComboBox.removeAllItems()
             groundNameComboBox.stringValue = ""
+            edgeTerminatedNetRows = []
+            edgeTerminationTable.reloadData()
             setPerSimulationFieldsEnabled(false)
             return
         }
@@ -314,6 +372,8 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
         viaEdgeDistanceField.doubleValue = sim.viaEdgeDistance
         viaSpacingField.doubleValue = sim.viaSpacing
         eyeBitRateField.doubleValue = sim.eyeBitRate
+        edgeTerminatedNetRows = sim.edgeTerminatedNets
+        edgeTerminationTable.reloadData()
 
         refreshNetLists()
 
@@ -338,7 +398,8 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
 
     private func setPerSimulationFieldsEnabled(_ enabled: Bool) {
         for control in [nameField, differentialPairCheckbox, groundNameComboBox,
-                         viaEdgeDistanceField, viaSpacingField, eyeBitRateField] as [NSControl] {
+                         viaEdgeDistanceField, viaSpacingField, eyeBitRateField, edgeTerminationTable,
+                         addEdgeTerminationButton, removeEdgeTerminationButton] as [NSControl] {
             control.isEnabled = enabled
         }
     }
@@ -354,6 +415,7 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
                 self?.groundNetClassNames = classes
                 self?.groundNetNames = nets
                 self?.updateGroundNameComboBox()
+                self?.edgeTerminationTable.reloadData()
             }
         }
     }
@@ -465,21 +527,119 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
     }
 
     func comboBoxSelectionDidChange(_ notification: Notification) {
+        if let rowComboBox = notification.object as? EdgeTerminationComboBox {
+            // The selection lands after this notification; read it on the next turn of the run loop.
+            DispatchQueue.main.async { [weak self] in self?.edgeTerminatedNetChanged(rowComboBox) }
+            return
+        }
         guard let comboBox = notification.object as? NSComboBox,
               comboBox === groundNameComboBox else { return }
         groundNameChanged()
     }
 
     func controlTextDidEndEditing(_ notification: Notification) {
+        if let rowComboBox = notification.object as? EdgeTerminationComboBox {
+            edgeTerminatedNetChanged(rowComboBox)
+            return
+        }
         guard let comboBox = notification.object as? NSComboBox,
               comboBox === groundNameComboBox else { return }
         groundNameChanged()
     }
 
     func comboBox(_ comboBox: NSComboBox, completedString string: String) -> String? {
+        if comboBox is EdgeTerminationComboBox {
+            return groundNetNames.first { $0.range(of: string, options: [.anchored, .caseInsensitive]) != nil }
+        }
         guard comboBox === groundNameComboBox else { return nil }
         let choices = groundNetNames + groundNetClassNames
         return choices.first { $0.range(of: string, options: [.anchored, .caseInsensitive]) != nil }
+    }
+
+    // MARK: Edge-terminated nets
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        edgeTerminatedNetRows.count
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let comboBox = EdgeTerminationComboBox()
+        comboBox.controlSize = .small
+        comboBox.font = Self.formFont
+        comboBox.completes = true
+        comboBox.isBordered = false
+        comboBox.drawsBackground = false
+        comboBox.delegate = self
+        comboBox.target = self
+        comboBox.action = #selector(edgeTerminatedNetComboBoxAction(_:))
+        comboBox.tag = row
+        let font = comboBox.font ?? Self.formFont
+        for name in groundNetNames {
+            comboBox.addItem(withObjectValue: NetNameFormatting.attributedString(for: name, font: font))
+        }
+        let name = edgeTerminatedNetRows[row]
+        if let index = groundNetNames.firstIndex(of: name) { comboBox.selectItem(at: index) }
+        comboBox.stringValue = name
+        comboBox.isEnabled = selectedSimulation != nil
+        return comboBox
+    }
+
+    @objc private func edgeTerminatedNetComboBoxAction(_ sender: NSComboBox) {
+        guard let rowComboBox = sender as? EdgeTerminationComboBox else { return }
+        edgeTerminatedNetChanged(rowComboBox)
+    }
+
+    /// Accepts a picked menu item, or typed text naming a real net; anything else reverts the row.
+    private func edgeTerminatedNetChanged(_ comboBox: EdgeTerminationComboBox) {
+        let row = comboBox.tag
+        guard let sim = selectedSimulation, edgeTerminatedNetRows.indices.contains(row) else { return }
+        let typed = comboBox.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let selectedIndex = comboBox.indexOfSelectedItem
+        let name: String
+        if groundNetNames.contains(typed) {
+            name = typed
+        } else if groundNetNames.indices.contains(selectedIndex),
+                  NetNameFormatting.attributedString(for: groundNetNames[selectedIndex],
+                                                     font: comboBox.font ?? Self.formFont).string == typed {
+            name = groundNetNames[selectedIndex]
+        } else {
+            comboBox.stringValue = edgeTerminatedNetRows[row]
+            return
+        }
+        comboBox.stringValue = name
+        guard edgeTerminatedNetRows[row] != name else { return }
+        edgeTerminatedNetRows[row] = name
+        commitEdgeTerminatedNets(to: sim)
+    }
+
+    @objc private func addEdgeTerminatedNet() {
+        guard let sim = selectedSimulation else { return }
+        edgeTerminatedNetRows.append("")
+        // A row with no net yet is stored as "" (ignored by slicing), so it survives reloads.
+        commitEdgeTerminatedNets(to: sim)
+        edgeTerminationTable.reloadData()
+        let row = edgeTerminatedNetRows.count - 1
+        edgeTerminationTable.scrollRowToVisible(row)
+        edgeTerminationTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+    }
+
+    @objc private func removeEdgeTerminatedNet() {
+        guard let sim = selectedSimulation, !edgeTerminatedNetRows.isEmpty else { return }
+        let selected = edgeTerminationTable.selectedRow
+        edgeTerminatedNetRows.remove(at: edgeTerminatedNetRows.indices.contains(selected)
+                                         ? selected : edgeTerminatedNetRows.count - 1)
+        commitEdgeTerminatedNets(to: sim)
+        edgeTerminationTable.reloadData()
+    }
+
+    /// Edge terminations are part of the sliced geometry (SlicedBoard::edgeTerminationLoops), so
+    /// any change invalidates this simulation's cached geometry like a ground-net change does.
+    private func commitEdgeTerminatedNets(to sim: EMSSimulationBridge) {
+        sim.edgeTerminatedNets = edgeTerminatedNetRows
+        document?.updateChangeCount(.changeDone)
+        if let selectedIndex {
+            onGeometryParametersChanged?(selectedIndex)
+        }
     }
 
     @objc private func numberFieldChanged(_ sender: NSTextField) {

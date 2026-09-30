@@ -438,6 +438,48 @@ bool containsPoint(const PolygonSet& polygons, const Position& point) {
     return result == 1;
 }
 
+struct PointLocator::Impl {
+    GeometryPtr geometry;
+    // One prepared geometry per component. A point is covered by a collection exactly when some
+    // component covers it, and preparing components individually keeps GEOS's indexed polygon
+    // fast path even when the whole set is a GeometryCollection (which would only get the generic,
+    // unindexed prepared implementation).
+    std::vector<const GEOSPreparedGeometry*> prepared;
+    ~Impl() {
+        for (const GEOSPreparedGeometry* p : prepared) GEOSPreparedGeom_destroy_r(gGeos.handle, p);
+    }
+};
+
+PointLocator::PointLocator(const PolygonSet& polygons) : _impl(std::make_unique<Impl>()) {
+    _impl->geometry = makeGeometry(polygons);
+    const int count = GEOSGetNumGeometries_r(gGeos.handle, _impl->geometry.get());
+    if (count < 0) throwGeos("Counting geometry components");
+    _impl->prepared.reserve(static_cast<std::size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        const GEOSGeometry* component = GEOSGetGeometryN_r(gGeos.handle, _impl->geometry.get(), i);
+        const GEOSPreparedGeometry* prepared = GEOSPrepare_r(gGeos.handle, component);
+        if (prepared == nullptr) throwGeos("Preparing geometry for point queries");
+        _impl->prepared.push_back(prepared);
+    }
+}
+
+PointLocator::~PointLocator() = default;
+PointLocator::PointLocator(PointLocator&&) noexcept = default;
+PointLocator& PointLocator::operator=(PointLocator&&) noexcept = default;
+
+bool PointLocator::contains(const Position& point) const {
+    if (_impl->prepared.empty()) return false;
+    GEOSCoordSequence* sequence = GEOSCoordSeq_create_r(gGeos.handle, 1, 2);
+    GEOSCoordSeq_setXY_r(gGeos.handle, sequence, 0, point.x(), point.y());
+    GeometryPtr p(GEOSGeom_createPoint_r(gGeos.handle, sequence));
+    for (const GEOSPreparedGeometry* prepared : _impl->prepared) {
+        const char result = GEOSPreparedCovers_r(gGeos.handle, prepared, p.get());
+        if (result == 2) throwGeos("Testing point containment");
+        if (result == 1) return true;
+    }
+    return false;
+}
+
 std::vector<Triangle> triangulate(const PolygonSet& composited, double tessellationTolerance,
                                   const std::string& contextForErrors) {
     if (composited.empty()) return {};

@@ -1,4 +1,5 @@
 import Cocoa
+import os
 
 /// Shows the whole linked board -- every net's own copper, on every copper layer, at its own real
 /// stackup Z, colored per net, plus every footprint's real STEP model -- with GeometryView's same
@@ -115,6 +116,13 @@ final class WholeBoardViewController: NSViewController {
     private var loadedForPath: String?
     private var layerGeometryLoader: BoardLayerGeometryLoader?
     private var stitchingViaPlanRevision = 0
+    /// Inputs of the plan currently shown or being computed; nil forces the next refresh to plan.
+    private var stitchingViaPlanInputsKey: String?
+    /// Plans run one at a time, and a queued plan that a newer edit has already superseded is
+    /// skipped before it starts -- otherwise every intermediate edit (e.g. each step of a padding
+    /// change) ran its own full plan concurrently, all competing with the one that will be shown.
+    private let stitchingViaPlanQueue = DispatchQueue(label: "KiEMS.stitchingViaPlan", qos: .userInitiated)
+    private let latestStitchingViaPlanRevision = OSAllocatedUnfairLock(initialState: 0)
     private var plannedStitchingViaPositions: [CGPoint] = []
     private var rejectedStitchingViaPositions: [CGPoint] = []
     private var plannedStitchingViaDiameter: CGFloat = 0
@@ -1119,6 +1127,25 @@ final class WholeBoardViewController: NSViewController {
     /// Runs the same slicing/via-placement code as Geometry without publishing or caching a
     /// Geometry stage. A revision token prevents an older worker result replacing a newer edit.
     private func refreshStitchingViaPlan() {
+        let request: KicadStitchingViaPlanRequest?
+        if let document, let selectedSimulationIndex,
+           let boardPath = document.config.kicadPcbPath,
+           loadedForPath == boardPath, boardView.preview != nil {
+            request = KicadBoardBridge.stitchingViaPlanRequest(
+                forConfig: document.config, simulationIndex: selectedSimulationIndex)
+        } else {
+            request = nil
+        }
+        // Most configuration edits (ports, probes, absorbing, excitations, ...) can't move the cut
+        // or its vias. Keep the current plan -- and its clickable hull-cut points -- unless one of
+        // the plan's own inputs actually changed.
+        let inputsKey = request.map { "\(loadedForPath ?? "")\n\(selectedSimulationIndex ?? -1)\n\($0.inputsKey)" }
+        if let inputsKey, inputsKey == stitchingViaPlanInputsKey {
+            boardView.activity = computeActivityHighlight()
+            return
+        }
+        stitchingViaPlanInputsKey = inputsKey
+
         stitchingViaPlanRevision += 1
         let revision = stitchingViaPlanRevision
         plannedStitchingViaPositions = []
@@ -1126,16 +1153,16 @@ final class WholeBoardViewController: NSViewController {
         plannedStitchingViaDiameter = 0
         hullCutTracePoints = []
         guard let document, let selectedSimulationIndex,
-              let boardPath = document.config.kicadPcbPath,
-              loadedForPath == boardPath, boardView.preview != nil,
-              let request = KicadBoardBridge.stitchingViaPlanRequest(
-                forConfig: document.config, simulationIndex: selectedSimulationIndex)
+              let boardPath = document.config.kicadPcbPath, let request
         else {
             boardView.activity = computeActivityHighlight()
             return
         }
         boardView.activity = computeActivityHighlight()
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        latestStitchingViaPlanRevision.withLock { $0 = revision }
+        let latestRevision = latestStitchingViaPlanRevision
+        stitchingViaPlanQueue.async { [weak self] in
+            guard latestRevision.withLock({ $0 }) == revision else { return }
             let plan: KicadStitchingViaPlan?
             let planningError: Error?
             do {
@@ -1565,6 +1592,7 @@ final class WholeBoardViewController: NSViewController {
         guard let document, let kicadPcbPath = document.config.kicadPcbPath else { return false }
         guard loadedForPath != kicadPcbPath else { return false }
         loadedForPath = kicadPcbPath
+        stitchingViaPlanInputsKey = nil
         layerGeometryLoader?.cancel()
         layerGeometryLoader = nil
         onLoadingStateChanged?(true)
@@ -1641,6 +1669,8 @@ final class WholeBoardViewController: NSViewController {
         layerGeometryLoader?.cancel()
         layerGeometryLoader = nil
         loadedForPath = nil
+        // The board itself changed on disk: the same settings can now give a different plan.
+        stitchingViaPlanInputsKey = nil
         netClassByNet.removeAll()
         netsByNetClass.removeAll()
         resolvingActivityNetClasses.removeAll()

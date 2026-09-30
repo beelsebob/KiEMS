@@ -645,6 +645,10 @@ void to_json(nlohmann::json& j, const SimulationConfig& p) {
     if (p._isDifferentialPair) {
         j["is_differential_pair"] = true;
     }
+    // Omitted when empty so existing configurations (and their geometry cache keys) are unchanged.
+    if (!p._edgeTerminatedNets.empty()) {
+        j["edge_terminated_nets"] = p._edgeTerminatedNets;
+    }
 }
 
 void from_json(const nlohmann::json& j, SimulationConfig& p) {
@@ -672,6 +676,7 @@ void from_json(const nlohmann::json& j, SimulationConfig& p) {
     p._viaSpacing = j.value("via_spacing", def._viaSpacing);
     p._eyeBitRate = j.value("eye_bit_rate", def._eyeBitRate);
     p._isDifferentialPair = j.value("is_differential_pair", def._isDifferentialPair);
+    p._edgeTerminatedNets = j.value("edge_terminated_nets", std::vector<std::string>{});
     p._excitations = j.value("excitations", std::vector<ExcitationConfig>{});
     p._hullCutPorts = j.value("hull_cut_ports", std::vector<HullCutPortConfig>{});
     p._traces = j.value("traces", std::vector<SingleEndedConfig>{});

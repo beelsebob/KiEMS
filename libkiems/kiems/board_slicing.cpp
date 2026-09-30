@@ -244,6 +244,8 @@ SlicingConfig SlicingConfig::from(const SimulationConfig& sim, const EMSConfig& 
         .viaClearance = config.via().viaClearance(),
         .pixelSize = config.pixelSize(),
         .layerNames = std::move(layerNames),
+        .edgeTerminatedNets = sim.edgeTerminatedNets(),
+        .edgeTerminationWidth = config.grid().max(),
     };
 }
 
@@ -345,41 +347,43 @@ std::expected<ClassifiedCopper, std::string> classifyCopperForSimulation(const S
     return result;
 }
 
-std::expected<SlicedBoard, std::string> sliceBoardForSimulation(
+namespace {
+
+/// Everything steps 1, 2 and 4 of sliceBoardForSimulation() produce -- shared verbatim by that
+/// function and planSlicedBoardForSimulation(), so the setup screen's plan can never disagree with
+/// the geometry stage about where the cut or the stitching vias fall.
+struct CutoutStage {
+    BoundingBox<double> origin;
+    double tessellationTolerance = 0;
+    std::vector<PolygonSet> signalPerLayer;
+    std::vector<PolygonSet> groundPerLayer;
+    PolygonSet cutout;
+    StitchingViaPlacement stitching;
+};
+
+std::expected<CutoutStage, std::string> computeCutoutStage(
     const SlicingConfig& slicing, const libkicad::BoardGeometry& geometry,
     const std::vector<libkicad::CopperPolygon>& involvedCopper,
-    const std::vector<libkicad::CopperPolygon>& geometryOnlyCopper,
     const std::vector<libkicad::CopperPolygon>& groundCopper,
     const std::vector<ClassifiedCopper::HullContribution>& hullContributions,
-    const std::vector<ViaHole>& existingVias,
-    const std::vector<NPTHHole>& npthHoles,
-    const GeometryProcessingProgressCallback& onProgress) {
-    const double tessellationTolerance = static_cast<double>(slicing.pixelSize) * constants::unitMultiplier;
+    const std::vector<ViaHole>& existingVias, const std::function<void()>& polygonPrimitiveDone) {
+    CutoutStage stage;
+    stage.tessellationTolerance = static_cast<double>(slicing.pixelSize) * constants::unitMultiplier;
+    const double tessellationTolerance = stage.tessellationTolerance;
 
     auto originResult = boardBoundsInSimulationUnits(geometry);
     if (!originResult) {
         return std::unexpected(std::move(originResult).error());
     }
-    const BoundingBox<double>& origin = *originResult;
+    stage.origin = *originResult;
+    const BoundingBox<double>& origin = stage.origin;
     const PolygonSet realOutline = _polygonLoopsToPolygons(geometry.outline, origin.xMin, origin.yMin);
     const std::vector<std::string>& layerNames = slicing.layerNames;
 
-    const std::size_t polygonPrimitiveCount = 7 * layerNames.size() + 8;
-    std::size_t completedPolygonPrimitives = 0;
-    const auto polygonPrimitiveDone = [&] {
-        ++completedPolygonPrimitives;
-        if (onProgress) {
-            onProgress({GeometryProcessingPhase::PolygonOperations, completedPolygonPrimitives,
-                        polygonPrimitiveCount});
-        }
-    };
-    if (onProgress) {
-        onProgress({GeometryProcessingPhase::PolygonOperations, 0, polygonPrimitiveCount});
-    }
-
-    std::vector<PolygonSet> signalPerLayer(layerNames.size());
-    std::vector<PolygonSet> geometryOnlyPerLayer(layerNames.size());
-    std::vector<PolygonSet> groundPerLayer(layerNames.size());
+    std::vector<PolygonSet>& signalPerLayer = stage.signalPerLayer;
+    std::vector<PolygonSet>& groundPerLayer = stage.groundPerLayer;
+    signalPerLayer.resize(layerNames.size());
+    groundPerLayer.resize(layerNames.size());
     std::vector<PolygonSet> nonGroundCopperObstaclesPerLayer(layerNames.size());
 
     std::unordered_set<NetName, NetNameHash> groundNets;
@@ -397,26 +401,22 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(
         }
     }
 
-    PolygonSet signalUnionAllLayers;
     for (std::size_t layerIndex = 0; layerIndex < layerNames.size(); ++layerIndex) {
         const std::string& layerName = layerNames[layerIndex];
         signalPerLayer[layerIndex] = _copperOnLayer(involvedCopper, layerName, origin.xMin, origin.yMin);
-        polygonPrimitiveDone();
-        geometryOnlyPerLayer[layerIndex] = _copperOnLayer(geometryOnlyCopper, layerName, origin.xMin, origin.yMin);
         polygonPrimitiveDone();
         groundPerLayer[layerIndex] = _copperOnLayer(groundCopper, layerName, origin.xMin, origin.yMin);
         polygonPrimitiveDone();
         nonGroundCopperObstaclesPerLayer[layerIndex] =
             _copperOnLayer(nonGroundCopperObstacles, layerName, origin.xMin, origin.yMin);
         polygonPrimitiveDone();
-
-        signalUnionAllLayers.insert(signalUnionAllLayers.end(), signalPerLayer[layerIndex].begin(),
-                                    signalPerLayer[layerIndex].end());
-        signalUnionAllLayers = unionPolygons(signalUnionAllLayers);
-        polygonPrimitiveDone();
     }
 
-    if (signalUnionAllLayers.empty()) {
+    // Each per-layer set is already a regularized union, so "no copper anywhere" is just "every
+    // layer empty" -- no need to union all layers together (which, done incrementally, re-unioned
+    // an ever-growing polygon set once per layer purely to answer this yes/no question).
+    if (std::all_of(signalPerLayer.begin(), signalPerLayer.end(),
+                    [](const PolygonSet& layer) { return layer.empty(); })) {
         return std::unexpected("Involved nets have no copper on any layer");
     }
 
@@ -444,14 +444,73 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(
     }
     cutoutSource = unionPolygons(cutoutSource);
     polygonPrimitiveDone();
-    const PolygonSet cutout = intersectPolygons(cutoutSource, realOutline);
+    stage.cutout = intersectPolygons(cutoutSource, realOutline);
     polygonPrimitiveDone();
-    if (cutout.empty()) {
+    if (stage.cutout.empty()) {
         return std::unexpected("Computed cutout region is empty");
     }
 
-    StitchingViaPlacement stitching = placeStitchingVias(
-        slicing, cutout, realOutline, groundPerLayer, nonGroundCopperObstaclesPerLayer, existingVias);
+    stage.stitching = placeStitchingVias(slicing, stage.cutout, realOutline, groundPerLayer,
+                                         nonGroundCopperObstaclesPerLayer, existingVias);
+    return stage;
+}
+
+} // namespace
+
+std::expected<SlicedBoardPlan, std::string> planSlicedBoardForSimulation(
+    const SlicingConfig& slicing, const libkicad::BoardGeometry& geometry,
+    const std::vector<libkicad::CopperPolygon>& involvedCopper,
+    const std::vector<libkicad::CopperPolygon>& groundCopper,
+    const std::vector<ClassifiedCopper::HullContribution>& hullContributions,
+    const std::vector<ViaHole>& existingVias) {
+    auto stage = computeCutoutStage(slicing, geometry, involvedCopper, groundCopper, hullContributions,
+                                    existingVias, [] {});
+    if (!stage) return std::unexpected(std::move(stage).error());
+    return SlicedBoardPlan{std::move(stage->cutout), std::move(stage->stitching.vias),
+                           std::move(stage->stitching.failedAttempts)};
+}
+
+std::expected<SlicedBoard, std::string> sliceBoardForSimulation(
+    const SlicingConfig& slicing, const libkicad::BoardGeometry& geometry,
+    const std::vector<libkicad::CopperPolygon>& involvedCopper,
+    const std::vector<libkicad::CopperPolygon>& geometryOnlyCopper,
+    const std::vector<libkicad::CopperPolygon>& groundCopper,
+    const std::vector<ClassifiedCopper::HullContribution>& hullContributions,
+    const std::vector<ViaHole>& existingVias,
+    const std::vector<NPTHHole>& npthHoles,
+    const GeometryProcessingProgressCallback& onProgress) {
+    const std::vector<std::string>& layerNames = slicing.layerNames;
+    const std::size_t polygonPrimitiveCount = 6 * layerNames.size() + 8;
+    std::size_t completedPolygonPrimitives = 0;
+    const auto polygonPrimitiveDone = [&] {
+        ++completedPolygonPrimitives;
+        if (onProgress) {
+            onProgress({GeometryProcessingPhase::PolygonOperations, completedPolygonPrimitives,
+                        polygonPrimitiveCount});
+        }
+    };
+    if (onProgress) {
+        onProgress({GeometryProcessingPhase::PolygonOperations, 0, polygonPrimitiveCount});
+    }
+
+    auto stageResult = computeCutoutStage(slicing, geometry, involvedCopper, groundCopper, hullContributions,
+                                          existingVias, polygonPrimitiveDone);
+    if (!stageResult) return std::unexpected(std::move(stageResult).error());
+    CutoutStage& stage = *stageResult;
+    const BoundingBox<double>& origin = stage.origin;
+    const double tessellationTolerance = stage.tessellationTolerance;
+    const std::vector<PolygonSet>& signalPerLayer = stage.signalPerLayer;
+    const std::vector<PolygonSet>& groundPerLayer = stage.groundPerLayer;
+    const PolygonSet& cutout = stage.cutout;
+    StitchingViaPlacement& stitching = stage.stitching;
+
+    // Geometry-only copper never influences the cutout or stitching, so it's only built here.
+    std::vector<PolygonSet> geometryOnlyPerLayer(layerNames.size());
+    for (std::size_t layerIndex = 0; layerIndex < layerNames.size(); ++layerIndex) {
+        geometryOnlyPerLayer[layerIndex] =
+            _copperOnLayer(geometryOnlyCopper, layerNames[layerIndex], origin.xMin, origin.yMin);
+        polygonPrimitiveDone();
+    }
 
     const PolygonSet npthHolePolygons = tessellateHoles(npthHoles, tessellationTolerance);
     polygonPrimitiveDone();
@@ -560,6 +619,36 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(
     result.cutoutLoops = cutout;
     result.stitchingVias = std::move(stitching.vias);
     result.failedStitchingViaAttempts = std::move(stitching.failedAttempts);
+
+    // Edge terminations: each terminated net's copper within one termination width of the cut.
+    if (!slicing.edgeTerminatedNets.empty() && slicing.edgeTerminationWidth > 0) {
+        std::unordered_set<NetName, NetNameHash> terminated;
+        for (const std::string& net : slicing.edgeTerminatedNets) {
+            if (!net.empty()) terminated.insert(NetName(net)); // "" is a UI row with no net chosen yet
+        }
+        std::vector<libkicad::CopperPolygon> terminatedCopper;
+        for (const auto* source : {&involvedCopper, &geometryOnlyCopper}) {
+            for (const libkicad::CopperPolygon& polygon : *source) {
+                if (terminated.contains(NetName(polygon.netName))) terminatedCopper.push_back(polygon);
+            }
+        }
+        const PolygonSet band = differencePolygons(
+            cutout, offsetPolygons(cutout, -slicing.edgeTerminationWidth, tessellationTolerance));
+        result.edgeTerminationLoops.resize(layerNames.size());
+        std::size_t layersWithTermination = 0;
+        for (std::size_t layerIndex = 0; layerIndex < layerNames.size(); ++layerIndex) {
+            const PolygonSet copper =
+                _copperOnLayer(terminatedCopper, layerNames[layerIndex], origin.xMin, origin.yMin);
+            if (copper.empty()) continue;
+            result.edgeTerminationLoops[layerIndex] = intersectPolygons(copper, band);
+            if (!result.edgeTerminationLoops[layerIndex].empty()) ++layersWithTermination;
+        }
+        result.edgeTerminationWidth = slicing.edgeTerminationWidth;
+        if (layersWithTermination == 0) {
+            logWarning("Edge-terminated nets have no copper along the cut -- no terminations placed");
+            result.edgeTerminationLoops.clear();
+        }
+    }
 
     // placeStitchingVias() already logged its own via-count/DIAG summary -- this is just the
     // overall sliced-board bbox.

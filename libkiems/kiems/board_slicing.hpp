@@ -151,6 +151,12 @@ struct SlicedBoard {
     std::vector<Triangle> bottomMaskTriangles;
     std::vector<std::vector<Position>> topMaskOpeningLoops;
     std::vector<std::vector<Position>> bottomMaskOpeningLoops;
+    /// Per metal layer (same order as layerCopperLoops), the part of every
+    /// SimulationConfig::edgeTerminatedNets() net's copper lying within edgeTerminationWidth of the
+    /// cut -- where Simulation::addEdgeTerminations() places its matched resistive sheet. Empty when
+    /// no nets are edge-terminated.
+    std::vector<Cu::PolygonSet> edgeTerminationLoops;
+    double edgeTerminationWidth = 0;
 };
 
 /// Serialized/deserialized whole -- see simulation_data.hpp's saveSimulationData()/
@@ -166,6 +172,10 @@ inline void to_json(nlohmann::json& j, const SlicedBoard& b) {
                         {"bottomMaskOpeningLoops", b.bottomMaskOpeningLoops},
                         {"previewLayerTriangles", b.previewLayerTriangles},
                         {"cutoutLoops", b.cutoutLoops}};
+    if (!b.edgeTerminationLoops.empty()) {
+        j["edgeTerminationLoops"] = b.edgeTerminationLoops;
+        j["edgeTerminationWidth"] = b.edgeTerminationWidth;
+    }
 }
 
 inline void from_json(const nlohmann::json& j, SlicedBoard& b) {
@@ -228,6 +238,10 @@ inline void from_json(const nlohmann::json& j, SlicedBoard& b) {
     if (j.contains("cutoutLoops")) {
         j.at("cutoutLoops").get_to(b.cutoutLoops);
     }
+    if (j.contains("edgeTerminationLoops")) {
+        j.at("edgeTerminationLoops").get_to(b.edgeTerminationLoops);
+        b.edgeTerminationWidth = j.value("edgeTerminationWidth", 0.0);
+    }
 }
 
 /// Everything sliceBoardForSimulation()/placeStitchingVias() (via_stitching.hpp) need from a
@@ -262,6 +276,12 @@ struct SlicingConfig {
     /// ever reads) sliceBoardForSimulation() actually needs: which layer each involved/geometry-only/
     /// ground CopperPolygon's own copperLayerName should be matched against, per output layer index.
     std::vector<std::string> layerNames;
+    /// SimulationConfig::edgeTerminatedNets(): involved/geometry-only copper on these nets gets a
+    /// SlicedBoard::edgeTerminationLoops entry wherever it lies within edgeTerminationWidth of the cut.
+    std::vector<std::string> edgeTerminatedNets;
+    /// Width of that band inward from the cut, in simulation units -- the grid's maximum cell size,
+    /// so the band always covers at least one column of Yee edges.
+    double edgeTerminationWidth = 0;
 
     /// Builds one from `sim`'s own viaEdgeDistance()/viaSpacing() and `config`'s own
     /// via()/pixelSize()/getMetals() -- the two real sources every caller reads these fields off, so
@@ -350,6 +370,26 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(
     const std::vector<ViaHole>& existingVias,
     const std::vector<NPTHHole>& npthHoles,
     const GeometryProcessingProgressCallback& onProgress = {});
+
+/// The part of a SlicedBoard that interactive setup UI needs -- where the cut falls and where
+/// stitching vias would go -- without any of the per-layer copper Booleans, solder mask
+/// preparation, or triangulation that only the real geometry stage consumes.
+struct SlicedBoardPlan {
+    std::vector<std::vector<Position>> cutoutLoops;
+    std::vector<StitchingVia> stitchingVias;
+    std::vector<Position> failedStitchingViaAttempts;
+};
+
+/// Steps 1, 2 and 4 of sliceBoardForSimulation() only, with identical results for the fields
+/// SlicedBoardPlan carries (both functions share the same implementation of those steps) and the
+/// same errors for an empty net selection or cutout. Skips step 3 and every triangulation, which
+/// dominate sliceBoardForSimulation()'s cost on a real board.
+std::expected<SlicedBoardPlan, std::string> planSlicedBoardForSimulation(
+    const SlicingConfig& slicing, const libkicad::BoardGeometry& geometry,
+    const std::vector<libkicad::CopperPolygon>& involvedCopper,
+    const std::vector<libkicad::CopperPolygon>& groundCopper,
+    const std::vector<ClassifiedCopper::HullContribution>& hullContributions,
+    const std::vector<ViaHole>& existingVias);
 
 /// Low-level compatibility overload for geometry fixtures that provide one flat contributing
 /// copper set. Production callers pass ClassifiedCopper::hullContributions to the overload above.

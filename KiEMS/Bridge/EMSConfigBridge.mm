@@ -504,6 +504,22 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
     self.cxxSim.setIsDifferentialPair(value);
 }
 
+- (NSArray<NSString*>*)edgeTerminatedNets {
+    NSMutableArray<NSString*>* nets = [NSMutableArray array];
+    for (const std::string& net : self.cxxSim.edgeTerminatedNets()) {
+        [nets addObject:@(net.c_str())];
+    }
+    return nets;
+}
+- (void)setEdgeTerminatedNets:(NSArray<NSString*>*)nets {
+    std::vector<std::string> values;
+    values.reserve(nets.count);
+    for (NSString* net in nets) {
+        values.emplace_back(net.UTF8String);
+    }
+    self.cxxSim.edgeTerminatedNets() = std::move(values);
+}
+
 - (EMSInvolvedNetBridge*)_wrapperForInvolvedNetIndex:(NSInteger)index {
     EMSInvolvedNetBridge* wrapper = [[EMSInvolvedNetBridge alloc] init];
     wrapper->_parentSim = self;

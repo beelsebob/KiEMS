@@ -48,6 +48,11 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Immutable configuration snapshot created cheaply on the main thread, then evaluated off-thread.
 @interface KicadStitchingViaPlanRequest : NSObject
+/// Identifies everything the plan depends on: involved/geometry-only net selectors and their hull
+/// padding, the ground selector, and via placement settings. Two requests with equal keys against
+/// the same (unchanged) board produce the same plan, so ports, probes, absorbing/excitation state
+/// and other settings that can't move the cut or its vias never trigger a recompute.
+@property (nonatomic, copy, readonly) NSString* inputsKey;
 - (nullable KicadStitchingViaPlan*)computeForBoard:(NSString*)kicadPcbPath
                                                error:(NSError**)error;
 @end

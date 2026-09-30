@@ -61,6 +61,20 @@ StitchingViaPlacement placeStitchingVias(const SlicingConfig& slicing, const Pol
         double outerRadius = 0; // For the clearance check (edge-to-edge, not center-to-center).
         bool isGround = false;  // For the slicing.viaSpacing check, which only applies among ground-net vias.
     };
+    // Every point query below is against these same per-layer sets. containsPoint() rebuilds and
+    // re-validates the whole (plane-sized, clearance-riddled) geometry per call, which made this
+    // function dominate the setup screen's hull-cut/via planning; build each one once instead.
+    std::vector<PointLocator> groundLocators;
+    groundLocators.reserve(groundPerLayer.size());
+    for (const PolygonSet& ground : groundPerLayer) groundLocators.emplace_back(ground);
+    std::vector<PointLocator> obstacleLocators;
+    obstacleLocators.reserve(nonGroundCopperObstaclesPerLayer.size());
+    for (const PolygonSet& obstacles : nonGroundCopperObstaclesPerLayer) obstacleLocators.emplace_back(obstacles);
+    auto onAnyGroundLayer = [&](const Position& position) {
+        return std::any_of(groundLocators.begin(), groundLocators.end(),
+                           [&](const PointLocator& ground) { return ground.contains(position); });
+    };
+
     std::vector<ExistingVia> seenVias;
     seenVias.reserve(existingVias.size());
     for (const ViaHole& via : existingVias) {
@@ -69,8 +83,7 @@ StitchingViaPlacement placeStitchingVias(const SlicingConfig& slicing, const Pol
         const double midX = (via.x + via.x2) / 2;
         const double midY = (via.y + via.y2) / 2;
         const Position pos(midX, midY);
-        const bool isGround = std::any_of(groundPerLayer.begin(), groundPerLayer.end(),
-                                         [&](const PolygonSet& ground) { return containsPoint(ground, pos); });
+        const bool isGround = onAnyGroundLayer(pos);
         // Circumscribing radius from the midpoint -- half the centerline length plus the pad's
         // own half-width -- so an elongated pad's clearance footprint is never underestimated,
         // even though this treats it as round for the purpose of this check (a conservative
@@ -88,15 +101,16 @@ StitchingViaPlacement placeStitchingVias(const SlicingConfig& slicing, const Pol
     // from each other, alongside real ground vias).
     const double candidateRadius = slicing.stitchingViaAnnularRingDiameter / 2;
     auto intersectsNonGroundCopper = [&](const Position& position) {
-        return std::any_of(nonGroundCopperObstaclesPerLayer.begin(),
-                           nonGroundCopperObstaclesPerLayer.end(),
-                           [&](const PolygonSet& obstacles) {
-                               // The via occupies its full annular-ring disc, not just its centre.
-                               // Point membership catches a disc centred inside a wide trace or
-                               // pad; boundary distance catches every partial overlap and tangency.
-                               return containsPoint(obstacles, position) ||
-                                      _distancePointToPolylines(position, obstacles) <= candidateRadius;
-                           });
+        for (std::size_t layer = 0; layer < nonGroundCopperObstaclesPerLayer.size(); ++layer) {
+            // The via occupies its full annular-ring disc, not just its centre. Point membership
+            // catches a disc centred inside a wide trace or pad; boundary distance catches every
+            // partial overlap and tangency.
+            if (obstacleLocators[layer].contains(position) ||
+                _distancePointToPolylines(position, nonGroundCopperObstaclesPerLayer[layer]) <= candidateRadius) {
+                return true;
+            }
+        }
+        return false;
     };
     auto tooCloseToExistingVia = [&](double x, double y) {
         for (const ExistingVia& existing : seenVias) {
@@ -310,11 +324,7 @@ StitchingViaPlacement placeStitchingVias(const SlicingConfig& slicing, const Pol
                 const Position viaPos(viaXRaw, viaYRaw);
                 const double viaX = viaPos.x();
                 const double viaY = viaPos.y();
-                const bool onAnyGroundLayer = std::any_of(groundPerLayer.begin(), groundPerLayer.end(),
-                                                          [&](const PolygonSet& ground) {
-                                                              return containsPoint(ground, viaPos);
-                                                          });
-                if (!onAnyGroundLayer) {
+                if (!onAnyGroundLayer(viaPos)) {
                     result.failedAttempts.emplace_back(viaX, viaY);
                     ++diagNoGroundCopperCount;
                     continue; // No ground copper here to stitch to -- skip rather than place a

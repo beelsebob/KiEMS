@@ -329,6 +329,7 @@ std::expected<void, std::string> Simulation::populateGeometry() {
         addGrid();
     }
     addSubstrates();
+    addEdgeTerminations();
     addSolderMask();
     addNPTHHoles();
     if (_options.exportField.has_value()) {
@@ -761,6 +762,83 @@ void Simulation::addSubstrates() {
                  std::to_string(offset - thickness));
         offset -= thickness;
     }
+}
+
+// Dissipative edge termination (Novak, IEEE Trans. Adv. Packaging 22(3), 1999) of every
+// SimulationConfig::edgeTerminatedNets() net where the cut crosses it. A plane pair's TEM wave
+// impedance is eta0/sqrt(epsR) regardless of the gap, so a vertical resistive sheet of that sheet
+// resistance at the cut absorbs normally incident plane-pair waves as if the plane carried on. The
+// sheet is a band of conductive dielectric (width w = SlicedBoard::edgeTerminationWidth, so
+// sigma = sqrt(epsR)/(eta0*w)) filling each substrate directly above and below the terminated copper,
+// i.e. from that copper to the neighbouring metal layers -- normally the ground planes it's
+// referenced to.
+void Simulation::addEdgeTerminations() {
+    const auto& loopsPerLayer = _slicedBoard.edgeTerminationLoops;
+    const double widthSimUnits = _slicedBoard.edgeTerminationWidth;
+    if (loopsPerLayer.empty() || widthSimUnits <= 0) {
+        return;
+    }
+    const double widthMetres = widthSimUnits * constants::baseUnit / constants::unitMultiplier;
+    constexpr double eta0 = 376.730313668;
+
+    struct StackEntry {
+        LayerKind kind;
+        std::size_t index; // into getMetals() or getSubstrates()
+        double top;        // z of the upper face, simulation units
+        double thickness;
+    };
+    std::vector<StackEntry> stack;
+    std::size_t metalIndex = 0;
+    std::size_t substrateIndex = 0;
+    double offset = 0;
+    for (const auto& layer : _config.layers()) {
+        if (layer.kind() == LayerKind::Metal) {
+            stack.push_back({LayerKind::Metal, metalIndex++, offset, 0});
+        } else if (layer.kind() == LayerKind::Substrate) {
+            stack.push_back({LayerKind::Substrate, substrateIndex++, offset, layer.thickness()});
+            offset -= layer.thickness();
+        }
+    }
+    const auto substrates = _config.getSubstrates();
+
+    std::size_t sheets = 0;
+    for (std::size_t position = 0; position < stack.size(); ++position) {
+        const StackEntry& metal = stack[position];
+        if (metal.kind != LayerKind::Metal || metal.index >= loopsPerLayer.size() ||
+            loopsPerLayer[metal.index].empty()) {
+            continue;
+        }
+        for (const std::size_t neighbour : {position - 1, position + 1}) {
+            if (neighbour >= stack.size() || stack[neighbour].kind != LayerKind::Substrate) {
+                continue; // outermost copper: nothing to terminate against on that side
+            }
+            const StackEntry& dielectric = stack[neighbour];
+            const LayerConfig& substrate = substrates.at(dielectric.index);
+            const double kappa = _lossTangentToKappa(substrate.epsilon(), substrate.lossTangent()) +
+                                 std::sqrt(substrate.epsilon()) / (eta0 * widthMetres);
+            CSPropMaterial* sheet =
+                addMaterial(*_csx, "EdgeTermination_" + std::to_string(metal.index) + "_" + std::to_string(neighbour),
+                            substrate.epsilon(), kappa);
+            const double bottom = dielectric.top - dielectric.thickness;
+            for (const Cu::Polygon& loop : loopsPerLayer[metal.index]) {
+                std::vector<double> xs;
+                std::vector<double> ys;
+                xs.reserve(loop.size());
+                ys.reserve(loop.size());
+                for (const Position& point : loop) {
+                    xs.push_back(point.x());
+                    ys.push_back(point.y());
+                }
+                // Holes (antipads etc.) get the plain substrate back at a higher priority.
+                const bool hole = !Cu::isPositive(loop);
+                addLinPoly(hole ? *_substrateMaterials[dielectric.index] : *sheet, xs, ys, axisIndex("z"), bottom,
+                           dielectric.thickness, hole ? 2 : 1);
+            }
+            ++sheets;
+        }
+    }
+    logInfo("Added " + std::to_string(sheets) + " edge-termination sheet(s), width " +
+            std::to_string(widthSimUnits) + " sim units");
 }
 
 void Simulation::addSolderMask() {

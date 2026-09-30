@@ -1123,6 +1123,17 @@ public:
     bool isDifferentialPair() const { return _isDifferentialPair; }
     void setIsDifferentialPair(bool value) { _isDifferentialPair = value; }
 
+    /// Nets whose copper is terminated to the ground net wherever the board-slicing cut crosses it.
+    /// The cut makes a plane that really continues across the board (a power pour, say) end in an
+    /// open edge, which turns it into a closed, lightly damped resonator between the adjacent
+    /// reference planes. sliceBoardForSimulation() records where these nets' copper meets the cut
+    /// (SlicedBoard::edgeTerminationLoops) and Simulation::addEdgeTerminations() places a matched
+    /// resistive sheet (a dissipative edge termination, Novak 1999) in the dielectric on either side,
+    /// so energy reaching the cut leaves as it would into the rest of the plane. Names use the same
+    /// spelling as ground_net's "net" (the board's own net names).
+    const std::vector<std::string>& edgeTerminatedNets() const { return _edgeTerminatedNets; }
+    std::vector<std::string>& edgeTerminatedNets() { return _edgeTerminatedNets; }
+
     std::vector<ExcitationConfig>& excitations() { return _excitations; }
     const std::vector<ExcitationConfig>& excitations() const { return _excitations; }
     std::vector<HullCutPortConfig>& hullCutPorts() { return _hullCutPorts; }
@@ -1171,6 +1182,7 @@ private:
     double _viaSpacing = 1500;
     double _eyeBitRate = 0;
     bool _isDifferentialPair = false;
+    std::vector<std::string> _edgeTerminatedNets;
     std::vector<ExcitationConfig> _excitations;
     std::vector<HullCutPortConfig> _hullCutPorts;
     std::vector<SingleEndedConfig> _traces;

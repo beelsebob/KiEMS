@@ -180,6 +180,8 @@ public:
     std::expected<void, std::string> addLumpedComponents();
     void addPlane(double zHeight);
     void addSubstrates();
+    /// See SimulationConfig::edgeTerminatedNets() and the definition's own comment.
+    void addEdgeTerminations();
     /// Top/bottom solder mask, if this board's stackup has any -- see _slicedBoard.topMaskTriangles/
     /// bottomMaskTriangles' own doc comment for where the (already hole-free) covering shape comes
     /// from; this just extrudes it through the real mask thickness and adds the dielectric material.

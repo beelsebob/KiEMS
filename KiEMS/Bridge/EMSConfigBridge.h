@@ -205,6 +205,10 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 /// pairing actually get turned into a diffPairs() entry, or are left as plain single-ended ports).
 @property (nonatomic) BOOL isDifferentialPair;
 
+/// Nets terminated to the ground net along the board-slicing cut -- see
+/// kiems::SimulationConfig::edgeTerminatedNets(). Empty strings are rows not yet given a net.
+@property (nonatomic, copy) NSArray<NSString *> *edgeTerminatedNets;
+
 @property (nonatomic, readonly) NSArray<EMSInvolvedNetBridge *> *involvedNets;
 - (EMSInvolvedNetBridge *)addInvolvedNetWithKind:(EMSNetSelectorKind)kind;
 - (void)removeInvolvedNetAtIndex:(NSInteger)index;

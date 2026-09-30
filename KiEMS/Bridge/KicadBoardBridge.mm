@@ -110,7 +110,40 @@ NSArray<NSString*>* toNSStringArray(const std::vector<std::string>& values) {
 @interface KicadStitchingViaPlanRequest ()
 @property (nonatomic, strong) NSValue* configurationPointer;
 @property (nonatomic) NSInteger simulationIndex;
+@property (nonatomic, copy, readwrite) NSString* inputsKey;
 @end
+
+namespace {
+
+// Only the fields planning actually reads (see computeForBoard:error:) -- deliberately not the whole
+// SimulationConfig/InvolvedNetConfig JSON, which also carries port, probe, absorbing and excitation
+// settings that never move the cut or its stitching vias.
+std::string stitchingViaPlanInputsKey(const kiems::EMSConfig& config, const kiems::SimulationConfig& simulation) {
+    nlohmann::json nets = nlohmann::json::array();
+    for (const kiems::InvolvedNetConfig& entry : simulation.involvedNets()) {
+        nlohmann::json selector;
+        switch (entry.kind()) {
+            case kiems::NetSelectorKind::Net: selector["net"] = *entry.net(); break;
+            case kiems::NetSelectorKind::NetClass: selector["net_class"] = *entry.netClass(); break;
+            case kiems::NetSelectorKind::FootprintPin:
+                selector["footprint"] = *entry.footprint();
+                selector["pins"] = entry.pins();
+                break;
+        }
+        selector["geometry_only"] = entry.inclusionLevel() == kiems::NetInclusionLevel::GeometryOnly;
+        selector["hull_padding"] = entry.hullPadding();
+        nets.push_back(std::move(selector));
+    }
+    const nlohmann::json key{{"involved_nets", nets},
+                             {"ground_net", simulation.groundNet()},
+                             {"via_edge_distance", simulation.viaEdgeDistance()},
+                             {"via_spacing", simulation.viaSpacing()},
+                             {"via", config.via()},
+                             {"pixel_size", config.pixelSize()}};
+    return key.dump();
+}
+
+} // namespace
 
 @implementation KicadStitchingViaPlanRequest
 - (void)dealloc {
@@ -157,14 +190,11 @@ NSArray<NSString*>* toNSStringArray(const std::vector<std::string>& values) {
         if (auto vias = kiems::getVias(paths, origin->xMin, origin->yMin); vias) {
             existingVias = std::move(*vias);
         }
-        std::vector<kiems::NPTHHole> npthHoles;
-        if (auto holes = kiems::getNPTHHoles(paths, origin->xMin, origin->yMin); holes) {
-            npthHoles = std::move(*holes);
-        }
         const kiems::SlicingConfig slicing = kiems::SlicingConfig::from(simulation, config);
-        auto sliced = kiems::sliceBoardForSimulation(
-            slicing, *geometry, copper->involved, copper->geometryOnly,
-            copper->ground, copper->hullContributions, existingVias, npthHoles);
+        // Only the cut and the stitching-via placement are shown here -- the full slice's per-layer
+        // Booleans, solder mask preparation and triangulation are geometry-stage-only work.
+        auto sliced = kiems::planSlicedBoardForSimulation(
+            slicing, *geometry, copper->involved, copper->ground, copper->hullContributions, existingVias);
         if (!sliced) {
             if (error != nil) *error = makeError(sliced.error());
             return nil;
@@ -250,6 +280,9 @@ NSArray<NSString*>* toNSStringArray(const std::vector<std::string>& values) {
     KicadStitchingViaPlanRequest* request = [[KicadStitchingViaPlanRequest alloc] init];
     request.configurationPointer = [NSValue valueWithPointer:new kiems::EMSConfig(config.cxxConfig)];
     request.simulationIndex = simulationIndex;
+    const kiems::EMSConfig& cxxConfig = config.cxxConfig;
+    request.inputsKey = @(stitchingViaPlanInputsKey(
+        cxxConfig, cxxConfig.simulations()[static_cast<std::size_t>(simulationIndex)]).c_str());
     return request;
 }
 
