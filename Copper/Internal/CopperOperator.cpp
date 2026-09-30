@@ -344,7 +344,17 @@ const CopperOperator::PrimitiveTypeCache& CopperOperator::primitiveTypeCache(CSP
         cache.prims = _csx.GetAllPrimitives(true, type);
         cache.boundBoxes.resize(cache.prims.size());
         for (std::size_t i = 0; i < cache.prims.size(); ++i) {
-            cache.boundBoxes[i].ok = cache.prims[i]->GetBoundBox(cache.boundBoxes[i].box.data());
+            // GetBoundBox()'s return value means "this box is exact", not "this box is valid":
+            // CSPrimPolygon/CSPrimLinPoly always return false while still filling a correct,
+            // conservative box. Treating false as unusable silently dropped every polygon-shaped
+            // material (substrates, solder mask, via fill, NPTH voids) from the grid. A box is usable
+            // when it was filled in (finite) and has extent on at least one axis; the base class
+            // leaves it untouched (NaN) and a degenerate polygon zeroes it.
+            auto& entry = cache.boundBoxes[i];
+            const bool exact = cache.prims[i]->GetBoundBox(entry.box.data());
+            const bool finite = std::all_of(entry.box.begin(), entry.box.end(), [](double v) { return std::isfinite(v); });
+            const bool extent = entry.box[0] != entry.box[1] || entry.box[2] != entry.box[3] || entry.box[4] != entry.box[5];
+            entry.ok = exact || (finite && extent);
         }
         it = _primitiveTypeCache.emplace(key, std::move(cache)).first;
     }
