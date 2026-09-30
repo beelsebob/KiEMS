@@ -151,6 +151,13 @@
 			remoteGlobalIDString = 71AD3CD5302FAAD5006D5847;
 			remoteInfo = Copper;
 		};
+		7E57CB0000000000000000C7 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B0B651E8085482933DC2AFFE;
+			remoteInfo = libkicad;
+		};
 		2A075E9DC0149148EA251C93 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 71AD228A30263515006D5847 /* Project object */;
@@ -1257,6 +1264,7 @@
 			);
 			dependencies = (
 				EA0A86660359852DE27A849C /* PBXTargetDependency */,
+				7E57CB0000000000000000C6 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				87EBBDF2469E60AF87C97EB2 /* libkiems_tests */,
@@ -1710,6 +1718,11 @@
 			isa = PBXTargetDependency;
 			target = 71B4EE8D304224C5002796EC /* CopperUtils */;
 			targetProxy = 71B4EE9C304224FD002796EC /* PBXContainerItemProxy */;
+		};
+		7E57CB0000000000000000C6 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B0B651E8085482933DC2AFFE /* libkicad */;
+			targetProxy = 7E57CB0000000000000000C7 /* PBXContainerItemProxy */;
 		};
 		7B143B2514242142CF40DD14 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
