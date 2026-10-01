@@ -9,7 +9,7 @@
 #include "Internal/CopperCPML.hpp"
 #include "Internal/CopperDomain.hpp"
 #include "Internal/CopperOperator.hpp"
-#include "tools/constants.h"
+#include "Internal/CopperPhysicalConstants.hpp"
 
 using namespace copper::test;
 
@@ -95,7 +95,7 @@ using namespace copper::test;
     // -- see CopperCPML.hpp), graded along Z alone and so stored per plane: `depth` planes at the
     // bottom and one more at the top, whose first plane holds only the H-side half-cell grading.
     const auto nz = op.numberOfLines(2);
-    const copper::CopperZCPML zcpml = copper::buildZCPML(op, 2 * M_PI * 100e6 * EPS0, depth);
+    const copper::CopperZCPML zcpml = copper::buildZCPML(op, 2 * M_PI * 100e6 * copper::physical::epsilon0, depth);
     XCTAssertEqual(zcpml.layerOfZ.size(), static_cast<std::size_t>(nz));
     XCTAssertEqual(zcpml.layerCount(), 2 * depth + 1);
     for (std::uint32_t z = 0; z < nz; ++z) {
@@ -174,7 +174,7 @@ using namespace copper::test;
                                   {op.discLine(0, x0), op.discLine(1, y1)}}};
     config.domainCPMLCellSize = op.discLine(0, 1) - op.discLine(0, 0);
     const copper::CopperDomainMask mask = copper::buildDomainMask(op, config, depth);
-    const copper::CopperZCPML zcpml = copper::buildZCPML(op, 2 * M_PI * 100e6 * EPS0, depth);
+    const copper::CopperZCPML zcpml = copper::buildZCPML(op, 2 * M_PI * 100e6 * copper::physical::epsilon0, depth);
 
     copper::CopperEngine cpu(op.grid(), {}, {}, copper::CopperEngine::Backend::CPU, mask, zcpml);
     cpu.writeFieldCell(copper::CopperEngine::Field::Ez, nx / 2, ny / 2, nz / 2, 1.0F);
@@ -207,7 +207,7 @@ using namespace copper::test;
                                   {op.discLine(0, x0), op.discLine(1, y1)}}};
     config.domainCPMLCellSize = op.discLine(0, 1) - op.discLine(0, 0);
     const copper::CopperDomainMask mask = copper::buildDomainMask(op, config, depth);
-    const copper::CopperZCPML zcpml = copper::buildZCPML(op, 2 * M_PI * 100e6 * EPS0, depth);
+    const copper::CopperZCPML zcpml = copper::buildZCPML(op, 2 * M_PI * 100e6 * copper::physical::epsilon0, depth);
 
     copper::CopperEngine metal(op.grid(), {}, {}, copper::CopperEngine::Backend::Metal, mask, zcpml);
     copper::CopperEngine cpu(op.grid(), {}, {}, copper::CopperEngine::Backend::CPU, mask, zcpml);

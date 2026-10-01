@@ -12,8 +12,6 @@
 #include <CSPrimPolygon.h>
 #include <CSRectGrid.h>
 
-#include "FDTD/engine.h"
-
 namespace copper::test {
 
 ContinuousStructure* buildTinyVacuumGrid() {
@@ -261,25 +259,25 @@ ContinuousStructure* buildSeriesLumpedRLCFixture(double resistance, double induc
     return csx;
 }
 
-FieldParityResult compareGpuCpuFields(const CopperEngine& gpuEngine, Engine& cpuEngine, const CopperGridDims& dims) {
-    FieldParityResult result;
-    for (int f = 0; f < 6; ++f) {
-        const bool isH = f >= 3;
-        const std::vector<float> gpuField = gpuEngine.readField(kAllFields[f]);
-        for (std::uint32_t z = 0; z < dims.nz; ++z) {
-            for (std::uint32_t y = 0; y < dims.ny; ++y) {
-                for (std::uint32_t x = 0; x < dims.nx; ++x) {
-                    const float cpuValue = isH ? cpuEngine.GetCurr(kAxisForField[f], x, y, z)
-                                                : cpuEngine.GetVolt(kAxisForField[f], x, y, z);
-                    const std::uint32_t idx = copperGridIndex(dims, x, y, z);
-                    const float gpuValue = gpuField[idx];
-                    result.maxAbsDiff = std::max(result.maxAbsDiff, std::fabs(gpuValue - cpuValue));
-                    result.maxAbsValue = std::max(result.maxAbsValue, std::fabs(cpuValue));
-                    if (cpuValue != 0.0F) {
-                        result.anyNonzero = true;
-                    }
-                }
-            }
+CopperOperator::Config pulseConfig(std::uint32_t maxTimesteps, bool pecBox) {
+    CopperOperator::Config config;
+    if (pecBox) {
+        config.boundary.fill(CopperOperator::BoundaryType::PEC);
+    }
+    config.f0 = 2.5e9;
+    config.fc = 2.5e9;
+    config.maxTimesteps = maxTimesteps;
+    return config;
+}
+
+FieldDiff diffFields(const CopperEngine& a, const CopperEngine& b) {
+    FieldDiff result;
+    for (const CopperEngine::Field field : kAllFields) {
+        const std::vector<float> fa = a.readField(field);
+        const std::vector<float> fb = b.readField(field);
+        for (std::size_t i = 0; i < fa.size() && i < fb.size(); ++i) {
+            result.maxAbsDiff = std::max(result.maxAbsDiff, std::fabs(fa[i] - fb[i]));
+            result.maxAbsValue = std::max(result.maxAbsValue, std::fabs(fa[i]));
         }
     }
     return result;

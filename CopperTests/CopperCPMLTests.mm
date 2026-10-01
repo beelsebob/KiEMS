@@ -1,6 +1,5 @@
-// CopperCPML has no CPU reference to diff against (openEMS itself has no CPML implementation -- see
-// Internal/CopperCPML.hpp's own top comment: it's a structurally different formulation from
-// openEMS's own UPML, not a generalization of it). So these tests check what the closed-form
+// CopperCPML has no independent reference implementation to diff against (see Internal/CopperCPML.hpp's
+// own top comment for where its formulation comes from). So these tests check what the closed-form
 // coefficients themselves guarantee (bounds derived directly from the CFS formulas, eq. 7.99/7.102),
 // plus that a seeded impulse absorbed by a CPML boundary actually decays instead of exploding.
 #import <XCTest/XCTest.h>
@@ -12,10 +11,9 @@
 #include "CopperTestFixtures.hpp"
 #include "Internal/CopperCPML.hpp"
 #include "Internal/CopperDomain.hpp"
-#include "Internal/CopperOpenEMSAccess.hpp"
 #include "Internal/CopperOperator.hpp"
 #include "Internal/CopperYeeGrid.hpp"
-#include "tools/constants.h"
+#include "Internal/CopperPhysicalConstants.hpp"
 
 using namespace copper::test;
 
@@ -24,22 +22,11 @@ using namespace copper::test;
 
 @implementation CopperCPMLTests
 
-/// b[w] = exp(-(sigma_w+alpha_w)*dT/EPS0) is a decaying exponential of a non-negative exponent, so
+/// b[w] = exp(-(sigma_w+alpha_w)*dT/copper::physical::epsilon0) is a decaying exponential of a non-negative exponent, so
 /// it's bounded to (0,1] for every physically real sigma/alpha/dT; c[w] = sigma_w*(b[w]-1)/
 /// (sigma_w+alpha_w) is a non-negative fraction times a non-positive term, so it's bounded to
 /// [-1,0]. Every value must also be finite. Small tolerance above the exact bounds for float rounding.
 - (void)testCPMLShellCoefficientsAreWellFormed {
-    copper::CopperOpenEMS fdtd;
-    fdtd.SetCSX(buildCpmlCavityNoExcitation());
-    fdtd.SetGaussExcite(2.5e9, 2.5e9);
-    for (int side = 0; side < 6; ++side) {
-        fdtd.Set_BC_Type(side, 2); // MUR -- never Set_BC_PML() for a CPML run, see CopperCPML.hpp
-    }
-    fdtd.SetNumberOfTimeSteps(30);
-    XCTAssertEqual(fdtd.SetupFDTD(), 0);
-    Operator* op = fdtd.GetOperatorForGPU();
-    XCTAssertTrue(op != nullptr);
-
     copper::CopperOperator::Config config; // boundary stays Open (MUR) on every face
     config.f0 = 2.5e9;
     config.fc = 2.5e9;
@@ -47,7 +34,7 @@ using namespace copper::test;
     copper::CopperOperator newOp(*buildCpmlCavityNoExcitation(), config);
 
     constexpr std::uint32_t kPmlDepthCellsForTest = 8;
-    const double alphaMax = 2 * M_PI * 100e6 * EPS0;
+    const double alphaMax = 2 * M_PI * 100e6 * copper::physical::epsilon0;
     const std::vector<copper::CopperCPMLShell> shells =
         copper::buildCPMLShells(newOp, alphaMax, kPmlDepthCellsForTest);
     XCTAssertEqual(shells.size(), static_cast<std::size_t>(6), @"expected exactly 6 CPML shells (one per face)");
@@ -76,15 +63,6 @@ using namespace copper::test;
 /// alphaMax=0 and pmlDepthCells=0 are both explicitly documented edge cases -- 0 shells for
 /// pmlDepthCells=0 (a caller with no PML on this run shouldn't have to special-case the call away).
 - (void)testZeroPmlDepthReturnsNoShells {
-    copper::CopperOpenEMS fdtd;
-    fdtd.SetCSX(buildCpmlCavityNoExcitation());
-    fdtd.SetGaussExcite(2.5e9, 2.5e9);
-    for (int side = 0; side < 6; ++side) {
-        fdtd.Set_BC_Type(side, 2);
-    }
-    fdtd.SetNumberOfTimeSteps(10);
-    XCTAssertEqual(fdtd.SetupFDTD(), 0);
-
     copper::CopperOperator::Config config; // boundary stays Open (MUR) on every face
     config.f0 = 2.5e9;
     config.fc = 2.5e9;
@@ -100,15 +78,6 @@ using namespace copper::test;
 /// means the boundary is amplifying instead of absorbing), and every field value must stay finite
 /// (no NaN/Inf from a malformed recursion).
 - (void)testCPMLAbsorbsSeededImpulseWithoutGrowingEnergyOrProducingNonFiniteValues {
-    copper::CopperOpenEMS fdtd;
-    fdtd.SetCSX(buildCpmlCavityNoExcitation());
-    fdtd.SetGaussExcite(2.5e9, 2.5e9);
-    for (int side = 0; side < 6; ++side) {
-        fdtd.Set_BC_Type(side, 2);
-    }
-    fdtd.SetNumberOfTimeSteps(30);
-    XCTAssertEqual(fdtd.SetupFDTD(), 0);
-
     copper::CopperOperator::Config config; // boundary stays Open (MUR) on every face
     config.f0 = 2.5e9;
     config.fc = 2.5e9;
@@ -117,7 +86,7 @@ using namespace copper::test;
 
     constexpr std::uint32_t kPmlDepthCellsForTest = 8;
     const copper::CopperYeeGrid& grid = newOp.grid();
-    const double alphaMax = 2 * M_PI * 100e6 * EPS0;
+    const double alphaMax = 2 * M_PI * 100e6 * copper::physical::epsilon0;
     const std::vector<copper::CopperCPMLShell> shells =
         copper::buildCPMLShells(newOp, alphaMax, kPmlDepthCellsForTest);
     XCTAssertEqual(shells.size(), static_cast<std::size_t>(6));
@@ -197,7 +166,7 @@ using namespace copper::test;
         XCTAssertEqual(mismatches, static_cast<std::size_t>(0), @"%@: a CPML axis's grading varies off-axis", label);
     };
 
-    checkSeparable(copper::buildCPMLShells(op, 2 * M_PI * 100e6 * EPS0, depth), @"rectangular");
+    checkSeparable(copper::buildCPMLShells(op, 2 * M_PI * 100e6 * copper::physical::epsilon0, depth), @"rectangular");
 
 }
 
@@ -211,7 +180,7 @@ using namespace copper::test;
     config.maxTimesteps = 30;
     copper::CopperOperator op(*buildCpmlCavityNoExcitation(), config);
     constexpr std::uint32_t depth = 8;
-    const double alphaMax = 2 * M_PI * 100e6 * EPS0;
+    const double alphaMax = 2 * M_PI * 100e6 * copper::physical::epsilon0;
     const copper::CopperGridDims dims = op.dims();
     const std::uint32_t cx = dims.nx / 2, cy = dims.ny / 2;
 
@@ -295,7 +264,7 @@ static std::vector<copper::CopperCPMLShell> generalShellsFor(const copper::Coppe
     copper::CopperOperator op(*buildCpmlCavityNoExcitation(), config);
     constexpr std::uint32_t depth = 8;
     const copper::CopperGridDims dims = op.dims();
-    const copper::CopperZCPML zcpml = copper::buildZCPML(op, 2 * M_PI * 100e6 * EPS0, depth);
+    const copper::CopperZCPML zcpml = copper::buildZCPML(op, 2 * M_PI * 100e6 * copper::physical::epsilon0, depth);
     XCTAssertFalse(zcpml.empty());
     const auto shells = generalShellsFor(zcpml, dims);
     XCTAssertEqual(shells.size(), static_cast<std::size_t>(2));

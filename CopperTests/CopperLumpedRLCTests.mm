@@ -1,13 +1,9 @@
-// Internal/CopperLumpedRLC.hpp is a clean-room reimplementation of Operator_Ext_LumpedRLC's own
-// protected SERIES-branch math (see that header's own top comment for why it can't just read the
-// vendor extension's already-computed state) -- so unlike CopperYeeGrid/CopperExcitation,
-// there's no "read openEMS's own answer back" cross-check available for discoverLumpedRLC() itself.
-// What these tests check instead: (1) discoverLumpedRLC()'s output matches the exact closed-form
-// coefficients derived by hand from the same R/L/C values and the Cd=dT/vi relation the header
-// documents, and (2) applying CopperFDTDRunner.cpp's own per-timestep ADE correction (reimplemented
-// here identically, mirroring that file) to the GPU engine reproduces the real CPU openEMS Engine's
-// own Engine_Ext_LumpedRLC correction -- a genuine backend-parity check for the one Copper subsystem
-// the existing Copper_smoketest never covered at all.
+// Internal/CopperLumpedRLC.hpp's SERIES-branch ADE and CopperOperator's PARALLEL folding. These
+// tests check: (1) discoverLumpedRLC()'s output matches the exact closed-form coefficients derived by
+// hand from the same R/L/C values and the Cd=dT/vi relation the header documents, (2) the PARALLEL
+// folding keeps the requested resistance and actually drains a field, and (3) CopperFDTDRunner.cpp's
+// own per-timestep ADE correction (reimplemented here identically, mirroring that file) drains a
+// field the way a resistor across the cell must, identically on the Metal and CPU backends.
 #import <XCTest/XCTest.h>
 
 #include <cmath>
@@ -19,7 +15,6 @@
 #include "CopperTestFixtures.hpp"
 #include "Internal/CopperEngine.hpp"
 #include "Internal/CopperLumpedRLC.hpp"
-#include "Internal/CopperOpenEMSAccess.hpp"
 #include "Internal/CopperOperator.hpp"
 #include "Internal/CopperYeeGrid.hpp"
 
@@ -184,15 +179,6 @@ using namespace copper::test;
     const double resistance = 50.0;
     ContinuousStructure* csx = buildSeriesLumpedRLCFixture(resistance, std::numeric_limits<double>::quiet_NaN(),
                                                              std::numeric_limits<double>::quiet_NaN());
-    copper::CopperOpenEMS fdtd;
-    fdtd.SetCSX(csx);
-    fdtd.SetGaussExcite(2.5e9, 2.5e9);
-    for (int side = 0; side < 6; ++side) {
-        fdtd.Set_BC_Type(side, 0);
-    }
-    fdtd.SetNumberOfTimeSteps(10);
-    XCTAssertEqual(fdtd.SetupFDTD(), 0);
-
     copper::CopperOperator newOp(*csx, allPecConfig(10));
     const copper::CopperYeeGrid& grid = newOp.grid();
     const std::vector<copper::CopperLumpedRLCCell> cells = copper::discoverLumpedRLC(*csx, grid, newOp);
@@ -253,15 +239,6 @@ using namespace copper::test;
     box->SetCoord(4, 0.0);
     box->SetCoord(5, 1.0);
 
-    copper::CopperOpenEMS fdtd;
-    fdtd.SetCSX(csx);
-    fdtd.SetGaussExcite(2.5e9, 2.5e9);
-    for (int side = 0; side < 6; ++side) {
-        fdtd.Set_BC_Type(side, 0);
-    }
-    fdtd.SetNumberOfTimeSteps(10);
-    XCTAssertEqual(fdtd.SetupFDTD(), 0);
-
     copper::CopperOperator newOp(*csx, allPecConfig(10));
     const copper::CopperYeeGrid& grid = newOp.grid();
 
@@ -271,15 +248,6 @@ using namespace copper::test;
 
 - (void)testDiscoverLumpedRLCFindsNothingWhenNoLumpedElementExists {
     ContinuousStructure* csx = buildPecCavityNoExcitation();
-    copper::CopperOpenEMS fdtd;
-    fdtd.SetCSX(csx);
-    fdtd.SetGaussExcite(2.5e9, 2.5e9);
-    for (int side = 0; side < 6; ++side) {
-        fdtd.Set_BC_Type(side, 0);
-    }
-    fdtd.SetNumberOfTimeSteps(10);
-    XCTAssertEqual(fdtd.SetupFDTD(), 0);
-
     copper::CopperOperator newOp(*csx, allPecConfig(10));
     const copper::CopperYeeGrid& grid = newOp.grid();
 
@@ -288,33 +256,11 @@ using namespace copper::test;
     XCTAssertTrue(cells.empty());
 }
 
-/// Backend parity: applying CopperFDTDRunner.cpp's own per-timestep ADE correction (reimplemented
-/// identically here) to the GPU engine via runWithProbeSampling()'s midStepCorrection hook must
-/// reproduce the real CPU openEMS Engine's own Engine_Ext_LumpedRLC correction -- which runs
-/// automatically inside IterateTS(), no extra code needed on the CPU side.
-- (void)testLumpedRLCCorrectionMatchesCPUEngineOverAFullRun {
-    ContinuousStructure* csx = buildSeriesLumpedRLCFixture(50.0, std::numeric_limits<double>::quiet_NaN(),
-                                                             std::numeric_limits<double>::quiet_NaN());
-    copper::CopperOpenEMS fdtd;
-    fdtd.SetCSX(csx);
-    fdtd.SetGaussExcite(2.5e9, 2.5e9);
-    for (int side = 0; side < 6; ++side) {
-        fdtd.Set_BC_Type(side, 0);
-    }
-    fdtd.SetNumberOfTimeSteps(10);
-    XCTAssertEqual(fdtd.SetupFDTD(), 0);
-    Engine* cpuEngine = fdtd.GetEngineForCPU();
-    XCTAssertTrue(cpuEngine != nullptr);
-
-    copper::CopperOperator newOp(*csx, allPecConfig(10));
-    const copper::CopperYeeGrid& grid = newOp.grid();
-    const std::vector<copper::CopperLumpedRLCCell> lumpedRLC = copper::discoverLumpedRLC(*csx, grid, newOp);
-    XCTAssertEqual(lumpedRLC.size(), static_cast<std::size_t>(1));
-
-    copper::CopperEngine gpuEngine(grid);
-    gpuEngine.writeFieldCell(copper::CopperEngine::Field::Ez, 5, 5, 0, 1.0F);
-    cpuEngine->SetVolt(2, 5, 5, 0, 1.0F);
-
+/// CopperFDTDRunner.cpp's per-timestep ADE correction, reimplemented identically, applied to `engine`
+/// through runWithProbeSampling()'s midStepCorrection hook for `steps` steps.
+static void runWithLumpedRLCCorrection(copper::CopperEngine& engine,
+                                       const std::vector<copper::CopperLumpedRLCCell>& lumpedRLC,
+                                       std::uint32_t steps) {
     struct LumpedRLCState {
         double vdn[3] = {0.0, 0.0, 0.0};
         double jn[3] = {0.0, 0.0, 0.0};
@@ -330,7 +276,7 @@ using namespace copper::test;
             s.jn[1] = s.jn[0];
 
             const auto field = static_cast<copper::CopperEngine::Field>(cell.axis);
-            double vdn0 = static_cast<double>(gpuEngine.readFieldCell(field, cell.x, cell.y, cell.z));
+            double vdn0 = static_cast<double>(engine.readFieldCell(field, cell.x, cell.y, cell.z));
             vdn0 = static_cast<double>(cell.vvd) *
                    (vdn0 + static_cast<double>(cell.vv2) * s.vdn[2] + static_cast<double>(cell.vj1) * s.jn[1] +
                     static_cast<double>(cell.vj2) * s.jn[2]);
@@ -338,19 +284,64 @@ using namespace copper::test;
                       static_cast<double>(cell.b1) * static_cast<double>(cell.ib0) * s.jn[1] -
                       static_cast<double>(cell.b2) * static_cast<double>(cell.ib0) * s.jn[2];
             s.vdn[0] = vdn0;
-            gpuEngine.writeFieldCell(field, cell.x, cell.y, cell.z, static_cast<float>(vdn0));
+            engine.writeFieldCell(field, cell.x, cell.y, cell.z, static_cast<float>(vdn0));
         }
     };
-
-    const std::uint32_t steps = 8;
-    gpuEngine.runWithProbeSampling(
+    engine.runWithProbeSampling(
         steps, [](std::uint32_t) { return true; }, applyLumpedRLC);
-    cpuEngine->IterateTS(steps);
+}
 
-    const FieldParityResult diff = compareGpuCpuFields(gpuEngine, *cpuEngine, grid.dims);
-    XCTAssertTrue(diff.anyNonzero, @"CPU reference engine's fields are all still zero -- impulse never propagated");
-    const float tolerance = 1e-4F * std::max(diff.maxAbsValue, 1.0F);
-    XCTAssertLessThanOrEqual(diff.maxAbsDiff, tolerance);
+/// A 50-ohm SERIES resistor across the seeded cell must drain it on the very first step: with no H
+/// field yet the curl is zero, the ADE's history terms are all still zero, and the correction reduces
+/// to its implicit factor vvd = 1/(1 + dT/(2*R*Cd)), with Cd = dT/vi the cell's own capacitance. An
+/// undamped control must keep the seeded value.
+- (void)testSeriesResistorDrainsSeededCellByTheClosedFormFirstStepFactor {
+    ContinuousStructure* csx = buildSeriesLumpedRLCFixture(50.0, std::numeric_limits<double>::quiet_NaN(),
+                                                             std::numeric_limits<double>::quiet_NaN());
+    copper::CopperOperator op(*csx, allPecConfig(10));
+    const std::vector<copper::CopperLumpedRLCCell> lumpedRLC = copper::discoverLumpedRLC(*csx, op.grid(), op);
+    XCTAssertEqual(lumpedRLC.size(), static_cast<std::size_t>(1));
+    const copper::CopperLumpedRLCCell& cell = lumpedRLC.front();
+
+    copper::CopperEngine control(op.grid());
+    copper::CopperEngine damped(op.grid());
+    for (copper::CopperEngine* engine : {&control, &damped}) {
+        engine->writeFieldCell(copper::CopperEngine::Field::Ez, cell.x, cell.y, cell.z, 1.0F);
+    }
+    control.run(1);
+    runWithLumpedRLCCorrection(damped, lumpedRLC, 1);
+
+    const double dT = op.timestepSeconds();
+    const double cd = dT / static_cast<double>(op.grid().vi[2][copper::copperGridIndex(op.grid().dims, cell.x, cell.y, cell.z)]);
+    const double expected = 1.0 / (1.0 + dT / (2.0 * 50.0 * cd));
+    XCTAssertEqualWithAccuracy(control.readFieldCell(copper::CopperEngine::Field::Ez, cell.x, cell.y, cell.z), 1.0F, 1e-6F);
+    XCTAssertEqualWithAccuracy(damped.readFieldCell(copper::CopperEngine::Field::Ez, cell.x, cell.y, cell.z), expected,
+                               1e-5 * expected);
+    XCTAssertLessThan(damped.estimateEnergy(), control.estimateEnergy());
+    delete csx;
+}
+
+/// The ADE correction must produce the same fields on both backends -- the CPU backend implements the
+/// mid-step hook by running its voltage phase, the correction, then its current phase, the same
+/// two-phase split Metal does with a fence.
+- (void)testLumpedRLCCorrectionMatchesAcrossMetalAndCPUBackends {
+    ContinuousStructure* csx = buildSeriesLumpedRLCFixture(50.0, std::numeric_limits<double>::quiet_NaN(),
+                                                             std::numeric_limits<double>::quiet_NaN());
+    copper::CopperOperator op(*csx, allPecConfig(10));
+    const std::vector<copper::CopperLumpedRLCCell> lumpedRLC = copper::discoverLumpedRLC(*csx, op.grid(), op);
+    XCTAssertEqual(lumpedRLC.size(), static_cast<std::size_t>(1));
+
+    copper::CopperEngine metal(op.grid(), {}, {}, copper::CopperEngine::Backend::Metal);
+    copper::CopperEngine cpu(op.grid(), {}, {}, copper::CopperEngine::Backend::CPU);
+    for (copper::CopperEngine* engine : {&metal, &cpu}) {
+        engine->writeFieldCell(copper::CopperEngine::Field::Ez, 5, 5, 0, 1.0F);
+        runWithLumpedRLCCorrection(*engine, lumpedRLC, 8);
+    }
+
+    const FieldDiff diff = diffFields(metal, cpu);
+    XCTAssertGreaterThan(diff.maxAbsValue, 0.0F);
+    XCTAssertLessThanOrEqual(diff.maxAbsDiff, 1e-4F * std::max(diff.maxAbsValue, 1.0F));
+    delete csx;
 }
 
 @end

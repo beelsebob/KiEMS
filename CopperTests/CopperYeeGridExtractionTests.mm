@@ -1,25 +1,28 @@
-// Unit tests for the pure extraction layer (CopperYeeGrid/CopperExcitation) plus CalcPEC's
-// paint-cache cross-check -- the pieces that just walk openEMS's own already-built Operator/
-// Excitation into flat buffers, with no GPU/Metal involvement at all. These are exactly the
-// functions a future CPU backend would also need to produce identical answers from, so pinning
-// their behavior precisely (not just "didn't crash") is what gives confidence a CPU port built on
-// top of them still works.
+// CopperOperator's mesh/coefficient/excitation construction, checked against closed forms and
+// brute-force CSXCAD queries rather than a second solver: uniform-vacuum and filled-material
+// coefficients and CFL timestep, per-axis geometry on a graded mesh, per-edge PEC resolution against
+// ContinuousStructure::GetPropertyByCoordPriority(), the Gaussian pulse and its excited edge, and the
+// polygon scanline rasterizer against CSPrimitives::IsInside(). No GPU/Metal involvement at all.
 #import <XCTest/XCTest.h>
 
 #include <cmath>
 #include <iomanip>
+#include <memory>
 #include <random>
 #include <sstream>
 #include <string>
 #include <vector>
 
+#include <CSPrimBox.h>
 #include <CSPrimPolygon.h>
+#include <CSPropMaterial.h>
 #include <CSPropMetal.h>
+#include <CSRectGrid.h>
 
 #include "CopperTestFixtures.hpp"
 #include "Internal/CopperExcitation.hpp"
-#include "Internal/CopperOpenEMSAccess.hpp"
 #include "Internal/CopperOperator.hpp"
+#include "Internal/CopperPhysicalConstants.hpp"
 #include "Internal/CopperYeeGrid.hpp"
 
 using namespace copper::test;
@@ -93,6 +96,64 @@ std::vector<double> denseProbeValues(const std::vector<double>& vertexValues, do
     return out;
 }
 
+/// Uniform `cells`-cell cube of `spacing` drawing units (1 mm), optionally filled edge to edge (and
+/// beyond, so every edge sees the same material) with one material.
+std::unique_ptr<ContinuousStructure> buildUniformCube(int cells, double epsR = 1.0, double kappa = 0.0,
+                                                      double mueR = 1.0, double sigma = 0.0) {
+    auto csx = std::make_unique<ContinuousStructure>();
+    CSRectGrid* grid = csx->GetGrid();
+    grid->SetDeltaUnit(1e-3);
+    for (int axis = 0; axis < 3; ++axis) {
+        for (int i = 0; i <= cells; ++i) grid->AddDiscLine(axis, static_cast<double>(i));
+    }
+    if (epsR != 1.0 || kappa != 0.0 || mueR != 1.0 || sigma != 0.0) {
+        auto* material = new CSPropMaterial(csx->GetParameterSet());
+        material->SetName("fill");
+        material->SetEpsilon(epsR);
+        material->SetKappa(kappa);
+        material->SetMue(mueR);
+        material->SetSigma(sigma);
+        csx->AddProperty(material);
+        auto* box = new CSPrimBox(material->GetParameterSet(), material);
+        for (int axis = 0; axis < 3; ++axis) {
+            box->SetCoord(2 * axis, -1.0);
+            box->SetCoord(2 * axis + 1, cells + 1.0);
+        }
+    }
+    return csx;
+}
+
+/// Checks every interior cell's coefficients against the lossy-capacitor/inductor closed forms
+/// vv=(1-dT*G/2C)/(1+dT*G/2C), vi=(dT/C)/(1+dT*G/2C) (and ii/iv with L, R), for a uniform 1 mm cell
+/// filled with one material: C = eps*1mm, G = kappa*1mm, L = mu*1mm, R = sigma*1mm. Returns the
+/// number of mismatching values.
+std::size_t countUniformCoefficientMismatches(const copper::CopperYeeGrid& grid, double epsR, double kappa,
+                                              double mueR, double sigma) {
+    const double dT = grid.timestepSeconds;
+    const double d = 1e-3;
+    const double c = epsR * copper::physical::epsilon0 * d, g = kappa * d;
+    const double l = mueR * copper::physical::mu0 * d, r = sigma * d;
+    const double expected[4] = {(1.0 - dT * g / 2.0 / c) / (1.0 + dT * g / 2.0 / c),
+                                (dT / c) / (1.0 + dT * g / 2.0 / c),
+                                (1.0 - dT * r / 2.0 / l) / (1.0 + dT * r / 2.0 / l),
+                                (dT / l) / (1.0 + dT * r / 2.0 / l)};
+    std::size_t mismatches = 0;
+    for (int axis = 0; axis < 3; ++axis) {
+        const std::vector<float>* arrays[4] = {&grid.vv[axis], &grid.vi[axis], &grid.ii[axis], &grid.iv[axis]};
+        for (std::uint32_t z = 1; z + 1 < grid.dims.nz; ++z) {
+            for (std::uint32_t y = 1; y + 1 < grid.dims.ny; ++y) {
+                for (std::uint32_t x = 1; x + 1 < grid.dims.nx; ++x) {
+                    const std::uint32_t i = copper::copperGridIndex(grid.dims, x, y, z);
+                    for (int k = 0; k < 4; ++k) {
+                        if (std::fabs((*arrays[k])[i] - expected[k]) > 1e-6 * std::fabs(expected[k])) ++mismatches;
+                    }
+                }
+            }
+        }
+    }
+    return mismatches;
+}
+
 } // namespace
 
 @interface CopperYeeGridExtractionTests : XCTestCase
@@ -100,162 +161,169 @@ std::vector<double> denseProbeValues(const std::vector<double>& vertexValues, do
 
 @implementation CopperYeeGridExtractionTests
 
-/// CalcPEC's primitive-paint cache (Operator::PaintPECColumn) must pick exactly the same winning
-/// primitive per Yee edge as the old per-edge GetPropertyByCoordPriority query it replaced -- ported
-/// from Copper_smoketest's own Phase 0b, since that regression is invisible to every other test here
-/// (they only ever look at the resulting vv/vi/ii/iv, not which primitive produced them).
-- (void)testCalcPECPaintCacheMatchesLegacyPriorityQuery {
-    ContinuousStructure* pecCsx = buildPecPaintFixture();
-    copper::CopperOpenEMS fdtd;
-    fdtd.SetCSX(pecCsx);
-    fdtd.SetGaussExcite(2.5e9, 2.5e9);
-    for (int side = 0; side < 6; ++side) {
-        fdtd.Set_BC_Type(side, 0);
-    }
-    fdtd.SetNumberOfTimeSteps(10);
-    XCTAssertEqual(fdtd.SetupFDTD(), 0);
+/// Uniform 1 mm vacuum: every interior coefficient is the plain capacitor/inductor value, and the
+/// timestep is exactly the 3D Courant limit dx/(c*sqrt(3)) -- what the Var3 criterion reduces to when
+/// every cell is identical.
+- (void)testUniformVacuumCoefficientsAndTimestepMatchClosedForm {
+    const auto csx = buildUniformCube(8);
+    const copper::CopperOperator op(*csx, pulseConfig(10, /*pecBox=*/false));
+    const copper::CopperYeeGrid& grid = op.grid();
+    XCTAssertEqual(grid.dims.nx, 9U);
+    XCTAssertEqual(grid.dims.ny, 9U);
+    XCTAssertEqual(grid.dims.nz, 9U);
 
-    Operator* op = fdtd.GetOperatorForGPU();
-    XCTAssertTrue(op != nullptr);
-    auto* access = static_cast<copper::CopperOperatorAccess*>(op);
+    const double c0 = 1.0 / std::sqrt(copper::physical::epsilon0 * copper::physical::mu0);
+    const double courant = 1e-3 / (c0 * std::sqrt(3.0));
+    XCTAssertEqualWithAccuracy(grid.timestepSeconds, courant, 1e-9 * courant);
+    XCTAssertEqual(countUniformCoefficientMismatches(grid, 1.0, 0.0, 1.0, 0.0), static_cast<std::size_t>(0));
+}
 
-    unsigned int paintedMetal[3] = {0, 0, 0};
-    unsigned int pos[3] = {0, 0, 0};
-    double coord[3];
-    OperatorPECColumnCache cache;
-    for (pos[0] = 0; pos[0] < op->GetNumberOfLines(0); ++pos[0]) {
-        for (pos[1] = 0; pos[1] < op->GetNumberOfLines(1); ++pos[1]) {
-            access->PaintPECColumn(pos[0], pos[1], cache);
-            const std::vector<CSPrimitives*> candidates = op->GetPrimitivesBoundBox(
-                static_cast<int>(pos[0]), static_cast<int>(pos[1]), -1,
-                static_cast<CSProperties::PropertyType>(CSProperties::MATERIAL | CSProperties::METAL));
-            for (pos[2] = 0; pos[2] < op->GetNumberOfLines(2); ++pos[2]) {
-                for (int axis = 0; axis < 3; ++axis) {
-                    op->GetYeeCoords(axis, pos, coord, false);
-                    CSPrimitives* referenceWinner = nullptr;
-                    pecCsx->GetPropertyByCoordPriority(coord, candidates, false, &referenceWinner);
-                    XCTAssertEqual(cache.data[axis][pos[2]], referenceWinner,
-                                   @"paint-cache winner differs from the legacy priority query");
-                    if (referenceWinner != nullptr && referenceWinner->GetProperty()->GetType() == CSProperties::METAL) {
-                        ++paintedMetal[axis];
-                    }
-                }
-            }
-        }
-    }
+/// A lossy dielectric + lossy magnetic fill scales C/G/L/R exactly, and slows the Courant limit by
+/// sqrt(epsR*muR).
+- (void)testFilledLossyMaterialCoefficientsAndTimestepMatchClosedForm {
+    constexpr double epsR = 4.3, kappa = 0.05, mueR = 2.5, sigma = 800.0;
+    const auto csx = buildUniformCube(8, epsR, kappa, mueR, sigma);
+    const copper::CopperOperator op(*csx, pulseConfig(10, /*pecBox=*/false));
+    const copper::CopperYeeGrid& grid = op.grid();
+
+    const double c0 = 1.0 / std::sqrt(copper::physical::epsilon0 * copper::physical::mu0);
+    const double courant = 1e-3 * std::sqrt(epsR * mueR) / (c0 * std::sqrt(3.0));
+    XCTAssertEqualWithAccuracy(grid.timestepSeconds, courant, 1e-9 * courant);
+    XCTAssertEqual(countUniformCoefficientMismatches(grid, epsR, kappa, mueR, sigma), static_cast<std::size_t>(0));
+}
+
+/// On a mesh graded differently along each axis, every interior vacuum coefficient must carry its own
+/// cell's geometry, one factor per axis: vi[n] = dT*primary[n]/(eps0*dual[nP]*dual[nPP]) and
+/// iv[n] = dT*dual[n]/(mu0*primary[nP]*primary[nPP]) -- a transposed or shared factor shows up here
+/// and not on any uniform mesh. Also pins the exposed line positions to the CSX's own lines.
+- (void)testGradedVacuumCoefficientsCarryEachAxisOwnGeometry {
+    auto csx = std::make_unique<ContinuousStructure>();
+    CSRectGrid* mesh = csx->GetGrid();
+    mesh->SetDeltaUnit(1e-3);
+    const double firstSpacing[3] = {0.5, 0.4, 0.3}, growth[3] = {1.08, 1.12, 1.15};
+    const int cells[3] = {14, 12, 10};
+    std::vector<double> lines[3];
     for (int axis = 0; axis < 3; ++axis) {
-        XCTAssertEqual(paintedMetal[axis], access->m_Nr_PEC[axis],
-                       @"CalcPEC's applied PEC count differs from the paint-cache reference (axis %d)", axis);
+        double line = 0.0, spacing = firstSpacing[axis];
+        lines[axis].push_back(line);
+        for (int i = 0; i < cells[axis]; ++i) {
+            line += spacing;
+            spacing *= growth[axis];
+            lines[axis].push_back(line);
+        }
+        for (double l : lines[axis]) mesh->AddDiscLine(axis, l);
     }
-}
+    const copper::CopperOperator op(*csx, pulseConfig(10, /*pecBox=*/false));
+    const copper::CopperYeeGrid& grid = op.grid();
+    const double dT = grid.timestepSeconds;
+    XCTAssertGreaterThan(dT, 0.0);
 
-- (void)testYeeGridDimsAndTimestepMatchOperator {
-    copper::CopperOpenEMS fdtd;
-    fdtd.SetCSX(buildTinyVacuumGrid());
-    fdtd.SetGaussExcite(2.5e9, 2.5e9);
-    for (int side = 0; side < 6; ++side) {
-        fdtd.Set_BC_Type(side, 0);
+    const std::vector<float>* primaryLines[3] = {&grid.lineX, &grid.lineY, &grid.lineZ};
+    for (int axis = 0; axis < 3; ++axis) {
+        XCTAssertEqual(primaryLines[axis]->size(), lines[axis].size());
+        for (std::size_t i = 0; i < lines[axis].size(); ++i) {
+            XCTAssertEqual((*primaryLines[axis])[i], static_cast<float>(lines[axis][i] * 1e-3));
+        }
+        for (std::size_t i = 1; i + 1 < lines[axis].size(); ++i) {
+            XCTAssertEqualWithAccuracy(grid.primaryDelta[axis][i], (lines[axis][i + 1] - lines[axis][i]) * 1e-3, 1e-15);
+            XCTAssertEqualWithAccuracy(grid.dualDelta[axis][i], 0.5 * (lines[axis][i + 1] - lines[axis][i - 1]) * 1e-3,
+                                       1e-15);
+        }
     }
-    fdtd.SetNumberOfTimeSteps(150);
-    XCTAssertEqual(fdtd.SetupFDTD(), 0);
-    Operator* op = fdtd.GetOperatorForGPU();
-    XCTAssertTrue(op != nullptr);
 
-    XCTAssertEqual(op->GetNumberOfLines(0), 11U);
-    XCTAssertEqual(op->GetNumberOfLines(1), 11U);
-    XCTAssertEqual(op->GetNumberOfLines(2), 3U);
-
-    const FDTD_FLOAT vv = op->GetVV(0, 5, 5, 1);
-    const FDTD_FLOAT vi = op->GetVI(0, 5, 5, 1);
-    XCTAssertTrue(vv > 0.99F && vv <= 1.0F, @"interior vv coefficient outside the expected lossless-vacuum range");
-    XCTAssertTrue(std::isfinite(vi) && vi > 0.0F, @"interior vi coefficient not a sane positive finite value");
-
-    const copper::CopperYeeGrid grid = copper::buildYeeGrid(*op);
-    XCTAssertEqual(grid.dims.nx, op->GetNumberOfLines(0));
-    XCTAssertEqual(grid.dims.ny, op->GetNumberOfLines(1));
-    XCTAssertEqual(grid.dims.nz, op->GetNumberOfLines(2));
-    XCTAssertEqual(grid.timestepSeconds, op->GetTimestep());
-}
-
-/// Every (axis, x, y, z) coefficient, not just a sample -- cheap (363 cells x 3 axes) and this is the
-/// whole point of this test: proving the extraction/indexing never silently mismaps a value.
-- (void)testYeeGridCoefficientsMatchOperatorExactlyEverywhere {
-    copper::CopperOpenEMS fdtd;
-    fdtd.SetCSX(buildTinyVacuumGrid());
-    fdtd.SetGaussExcite(2.5e9, 2.5e9);
-    for (int side = 0; side < 6; ++side) {
-        fdtd.Set_BC_Type(side, 0);
-    }
-    fdtd.SetNumberOfTimeSteps(150);
-    XCTAssertEqual(fdtd.SetupFDTD(), 0);
-    Operator* op = fdtd.GetOperatorForGPU();
-    const copper::CopperYeeGrid grid = copper::buildYeeGrid(*op);
-
-    const unsigned int nx = op->GetNumberOfLines(0);
-    const unsigned int ny = op->GetNumberOfLines(1);
-    const unsigned int nz = op->GetNumberOfLines(2);
-    for (unsigned int axis = 0; axis < 3; ++axis) {
-        for (unsigned int z = 0; z < nz; ++z) {
-            for (unsigned int y = 0; y < ny; ++y) {
-                for (unsigned int x = 0; x < nx; ++x) {
-                    const std::uint32_t idx = copper::copperGridIndex(grid.dims, x, y, z);
-                    XCTAssertEqual(grid.vv[axis][idx], op->GetVV(axis, x, y, z));
-                    XCTAssertEqual(grid.vi[axis][idx], op->GetVI(axis, x, y, z));
-                    XCTAssertEqual(grid.ii[axis][idx], op->GetII(axis, x, y, z));
-                    XCTAssertEqual(grid.iv[axis][idx], op->GetIV(axis, x, y, z));
+    std::size_t checked = 0, mismatches = 0;
+    for (std::uint32_t z = 1; z + 1 < grid.dims.nz; ++z) {
+        for (std::uint32_t y = 1; y + 1 < grid.dims.ny; ++y) {
+            for (std::uint32_t x = 1; x + 1 < grid.dims.nx; ++x) {
+                const std::uint32_t pos[3] = {x, y, z};
+                const std::uint32_t i = copper::copperGridIndex(grid.dims, x, y, z);
+                for (int n = 0; n < 3; ++n) {
+                    const int nP = (n + 1) % 3, nPP = (n + 2) % 3;
+                    const double vi = dT * grid.primaryDelta[n][pos[n]] /
+                                      (copper::physical::epsilon0 * grid.dualDelta[nP][pos[nP]] * grid.dualDelta[nPP][pos[nPP]]);
+                    const double iv = dT * grid.dualDelta[n][pos[n]] /
+                                      (copper::physical::mu0 * grid.primaryDelta[nP][pos[nP]] *
+                                       grid.primaryDelta[nPP][pos[nPP]]);
+                    if (grid.vv[n][i] != 1.0F || grid.ii[n][i] != 1.0F) ++mismatches;
+                    if (std::fabs(grid.vi[n][i] - vi) > 1e-6 * vi) ++mismatches;
+                    if (std::fabs(grid.iv[n][i] - iv) > 1e-6 * iv) ++mismatches;
+                    ++checked;
                 }
             }
         }
     }
+    XCTAssertGreaterThan(checked, static_cast<std::size_t>(0));
+    XCTAssertEqual(mismatches, static_cast<std::size_t>(0));
 }
 
-/// Primary/dual line positions, spot-checked at domain edges where dual-mesh mirroring kicks in.
-/// Cast to float before comparing, matching CopperYeeGrid's own double-to-float narrowing.
-- (void)testYeeGridLinePositionsMatchOperator {
-    copper::CopperOpenEMS fdtd;
-    fdtd.SetCSX(buildTinyVacuumGrid());
-    fdtd.SetGaussExcite(2.5e9, 2.5e9);
-    for (int side = 0; side < 6; ++side) {
-        fdtd.Set_BC_Type(side, 0);
-    }
-    fdtd.SetNumberOfTimeSteps(150);
-    XCTAssertEqual(fdtd.SetupFDTD(), 0);
-    Operator* op = fdtd.GetOperatorForGPU();
-    const copper::CopperYeeGrid grid = copper::buildYeeGrid(*op);
-    const unsigned int nx = op->GetNumberOfLines(0);
+/// Every Yee E edge must be PEC (vv=vi=0) exactly when CSXCAD's own priority query at that edge's Yee
+/// point resolves to a METAL property -- on a fixture where a higher-priority material masks part of a
+/// metal box and a zero-thickness polygon sits in the top plane. Open boundary on every face, so no
+/// boundary PEC is mixed in.
+- (void)testPECEdgesMatchBruteForcePriorityQuery {
+    const std::unique_ptr<ContinuousStructure> csx(buildPecPaintFixture());
+    const copper::CopperOperator op(*csx, pulseConfig(10, /*pecBox=*/false));
+    const copper::CopperYeeGrid& grid = op.grid();
+    const auto pecTypes = static_cast<CSProperties::PropertyType>(CSProperties::MATERIAL | CSProperties::METAL);
 
-    XCTAssertEqual(grid.lineX[0], static_cast<float>(op->GetDiscLine(0, 0, false) * op->GetGridDelta()));
-    XCTAssertEqual(grid.lineX[nx - 1], static_cast<float>(op->GetDiscLine(0, nx - 1, false) * op->GetGridDelta()));
-    XCTAssertEqual(grid.dualLineX[0], static_cast<float>(op->GetDiscLine(0, 0, true) * op->GetGridDelta()));
-    XCTAssertEqual(grid.dualLineX[nx - 1],
-                   static_cast<float>(op->GetDiscLine(0, nx - 1, true) * op->GetGridDelta()));
+    std::size_t metalEdges = 0, maskedEdges = 0, mismatches = 0;
+    unsigned int pos[3];
+    double coord[3];
+    for (pos[2] = 0; pos[2] < grid.dims.nz; ++pos[2]) {
+        for (pos[1] = 0; pos[1] < grid.dims.ny; ++pos[1]) {
+            for (pos[0] = 0; pos[0] < grid.dims.nx; ++pos[0]) {
+                const std::uint32_t i = copper::copperGridIndex(grid.dims, pos[0], pos[1], pos[2]);
+                for (int axis = 0; axis < 3; ++axis) {
+                    if (!op.yeeCoords(axis, pos, coord, false)) continue;
+                    CSProperties* winner = csx->GetPropertyByCoordPriority(coord, pecTypes, false);
+                    const bool isMetal = winner != nullptr && winner->GetType() == CSProperties::METAL;
+                    const bool isPEC = grid.vv[axis][i] == 0.0F && grid.vi[axis][i] == 0.0F;
+                    if (isMetal != isPEC) ++mismatches;
+                    if (isMetal) ++metalEdges;
+                    if (winner != nullptr && winner->GetType() != CSProperties::METAL) ++maskedEdges;
+                }
+            }
+        }
+    }
+    XCTAssertGreaterThan(metalEdges, static_cast<std::size_t>(0), @"fixture painted no PEC at all");
+    XCTAssertGreaterThan(maskedEdges, static_cast<std::size_t>(0), @"fixture's material mask covered nothing");
+    XCTAssertEqual(mismatches, static_cast<std::size_t>(0));
 }
 
-- (void)testExcitationExtractionMatchesOperatorSignalAndFindsExcitedCell {
-    copper::CopperOpenEMS fdtd;
-    fdtd.SetCSX(buildTinyVacuumGrid());
-    fdtd.SetGaussExcite(2.5e9, 2.5e9);
-    for (int side = 0; side < 6; ++side) {
-        fdtd.Set_BC_Type(side, 0);
-    }
-    fdtd.SetNumberOfTimeSteps(150);
-    XCTAssertEqual(fdtd.SetupFDTD(), 0);
-    Operator* op = fdtd.GetOperatorForGPU();
+/// The Gaussian pulse is cos(2*pi*f0*(t-t0))*exp(-(2*pi*fc*t/3-3)^2) with t0 = 9/(2*pi*fc), sampled
+/// at n*dT for E and (n+1/2)*dT for H, sample 0 forced to zero, length ceil(2*t0/dT) clamped to the
+/// configured step count; the fixture's z-directed soft source excites exactly its one z edge with
+/// amplitude 1 V/m times that edge's length.
+- (void)testExcitationSignalAndExcitedEdgeMatchClosedForm {
+    const std::unique_ptr<ContinuousStructure> csx(buildTinyVacuumGrid());
+    for (const std::uint32_t maxTimesteps : {150U, 20U}) {
+        const copper::CopperOperator op(*csx, pulseConfig(maxTimesteps));
+        const copper::CopperExcitation& excitation = op.excitation();
+        const double dT = op.timestepSeconds();
+        const double f0 = 2.5e9, fc = 2.5e9, kPi = copper::physical::pi;
+        const double t0 = 9.0 / (2.0 * kPi * fc);
+        const auto expectedLength =
+            std::min<std::size_t>(static_cast<std::size_t>(std::ceil(2.0 * t0 / dT)), maxTimesteps);
+        XCTAssertEqual(excitation.voltageSignal.size(), expectedLength);
+        XCTAssertEqual(excitation.currentSignal.size(), expectedLength);
+        XCTAssertEqual(excitation.signalPeriodSeconds, 0.0);
+        auto pulse = [&](double t) { return std::cos(2 * kPi * f0 * (t - t0)) * std::exp(-std::pow(2 * kPi * fc * t / 3 - 3, 2)); };
+        for (std::size_t n = 0; n < expectedLength; ++n) {
+            const double v = n == 0 ? 0.0 : pulse(static_cast<double>(n) * dT), c = n == 0 ? 0.0 : pulse((static_cast<double>(n) + 0.5) * dT);
+            XCTAssertEqualWithAccuracy(excitation.voltageSignal[n], v, 1e-6);
+            XCTAssertEqualWithAccuracy(excitation.currentSignal[n], c, 1e-6);
+        }
 
-    const copper::CopperExcitation excitation = copper::buildExcitation(*op);
-    Excitation* exc = op->GetExcitationSignal();
-    XCTAssertTrue(exc != nullptr, @"SetGaussExcite wasn't honored");
-    XCTAssertEqual(excitation.voltageSignal.size(), static_cast<std::size_t>(exc->GetLength()));
-    XCTAssertEqual(excitation.currentSignal.size(), static_cast<std::size_t>(exc->GetLength()));
-    for (unsigned int i = 0; i < exc->GetLength(); ++i) {
-        XCTAssertEqual(excitation.voltageSignal[i], exc->GetVoltageSignal()[i]);
-        XCTAssertEqual(excitation.currentSignal[i], exc->GetCurrentSignal()[i]);
+        XCTAssertEqual(excitation.voltageCells.size(), static_cast<std::size_t>(1));
+        XCTAssertTrue(excitation.currentCells.empty());
+        const copper::CopperExcitationCell& cell = excitation.voltageCells.front();
+        XCTAssertEqual(cell.x, 5U);
+        XCTAssertEqual(cell.y, 5U);
+        XCTAssertEqual(cell.z, 0U);
+        XCTAssertEqual(cell.axis, 2U);
+        XCTAssertEqual(cell.delaySteps, 0U);
+        XCTAssertEqualWithAccuracy(cell.amplitude, 1e-3F, 1e-9F);
     }
-
-    XCTAssertFalse(excitation.voltageCells.empty(), @"the test fixture's excitation box wasn't picked up");
-    const copper::CopperExcitationCell& cell = excitation.voltageCells.front();
-    XCTAssertEqual(cell.axis, 2U, @"excited cell's axis isn't z, contradicting the fixture's own excitation direction");
-    XCTAssertTrue(std::isfinite(cell.amplitude) && cell.amplitude != 0.0F);
 }
 
 /// CopperOperator::rasterizePolygonRow() must reproduce CSPrimitives::IsInside()'s winding-number-
@@ -335,22 +403,13 @@ std::vector<double> denseProbeValues(const std::vector<double>& vertexValues, do
     }
 }
 
-/// No excitation properties in the CSX at all -- buildExcitation() should tolerate that the same way
-/// openEMS itself does (a warning, not a hard failure), returning an empty (not garbage) result.
-- (void)testExcitationExtractionIsEmptyNotErrorWhenNoExcitationExists {
-    copper::CopperOpenEMS fdtd;
-    fdtd.SetCSX(buildPecCavityNoExcitation());
-    fdtd.SetGaussExcite(2.5e9, 2.5e9);
-    for (int side = 0; side < 6; ++side) {
-        fdtd.Set_BC_Type(side, 0);
-    }
-    fdtd.SetNumberOfTimeSteps(10);
-    XCTAssertEqual(fdtd.SetupFDTD(), 0);
-    Operator* op = fdtd.GetOperatorForGPU();
-
-    const copper::CopperExcitation excitation = copper::buildExcitation(*op);
-    XCTAssertTrue(excitation.voltageCells.empty());
-    XCTAssertTrue(excitation.currentCells.empty());
+/// No excitation properties in the CSX at all -- the operator should tolerate that (a warning, not a
+/// hard failure), returning an empty (not garbage) excitation.
+- (void)testExcitationIsEmptyNotErrorWhenNoExcitationExists {
+    const std::unique_ptr<ContinuousStructure> csx(buildPecCavityNoExcitation());
+    const copper::CopperOperator op(*csx, pulseConfig(10));
+    XCTAssertTrue(op.excitation().voltageCells.empty());
+    XCTAssertTrue(op.excitation().currentCells.empty());
 }
 
 @end

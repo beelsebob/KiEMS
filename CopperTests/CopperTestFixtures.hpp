@@ -1,11 +1,10 @@
 // Shared CSX fixture builders + small cross-check helpers for CopperTests. Deliberately independent
 // of kiems/libkiems (Copper_smoketest's own design choice, kept here too -- see its file comment):
-// these build synthetic CSXCAD structures directly, the same minimal way Copper_smoketest's own
-// fixtures do, so CopperTests never depends on anything outside Copper itself plus openEMS/CSXCAD.
+// these build synthetic CSXCAD structures directly, so CopperTests never depends on anything outside
+// Copper itself plus CSXCAD.
 //
-// Uses the flat (unnamespaced) CSXCAD/openEMS includes throughout, matching every other file that
-// touches Internal/CopperOpenEMSAccess.hpp -- see that header's own file comment for why those can't
-// mix with the installed, namespaced `<CSXCAD/...>` forms in one translation unit.
+// Uses the flat (unnamespaced) CSXCAD includes throughout, matching Copper's own sources -- those
+// can't mix with the installed, namespaced `<CSXCAD/...>` forms in one translation unit.
 #pragma once
 
 #include <cstdint>
@@ -14,23 +13,19 @@
 #include <ContinuousStructure.h>
 
 #include "Internal/CopperEngine.hpp"
+#include "Internal/CopperOperator.hpp"
 #include "Internal/CopperYeeGrid.hpp"
-
-class Engine;
 
 namespace copper::test {
 
 /// A trivial 11x11x3-line vacuum grid (1mm cells, PEC on every side), with a single soft E-field
 /// (excitation type 0) excitation box in the middle of the domain, oriented along z -- the same
-/// shape kiems's own MSLPort excitation uses. Heap-allocated: `openEMS::SetCSX()` takes ownership
-/// (see ContinuousStructure's own destruction contract) -- never construct one of these on the stack.
+/// shape kiems's own MSLPort excitation uses. Heap-allocated, matching every builder below.
 ContinuousStructure* buildTinyVacuumGrid();
 
 /// buildTinyVacuumGrid()'s same domain, but with *no* excitation box anywhere -- used wherever the
-/// stimulus is a hand-seeded impulse (CopperEngine::writeFieldCell / Engine::SetVolt) instead, so
-/// both engines under comparison start from a genuinely identical, otherwise-quiescent state.
-/// `SetGaussExcite` is still required on the `openEMS` object itself (SetupFDTD() rejects a null
-/// excitation signal outright), but with nothing in the CSX to attach to, it's a no-op every step.
+/// stimulus is a hand-seeded impulse (CopperEngine::writeFieldCell) instead, so every engine under
+/// comparison starts from a genuinely identical, otherwise-quiescent state.
 ContinuousStructure* buildPecCavityNoExcitation();
 
 /// Small fixture for CalcPEC's primitive-paint cache: overlapping metal/material boxes (the
@@ -40,9 +35,8 @@ ContinuousStructure* buildPecCavityNoExcitation();
 ContinuousStructure* buildPecPaintFixture();
 
 /// A cube large enough on all 3 axes to hold a uniform-6-face, depth-8-cell CPML shell set with real
-/// interior left over. No boundary condition set here -- callers must use Set_BC_Type()+MUR (never
-/// Set_BC_PML()) on every face, matching how a real CPML run is actually configured (see
-/// Internal/CopperCPML.hpp's own top comment for why).
+/// interior left over. Pair it with CopperOperator's default (Open) boundary on every face, matching
+/// how a real CPML run is actually configured (see Internal/CopperCPML.hpp's own top comment).
 ContinuousStructure* buildCpmlCavityNoExcitation();
 
 /// A no-excitation box whose mesh spacing grows geometrically along every axis (at a different rate
@@ -75,15 +69,17 @@ inline constexpr CopperEngine::Field kAllFields[6] = {
 /// order -- Ex/Hx->0, Ey/Hy->1, Ez/Hz->2.
 inline constexpr unsigned int kAxisForField[6] = {0, 1, 2, 0, 1, 2};
 
-/// Result of diffing every one of a CopperEngine's 6 field components against a real CPU openEMS
-/// Engine's GetVolt()/GetCurr() -- the same comparison every GPU-vs-CPU parity check in this test
-/// suite needs, pulled into one place instead of six copy-pasted nested loops per test.
-struct FieldParityResult {
+/// A CopperOperator config with the test fixtures' standard 2.5 GHz Gaussian pulse, either a closed
+/// PEC box (every face PEC) or CopperOperator's own default open boundary on every face.
+CopperOperator::Config pulseConfig(std::uint32_t maxTimesteps, bool pecBox = true);
+
+/// The largest |a-b| and |a| over every cell of every field component of two engines on the same
+/// grid -- the comparison every engine-vs-engine check in this suite needs.
+struct FieldDiff {
     float maxAbsDiff = 0.0F;
     float maxAbsValue = 0.0F;
-    bool anyNonzero = false;
 };
 
-FieldParityResult compareGpuCpuFields(const CopperEngine& gpuEngine, Engine& cpuEngine, const CopperGridDims& dims);
+FieldDiff diffFields(const CopperEngine& a, const CopperEngine& b);
 
 } // namespace copper::test

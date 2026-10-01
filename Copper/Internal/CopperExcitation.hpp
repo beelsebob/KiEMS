@@ -1,16 +1,10 @@
-// Extracts openEMS's own already-computed excitation: the precomputed Gaussian-pulse sample arrays
-// (`Excitation::GetVoltageSignal`/`GetCurrentSignal`, built by `openEMS::SetupFDTD()` via
-// `m_Exc->buildExcitationSignal(NrTS)`) and the per-edge injection list built by
-// `Operator_Ext_Excitation` (which cells get excited, along which axis, with what amplitude and
-// per-cell delay). Copper never recomputes the pulse waveform itself -- see
-// CopperOpenEMSAccess.hpp's file comment for why that would be a second, potentially-diverging
-// numerics path.
+// A run's excitation: the precomputed Gaussian-pulse sample arrays and the per-edge injection list
+// (which cells get excited, along which axis, with what amplitude and per-cell delay).
+// CopperOperator::computeExcitation() builds it.
 #pragma once
 
 #include <cstdint>
 #include <vector>
-
-class Operator;
 
 namespace copper {
 
@@ -42,11 +36,5 @@ struct CopperExcitation {
     std::vector<CopperExcitationCell> voltageCells;
     std::vector<CopperExcitationCell> currentCells;
 };
-
-/// `op` must already be fully set up (openEMS::SetupFDTD() already run) -- this only reads what's
-/// already there. Returns an empty CopperExcitation (not an error) if no Operator_Ext_Excitation
-/// extension is found, matching openEMS's own tolerance for a CSX with no excitation properties
-/// (see Operator::CalcFieldExcitation's own "Warning, no excitation properties found").
-CopperExcitation buildExcitation(Operator& op);
 
 } // namespace copper

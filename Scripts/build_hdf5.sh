@@ -1,18 +1,14 @@
 #!/bin/bash
 # Builds vendor/hdf5 (HDF5 2.2.0, matching what Homebrew's own hdf5 formula builds from) as this
 # project's own self-contained libhdf5.dylib/libhdf5_hl.dylib, entirely within Xcode's build
-# output -- never touches Homebrew's copy. openEMS only needs HDF5's own C API (see
-# openEMS/tools/hdf5_file_{reader,writer}.cpp's plain `#include <hdf5.h>`), and previously
-# linked Homebrew's /opt/homebrew/opt/hdf5/lib/libhdf5*.dylib by absolute path -- fine for a build on
-# this machine, but that path isn't embedded/rewritten anywhere, so it silently breaks (dyld "Library
-# not loaded") the moment Homebrew's hdf5 is upgraded, reinstalled at a different version, or simply
-# isn't present (e.g. this app run on a different machine). Vendoring it, and rewriting libopenEMS's
-# own dependency onto it via @rpath (see build_openEMS.sh), matches the same self-contained treatment
-# CSXCAD/openEMS themselves already get.
+# output -- never touches Homebrew's copy. Copper's field-frame files (Copper/Internal/
+# CopperHDF5Blosc2.cpp) only need HDF5's own C API. Linking Homebrew's
+# /opt/homebrew/opt/hdf5/lib/libhdf5*.dylib by absolute path would silently break (dyld "Library not
+# loaded") the moment Homebrew's hdf5 is upgraded, reinstalled at a different version, or simply
+# isn't present (e.g. this app run on a different machine); vendoring it with an @rpath install name
+# matches the same self-contained treatment CSXCAD gets.
 #
-# Invoked from the "HDF5" Xcode target's Run Script build phase; build_openEMS.sh's own CMake
-# configure step points at this script's install prefix so openEMS's `find_package(HDF5)` picks up
-# this vendored copy instead of Homebrew's.
+# Invoked from the "HDF5" Xcode target's Run Script build phase.
 set -euo pipefail
 
 : "${SRCROOT:?SRCROOT must be set (run from an Xcode build phase)}"
@@ -29,8 +25,10 @@ PREFIX="${BUILT_PRODUCTS_DIR}/hdf5-local-prefix"
 BLOSC2_BUILD_DIR="${TARGET_TEMP_DIR}/blosc2-cmake"
 BLOSC2_PREFIX="${BUILT_PRODUCTS_DIR}/blosc2-local-prefix"
 
-# See build_openEMS.sh's own comment on why ARCHS/CONFIGURATION are forced explicitly rather than
-# left to CMake's own defaults.
+# Xcode's own ARCHS (e.g. "arm64") and CONFIGURATION (Debug/Release) -- explicitly forced rather than
+# left to CMake's own defaults, since a stale CMakeCache.txt from a prior manual configure (or CMake's
+# arch autodetection inside Xcode's build-script sandbox) can otherwise silently pick x86_64 on an
+# Apple Silicon Mac, producing a dylib that fails to link against every other arm64-only dependency.
 CMAKE_ARCHS="${ARCHS:-arm64}"
 CMAKE_ARCHS="${CMAKE_ARCHS// /;}"
 CMAKE_CONFIG="${CONFIGURATION:-Debug}"
@@ -77,7 +75,7 @@ cp -a "${BLOSC2_PREFIX}/lib/libblosc2.a" "${BUILT_PRODUCTS_DIR}/libblosc2.a"
 # by address to H5O_msg_size_oh() purely so it can report that message type's on-disk size -- the
 # callee only ever reads its type/size, never mtime's own value, but Clang can't prove that across
 # the call and flags it regardless. Vendored upstream source we don't patch; suppressed narrowly (by
-# name, unlike ext_using_undefined_std in build_openEMS.sh, which has none) rather than the whole
+# name) rather than the whole
 # build's warnings, since this is the only warning HDF5's own build otherwise produces. A plain
 # -Wno-uninitialized-const-pointer in CMAKE_C_FLAGS isn't enough on its own -- HDF5's own CMakeLists
 # appends its own -Wall *after* CMAKE_C_FLAGS on each compile line, which re-enables this warning on
@@ -125,9 +123,8 @@ if [ ! -d "${PREFIX}/lib" ] || [ ! -f "${STAMP}" ] || \
   touch "${STAMP}"
 fi
 
-# Copies+renames+@rpath-izes the same way build_openEMS.sh does for libopenEMS.dylib -- landing both
-# libraries directly in BUILT_PRODUCTS_DIR (unversioned names), where the app's own linker rpath
-# already resolves libCSXCAD.dylib/libopenEMS.dylib from today.
+# Copies+renames+@rpath-izes both libraries directly into BUILT_PRODUCTS_DIR (unversioned names),
+# where the app's own linker rpath already resolves libCSXCAD.dylib from today.
 _publish() {
   local base="$1" # e.g. "hdf5"
   local real

@@ -5,12 +5,13 @@
 #import <XCTest/XCTest.h>
 
 #include <cmath>
+#include <memory>
 
 #include "CopperTestFixtures.hpp"
 #include "Internal/CopperExcitation.hpp"
-#include "Internal/CopperOpenEMSAccess.hpp"
+#include "Internal/CopperOperator.hpp"
+#include "Internal/CopperPhysicalConstants.hpp"
 #include "Internal/CopperYeeGrid.hpp"
-#include "tools/constants.h"
 
 using namespace copper::test;
 
@@ -24,17 +25,10 @@ using namespace copper::test;
 /// over readField()'s own full-array copies) -- a bug in either implementation is very unlikely to
 /// cancel out and pass both.
 - (void)testEstimateEnergyMatchesNaiveFullGridComputation {
-    copper::CopperOpenEMS fdtd;
-    fdtd.SetCSX(buildTinyVacuumGrid());
-    fdtd.SetGaussExcite(2.5e9, 2.5e9);
-    for (int side = 0; side < 6; ++side) {
-        fdtd.Set_BC_Type(side, 0);
-    }
-    fdtd.SetNumberOfTimeSteps(150);
-    XCTAssertEqual(fdtd.SetupFDTD(), 0);
-    Operator* op = fdtd.GetOperatorForGPU();
-    const copper::CopperYeeGrid grid = copper::buildYeeGrid(*op);
-    const copper::CopperExcitation excitation = copper::buildExcitation(*op);
+    const std::unique_ptr<ContinuousStructure> csx(buildTinyVacuumGrid());
+    const copper::CopperOperator op(*csx, pulseConfig(150));
+    const copper::CopperYeeGrid& grid = op.grid();
+    const copper::CopperExcitation& excitation = op.excitation();
 
     copper::CopperEngine engine(grid, excitation);
     engine.run(20); // real steps, not just a seeded impulse, so both E and H are nonzero
@@ -53,7 +47,7 @@ using namespace copper::test;
             naiveHSumSq += static_cast<double>(v) * static_cast<double>(v);
         }
     }
-    const double naiveEnergy = EPS0 * naiveESumSq + MUE0 * naiveHSumSq;
+    const double naiveEnergy = copper::physical::epsilon0 * naiveESumSq + copper::physical::mu0 * naiveHSumSq;
 
     XCTAssertGreaterThan(naiveEnergy, 0.0, @"fixture excitation never propagated");
     XCTAssertEqualWithAccuracy(fastEnergy, naiveEnergy, 1e-4 * naiveEnergy);
@@ -61,16 +55,9 @@ using namespace copper::test;
 
 /// A brand-new engine's estimateEnergy() must be exactly zero (E=H=0 initial condition).
 - (void)testEstimateEnergyIsZeroBeforeAnyStep {
-    copper::CopperOpenEMS fdtd;
-    fdtd.SetCSX(buildPecCavityNoExcitation());
-    fdtd.SetGaussExcite(2.5e9, 2.5e9);
-    for (int side = 0; side < 6; ++side) {
-        fdtd.Set_BC_Type(side, 0);
-    }
-    fdtd.SetNumberOfTimeSteps(10);
-    XCTAssertEqual(fdtd.SetupFDTD(), 0);
-    Operator* op = fdtd.GetOperatorForGPU();
-    const copper::CopperYeeGrid grid = copper::buildYeeGrid(*op);
+    const std::unique_ptr<ContinuousStructure> csx(buildPecCavityNoExcitation());
+    const copper::CopperOperator op(*csx, pulseConfig(10));
+    const copper::CopperYeeGrid& grid = op.grid();
     copper::CopperEngine engine(grid);
     XCTAssertEqualWithAccuracy(engine.estimateEnergy(), 0.0, 0.0);
 }
@@ -79,17 +66,10 @@ using namespace copper::test;
 /// engine's field state bit-identical to a plain run(N) -- not run() the full requested step count
 /// regardless of what the sampler returns.
 - (void)testRunWithProbeSamplingStopsExactlyWhenSamplerReturnsFalse {
-    copper::CopperOpenEMS fdtd;
-    fdtd.SetCSX(buildTinyVacuumGrid());
-    fdtd.SetGaussExcite(2.5e9, 2.5e9);
-    for (int side = 0; side < 6; ++side) {
-        fdtd.Set_BC_Type(side, 0);
-    }
-    fdtd.SetNumberOfTimeSteps(150);
-    XCTAssertEqual(fdtd.SetupFDTD(), 0);
-    Operator* op = fdtd.GetOperatorForGPU();
-    const copper::CopperYeeGrid grid = copper::buildYeeGrid(*op);
-    const copper::CopperExcitation excitation = copper::buildExcitation(*op);
+    const std::unique_ptr<ContinuousStructure> csx(buildTinyVacuumGrid());
+    const copper::CopperOperator op(*csx, pulseConfig(150));
+    const copper::CopperYeeGrid& grid = op.grid();
+    const copper::CopperExcitation& excitation = op.excitation();
 
     copper::CopperEngine stoppedEarly(grid, excitation);
     std::uint32_t callCount = 0;
@@ -116,16 +96,9 @@ using namespace copper::test;
 /// at (1,1,1) directly consumes Ez(1,1,1); with a post-H callback instead of a mid-step one, this
 /// write would arrive one timestep too late and Hx would stay zero.
 - (void)testMidStepCorrectionFeedsSameTimestepCurrentUpdate {
-    copper::CopperOpenEMS fdtd;
-    fdtd.SetCSX(buildPecCavityNoExcitation());
-    fdtd.SetGaussExcite(2.5e9, 2.5e9);
-    for (int side = 0; side < 6; ++side) {
-        fdtd.Set_BC_Type(side, 0);
-    }
-    fdtd.SetNumberOfTimeSteps(1);
-    XCTAssertEqual(fdtd.SetupFDTD(), 0);
-    Operator* op = fdtd.GetOperatorForGPU();
-    const copper::CopperYeeGrid grid = copper::buildYeeGrid(*op);
+    const std::unique_ptr<ContinuousStructure> csx(buildPecCavityNoExcitation());
+    const copper::CopperOperator op(*csx, pulseConfig(1));
+    const copper::CopperYeeGrid& grid = op.grid();
 
     copper::CopperEngine corrected(grid);
     std::uint32_t correctionCalls = 0;
@@ -146,17 +119,10 @@ using namespace copper::test;
 /// for the same step count -- the correction hook must be strictly additive, not change ordinary
 /// leapfrog behavior when unused.
 - (void)testRunWithProbeSamplingWithoutCorrectionMatchesPlainRun {
-    copper::CopperOpenEMS fdtd;
-    fdtd.SetCSX(buildTinyVacuumGrid());
-    fdtd.SetGaussExcite(2.5e9, 2.5e9);
-    for (int side = 0; side < 6; ++side) {
-        fdtd.Set_BC_Type(side, 0);
-    }
-    fdtd.SetNumberOfTimeSteps(50);
-    XCTAssertEqual(fdtd.SetupFDTD(), 0);
-    Operator* op = fdtd.GetOperatorForGPU();
-    const copper::CopperYeeGrid grid = copper::buildYeeGrid(*op);
-    const copper::CopperExcitation excitation = copper::buildExcitation(*op);
+    const std::unique_ptr<ContinuousStructure> csx(buildTinyVacuumGrid());
+    const copper::CopperOperator op(*csx, pulseConfig(50));
+    const copper::CopperYeeGrid& grid = op.grid();
+    const copper::CopperExcitation& excitation = op.excitation();
 
     copper::CopperEngine sampled(grid, excitation);
     sampled.runWithProbeSampling(10, [](std::uint32_t) { return true; });

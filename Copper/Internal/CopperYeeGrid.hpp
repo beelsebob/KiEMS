@@ -1,16 +1,9 @@
-// Extracts openEMS's own already-built Yee grid (mesh lines + leapfrog coefficients) into flat,
-// structure-of-arrays buffers ready to hand straight to a Metal MTLBuffer -- no reimplementation of
-// grid/coefficient math here, just walking `Operator`'s own public accessors (see
-// CopperOpenEMSAccess.hpp's file comment for why: every number here is openEMS's own answer).
-//
-// Uses the flat (unnamespaced) CSXCAD/openEMS includes -- see CopperOpenEMSAccess.hpp's own
-// warning about not mixing those with the installed, namespaced `<CSXCAD/...>` headers.
+// A built Yee grid (mesh lines + leapfrog coefficients) as flat, structure-of-arrays buffers ready to
+// hand straight to a Metal MTLBuffer. CopperOperator builds it.
 #pragma once
 
 #include <cstdint>
 #include <vector>
-
-class Operator;
 
 namespace copper {
 
@@ -30,19 +23,18 @@ inline std::uint32_t copperGridIndex(const CopperGridDims& dims, std::uint32_t x
     return x + dims.nx * (y + dims.ny * z);
 }
 
-/// A fully-built Yee grid, ready for Metal: `Operator::GetVV/GetVI/GetII/GetIV`'s own leapfrog
-/// coefficients (see engine.cpp's UpdateVoltages/UpdateCurrents for exactly how they're used --
-/// Copper's own Metal kernels reimplement that update loop, not this extraction), one flat `float`
-/// array per (coefficient, axis) pair, indexed via copperGridIndex(). `vv[n]`/`vi[n]` are the
+/// A fully-built Yee grid, ready for Metal: the leapfrog coefficients (see CopperFDTD.metal's
+/// update_e_interior/update_h_interior for exactly how they're used), one flat `float` array per
+/// (coefficient, axis) pair, indexed via copperGridIndex(). `vv[n]`/`vi[n]` are the
 /// axis-`n` E-update coefficients (`volt(n,...) = vv[n]*volt(n,...) + vi[n]*curl(H)`); `ii[n]`/
 /// `iv[n]` are the symmetric H-update coefficients. Primary (E) grid lines are the mesh's own lines
-/// verbatim; dual (H) grid lines are openEMS's own already-computed midpoints (`GetDiscLine(n, pos,
-/// /*dualMesh=*/true)`), boundary-mirrored by openEMS itself where there's no neighbor to average.
+/// verbatim; dual (H) grid lines are their midpoints (CopperOperator::discLine(n, pos,
+/// /*dualMesh=*/true)), boundary-mirrored where there's no neighbor to average.
 struct CopperYeeGrid {
     CopperGridDims dims;
     std::vector<float> lineX, lineY, lineZ;             // primary (E) mesh lines, metres
     std::vector<float> dualLineX, dualLineY, dualLineZ; // dual (H) mesh lines, metres
-    double timestepSeconds = 0.0;                       // Operator::GetTimestep() -- openEMS's own CFL dt
+    double timestepSeconds = 0.0;                       // CFL timestep (CopperOperator's Var3 criterion)
 
     std::vector<float> vv[3];
     std::vector<float> vi[3];
@@ -51,7 +43,7 @@ struct CopperYeeGrid {
 
     /// Mesh spacing along each axis in metres, kept in double precision (the float lines above lose
     /// most of a fine spacing's digits): primaryDelta[a][i] is the primary-mesh edge length at line
-    /// i along axis a (GetDiscDelta(a, i, false) times the grid delta), dualDelta[a][i] the dual
+    /// i along axis a (CopperOperator::discDelta(a, i, false) times the grid delta), dualDelta[a][i] the dual
     /// one. Every coefficient's geometry is a product of these, one factor per axis -- with nP/nPP
     /// the other two axes,
     ///   vi[n] = (material term) * primaryDelta[n][pos n] / (dualDelta[nP][pos nP] * dualDelta[nPP][pos nPP])
@@ -60,12 +52,5 @@ struct CopperYeeGrid {
     /// across the edge). Empty if the builder didn't provide them.
     std::vector<double> primaryDelta[3], dualDelta[3];
 };
-
-/// Walks `op`'s already-built grid/coefficients (i.e. `SetGeometryCSX`+`CalcECOperator`, or
-/// equivalently `openEMS::SetupFDTD()`, must already have run) into a CopperYeeGrid. `op`'s own
-/// `GetDiscLine` returns grid-delta-unit values (not metres) -- multiplied here by
-/// `op->GetGridDelta()`-equivalent scaling already baked into openEMS's own coordinate convention;
-/// see the .cpp for the exact unit handling.
-CopperYeeGrid buildYeeGrid(Operator& op);
 
 } // namespace copper

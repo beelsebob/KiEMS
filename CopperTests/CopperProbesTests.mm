@@ -1,7 +1,7 @@
 // Two layers of coverage for Internal/CopperProbes.hpp: pure formula unit tests against small,
 // hand-built synthetic field accessors (isolating sampleVoltageProbe/sampleCurrentProbe's own
-// indexing/sign logic from FDTD field correctness entirely -- no engine, no CSX, no openEMS at all),
-// plus an end-to-end discovery + GPU-vs-CPU sampling + real ASCII file round trip, confirming the
+// indexing/sign logic from FDTD field correctness entirely -- no engine, no CSX at all), plus an
+// end-to-end discovery + Metal-vs-CPU-backend sampling + real ASCII file round trip, confirming the
 // file Copper writes is the file kiems's own ports.cpp reader already expects, unmodified.
 #import <XCTest/XCTest.h>
 
@@ -12,7 +12,6 @@
 
 #include "CopperTestFixtures.hpp"
 #include "Internal/CopperExcitation.hpp"
-#include "Internal/CopperOpenEMSAccess.hpp"
 #include "Internal/CopperOperator.hpp"
 #include "Internal/CopperProbes.hpp"
 #include "Internal/CopperYeeGrid.hpp"
@@ -152,32 +151,13 @@ std::vector<std::pair<double, double>> loadProbeFileLikePortsCpp(const std::file
 
 @implementation CopperProbeSamplingParityTests
 
-/// Discovery finds exactly one voltage + one current probe; GPU-sampled and CPU-sampled values
-/// (both via the identical sampleVoltageProbe/sampleCurrentProbe formulas, applied to each engine's
-/// own fields) must agree; and CopperProbeWriter's real ASCII output must round-trip through
+/// Discovery finds exactly one voltage + one current probe; values sampled from the Metal and CPU
+/// backends (both via the identical sampleVoltageProbe/sampleCurrentProbe formulas, applied to each
+/// engine's own fields) must agree; and CopperProbeWriter's real ASCII output must round-trip through
 /// ports.cpp's own parsing rule with the exact weighted values/timestamps that were sampled.
 - (void)testProbeDiscoverySamplingParityAndFileRoundTrip {
     ContinuousStructure* probeCsx = buildProbeFixture();
-    copper::CopperOpenEMS fdtd;
-    fdtd.SetCSX(probeCsx); // ownership transfers; probeCsx stays valid (non-owning) until fdtd dies
-    fdtd.SetGaussExcite(2.5e9, 2.5e9);
-    for (int side = 0; side < 6; ++side) {
-        fdtd.Set_BC_Type(side, 0);
-    }
-    fdtd.SetNumberOfTimeSteps(150);
-    XCTAssertEqual(fdtd.SetupFDTD(), 0);
-
-    Engine* cpuEngine = fdtd.GetEngineForCPU();
-    XCTAssertTrue(cpuEngine != nullptr);
-
-    copper::CopperOperator::Config config;
-    for (int side = 0; side < 6; ++side) {
-        config.boundary[static_cast<std::size_t>(side)] = copper::CopperOperator::BoundaryType::PEC;
-    }
-    config.f0 = 2.5e9;
-    config.fc = 2.5e9;
-    config.maxTimesteps = 150;
-    copper::CopperOperator newOp(*buildProbeFixture(), config);
+    copper::CopperOperator newOp(*probeCsx, pulseConfig(150));
     const copper::CopperYeeGrid& grid = newOp.grid();
     const copper::CopperExcitation& excitation = newOp.excitation();
     const std::vector<copper::CopperProbe> probes = copper::discoverProbes(*probeCsx, newOp);
@@ -220,19 +200,20 @@ std::vector<std::pair<double, double>> loadProbeFileLikePortsCpp(const std::file
             return true;
         });
     }
-    cpuEngine->IterateTS(steps);
+    copper::CopperEngine cpuEngine(grid, excitation, {}, copper::CopperEngine::Backend::CPU);
+    cpuEngine.run(steps);
 
     auto cpuE = [&](std::uint32_t axis, std::uint32_t x, std::uint32_t y, std::uint32_t z) {
-        return cpuEngine->GetVolt(axis, x, y, z);
+        return cpuEngine.readFieldCell(static_cast<copper::CopperEngine::Field>(static_cast<int>(axis)), x, y, z);
     };
     auto cpuH = [&](std::uint32_t axis, std::uint32_t x, std::uint32_t y, std::uint32_t z) {
-        return cpuEngine->GetCurr(axis, x, y, z);
+        return cpuEngine.readFieldCell(static_cast<copper::CopperEngine::Field>(static_cast<int>(axis) + 3), x, y, z);
     };
     const double cpuVoltage = copper::sampleVoltageProbe(*voltageProbe, cpuE);
     const double cpuCurrent = copper::sampleCurrentProbe(*currentProbe, cpuH);
 
     XCTAssertFalse(cpuVoltage == 0.0 && cpuCurrent == 0.0,
-                   @"both probes read zero on the real CPU engine -- fixture excitation/timing looks wrong");
+                   @"both probes read zero on the CPU backend -- fixture excitation/timing looks wrong");
     const double voltageTolerance = 1e-4 * std::max(std::fabs(cpuVoltage), 1e-6);
     const double currentTolerance = 1e-4 * std::max(std::fabs(cpuCurrent), 1e-6);
     XCTAssertLessThanOrEqual(std::fabs(lastGpuVoltage - cpuVoltage), voltageTolerance);
@@ -259,6 +240,7 @@ std::vector<std::pair<double, double>> loadProbeFileLikePortsCpp(const std::file
 
     std::filesystem::remove(voltagePath);
     std::filesystem::remove(currentPath);
+    delete probeCsx;
 }
 
 @end

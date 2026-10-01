@@ -1,7 +1,6 @@
 build/
 /vendor/
 xcuserdata/
-/openEMS/build/
 __pycache__/
 *.pyc
 *.egg-info/
