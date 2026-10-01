@@ -5,6 +5,7 @@
 // plus that a seeded impulse absorbed by a CPML boundary actually decays instead of exploding.
 #import <XCTest/XCTest.h>
 
+#include <algorithm>
 #include <cmath>
 
 #include "CopperFDTDRunner.h"
@@ -198,17 +199,135 @@ using namespace copper::test;
 
     checkSeparable(copper::buildCPMLShells(op, 2 * M_PI * 100e6 * EPS0, depth), @"rectangular");
 
-    // The irregular form grades Z only, so its Z grading must be separable too -- over the active
-    // columns (external columns are never updated, so their implicit zero doesn't count). Check it by
-    // building the mask for a cutout that leaves the whole grid active except nothing: a cutout
-    // covering every node makes every column interior.
-    copper::CopperFDTDPortConfig portConfig;
-    const double lo = op.discLine(0, 0) - 100.0, hi = op.discLine(0, dims.nx - 1) + 100.0;
-    portConfig.domainCutoutLoops = {{{lo, lo}, {hi, lo}, {hi, hi}, {lo, hi}}};
-    portConfig.domainCPMLCellSize = op.discLine(0, 1) - op.discLine(0, 0);
-    const copper::CopperDomainMask mask = copper::buildDomainMask(op, portConfig, depth);
-    XCTAssertFalse(mask.empty());
-    checkSeparable(copper::buildCPMLShells(op, 2 * M_PI * 100e6 * EPS0, depth, mask), @"irregular Z slabs");
+}
+
+/// The irregular domain's Z-only CPML keeps one coefficient set per plane, so it can't vary off-axis;
+/// what it must do is grade exactly like the rectangular CPML's Z faces. Compared at the domain
+/// centre, where no X or Y face claims the column.
+- (void)testZOnlyCPMLGradesExactlyLikeTheRectangularZFaces {
+    copper::CopperOperator::Config config;
+    config.f0 = 2.5e9;
+    config.fc = 2.5e9;
+    config.maxTimesteps = 30;
+    copper::CopperOperator op(*buildCpmlCavityNoExcitation(), config);
+    constexpr std::uint32_t depth = 8;
+    const double alphaMax = 2 * M_PI * 100e6 * EPS0;
+    const copper::CopperGridDims dims = op.dims();
+    const std::uint32_t cx = dims.nx / 2, cy = dims.ny / 2;
+
+    std::vector<float> bE(dims.nz, 1.0F), cE(dims.nz, 0.0F), bH(dims.nz, 1.0F), cH(dims.nz, 0.0F);
+    for (const auto& shell : copper::buildCPMLShells(op, alphaMax, depth)) {
+        if (cx < shell.startX || cx >= shell.startX + shell.dims.nx || cy < shell.startY ||
+            cy >= shell.startY + shell.dims.ny) {
+            continue;
+        }
+        for (std::uint32_t lz = 0; lz < shell.dims.nz; ++lz) {
+            const std::size_t local = copper::copperGridIndex(shell.dims, cx - shell.startX, cy - shell.startY, lz);
+            bE[shell.startZ + lz] = shell.bE[2][local];
+            cE[shell.startZ + lz] = shell.cE[2][local];
+            bH[shell.startZ + lz] = shell.bH[2][local];
+            cH[shell.startZ + lz] = shell.cH[2][local];
+        }
+    }
+
+    const copper::CopperZCPML zcpml = copper::buildZCPML(op, alphaMax, depth);
+    for (std::uint32_t z = 0; z < dims.nz; ++z) {
+        const std::uint32_t layer = zcpml.layerOfZ[z];
+        const bool graded = layer != copper::CopperZCPML::kNoLayer;
+        XCTAssertEqual(graded ? zcpml.bE[layer] : 1.0F, bE[z], @"bE at z=%u", z);
+        XCTAssertEqual(graded ? zcpml.cE[layer] : 0.0F, cE[z], @"cE at z=%u", z);
+        XCTAssertEqual(graded ? zcpml.bH[layer] : 1.0F, bH[z], @"bH at z=%u", z);
+        XCTAssertEqual(graded ? zcpml.cH[layer] : 0.0F, cH[z], @"cH at z=%u", z);
+        if (graded) XCTAssertTrue(cE[z] != 0.0F || cH[z] != 0.0F, @"a Z-only CPML plane with no grading at z=%u", z);
+    }
+}
+
+/// The general per-shell CPML equivalent of `zcpml`: one slab per run of graded planes, spanning the
+/// whole XY extent and grading Z with zcpml's own coefficients (X/Y slots inert, b=1/c=0).
+static std::vector<copper::CopperCPMLShell> generalShellsFor(const copper::CopperZCPML& zcpml,
+                                                             const copper::CopperGridDims& dims) {
+    std::vector<copper::CopperCPMLShell> shells;
+    for (std::uint32_t z = 0; z < dims.nz;) {
+        if (zcpml.layerOfZ[z] == copper::CopperZCPML::kNoLayer) {
+            ++z;
+            continue;
+        }
+        std::uint32_t end = z;
+        while (end < dims.nz && zcpml.layerOfZ[end] != copper::CopperZCPML::kNoLayer) ++end;
+        copper::CopperCPMLShell shell;
+        shell.startZ = z;
+        shell.dims = {dims.nx, dims.ny, end - z};
+        const std::size_t count = shell.dims.cellCount();
+        const std::size_t plane = static_cast<std::size_t>(dims.nx) * dims.ny;
+        for (int a = 0; a < 3; ++a) {
+            shell.bE[a].assign(count, 1.0F);
+            shell.cE[a].assign(count, 0.0F);
+            shell.bH[a].assign(count, 1.0F);
+            shell.cH[a].assign(count, 0.0F);
+            shell.psiE0[a].assign(count, 0.0F);
+            shell.psiE1[a].assign(count, 0.0F);
+            shell.psiH0[a].assign(count, 0.0F);
+            shell.psiH1[a].assign(count, 0.0F);
+        }
+        for (std::uint32_t lz = 0; lz < shell.dims.nz; ++lz) {
+            const std::uint32_t layer = zcpml.layerOfZ[z + lz];
+            std::fill_n(shell.bE[2].data() + lz * plane, plane, zcpml.bE[layer]);
+            std::fill_n(shell.cE[2].data() + lz * plane, plane, zcpml.cE[layer]);
+            std::fill_n(shell.bH[2].data() + lz * plane, plane, zcpml.bH[layer]);
+            std::fill_n(shell.cH[2].data() + lz * plane, plane, zcpml.cH[layer]);
+        }
+        shells.push_back(std::move(shell));
+        z = end;
+    }
+    return shells;
+}
+
+/// The Z-only CPML folded into update_e/h_interior_zcpml must do exactly what the general
+/// cpml_correct_e/h kernels do with the same grading (up to fast-math rounding), and the CPU
+/// backend's separate pass must agree with both. Impulses seeded inside both slabs drive the psi
+/// terms from the first step; a run without any CPML must come out clearly different, or the
+/// comparison proves nothing.
+- (void)testZOnlyCPMLFoldedIntoInteriorUpdateMatchesGeneralCPMLKernels {
+    copper::CopperOperator::Config config;
+    config.f0 = 2.5e9;
+    config.fc = 2.5e9;
+    config.maxTimesteps = 30;
+    copper::CopperOperator op(*buildCpmlCavityNoExcitation(), config);
+    constexpr std::uint32_t depth = 8;
+    const copper::CopperGridDims dims = op.dims();
+    const copper::CopperZCPML zcpml = copper::buildZCPML(op, 2 * M_PI * 100e6 * EPS0, depth);
+    XCTAssertFalse(zcpml.empty());
+    const auto shells = generalShellsFor(zcpml, dims);
+    XCTAssertEqual(shells.size(), static_cast<std::size_t>(2));
+
+    using Engine = copper::CopperEngine;
+    Engine folded(op.grid(), {}, {}, Engine::Backend::Metal, {}, zcpml);
+    Engine general(op.grid(), {}, shells, Engine::Backend::Metal);
+    Engine cpu(op.grid(), {}, {}, Engine::Backend::CPU, {}, zcpml);
+    Engine unabsorbed(op.grid());
+    for (Engine* engine : {&folded, &general, &cpu, &unabsorbed}) {
+        engine->writeFieldCell(Engine::Field::Ez, dims.nx / 2, dims.ny / 2, depth / 2, 1.0F);
+        engine->writeFieldCell(Engine::Field::Ex, dims.nx / 2, dims.ny / 2, dims.nz - 1 - depth / 2, 1.0F);
+        engine->run(40);
+    }
+
+    float maxValue = 0.0F, generalDiff = 0.0F, cpuDiff = 0.0F, unabsorbedDiff = 0.0F;
+    for (const auto field : kAllFields) {
+        const auto a = folded.readField(field), b = general.readField(field), c = cpu.readField(field),
+                   d = unabsorbed.readField(field);
+        for (std::size_t i = 0; i < a.size(); ++i) {
+            XCTAssertTrue(std::isfinite(a[i]));
+            maxValue = std::max(maxValue, std::abs(a[i]));
+            generalDiff = std::max(generalDiff, std::abs(a[i] - b[i]));
+            cpuDiff = std::max(cpuDiff, std::abs(a[i] - c[i]));
+            unabsorbedDiff = std::max(unabsorbedDiff, std::abs(a[i] - d[i]));
+        }
+    }
+    NSLog(@"Z-only CPML: max |field| %g, vs general kernels %g, vs CPU %g, vs no CPML %g", maxValue, generalDiff,
+          cpuDiff, unabsorbedDiff);
+    XCTAssertLessThanOrEqual(generalDiff, 1e-6F * maxValue);
+    XCTAssertLessThanOrEqual(cpuDiff, 1e-5F * maxValue);
+    XCTAssertGreaterThan(unabsorbedDiff, 1e-2F * maxValue, @"the CPML had no visible effect");
 }
 
 @end

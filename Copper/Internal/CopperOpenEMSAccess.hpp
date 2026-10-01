@@ -138,6 +138,13 @@ inline CopperYeeGrid buildYeeGrid(Operator& op) {
     for (unsigned int axis = 0; axis < 3; ++axis) {
         reference::coefficients(op, grid.dims, axis, grid.vv[axis], grid.vi[axis],
                                 grid.ii[axis], grid.iv[axis]);
+        const unsigned int lines = op.GetNumberOfLines(static_cast<int>(axis));
+        grid.primaryDelta[axis].resize(lines);
+        grid.dualDelta[axis].resize(lines);
+        for (unsigned int i = 0; i < lines; ++i) {
+            grid.primaryDelta[axis][i] = op.GetDiscDelta(static_cast<int>(axis), i, false) * gridDelta;
+            grid.dualDelta[axis][i] = op.GetDiscDelta(static_cast<int>(axis), i, true) * gridDelta;
+        }
     }
     return grid;
 }

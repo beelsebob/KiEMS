@@ -6,9 +6,9 @@ namespace copper {
 
 CopperEngine::CopperEngine(const CopperYeeGrid& grid, const CopperExcitation& excitation,
                             const std::vector<CopperCPMLShell>& cpmlShells,
-                            Backend backend, const CopperDomainMask& domainMask)
-    : _backend(backend == Backend::Metal ? makeMetalEngineBackend(grid, excitation, cpmlShells, domainMask)
-                                          : makeCPUEngineBackend(grid, excitation, cpmlShells, domainMask)) {}
+                            Backend backend, const CopperDomainMask& domainMask, const CopperZCPML& zcpml)
+    : _backend(backend == Backend::Metal ? makeMetalEngineBackend(grid, excitation, cpmlShells, domainMask, zcpml)
+                                          : makeCPUEngineBackend(grid, excitation, cpmlShells, domainMask, zcpml)) {}
 
 CopperEngine::~CopperEngine() = default;
 

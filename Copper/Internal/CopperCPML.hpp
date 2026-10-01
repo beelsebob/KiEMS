@@ -98,10 +98,9 @@ struct CopperCPMLShell {
 /// with no Operator_Ext_UPML extension involved at all. 0 returns no shells (a caller with no PML on
 /// this run -- e.g. a MUR-only smoketest -- can pass 0 rather than special-casing the call away).
 std::vector<CopperCPMLShell> buildCPMLShells(CopperOperator& op, double alphaMax, std::uint32_t pmlDepthCells);
-/// Irregular-domain form: only the conventional lower/upper Z slabs, one pair per dispatch cuboid
-/// (ring and interior alike), graded along Z alone. Absorption across the irregular XY outline is
-/// NOT a CPML -- it's applyRingAbsorber() below. Empty masks delegate to the rectangular overload
-/// above.
+/// Irregular-domain CPML: the conventional lower and upper Z slabs only, graded along Z alone and
+/// spanning every active XY column. Absorption across the irregular XY outline is NOT a CPML -- it's
+/// applyRingAbsorber() below.
 ///
 /// Why the XY rings can't be a CPML: the stretched-coordinate PML this file implements is only
 /// stable when each axis's stretch depends on that axis alone -- sigma_x(x), sigma_y(y),
@@ -115,8 +114,34 @@ std::vector<CopperCPMLShell> buildCPMLShells(CopperOperator& op, double alphaMax
 /// 2D (kz=0) runs, and a plain rectangular CPML whose X-lo face was merely truncated halfway along y
 /// diverges the same way, with the growing mode sitting exactly on the truncation line. Z grading
 /// is still separable (the ring absorber is Z-invariant), which is why the Z slabs stay a CPML.
-std::vector<CopperCPMLShell> buildCPMLShells(CopperOperator& op, double alphaMax, std::uint32_t pmlDepthCells,
-                                             const CopperDomainMask& domainMask);
+///
+/// Grading along Z alone shrinks the state a CopperCPMLShell would need. The coefficients depend on
+/// z only, so they're one set per graded plane rather than per cell. And of each component's two
+/// psi terms only the one driven by a d/dz curl term can ever be non-zero -- Ex's (dHy/dz) and Ey's
+/// (dHx/dz), Hx's (dEy/dz) and Hy's (dEx/dz); every other term has b=1, c=0, so it starts at zero
+/// and stays there. Ez and Hz have no d/dz term, so a Z-only CPML never touches them. The engines
+/// fold the correction into the interior update itself (it needs only the cell's freshly updated
+/// value and curl differences the update already read), which leaves two psi read-modify-writes
+/// per graded cell as its only extra memory traffic. The psi state itself is allocated, zeroed, by
+/// the engine: one value per XY node per graded plane for each of those four terms.
+struct CopperZCPML {
+    static constexpr std::uint32_t kNoLayer = 0xFFFFFFFFu;
+
+    /// Per grid z-plane: the index of its entry in the per-plane arrays below, or kNoLayer outside
+    /// the slabs.
+    std::vector<std::uint32_t> layerOfZ;
+    /// Per graded plane, eq. (7.99)/(7.102) for the Z axis exactly as CopperCPMLShell's b[2]/c[2],
+    /// at the V-side (E update) and I-side (H update) positions.
+    std::vector<float> bE, cE, bH, cH;
+
+    std::uint32_t layerCount() const { return static_cast<std::uint32_t>(bE.size()); }
+    bool empty() const { return bE.empty(); }
+};
+
+/// Builds the irregular domain's Z-only CPML: `pmlDepthCells` planes at the bottom and one more at
+/// the top (see upperFaceDepth() in CopperCPML.cpp), graded exactly like the rectangular overload's
+/// Z faces. Empty when `pmlDepthCells` is 0 or the grid is too thin to hold both slabs.
+CopperZCPML buildZCPML(CopperOperator& op, double alphaMax, std::uint32_t pmlDepthCells);
 
 /// Folds the irregular domain's XY absorbing rings into one engine backend's own copies of the
 /// Yee coefficients (both backends call this at construction; `vv`/`vi`/`ii`/`iv` are per-axis
@@ -134,5 +159,24 @@ std::vector<CopperCPMLShell> buildCPMLShells(CopperOperator& op, double alphaMax
 /// as a conducting shell. Keep the ring well clear of the board.
 void applyRingAbsorber(const CopperDomainMask& domainMask, double timestepSeconds, const CopperGridDims& dims,
                        float* const vv[3], float* const vi[3], float* const ii[3], float* const iv[3]);
+
+/// applyRingAbsorber()'s damping one coefficient pair at a time, for a caller that never holds a
+/// mutable copy of the whole grid's coefficients (the Metal engine folds it into its coefficient
+/// table as it builds it). Inactive -- every fold a no-op -- for the same masks applyRingAbsorber()
+/// ignores.
+class CopperRingAbsorber {
+public:
+    CopperRingAbsorber(const CopperDomainMask& domainMask, double timestepSeconds, const CopperGridDims& dims);
+
+    bool active() const { return !_q.empty(); }
+    /// Folds the absorber into component n's (vv, vi) at node (x, y), any z.
+    void foldE(int n, std::uint32_t x, std::uint32_t y, float& vv, float& vi) const;
+    /// Folds the absorber into component n's (ii, iv) at node (x, y), any z.
+    void foldH(int n, std::uint32_t x, std::uint32_t y, float& ii, float& iv) const;
+
+private:
+    const CopperDomainMask* _mask = nullptr;
+    std::vector<double> _q; // per ring layer; empty when inactive
+};
 
 } // namespace copper

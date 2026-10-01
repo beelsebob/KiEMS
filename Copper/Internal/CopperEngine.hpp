@@ -45,9 +45,13 @@ public:
     /// the chosen backend and zero-initializes every E/H field and auxiliary PML state
     /// buffer (matching FDTD's own E=H=0 initial condition). Throws std::runtime_error if `backend`
     /// is Metal and no Metal device is available or the shader library fails to load/compile.
+    ///
+    /// `zcpml` is an irregular domain's Z-only CPML (see CopperZCPML), applied inside the interior
+    /// update; `cpmlShells` is the general per-shell CPML a rectangular domain uses. Either may be
+    /// empty.
     explicit CopperEngine(const CopperYeeGrid& grid, const CopperExcitation& excitation = {},
                           const std::vector<CopperCPMLShell>& cpmlShells = {}, Backend backend = Backend::Metal,
-                          const CopperDomainMask& domainMask = {});
+                          const CopperDomainMask& domainMask = {}, const CopperZCPML& zcpml = {});
     ~CopperEngine();
 
     CopperEngine(const CopperEngine&) = delete;

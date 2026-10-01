@@ -1360,6 +1360,14 @@ CopperOperator::CopperOperator(ContinuousStructure& csx, const Config& config) :
         _grid.lineZ[i] = static_cast<float>(discLine(2, i, false) * _gridDeltaMetres);
         _grid.dualLineZ[i] = static_cast<float>(discLine(2, i, true) * _gridDeltaMetres);
     }
+    for (int axis = 0; axis < 3; ++axis) {
+        _grid.primaryDelta[axis].resize(numLines(axis));
+        _grid.dualDelta[axis].resize(numLines(axis));
+        for (unsigned int i = 0; i < numLines(axis); ++i) {
+            _grid.primaryDelta[axis][i] = discDelta(axis, static_cast<int>(i), false) * _gridDeltaMetres;
+            _grid.dualDelta[axis][i] = discDelta(axis, static_cast<int>(i), true) * _gridDeltaMetres;
+        }
+    }
 
     computeMaterialCoefficients();
 

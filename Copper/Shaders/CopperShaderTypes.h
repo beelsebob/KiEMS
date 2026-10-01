@@ -41,6 +41,22 @@ struct CopperExcitationParamsGPU {
     uint32_t signalLength;
 };
 
+// One copper::CopperCoefficientTable entry: vv[n] (ii[n]) exactly, and vi[n] (iv[n]) with its cell's
+// separable geometry factor divided out. Layout-identical to CopperCoefficientTable::Entry.
+struct CopperMaterialCoefficientsGPU {
+    float decay[3];
+    float material[3];
+};
+
+// update_e_interior_zcpml/update_h_interior_zcpml's per-z-plane Z-only CPML entry (see
+// copper::CopperZCPML): `layer` indexes the psi buffers' planes, or is kCopperZCPMLNoLayer for a
+// plane outside the CPML slabs.
+#define kCopperZCPMLNoLayer 0xFFFFFFFFu
+struct CopperZCPMLPlaneGPU {
+    uint32_t layer;
+    float bE, cE, bH, cH;
+};
+
 // A rectangular run uses the full (nx,ny,nz)/(nx-1,ny-1,nz-1) extents. An irregular run uses an
 // origin plus a set of active cuboids within those same bounds; see CopperEngine.mm.
 enum CopperBufferIndex {
@@ -51,18 +67,13 @@ enum CopperBufferIndex {
     CopperBufferIndexHx = 4,
     CopperBufferIndexHy = 5,
     CopperBufferIndexHz = 6,
-    CopperBufferIndexVV0 = 7,
-    CopperBufferIndexVV1 = 8,
-    CopperBufferIndexVV2 = 9,
-    CopperBufferIndexVI0 = 10,
-    CopperBufferIndexVI1 = 11,
-    CopperBufferIndexVI2 = 12,
-    CopperBufferIndexII0 = 13,
-    CopperBufferIndexII1 = 14,
-    CopperBufferIndexII2 = 15,
-    CopperBufferIndexIV0 = 16,
-    CopperBufferIndexIV1 = 17,
-    CopperBufferIndexIV2 = 18,
+
+    // The update coefficients in table form (see copper::CopperCoefficientTable), bound with the
+    // E side's buffers for E-update kernels and the H side's for H-update kernels. Indices 10-18
+    // once held twelve per-cell coefficient arrays and are now unused.
+    CopperBufferIndexMaterialIndex = 7, // per cell: ushort or uint index into the table
+    CopperBufferIndexMaterialTable = 8, // array of CopperMaterialCoefficientsGPU
+    CopperBufferIndexGeometry = 9,      // float: own spacing along x,y,z, then 1/(across spacing) along x,y,z
 
     CopperBufferIndexCPMLShell = 19,
 
@@ -89,6 +100,12 @@ enum CopperBufferIndex {
     CopperBufferIndexCPMLPsi0 = 25,   // psi driven by the nP-axis curl term, axis-major by component, read-write
     CopperBufferIndexCPMLPsi1 = 26,   // psi driven by the nPP-axis curl term, axis-major by component, read-write
     CopperBufferIndexDispatchOrigin = 27,
+
+    // update_e_interior_zcpml/update_h_interior_zcpml -- the irregular domain's Z-only CPML, folded
+    // into the interior update (see copper::CopperZCPML). Metal's buffer argument table ends at 30.
+    CopperBufferIndexZCPMLPlanes = 28, // constant array of CopperZCPMLPlaneGPU, one per grid z-plane
+    CopperBufferIndexZCPMLPsiX = 29,   // Ex's (E update) or Hx's (H update) d/dz-driven psi, read-write
+    CopperBufferIndexZCPMLPsiY = 30,   // Ey's (E update) or Hy's (H update) d/dz-driven psi, read-write
 };
 
 #endif /* CopperShaderTypes_h */

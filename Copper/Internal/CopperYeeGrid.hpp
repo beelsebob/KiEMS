@@ -48,6 +48,17 @@ struct CopperYeeGrid {
     std::vector<float> vi[3];
     std::vector<float> ii[3];
     std::vector<float> iv[3];
+
+    /// Mesh spacing along each axis in metres, kept in double precision (the float lines above lose
+    /// most of a fine spacing's digits): primaryDelta[a][i] is the primary-mesh edge length at line
+    /// i along axis a (GetDiscDelta(a, i, false) times the grid delta), dualDelta[a][i] the dual
+    /// one. Every coefficient's geometry is a product of these, one factor per axis -- with nP/nPP
+    /// the other two axes,
+    ///   vi[n] = (material term) * primaryDelta[n][pos n] / (dualDelta[nP][pos nP] * dualDelta[nPP][pos nPP])
+    ///   iv[n] = (material term) * dualDelta[n][pos n] / (primaryDelta[nP][pos nP] * primaryDelta[nPP][pos nPP])
+    /// (C = eps*area/length and L = mu*area/length, with the area the two dual or primary widths
+    /// across the edge). Empty if the builder didn't provide them.
+    std::vector<double> primaryDelta[3], dualDelta[3];
 };
 
 /// Walks `op`'s already-built grid/coefficients (i.e. `SetGeometryCSX`+`CalcECOperator`, or

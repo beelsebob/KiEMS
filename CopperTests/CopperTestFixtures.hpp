@@ -45,6 +45,13 @@ ContinuousStructure* buildPecPaintFixture();
 /// Internal/CopperCPML.hpp's own top comment for why).
 ContinuousStructure* buildCpmlCavityNoExcitation();
 
+/// A no-excitation box whose mesh spacing grows geometrically along every axis (at a different rate
+/// per axis), holding a lossy dielectric block, a lossy magnetic block and a metal block whose faces
+/// mostly fall between mesh lines -- so its cells carry many distinct geometries and quarter-cell
+/// material blends. The other fixtures' uniform 1 mm meshes can't tell whether coefficient geometry
+/// is being handled per axis correctly. Boundary is PEC (CopperOperator's default).
+ContinuousStructure* buildGradedMaterialFixture();
+
 /// buildTinyVacuumGrid()'s same domain/excitation, plus a voltage probe and a current probe laid out
 /// the way a real LumpedPort's own u/i probes are: a voltage probe spanning the excitation direction
 /// at the port's center point, a current probe forming a loop around the port's footprint at its

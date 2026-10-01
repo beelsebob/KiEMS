@@ -89,7 +89,8 @@ void shiftRowRightClampFirst(const float* row, float* shifted, std::size_t n) {
 class CPUEngineImpl final : public EngineBackend {
 public:
     CPUEngineImpl(const CopperYeeGrid& grid, const CopperExcitation& excitation,
-                  const std::vector<CopperCPMLShell>& cpmlShells, const CopperDomainMask& domainMask);
+                  const std::vector<CopperCPMLShell>& cpmlShells, const CopperDomainMask& domainMask,
+                  const CopperZCPML& zcpml);
 
     void run(std::uint32_t steps) override;
     void runWithProbeSampling(std::uint32_t steps, const CopperEngine::ProbeSampler& sampler,
@@ -112,6 +113,12 @@ private:
     // same as CopperEngine.mm's own zero-uploaded psi buffers.
     std::vector<CopperCPMLShell> _cpmlShells;
 
+    // An irregular domain's Z-only CPML (see CopperZCPML) and its d/dz-driven psi for Ex, Ey, Hx,
+    // Hy, nx*ny per graded plane. Applied as its own pass after the interior update, rather than
+    // folded into it as on the GPU -- same arithmetic per cell either way.
+    CopperZCPML _zcpml;
+    std::vector<float> _zcpmlPsi[4];
+
     std::vector<CopperExcitationCell> _voltageCells;
     std::vector<CopperExcitationCell> _currentCells;
     std::vector<float> _voltageSignal;
@@ -132,6 +139,8 @@ private:
     void updateHInterior();
     void cpmlCorrectE();
     void cpmlCorrectH();
+    void zcpmlCorrectE();
+    void zcpmlCorrectH();
     void applyExcitationE();
     void applyExcitationH();
 
@@ -145,9 +154,10 @@ private:
 
 CPUEngineImpl::CPUEngineImpl(const CopperYeeGrid& grid, const CopperExcitation& excitation,
                               const std::vector<CopperCPMLShell>& cpmlShells,
-                              const CopperDomainMask& domainMask)
+                              const CopperDomainMask& domainMask, const CopperZCPML& zcpml)
     : _dims(grid.dims),
       _cpmlShells(cpmlShells),
+      _zcpml(zcpml),
       _voltageCells(excitation.voltageCells),
       _currentCells(excitation.currentCells),
       _voltageSignal(excitation.voltageSignal),
@@ -179,6 +189,11 @@ CPUEngineImpl::CPUEngineImpl(const CopperYeeGrid& grid, const CopperExcitation& 
     float* const ii[3] = {_ii[0].data(), _ii[1].data(), _ii[2].data()};
     float* const iv[3] = {_iv[0].data(), _iv[1].data(), _iv[2].data()};
     applyRingAbsorber(domainMask, grid.timestepSeconds, _dims, vv, vi, ii, iv);
+
+    if (!_zcpml.empty()) {
+        const std::size_t psiCount = static_cast<std::size_t>(_dims.nx) * _dims.ny * _zcpml.layerCount();
+        for (auto& psi : _zcpmlPsi) psi.assign(psiCount, 0.0F);
+    }
 
     _scratch0.assign(_dims.nx, 0.0F);
     _scratch1.assign(_dims.nx, 0.0F);
@@ -340,6 +355,53 @@ void CPUEngineImpl::cpmlCorrectH() {
     }
 }
 
+// CopperFDTD.metal's updateE<true>/updateH<true> Z-only CPML terms (see CopperZCPML), over every node
+// of each graded plane -- external nodes have zeroed coefficients here, so they stay at zero.
+void CPUEngineImpl::zcpmlCorrectE() {
+    if (_zcpml.empty()) return;
+    const std::size_t nx = _dims.nx, nxny = nx * _dims.ny;
+    for (std::uint32_t z = 0; z < _dims.nz; ++z) {
+        const std::uint32_t layer = _zcpml.layerOfZ[z];
+        if (layer == CopperZCPML::kNoLayer) continue;
+        const float b = _zcpml.bE[layer], c = _zcpml.cE[layer];
+        const std::size_t dz = z != 0 ? nxny : 0;
+        for (std::uint32_t y = 0; y < _dims.ny; ++y) {
+            for (std::uint32_t x = 0; x < _dims.nx; ++x) {
+                const std::size_t g = index(x, y, z);
+                const std::size_t p = x + nx * (y + static_cast<std::size_t>(_dims.ny) * layer);
+                const float psiEx = b * _zcpmlPsi[0][p] + c * (_hField[1][g] - _hField[1][g - dz]);
+                const float psiEy = b * _zcpmlPsi[1][p] + c * (_hField[0][g] - _hField[0][g - dz]);
+                _zcpmlPsi[0][p] = psiEx;
+                _zcpmlPsi[1][p] = psiEy;
+                _eField[0][g] += _vi[0][g] * (0.0F - psiEx);
+                _eField[1][g] += _vi[1][g] * psiEy;
+            }
+        }
+    }
+}
+
+void CPUEngineImpl::zcpmlCorrectH() {
+    if (_zcpml.empty()) return;
+    const std::size_t nx = _dims.nx, nxny = nx * _dims.ny;
+    for (std::uint32_t z = 0; z + 1 < _dims.nz; ++z) {
+        const std::uint32_t layer = _zcpml.layerOfZ[z];
+        if (layer == CopperZCPML::kNoLayer) continue;
+        const float b = _zcpml.bH[layer], c = _zcpml.cH[layer];
+        for (std::uint32_t y = 0; y + 1 < _dims.ny; ++y) {
+            for (std::uint32_t x = 0; x + 1 < _dims.nx; ++x) {
+                const std::size_t g = index(x, y, z);
+                const std::size_t p = x + nx * (y + static_cast<std::size_t>(_dims.ny) * layer);
+                const float psiHx = b * _zcpmlPsi[2][p] + c * (_eField[1][g] - _eField[1][g + nxny]);
+                const float psiHy = b * _zcpmlPsi[3][p] + c * (_eField[0][g] - _eField[0][g + nxny]);
+                _zcpmlPsi[2][p] = psiHx;
+                _zcpmlPsi[3][p] = psiHy;
+                _hField[0][g] += _iv[0][g] * (0.0F - psiHx);
+                _hField[1][g] += _iv[1][g] * psiHy;
+            }
+        }
+    }
+}
+
 // applyExcitationCell()'s exc_pos formula is ported *exactly*, multiply-by-boolean tricks included,
 // rather than rewritten as more obviously-equivalent branches -- see CopperExcitationCell's own doc
 // comment: "clamp(timestep - delaySteps, 0, length-1 or wrapped by signalPeriodSeconds)" is the
@@ -392,6 +454,7 @@ void CPUEngineImpl::runIterationPhase(IterationPhase phase) {
     if (doVoltage) {
         updateEInterior();
         cpmlCorrectE();
+        zcpmlCorrectE();
         applyExcitationE();
     }
 
@@ -399,6 +462,7 @@ void CPUEngineImpl::runIterationPhase(IterationPhase phase) {
     if (doCurrent) {
         updateHInterior();
         cpmlCorrectH();
+        zcpmlCorrectH();
         applyExcitationH();
         ++_currentTimestep;
     }
@@ -481,8 +545,9 @@ double CPUEngineImpl::estimateEnergy() const {
 std::unique_ptr<EngineBackend> makeCPUEngineBackend(const CopperYeeGrid& grid,
                                                      const CopperExcitation& excitation,
                                                      const std::vector<CopperCPMLShell>& cpmlShells,
-                                                     const CopperDomainMask& domainMask) {
-    return std::make_unique<CPUEngineImpl>(grid, excitation, cpmlShells, domainMask);
+                                                     const CopperDomainMask& domainMask,
+                                                     const CopperZCPML& zcpml) {
+    return std::make_unique<CPUEngineImpl>(grid, excitation, cpmlShells, domainMask, zcpml);
 }
 
 } // namespace copper

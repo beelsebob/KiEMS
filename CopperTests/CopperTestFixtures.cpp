@@ -120,6 +120,60 @@ ContinuousStructure* buildCpmlCavityNoExcitation() {
     return csx;
 }
 
+ContinuousStructure* buildGradedMaterialFixture() {
+    auto* csx = new ContinuousStructure();
+    CSRectGrid* grid = csx->GetGrid();
+    grid->SetDeltaUnit(1e-3);
+    const double firstSpacing[3] = {0.5, 0.4, 0.3};
+    const double growth[3] = {1.08, 1.12, 1.15};
+    const int cells[3] = {24, 20, 16};
+    double extent[3];
+    for (int axis = 0; axis < 3; ++axis) {
+        double line = 0.0, spacing = firstSpacing[axis];
+        grid->AddDiscLine(axis, line);
+        for (int i = 0; i < cells[axis]; ++i) {
+            line += spacing;
+            grid->AddDiscLine(axis, line);
+            spacing *= growth[axis];
+        }
+        extent[axis] = line;
+    }
+
+    // Boxes as fractions of each axis's extent, so their faces land between lines.
+    auto addBox = [&](CSProperties* property, const double lo[3], const double hi[3], int priority) {
+        auto* box = new CSPrimBox(property->GetParameterSet(), property);
+        for (int axis = 0; axis < 3; ++axis) {
+            box->SetCoord(2 * axis, lo[axis] * extent[axis]);
+            box->SetCoord(2 * axis + 1, hi[axis] * extent[axis]);
+        }
+        box->SetPriority(priority);
+    };
+
+    auto* dielectric = new CSPropMaterial(csx->GetParameterSet());
+    dielectric->SetName("graded_dielectric");
+    dielectric->SetEpsilon(4.3);
+    dielectric->SetKappa(0.05);
+    csx->AddProperty(dielectric);
+    const double dielectricLo[3] = {0.13, 0.21, 0.0}, dielectricHi[3] = {0.77, 0.83, 0.43};
+    addBox(dielectric, dielectricLo, dielectricHi, 10);
+
+    auto* magnetic = new CSPropMaterial(csx->GetParameterSet());
+    magnetic->SetName("graded_magnetic");
+    magnetic->SetMue(2.5);
+    magnetic->SetSigma(800.0);
+    csx->AddProperty(magnetic);
+    const double magneticLo[3] = {0.52, 0.11, 0.37}, magneticHi[3] = {0.91, 0.47, 0.71};
+    addBox(magnetic, magneticLo, magneticHi, 20);
+
+    auto* metal = new CSPropMetal(csx->GetParameterSet());
+    metal->SetName("graded_metal");
+    csx->AddProperty(metal);
+    const double metalLo[3] = {0.31, 0.56, 0.33}, metalHi[3] = {0.47, 0.69, 0.58};
+    addBox(metal, metalLo, metalHi, 30);
+
+    return csx;
+}
+
 ContinuousStructure* buildProbeFixture() {
     auto* csx = new ContinuousStructure();
     CSRectGrid* grid = csx->GetGrid();

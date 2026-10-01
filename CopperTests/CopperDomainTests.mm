@@ -91,40 +91,21 @@ using namespace copper::test;
     XCTAssertLessThanOrEqual(mask.dispatchBoxes.size(), mask.xyClass.size(),
                              @"run merging must never produce more cuboids than raster nodes");
 
-    // The irregular form is Z slabs only (the XY rings are a matched lossy absorber, not a CPML --
-    // see CopperCPML.hpp): one lower and one upper slab per dispatch cuboid, graded along Z alone,
-    // together covering every active column exactly twice and no external node at all. The upper
-    // slab is one plane deeper: its first plane holds the H-side half-cell grading.
+    // The irregular form is the Z slabs only (the XY rings are a matched lossy absorber, not a CPML
+    // -- see CopperCPML.hpp), graded along Z alone and so stored per plane: `depth` planes at the
+    // bottom and one more at the top, whose first plane holds only the H-side half-cell grading.
     const auto nz = op.numberOfLines(2);
-    const auto shells = copper::buildCPMLShells(op, 2 * M_PI * 100e6 * EPS0, depth, mask);
-    XCTAssertEqual(shells.size(), 2 * mask.dispatchBoxes.size());
-    std::vector<std::uint8_t> slabCoverage(mask.xyClass.size(), 0);
-    for (const auto& shell : shells) {
-        if (shell.startZ == 0) {
-            XCTAssertEqual(shell.dims.nz, depth);
-        } else {
-            XCTAssertEqual(shell.startZ, nz - depth - 1);
-            XCTAssertEqual(shell.dims.nz, depth + 1);
-            // First plane: E-side grading is zero on the PML's inner edge, H-side is not.
-            const std::size_t plane = static_cast<std::size_t>(shell.dims.nx) * shell.dims.ny;
-            XCTAssertEqual(shell.cE[2][0], 0.0F);
-            XCTAssertLessThan(shell.cH[2][0], 0.0F);
-            XCTAssertLessThan(shell.cE[2][plane], 0.0F);
-        }
-        for (std::uint32_t y = shell.startY; y < shell.startY + shell.dims.ny; ++y) {
-            for (std::uint32_t x = shell.startX; x < shell.startX + shell.dims.nx; ++x) {
-                XCTAssertNotEqual(mask.at(x, y), 0, @"a CPML slab contains an external node");
-                ++slabCoverage[static_cast<std::size_t>(x) + static_cast<std::size_t>(mask.nx) * y];
-            }
-        }
-        for (int axis = 0; axis < 2; ++axis) {
-            for (const float c : shell.cE[axis]) XCTAssertEqual(c, 0.0F, @"an irregular-domain slab grades X/Y");
-            for (const float c : shell.cH[axis]) XCTAssertEqual(c, 0.0F, @"an irregular-domain slab grades X/Y");
-        }
+    const copper::CopperZCPML zcpml = copper::buildZCPML(op, 2 * M_PI * 100e6 * EPS0, depth);
+    XCTAssertEqual(zcpml.layerOfZ.size(), static_cast<std::size_t>(nz));
+    XCTAssertEqual(zcpml.layerCount(), 2 * depth + 1);
+    for (std::uint32_t z = 0; z < nz; ++z) {
+        const bool graded = z < depth || z >= nz - depth - 1;
+        XCTAssertEqual(zcpml.layerOfZ[z] != copper::CopperZCPML::kNoLayer, graded, @"plane %u", z);
     }
-    for (std::size_t i = 0; i < slabCoverage.size(); ++i) {
-        XCTAssertEqual(slabCoverage[i], mask.xyClass[i] == 0 ? 0 : 2);
-    }
+    const std::uint32_t upperFirst = zcpml.layerOfZ[nz - depth - 1];
+    XCTAssertEqual(zcpml.cE[upperFirst], 0.0F, @"E-side grading is zero on the PML's inner edge");
+    XCTAssertLessThan(zcpml.cH[upperFirst], 0.0F, @"H-side grading is not");
+    XCTAssertLessThan(zcpml.cE[zcpml.layerOfZ[nz - depth]], 0.0F);
 }
 
 /// The ring absorber samples its profile at each Yee component's own staggered XY position: the
@@ -193,9 +174,9 @@ using namespace copper::test;
                                   {op.discLine(0, x0), op.discLine(1, y1)}}};
     config.domainCPMLCellSize = op.discLine(0, 1) - op.discLine(0, 0);
     const copper::CopperDomainMask mask = copper::buildDomainMask(op, config, depth);
-    const auto shells = copper::buildCPMLShells(op, 2 * M_PI * 100e6 * EPS0, depth, mask);
+    const copper::CopperZCPML zcpml = copper::buildZCPML(op, 2 * M_PI * 100e6 * EPS0, depth);
 
-    copper::CopperEngine cpu(op.grid(), {}, shells, copper::CopperEngine::Backend::CPU, mask);
+    copper::CopperEngine cpu(op.grid(), {}, {}, copper::CopperEngine::Backend::CPU, mask, zcpml);
     cpu.writeFieldCell(copper::CopperEngine::Field::Ez, nx / 2, ny / 2, nz / 2, 1.0F);
     const double initialEnergy = cpu.estimateEnergy();
     cpu.run(500);
@@ -226,10 +207,10 @@ using namespace copper::test;
                                   {op.discLine(0, x0), op.discLine(1, y1)}}};
     config.domainCPMLCellSize = op.discLine(0, 1) - op.discLine(0, 0);
     const copper::CopperDomainMask mask = copper::buildDomainMask(op, config, depth);
-    const auto shells = copper::buildCPMLShells(op, 2 * M_PI * 100e6 * EPS0, depth, mask);
+    const copper::CopperZCPML zcpml = copper::buildZCPML(op, 2 * M_PI * 100e6 * EPS0, depth);
 
-    copper::CopperEngine metal(op.grid(), {}, shells, copper::CopperEngine::Backend::Metal, mask);
-    copper::CopperEngine cpu(op.grid(), {}, shells, copper::CopperEngine::Backend::CPU, mask);
+    copper::CopperEngine metal(op.grid(), {}, {}, copper::CopperEngine::Backend::Metal, mask, zcpml);
+    copper::CopperEngine cpu(op.grid(), {}, {}, copper::CopperEngine::Backend::CPU, mask, zcpml);
     const std::uint32_t seedX = (x0 + x1) / 2, seedY = (y0 + y1) / 2, seedZ = nz / 2;
     metal.writeFieldCell(copper::CopperEngine::Field::Ez, seedX, seedY, seedZ, 1.0F);
     cpu.writeFieldCell(copper::CopperEngine::Field::Ez, seedX, seedY, seedZ, 1.0F);

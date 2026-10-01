@@ -6,7 +6,9 @@
 //
 //   update_e_interior <-> Engine::UpdateVoltages. Rectangular-domain callers dispatch the full
 //   (nx,ny,nz) grid; irregular-board runs dispatch the non-overlapping active cuboids produced by
-//   CopperDomain instead. The
+//   CopperDomain instead, through the _zcpml variants that also apply their Z-only CPML (see
+//   updateE below). Coefficients come from a per-cell index into a table of material terms times
+//   the mesh's separable geometry (see curlCoefficients() and copper::CopperCoefficientTable). The
 //   lower-index neighbor in each curl term is guarded by `shift = (pos != 0)`: at pos==0, shift is
 //   0, so `pos - shift` reads the *same* cell instead of underflowing -- and since both terms of
 //   that difference then read the identical value, they cancel to exactly zero. That's not a
@@ -40,24 +42,30 @@ inline uint32_t copperIndex(constant CopperGridDimsGPU& dims, uint32_t x, uint32
     return x + dims.nx * (y + dims.ny * z);
 }
 
-} // namespace
+// vi (E kernels) or iv (H kernels) of all three components at (x, y, z): the cell's table entry's
+// material terms times the mesh's separable geometry -- component n's own spacing times the
+// reciprocal spacing across it along the other two axes (see copper::CopperCoefficientTable).
+inline float3 curlCoefficients(constant CopperGridDimsGPU& dims, device const float* geometry,
+                               thread const CopperMaterialCoefficientsGPU& c, uint32_t x, uint32_t y, uint32_t z) {
+    const uint32_t yOffset = dims.nx, zOffset = dims.nx + dims.ny, inverse = dims.nx + dims.ny + dims.nz;
+    const float ownX = geometry[x], ownY = geometry[yOffset + y], ownZ = geometry[zOffset + z];
+    const float invX = geometry[inverse + x], invY = geometry[inverse + yOffset + y],
+                invZ = geometry[inverse + zOffset + z];
+    return float3(c.material[0] * ownX * invY * invZ, c.material[1] * ownY * invZ * invX,
+                  c.material[2] * ownZ * invX * invY);
+}
 
-kernel void update_e_interior(constant CopperGridDimsGPU& dims [[buffer(CopperBufferIndexDims)]],
-                               device float* Ex [[buffer(CopperBufferIndexEx)]],
-                               device float* Ey [[buffer(CopperBufferIndexEy)]],
-                               device float* Ez [[buffer(CopperBufferIndexEz)]],
-                               device const float* Hx [[buffer(CopperBufferIndexHx)]],
-                               device const float* Hy [[buffer(CopperBufferIndexHy)]],
-                               device const float* Hz [[buffer(CopperBufferIndexHz)]],
-                               device const float* vv0 [[buffer(CopperBufferIndexVV0)]],
-                               device const float* vv1 [[buffer(CopperBufferIndexVV1)]],
-                               device const float* vv2 [[buffer(CopperBufferIndexVV2)]],
-                               device const float* vi0 [[buffer(CopperBufferIndexVI0)]],
-                               device const float* vi1 [[buffer(CopperBufferIndexVI1)]],
-                               device const float* vi2 [[buffer(CopperBufferIndexVI2)]],
-                               constant CopperDispatchOriginGPU& origin [[buffer(CopperBufferIndexDispatchOrigin)]],
-                               uint3 gid [[thread_position_in_grid]]) {
-    gid += uint3(origin.x, origin.y, origin.z);
+// update_e_interior's body. With kZCPML it also applies the irregular domain's Z-only CPML
+// (copper::CopperZCPML) to the freshly updated value before storing it: that's cpml_correct_e's
+// Ex/Ey terms with their X/Y-graded psi at their permanent zero, and nothing for Ez. The
+// correction reads only this cell's new value and H differences this update already reads, so
+// folding it in costs two psi read-modify-writes per graded cell instead of a second pass.
+template <bool kZCPML, typename Index>
+inline void updateE(uint3 gid, constant CopperGridDimsGPU& dims, device float* Ex, device float* Ey,
+                    device float* Ez, device const float* Hx, device const float* Hy, device const float* Hz,
+                    device const Index* materialIndex, device const CopperMaterialCoefficientsGPU* table,
+                    device const float* geometry, constant CopperZCPMLPlaneGPU* planes, device float* psiX,
+                    device float* psiY) {
     if (gid.x >= dims.nx || gid.y >= dims.ny || gid.z >= dims.nz) {
         return;
     }
@@ -66,42 +74,46 @@ kernel void update_e_interior(constant CopperGridDimsGPU& dims [[buffer(CopperBu
     const uint32_t sy = (y != 0) ? 1 : 0;
     const uint32_t sz = (z != 0) ? 1 : 0;
     const uint32_t idx = copperIndex(dims, x, y, z);
+    const uint32_t xM1 = copperIndex(dims, x - sx, y, z);
+    const uint32_t yM1 = copperIndex(dims, x, y - sy, z);
+    const uint32_t zM1 = copperIndex(dims, x, y, z - sz);
+    const CopperMaterialCoefficientsGPU c = table[materialIndex[idx]];
+    const float3 vi = curlCoefficients(dims, geometry, c, x, y, z);
 
     // Ex: curl term is (Hz - Hz[y-1] - Hy + Hy[z-1]).
-    Ex[idx] = vv0[idx] * Ex[idx] + vi0[idx] * (Hz[copperIndex(dims, x, y, z)] -
-                                                 Hz[copperIndex(dims, x, y - sy, z)] -
-                                                 Hy[copperIndex(dims, x, y, z)] +
-                                                 Hy[copperIndex(dims, x, y, z - sz)]);
-
+    float ex = c.decay[0] * Ex[idx] + vi.x * (Hz[idx] - Hz[yM1] - Hy[idx] + Hy[zM1]);
     // Ey: curl term is (Hx - Hx[z-1] - Hz + Hz[x-1]).
-    Ey[idx] = vv1[idx] * Ey[idx] + vi1[idx] * (Hx[copperIndex(dims, x, y, z)] -
-                                                 Hx[copperIndex(dims, x, y, z - sz)] -
-                                                 Hz[copperIndex(dims, x, y, z)] +
-                                                 Hz[copperIndex(dims, x - sx, y, z)]);
-
+    float ey = c.decay[1] * Ey[idx] + vi.y * (Hx[idx] - Hx[zM1] - Hz[idx] + Hz[xM1]);
     // Ez: curl term is (Hy - Hy[x-1] - Hx + Hx[y-1]).
-    Ez[idx] = vv2[idx] * Ez[idx] + vi2[idx] * (Hy[copperIndex(dims, x, y, z)] -
-                                                 Hy[copperIndex(dims, x - sx, y, z)] -
-                                                 Hx[copperIndex(dims, x, y, z)] +
-                                                 Hx[copperIndex(dims, x, y - sy, z)]);
+    const float ez = c.decay[2] * Ez[idx] + vi.z * (Hy[idx] - Hy[xM1] - Hx[idx] + Hx[yM1]);
+
+    if (kZCPML) {
+        const CopperZCPMLPlaneGPU plane = planes[z];
+        if (plane.layer != kCopperZCPMLNoLayer) {
+            // Ex's d/dz term is its second (subtracted) curl difference, Ey's its first (added) one.
+            const uint32_t p = x + dims.nx * (y + dims.ny * plane.layer);
+            const float psiEx = plane.bE * psiX[p] + plane.cE * (Hy[idx] - Hy[zM1]);
+            const float psiEy = plane.bE * psiY[p] + plane.cE * (Hx[idx] - Hx[zM1]);
+            psiX[p] = psiEx;
+            psiY[p] = psiEy;
+            ex += vi.x * (0.0f - psiEx);
+            ey += vi.y * psiEy;
+        }
+    }
+
+    Ex[idx] = ex;
+    Ey[idx] = ey;
+    Ez[idx] = ez;
 }
 
-kernel void update_h_interior(constant CopperGridDimsGPU& dims [[buffer(CopperBufferIndexDims)]],
-                               device const float* Ex [[buffer(CopperBufferIndexEx)]],
-                               device const float* Ey [[buffer(CopperBufferIndexEy)]],
-                               device const float* Ez [[buffer(CopperBufferIndexEz)]],
-                               device float* Hx [[buffer(CopperBufferIndexHx)]],
-                               device float* Hy [[buffer(CopperBufferIndexHy)]],
-                               device float* Hz [[buffer(CopperBufferIndexHz)]],
-                               device const float* ii0 [[buffer(CopperBufferIndexII0)]],
-                               device const float* ii1 [[buffer(CopperBufferIndexII1)]],
-                               device const float* ii2 [[buffer(CopperBufferIndexII2)]],
-                               device const float* iv0 [[buffer(CopperBufferIndexIV0)]],
-                               device const float* iv1 [[buffer(CopperBufferIndexIV1)]],
-                               device const float* iv2 [[buffer(CopperBufferIndexIV2)]],
-                               constant CopperDispatchOriginGPU& origin [[buffer(CopperBufferIndexDispatchOrigin)]],
-                               uint3 gid [[thread_position_in_grid]]) {
-    gid += uint3(origin.x, origin.y, origin.z);
+// update_h_interior's body, optionally with cpml_correct_h's Z-only terms folded in exactly like
+// updateE above (Hx/Hy only; Hz has no d/dz term).
+template <bool kZCPML, typename Index>
+inline void updateH(uint3 gid, constant CopperGridDimsGPU& dims, device const float* Ex, device const float* Ey,
+                    device const float* Ez, device float* Hx, device float* Hy, device float* Hz,
+                    device const Index* materialIndex, device const CopperMaterialCoefficientsGPU* table,
+                    device const float* geometry, constant CopperZCPMLPlaneGPU* planes, device float* psiX,
+                    device float* psiY) {
     // Dispatched over exactly (nx-1, ny-1, nz-1) -- every pos+1 read below is guaranteed in bounds
     // by that dispatch size alone; this guard is defensive belt-and-suspenders, not load-bearing.
     if (gid.x + 1 >= dims.nx || gid.y + 1 >= dims.ny || gid.z + 1 >= dims.nz) {
@@ -109,27 +121,40 @@ kernel void update_h_interior(constant CopperGridDimsGPU& dims [[buffer(CopperBu
     }
     const uint32_t x = gid.x, y = gid.y, z = gid.z;
     const uint32_t idx = copperIndex(dims, x, y, z);
+    const uint32_t xP1 = copperIndex(dims, x + 1, y, z);
+    const uint32_t yP1 = copperIndex(dims, x, y + 1, z);
+    const uint32_t zP1 = copperIndex(dims, x, y, z + 1);
+    const CopperMaterialCoefficientsGPU c = table[materialIndex[idx]];
+    const float3 iv = curlCoefficients(dims, geometry, c, x, y, z);
 
     // Hx: curl term is (Ez - Ez[y+1] - Ey + Ey[z+1]).
-    Hx[idx] = ii0[idx] * Hx[idx] + iv0[idx] * (Ez[copperIndex(dims, x, y, z)] -
-                                                 Ez[copperIndex(dims, x, y + 1, z)] -
-                                                 Ey[copperIndex(dims, x, y, z)] +
-                                                 Ey[copperIndex(dims, x, y, z + 1)]);
-
+    float hx = c.decay[0] * Hx[idx] + iv.x * (Ez[idx] - Ez[yP1] - Ey[idx] + Ey[zP1]);
     // Hy: curl term is (Ex - Ex[z+1] - Ez + Ez[x+1]).
-    Hy[idx] = ii1[idx] * Hy[idx] + iv1[idx] * (Ex[copperIndex(dims, x, y, z)] -
-                                                 Ex[copperIndex(dims, x, y, z + 1)] -
-                                                 Ez[copperIndex(dims, x, y, z)] +
-                                                 Ez[copperIndex(dims, x + 1, y, z)]);
-
+    float hy = c.decay[1] * Hy[idx] + iv.y * (Ex[idx] - Ex[zP1] - Ez[idx] + Ez[xP1]);
     // Hz: curl term is (Ey - Ey[x+1] - Ex + Ex[y+1]).
-    Hz[idx] = ii2[idx] * Hz[idx] + iv2[idx] * (Ey[copperIndex(dims, x, y, z)] -
-                                                 Ey[copperIndex(dims, x + 1, y, z)] -
-                                                 Ex[copperIndex(dims, x, y, z)] +
-                                                 Ex[copperIndex(dims, x, y + 1, z)]);
+    const float hz = c.decay[2] * Hz[idx] + iv.z * (Ey[idx] - Ey[xP1] - Ex[idx] + Ex[yP1]);
+
+    if (kZCPML) {
+        const CopperZCPMLPlaneGPU plane = planes[z];
+        if (plane.layer != kCopperZCPMLNoLayer) {
+            // Hx's d/dz term is its second (subtracted) curl difference, Hy's its first (added) one.
+            const uint32_t p = x + dims.nx * (y + dims.ny * plane.layer);
+            const float psiHx = plane.bH * psiX[p] + plane.cH * (Ey[idx] - Ey[zP1]);
+            const float psiHy = plane.bH * psiY[p] + plane.cH * (Ex[idx] - Ex[zP1]);
+            psiX[p] = psiHx;
+            psiY[p] = psiHy;
+            hx += iv.x * (0.0f - psiHx);
+            hy += iv.y * psiHy;
+        }
+    }
+
+    Hx[idx] = hx;
+    Hy[idx] = hy;
+    Hz[idx] = hz;
 }
 
-// CPML (real CFS-PML, Roden & Gedney 2000) correction kernels -- a direct port of Taflove & Hagness,
+// CPML (real CFS-PML, Roden & Gedney 2000) correction kernels, for rectangular domains (an irregular
+// domain's Z-only CPML is folded into update_e/h_interior_zcpml) -- a direct port of Taflove & Hagness,
 // *Computational Electrodynamics* 3rd ed., eq. (7.101)/(7.105)/(7.106) for E and eq. (7.101)/(7.110)/
 // (7.108) for H, read from the actual text (see CopperCPML.hpp's own top comment for why this is a
 // convolutional perfectly matched layer. These are dispatched *after*
@@ -146,22 +171,13 @@ kernel void update_h_interior(constant CopperGridDimsGPU& dims [[buffer(CopperBu
 // for that component (grading axis nP=(n+1)%3), psi1[n] by the second/negative term (grading axis
 // nPP=(n+2)%3) -- mirrored exactly below, including which raw difference feeds which slot.
 
-kernel void cpml_correct_e(constant CopperGridDimsGPU& dims [[buffer(CopperBufferIndexDims)]],
-                            constant CopperCPMLShellGPU& shell [[buffer(CopperBufferIndexCPMLShell)]],
-                            device float* Ex [[buffer(CopperBufferIndexEx)]],
-                            device float* Ey [[buffer(CopperBufferIndexEy)]],
-                            device float* Ez [[buffer(CopperBufferIndexEz)]],
-                            device const float* Hx [[buffer(CopperBufferIndexHx)]],
-                            device const float* Hy [[buffer(CopperBufferIndexHy)]],
-                            device const float* Hz [[buffer(CopperBufferIndexHz)]],
-                            device const float* vi0 [[buffer(CopperBufferIndexVI0)]],
-                            device const float* vi1 [[buffer(CopperBufferIndexVI1)]],
-                            device const float* vi2 [[buffer(CopperBufferIndexVI2)]],
-                            device const float* bCoef [[buffer(CopperBufferIndexCPMLCoeffB)]],
-                            device const float* cCoef [[buffer(CopperBufferIndexCPMLCoeffC)]],
-                            device float* psi0 [[buffer(CopperBufferIndexCPMLPsi0)]],
-                            device float* psi1 [[buffer(CopperBufferIndexCPMLPsi1)]],
-                            uint3 lid [[thread_position_in_grid]]) {
+template <typename Index>
+inline void cpmlCorrectE(uint3 lid, constant CopperGridDimsGPU& dims, constant CopperCPMLShellGPU& shell,
+                         device float* Ex, device float* Ey, device float* Ez, device const float* Hx,
+                         device const float* Hy, device const float* Hz, device const Index* materialIndex,
+                         device const CopperMaterialCoefficientsGPU* table, device const float* geometry,
+                         device const float* bCoef, device const float* cCoef, device float* psi0,
+                         device float* psi1) {
     if (lid.x >= shell.nx || lid.y >= shell.ny || lid.z >= shell.nz) {
         return;
     }
@@ -172,6 +188,8 @@ kernel void cpml_correct_e(constant CopperGridDimsGPU& dims [[buffer(CopperBuffe
     const uint32_t sy = (y != 0) ? 1 : 0;
     const uint32_t sz = (z != 0) ? 1 : 0;
     const uint32_t globalIdx = copperIndex(dims, x, y, z);
+    const CopperMaterialCoefficientsGPU c = table[materialIndex[globalIdx]];
+    const float3 vi = curlCoefficients(dims, geometry, c, x, y, z);
 
     // Ex: same two terms as update_e_interior's own (Hz-diff, then -Hy-diff) -- grading axes y (nP),
     // z (nPP).
@@ -183,7 +201,7 @@ kernel void cpml_correct_e(constant CopperGridDimsGPU& dims [[buffer(CopperBuffe
         const float hyDiff = Hy[copperIndex(dims, x, y, z)] - Hy[copperIndex(dims, x, y, z - sz)];
         psi0[p] = bCoef[bc0] * psi0[p] + cCoef[bc0] * hzDiff;
         psi1[p] = bCoef[bc1] * psi1[p] + cCoef[bc1] * hyDiff;
-        Ex[globalIdx] += vi0[globalIdx] * (psi0[p] - psi1[p]);
+        Ex[globalIdx] += vi.x * (psi0[p] - psi1[p]);
     }
     // Ey: (Hx-diff, then -Hz-diff) -- grading axes z (nP), x (nPP).
     {
@@ -194,7 +212,7 @@ kernel void cpml_correct_e(constant CopperGridDimsGPU& dims [[buffer(CopperBuffe
         const float hzDiff = Hz[copperIndex(dims, x, y, z)] - Hz[copperIndex(dims, x - sx, y, z)];
         psi0[p] = bCoef[bc0] * psi0[p] + cCoef[bc0] * hxDiff;
         psi1[p] = bCoef[bc1] * psi1[p] + cCoef[bc1] * hzDiff;
-        Ey[globalIdx] += vi1[globalIdx] * (psi0[p] - psi1[p]);
+        Ey[globalIdx] += vi.y * (psi0[p] - psi1[p]);
     }
     // Ez: (Hy-diff, then -Hx-diff) -- grading axes x (nP), y (nPP).
     {
@@ -205,26 +223,17 @@ kernel void cpml_correct_e(constant CopperGridDimsGPU& dims [[buffer(CopperBuffe
         const float hxDiff = Hx[copperIndex(dims, x, y, z)] - Hx[copperIndex(dims, x, y - sy, z)];
         psi0[p] = bCoef[bc0] * psi0[p] + cCoef[bc0] * hyDiff;
         psi1[p] = bCoef[bc1] * psi1[p] + cCoef[bc1] * hxDiff;
-        Ez[globalIdx] += vi2[globalIdx] * (psi0[p] - psi1[p]);
+        Ez[globalIdx] += vi.z * (psi0[p] - psi1[p]);
     }
 }
 
-kernel void cpml_correct_h(constant CopperGridDimsGPU& dims [[buffer(CopperBufferIndexDims)]],
-                            constant CopperCPMLShellGPU& shell [[buffer(CopperBufferIndexCPMLShell)]],
-                            device const float* Ex [[buffer(CopperBufferIndexEx)]],
-                            device const float* Ey [[buffer(CopperBufferIndexEy)]],
-                            device const float* Ez [[buffer(CopperBufferIndexEz)]],
-                            device float* Hx [[buffer(CopperBufferIndexHx)]],
-                            device float* Hy [[buffer(CopperBufferIndexHy)]],
-                            device float* Hz [[buffer(CopperBufferIndexHz)]],
-                            device const float* iv0 [[buffer(CopperBufferIndexIV0)]],
-                            device const float* iv1 [[buffer(CopperBufferIndexIV1)]],
-                            device const float* iv2 [[buffer(CopperBufferIndexIV2)]],
-                            device const float* bCoef [[buffer(CopperBufferIndexCPMLCoeffB)]],
-                            device const float* cCoef [[buffer(CopperBufferIndexCPMLCoeffC)]],
-                            device float* psi0 [[buffer(CopperBufferIndexCPMLPsi0)]],
-                            device float* psi1 [[buffer(CopperBufferIndexCPMLPsi1)]],
-                            uint3 lid [[thread_position_in_grid]]) {
+template <typename Index>
+inline void cpmlCorrectH(uint3 lid, constant CopperGridDimsGPU& dims, constant CopperCPMLShellGPU& shell,
+                         device const float* Ex, device const float* Ey, device const float* Ez, device float* Hx,
+                         device float* Hy, device float* Hz, device const Index* materialIndex,
+                         device const CopperMaterialCoefficientsGPU* table, device const float* geometry,
+                         device const float* bCoef, device const float* cCoef, device float* psi0,
+                         device float* psi1) {
     // Dispatched over the shell's own local box, but only cells satisfying update_h_interior's own
     // (nx-1,ny-1,nz-1) dispatch bound have a meaningful H value to correct -- guard identically.
     if (lid.x >= shell.nx || lid.y >= shell.ny || lid.z >= shell.nz) {
@@ -237,6 +246,8 @@ kernel void cpml_correct_h(constant CopperGridDimsGPU& dims [[buffer(CopperBuffe
     const uint32_t localCellCount = shell.nx * shell.ny * shell.nz;
     const uint32_t localIdx = lid.x + shell.nx * (lid.y + shell.ny * lid.z);
     const uint32_t globalIdx = copperIndex(dims, x, y, z);
+    const CopperMaterialCoefficientsGPU c = table[materialIndex[globalIdx]];
+    const float3 iv = curlCoefficients(dims, geometry, c, x, y, z);
 
     // Hx: same two terms as update_h_interior's own (Ez-diff, then -Ey-diff) -- grading axes y (nP),
     // z (nPP).
@@ -248,7 +259,7 @@ kernel void cpml_correct_h(constant CopperGridDimsGPU& dims [[buffer(CopperBuffe
         const float eyDiff = Ey[copperIndex(dims, x, y, z)] - Ey[copperIndex(dims, x, y, z + 1)];
         psi0[p] = bCoef[bc0] * psi0[p] + cCoef[bc0] * ezDiff;
         psi1[p] = bCoef[bc1] * psi1[p] + cCoef[bc1] * eyDiff;
-        Hx[globalIdx] += iv0[globalIdx] * (psi0[p] - psi1[p]);
+        Hx[globalIdx] += iv.x * (psi0[p] - psi1[p]);
     }
     // Hy: (Ex-diff, then -Ez-diff) -- grading axes z (nP), x (nPP).
     {
@@ -259,7 +270,7 @@ kernel void cpml_correct_h(constant CopperGridDimsGPU& dims [[buffer(CopperBuffe
         const float ezDiff = Ez[copperIndex(dims, x, y, z)] - Ez[copperIndex(dims, x + 1, y, z)];
         psi0[p] = bCoef[bc0] * psi0[p] + cCoef[bc0] * exDiff;
         psi1[p] = bCoef[bc1] * psi1[p] + cCoef[bc1] * ezDiff;
-        Hy[globalIdx] += iv1[globalIdx] * (psi0[p] - psi1[p]);
+        Hy[globalIdx] += iv.y * (psi0[p] - psi1[p]);
     }
     // Hz: (Ey-diff, then -Ex-diff) -- grading axes x (nP), y (nPP).
     {
@@ -270,9 +281,78 @@ kernel void cpml_correct_h(constant CopperGridDimsGPU& dims [[buffer(CopperBuffe
         const float exDiff = Ex[copperIndex(dims, x, y, z)] - Ex[copperIndex(dims, x, y + 1, z)];
         psi0[p] = bCoef[bc0] * psi0[p] + cCoef[bc0] * eyDiff;
         psi1[p] = bCoef[bc1] * psi1[p] + cCoef[bc1] * exDiff;
-        Hz[globalIdx] += iv2[globalIdx] * (psi0[p] - psi1[p]);
+        Hz[globalIdx] += iv.z * (psi0[p] - psi1[p]);
     }
 }
+
+} // namespace
+
+// Kernel entry points. Each comes in a _u16 and a _u32 variant, for a coefficient table whose
+// per-cell indices fit in 16 bits (every board so far) or need 32.
+#define COPPER_FIELD_ARGS(E_ACCESS, H_ACCESS)                                                           \
+    constant CopperGridDimsGPU &dims [[buffer(CopperBufferIndexDims)]],                                 \
+        device E_ACCESS float *Ex [[buffer(CopperBufferIndexEx)]],                                      \
+        device E_ACCESS float *Ey [[buffer(CopperBufferIndexEy)]],                                      \
+        device E_ACCESS float *Ez [[buffer(CopperBufferIndexEz)]],                                      \
+        device H_ACCESS float *Hx [[buffer(CopperBufferIndexHx)]],                                      \
+        device H_ACCESS float *Hy [[buffer(CopperBufferIndexHy)]],                                      \
+        device H_ACCESS float *Hz [[buffer(CopperBufferIndexHz)]]
+
+#define COPPER_COEFFICIENT_ARGS(INDEX)                                                                  \
+    device const INDEX *materialIndex [[buffer(CopperBufferIndexMaterialIndex)]],                       \
+        device const CopperMaterialCoefficientsGPU *table [[buffer(CopperBufferIndexMaterialTable)]],   \
+        device const float *geometry [[buffer(CopperBufferIndexGeometry)]]
+
+#define COPPER_ORIGIN_ARGS                                                                              \
+    constant CopperDispatchOriginGPU &origin [[buffer(CopperBufferIndexDispatchOrigin)]],               \
+        uint3 gid [[thread_position_in_grid]]
+
+#define COPPER_ZCPML_ARGS                                                                               \
+    constant CopperZCPMLPlaneGPU *planes [[buffer(CopperBufferIndexZCPMLPlanes)]],                      \
+        device float *psiX [[buffer(CopperBufferIndexZCPMLPsiX)]],                                      \
+        device float *psiY [[buffer(CopperBufferIndexZCPMLPsiY)]]
+
+#define COPPER_CPML_ARGS                                                                                \
+    constant CopperCPMLShellGPU &shell [[buffer(CopperBufferIndexCPMLShell)]],                          \
+        device const float *bCoef [[buffer(CopperBufferIndexCPMLCoeffB)]],                              \
+        device const float *cCoef [[buffer(CopperBufferIndexCPMLCoeffC)]],                              \
+        device float *psi0 [[buffer(CopperBufferIndexCPMLPsi0)]],                                       \
+        device float *psi1 [[buffer(CopperBufferIndexCPMLPsi1)]], uint3 lid [[thread_position_in_grid]]
+
+#define COPPER_KERNELS(SUFFIX, INDEX)                                                                   \
+    kernel void update_e_interior##SUFFIX(COPPER_FIELD_ARGS(, const), COPPER_COEFFICIENT_ARGS(INDEX),   \
+                                          COPPER_ORIGIN_ARGS) {                                         \
+        updateE<false, INDEX>(gid + uint3(origin.x, origin.y, origin.z), dims, Ex, Ey, Ez, Hx, Hy, Hz,  \
+                              materialIndex, table, geometry, nullptr, nullptr, nullptr);               \
+    }                                                                                                   \
+    kernel void update_e_interior_zcpml##SUFFIX(COPPER_FIELD_ARGS(, const), COPPER_COEFFICIENT_ARGS(INDEX), \
+                                                COPPER_ORIGIN_ARGS, COPPER_ZCPML_ARGS) {                \
+        updateE<true, INDEX>(gid + uint3(origin.x, origin.y, origin.z), dims, Ex, Ey, Ez, Hx, Hy, Hz,   \
+                             materialIndex, table, geometry, planes, psiX, psiY);                       \
+    }                                                                                                   \
+    kernel void update_h_interior##SUFFIX(COPPER_FIELD_ARGS(const, ), COPPER_COEFFICIENT_ARGS(INDEX),   \
+                                          COPPER_ORIGIN_ARGS) {                                         \
+        updateH<false, INDEX>(gid + uint3(origin.x, origin.y, origin.z), dims, Ex, Ey, Ez, Hx, Hy, Hz,  \
+                              materialIndex, table, geometry, nullptr, nullptr, nullptr);               \
+    }                                                                                                   \
+    kernel void update_h_interior_zcpml##SUFFIX(COPPER_FIELD_ARGS(const, ), COPPER_COEFFICIENT_ARGS(INDEX), \
+                                                COPPER_ORIGIN_ARGS, COPPER_ZCPML_ARGS) {                \
+        updateH<true, INDEX>(gid + uint3(origin.x, origin.y, origin.z), dims, Ex, Ey, Ez, Hx, Hy, Hz,   \
+                             materialIndex, table, geometry, planes, psiX, psiY);                       \
+    }                                                                                                   \
+    kernel void cpml_correct_e##SUFFIX(COPPER_FIELD_ARGS(, const), COPPER_COEFFICIENT_ARGS(INDEX),      \
+                                       COPPER_CPML_ARGS) {                                              \
+        cpmlCorrectE<INDEX>(lid, dims, shell, Ex, Ey, Ez, Hx, Hy, Hz, materialIndex, table, geometry,   \
+                            bCoef, cCoef, psi0, psi1);                                                  \
+    }                                                                                                   \
+    kernel void cpml_correct_h##SUFFIX(COPPER_FIELD_ARGS(const, ), COPPER_COEFFICIENT_ARGS(INDEX),      \
+                                       COPPER_CPML_ARGS) {                                              \
+        cpmlCorrectH<INDEX>(lid, dims, shell, Ex, Ey, Ez, Hx, Hy, Hz, materialIndex, table, geometry,   \
+                            bCoef, cCoef, psi0, psi1);                                                  \
+    }
+
+COPPER_KERNELS(_u16, ushort)
+COPPER_KERNELS(_u32, uint)
 
 // Soft excitation -- a direct port of Engine_Ext_Excitation::Apply2VoltagesImpl/Apply2CurrentImpl
 // (engine_ext_excitation.cpp), dispatched with exactly one thread per excited cell (not over the

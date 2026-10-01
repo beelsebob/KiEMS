@@ -211,18 +211,35 @@ CopperFDTDRunResult runFDTDPortImpl(ContinuousStructure& csx, const CopperFDTDPo
                          total == 0 ? 0.0 : 100.0 * static_cast<double>(skipped) / static_cast<double>(total),
                          domainMask.dispatchBoxes.size());
         }
-        std::vector<CopperCPMLShell> cpmlShells =
-            buildCPMLShells(newOp, cpmlAlphaMax, pmlDepthCells, domainMask);
+        // A rectangular domain gets the general per-face CPML; an irregular one only its Z slabs,
+        // whose compact form the engines fold into the interior update (see CopperZCPML).
+        std::vector<CopperCPMLShell> cpmlShells;
+        CopperZCPML zcpml;
+        if (domainMask.empty()) {
+            cpmlShells = buildCPMLShells(newOp, cpmlAlphaMax, pmlDepthCells);
+        } else {
+            zcpml = buildZCPML(newOp, cpmlAlphaMax, pmlDepthCells);
+        }
         std::uint64_t pmlCellTotal = 0;
         std::size_t shellCount = 0;
         shellCount = cpmlShells.size();
         for (const CopperCPMLShell& shell : cpmlShells) {
             pmlCellTotal += shell.dims.cellCount();
         }
+        if (!zcpml.empty()) {
+            std::uint64_t activeNodes = 0;
+            for (const auto& box : domainMask.dispatchBoxes) activeNodes += std::uint64_t{box.width} * box.height;
+            pmlCellTotal += activeNodes * zcpml.layerCount();
+        }
         if (!onProgress) {
             timer.mark("buildCPMLShells");
-            std::fprintf(stdout, "Copper: %zu PML shell(s), %llu cell(s) total\n", shellCount,
-                         static_cast<unsigned long long>(pmlCellTotal));
+            if (zcpml.empty()) {
+                std::fprintf(stdout, "Copper: %zu PML shell(s), %llu cell(s) total\n", shellCount,
+                             static_cast<unsigned long long>(pmlCellTotal));
+            } else {
+                std::fprintf(stdout, "Copper: Z-only CPML on %u z-plane(s), %llu cell(s) total\n",
+                             zcpml.layerCount(), static_cast<unsigned long long>(pmlCellTotal));
+            }
         }
         const CopperExcitation& excitation = newOp.excitation();
         if (excitation.voltageCells.empty() && excitation.currentCells.empty()) {
@@ -256,9 +273,10 @@ CopperFDTDRunResult runFDTDPortImpl(ContinuousStructure& csx, const CopperFDTDPo
         // inject NaN into the field on literally the very first applyLumpedRLC() call, matching an
         // immediate-onset NaN.
         std::fprintf(stderr,
-                     "Copper: setup -- %zu PML shell(s) (%llu cell(s)), %zu voltage/%zu current excitation "
-                     "cell(s), %zu lumped RLC cell(s)\n",
-                     shellCount, static_cast<unsigned long long>(pmlCellTotal), excitation.voltageCells.size(),
+                     "Copper: setup -- %zu PML shell(s) + %u Z-only CPML plane(s) (%llu cell(s)), %zu voltage/%zu "
+                     "current excitation cell(s), %zu lumped RLC cell(s)\n",
+                     shellCount, zcpml.layerCount(), static_cast<unsigned long long>(pmlCellTotal),
+                     excitation.voltageCells.size(),
                      excitation.currentCells.size(), lumpedRLC.size());
         for (std::size_t i = 0; i < lumpedRLC.size(); ++i) {
             const CopperLumpedRLCCell& cell = lumpedRLC[i];
@@ -271,7 +289,7 @@ CopperFDTDRunResult runFDTDPortImpl(ContinuousStructure& csx, const CopperFDTDPo
                          i, cell.axis, cell.x, cell.y, cell.z, cell.vvd, cell.vv2, cell.vj1, cell.vj2, cell.ib0,
                          cell.b1, cell.b2, allFinite ? "" : "  <-- NON-FINITE");
         }
-        CopperEngine engine(grid, excitation, cpmlShells, backend, domainMask);
+        CopperEngine engine(grid, excitation, cpmlShells, backend, domainMask, zcpml);
         if (!onProgress) {
             timer.mark(backend == CopperEngine::Backend::CPU ? "CopperEngine construction (CPU coefficient upload)"
                                                               : "CopperEngine construction (GPU buffer upload)");
