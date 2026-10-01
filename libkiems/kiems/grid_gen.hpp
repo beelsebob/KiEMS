@@ -106,7 +106,7 @@ public:
     /// exclusively from the already-sliced copper supplied to the constructor. The original board
     /// is consulted only for differential-pair net identity, and those centrelines are clipped to
     /// the cutout before their coupling gap is refined.
-    CSRectGrid& generate(CSRectGrid& grid, const SimulationConfig& simConfig, const PathsConfig& paths);
+    CSRectGrid& generate(CSRectGrid& grid, const SimulationConfig& simConfig, const libkicad::Board& board);
 
     /// The core mesh's own extent along each axis -- everywhere *inside* the PML band generate()
     /// appends beyond it (see GridGeneratorAxis::pmlInnerMin()/pmlInnerMax()'s own doc comment, in

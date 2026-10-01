@@ -92,11 +92,20 @@ int main(int argc, char** argv) {
 
     const PathsConfig paths = PathsConfig::forConfigFile(configPath, "", "");
 
-    if (auto result = importStackup(paths, config); !result) {
+    // Owned by main so the loaded KiCad board is torn down before main returns, while KiCad's own
+    // process-wide state is still alive -- not from exit()'s static destructors.
+    auto runtime = libkicad::Runtime::create();
+    if (!runtime) {
+        writeError(simPath, runtime.error());
+        return EXIT_FAILURE;
+    }
+    const libkicad::Board board(*runtime, paths.kicadBoardPaths());
+
+    if (auto result = importStackup(board, config); !result) {
         writeError(simPath, result.error());
         return EXIT_FAILURE;
     }
-    if (auto result = resolveSimulationPorts(config, paths); !result) {
+    if (auto result = resolveSimulationPorts(config, board); !result) {
         writeError(simPath, result.error());
         return EXIT_FAILURE;
     }
@@ -144,7 +153,7 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    Simulation simulation(*simConfig, config, options, paths);
+    Simulation simulation(*simConfig, config, options, paths, board);
     simulation.adoptSlicedBoard(simDataResult->geometry().slicedBoard);
     simulation.adoptGridLines(simDataResult->grid().gridLines);
     if (auto result = simulation.populateGeometry(); !result) {

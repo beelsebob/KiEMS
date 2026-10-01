@@ -5,6 +5,7 @@
 #include <cmath>
 #include <complex>
 #include <limits>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -498,12 +499,26 @@ double triangulateLastCallArea(const std::vector<TriangulateCall>& sequence) {
 @interface LibkiemsTests : XCTestCase
 @end
 
-@implementation LibkiemsTests
+@implementation LibkiemsTests {
+    std::optional<libkicad::Runtime> _runtime;
+}
+
+- (void)setUp {
+    auto runtime = libkicad::Runtime::create();
+    XCTAssertTrue(runtime.has_value());
+    if (runtime) {
+        _runtime.emplace(std::move(*runtime));
+    }
+}
+
+- (void)tearDown {
+    _runtime.reset();
+}
 
 - (void)testMissingKiCadProjectReturnsAnErrorInsteadOfEnteringBoardLoader {
-    const auto geometry = libkicad::boardGeometry(
-        "/private/tmp/kiems-definitely-missing-project.kicad_pro",
-        "/private/tmp/kiems-definitely-missing-board.kicad_pcb");
+    const libkicad::Board board(*_runtime, "/private/tmp/kiems-definitely-missing-project.kicad_pro",
+                                "/private/tmp/kiems-definitely-missing-board.kicad_pcb");
+    const auto geometry = board.boardGeometry();
     XCTAssertFalse(geometry.has_value());
     XCTAssertNotEqual(geometry.error().find("project file does not exist"), std::string::npos);
 }
@@ -512,8 +527,8 @@ double triangulateLastCallArea(const std::vector<TriangulateCall>& sequence) {
     // __FILE__ is an existing readable regular file, which gets this request through the project
     // preflight without invoking KiCad; the absent board must then be rejected at the shared file
     // boundary before PCB_IO_KICAD_SEXPR::LoadBoard can throw across it.
-    const auto geometry = libkicad::boardGeometry(
-        __FILE__, "/private/tmp/kiems-definitely-missing-board.kicad_pcb");
+    const libkicad::Board board(*_runtime, __FILE__, "/private/tmp/kiems-definitely-missing-board.kicad_pcb");
+    const auto geometry = board.boardGeometry();
     XCTAssertFalse(geometry.has_value());
     XCTAssertNotEqual(geometry.error().find("board file does not exist"), std::string::npos);
 }
@@ -754,9 +769,9 @@ double triangulateLastCallArea(const std::vector<TriangulateCall>& sequence) {
 
     // Both selectors above are NetSelectorKind::Net/GroundSelectorKind::Net -- resolved by naming
     // the net directly, no libkicad_smoketest subprocess needed (see resolveInvolvedNetNames()/
-    // resolveGroundNetNames()), so a default, file-less PathsConfig is fine here.
-    const kiems::PathsConfig paths;
-    auto classified = kiems::classifyCopperForSimulation(sim, geometry, paths);
+    // resolveGroundNetNames()), so a file-less Board, which never loads, is fine here.
+    const libkicad::Board board(*_runtime, "", "");
+    auto classified = kiems::classifyCopperForSimulation(sim, geometry, board);
     XCTAssertTrue(classified.has_value());
     if (!classified.has_value()) {
         return;
@@ -1636,8 +1651,8 @@ double triangulateLastCallArea(const std::vector<TriangulateCall>& sequence) {
         copperRectMm("OTHER", "F.Cu", 0, 0, 1, 1),
     };
 
-    const kiems::PathsConfig paths;
-    auto classified = kiems::classifyCopperForSimulation(sim, geometry, paths);
+    const libkicad::Board board(*_runtime, "", "");
+    auto classified = kiems::classifyCopperForSimulation(sim, geometry, board);
     XCTAssertTrue(classified.has_value());
     if (!classified.has_value()) {
         return;

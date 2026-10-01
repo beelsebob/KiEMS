@@ -8,6 +8,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // here rather than by any one Document/DocumentWindowController.
     private var jobsWindowController: JobsWindowController?
 
+    /// KiCad's runtime, created in main.swift before anything can query a board. Every Document's
+    /// boards and pipelines hold it too.
+    let kicadRuntime: KicadRuntime
+
+    init(kicadRuntime: KicadRuntime) {
+        self.kicadRuntime = kicadRuntime
+        super.init()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         Document.removeStaleScratchDirectories()
         NSApp.mainMenu = buildMainMenu()

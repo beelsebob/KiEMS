@@ -39,6 +39,6 @@ bool geometryOnlyPinNeedsAbsorbingPort(const InvolvedNetConfig& entry,
 /// any unresolvable reference (unknown net/net class/footprint/pin, a pad whose port direction
 /// can't be derived, an excitation or trace/differential-pair endpoint that doesn't belong to its
 /// simulation's involved nets).
-std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const PathsConfig& paths);
+std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const libkicad::Board& board);
 
 } // namespace kiems

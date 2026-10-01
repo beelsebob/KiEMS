@@ -328,7 +328,7 @@ final class DocumentWindowController: NSWindowController {
         simulationListVC.setProjectAvailable(ownerDocument.config.kicadPcbPath != nil)
         // ...and the picker header/net lists need to reflect that too -- restoreLinkedBoardIfNeeded
         // is everything importSucceeded does *except* the two actions that only make sense the
-        // moment a board is first linked (adding a new simulation, re-running linkKicadPCB itself).
+        // moment a board is first linked (adding a new simulation, re-running link(toConfig:) itself).
         restoreLinkedBoardIfNeeded()
         // Renaming a simulation has no other way to reach the sidebar row showing its (now stale) name.
         propertiesVC.onNameChanged = { [weak simulationListVC] in simulationListVC?.refreshRows() }
@@ -799,16 +799,17 @@ final class DocumentWindowController: NSWindowController {
         boardPopUp.isEnabled = false
 
         let config = doc.config
-        // Just a stackup query against boardURL directly (see KicadBoardBridge.linkKicadPCB's doc
+        let board = doc.board(at: boardURL.path)
+        // Just a stackup query against boardURL directly (see KicadBoardBridge.link(toConfig:)'s doc
         // comment) -- no kicad-cli export, no copy into the document, so this doesn't touch the
         // filesystem at all and works whether or not the document has ever been saved. Still a
         // parsing work, so it remains off the main thread.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
-                try KicadBoardBridge.linkKicadPCB(boardURL.path, config: config)
+                try board.link(toConfig: config)
                 // Fetched here (already off the main thread) rather than in importSucceeded, so the
                 // ground-net guess below has real data to work with instead of a second async hop.
-                let nets = (try? KicadBoardBridge.allNets(forBoard: boardURL.path)) ?? []
+                let nets = (try? board.allNets()) ?? []
                 DispatchQueue.main.async {
                     self?.importSucceeded(boardURL: boardURL, document: doc, availableNets: nets)
                 }

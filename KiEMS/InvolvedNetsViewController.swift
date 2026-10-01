@@ -257,7 +257,7 @@ final class InvolvedNetsViewController: NSViewController {
     func refresh() {
         guard let document, let selectedIndex, selectedIndex >= 0,
               selectedIndex < document.config.simulations.count,
-              let kicadPcbPath = document.config.kicadPcbPath
+              let board = document.board
         else {
             netNodes = []
             outlineView.reloadData()
@@ -292,7 +292,7 @@ final class InvolvedNetsViewController: NSViewController {
         // Board parsing can still be substantial, so keep it off the main thread even though
         // libkicad now performs it in-process.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let footprints = (try? KicadBoardBridge.footprints(forBoard: kicadPcbPath)) ?? []
+            let footprints = (try? board.footprints()) ?? []
             var netForPin: [String: String] = [:]
             var pinInfoForKey: [String: KicadFootprintPin] = [:]
             for footprint in footprints {
@@ -319,8 +319,7 @@ final class InvolvedNetsViewController: NSViewController {
                     if let net = entry.net { record(net, from: entry) }
                 case .netClass:
                     if let netClass = entry.netClass,
-                       let nets = try? KicadBoardBridge.netsInNetClass(
-                           forBoard: kicadPcbPath, netClass: netClass) {
+                       let nets = try? board.nets(inNetClass: netClass) {
                         for net in nets { record(net, from: entry) }
                     }
                 case .footprintPin:

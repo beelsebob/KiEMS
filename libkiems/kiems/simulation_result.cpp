@@ -103,6 +103,7 @@ void SimulationResult::probeToFile(const std::string& simulationName, const std:
 
 std::expected<SimulationResult, std::string> SimulationResult::run(const GeometryResult& geometry,
                                                                      const RunOptions& options,
+                                                                     const libkicad::Board& board,
                                                                      const FDTDPortRunner& portRunner) {
     std::vector<double> frequencies =
         linspace(geometry.config().frequency().start(), geometry.config().frequency().stop(),
@@ -132,7 +133,7 @@ std::expected<SimulationResult, std::string> SimulationResult::run(const Geometr
                 logInfo("[" + simConfig.name() + "] Simulating with excitation on port #" + std::to_string(index));
             }
         }
-        auto resultsResult = generateResults(*gridData, geometry.config(), options, geometry.paths(), frequencies,
+        auto resultsResult = generateResults(*gridData, geometry.config(), options, geometry.paths(), board, frequencies,
                                               portRunner);
         if (!resultsResult) {
             return std::unexpected(resultsResult.error());

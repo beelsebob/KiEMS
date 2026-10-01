@@ -1,4 +1,4 @@
-#import "KicadBoardBridge.h"
+#import "KicadBoardBridge+Private.h"
 #import "EMSConfigBridge+Private.h"
 #import "GeometryPreviewBridge+Private.h"
 
@@ -9,9 +9,8 @@
 #include "kiems/net_name.hpp"
 #include <unordered_set>
 #include "libkicad/libkicad.hpp"
-#include "kiems/paths_config.hpp"
-
-using kiems::PathsConfig;
+#include <filesystem>
+#include <optional>
 
 namespace {
 
@@ -19,19 +18,6 @@ NSError* makeError(const std::string& message) {
     return [NSError errorWithDomain:EMSConfigErrorDomain
                                 code:1
                             userInfo:@{NSLocalizedDescriptionKey : @(message.c_str())}];
-}
-
-// Every field ki/importStackup actually reads is set explicitly here; every other
-// PathsConfig field (configFile, fabDir, geometryDir, ...) is left default-constructed (empty) --
-// none of them are touched by the functions this bridge calls. This is exactly the "populate a
-// PathsConfig by hand" escape hatch paths_config.hpp's own doc comment describes: querying
-// wherever the user's board actually lives, not a fab/-directory copy of it.
-PathsConfig pathsForBoard(NSString* kicadPcbPath) {
-    PathsConfig paths;
-    paths.fabBoardFile = std::filesystem::path(kicadPcbPath.UTF8String);
-    paths.fabProjectFile = paths.fabBoardFile;
-    paths.fabProjectFile.replace_extension(".kicad_pro");
-    return paths;
 }
 
 NSArray<NSString*>* toNSStringArray(const std::vector<std::string>& values) {
@@ -115,7 +101,7 @@ NSArray<NSString*>* toNSStringArray(const std::vector<std::string>& values) {
 
 namespace {
 
-// Only the fields planning actually reads (see computeForBoard:error:) -- deliberately not the whole
+// Only the fields planning actually reads (see computeWithBoard:error:) -- deliberately not the whole
 // SimulationConfig/InvolvedNetConfig JSON, which also carries port, probe, absorbing and excitation
 // settings that never move the cut or its stitching vias.
 std::string stitchingViaPlanInputsKey(const kiems::EMSConfig& config, const kiems::SimulationConfig& simulation) {
@@ -150,7 +136,7 @@ std::string stitchingViaPlanInputsKey(const kiems::EMSConfig& config, const kiem
     delete static_cast<kiems::EMSConfig*>(self.configurationPointer.pointerValue);
 }
 
-- (nullable KicadStitchingViaPlan*)computeForBoard:(NSString*)kicadPcbPath error:(NSError**)error {
+- (nullable KicadStitchingViaPlan*)computeWithBoard:(KicadBoardBridge*)boardBridge error:(NSError**)error {
     try {
         kiems::EMSConfig config = *static_cast<const kiems::EMSConfig*>(self.configurationPointer.pointerValue);
         if (self.simulationIndex < 0 ||
@@ -158,25 +144,25 @@ std::string stitchingViaPlanInputsKey(const kiems::EMSConfig& config, const kiem
             if (error != nil) *error = makeError("The selected simulation no longer exists");
             return nil;
         }
-        const PathsConfig paths = pathsForBoard(kicadPcbPath);
+        const libkicad::Board& board = boardBridge.cxxBoard;
         // Saved app documents intentionally do not persist the imported stackup. The real geometry
         // pipeline imports it before slicing, but this lightweight setup-screen planning path used
         // the document config directly. That left SlicingConfig::layerNames empty after reopening a
         // document, so otherwise correctly-classified copper was never examined on any layer and
         // the whole plan failed with "Involved nets have no copper on any layer".
-        if (auto imported = kiems::importStackup(paths, config); !imported) {
+        if (auto imported = kiems::importStackup(board, config); !imported) {
             if (error != nil) *error = makeError(imported.error());
             return nil;
         }
         config = config.scaledToSimulationUnits();
         const kiems::SimulationConfig& simulation =
             config.simulations()[static_cast<std::size_t>(self.simulationIndex)];
-        auto geometry = libkicad::boardGeometry(paths.kicadBoardPaths());
+        auto geometry = board.boardGeometry();
         if (!geometry) {
             if (error != nil) *error = makeError(geometry.error());
             return nil;
         }
-        auto copper = kiems::classifyCopperForSimulation(simulation, *geometry, paths);
+        auto copper = kiems::classifyCopperForSimulation(simulation, *geometry, board);
         if (!copper) {
             if (error != nil) *error = makeError(copper.error());
             return nil;
@@ -187,7 +173,7 @@ std::string stitchingViaPlanInputsKey(const kiems::EMSConfig& config, const kiem
             return nil;
         }
         std::vector<kiems::ViaHole> existingVias;
-        if (auto vias = kiems::getVias(paths, origin->xMin, origin->yMin); vias) {
+        if (auto vias = kiems::getVias(board, origin->xMin, origin->yMin); vias) {
             existingVias = std::move(*vias);
         }
         const kiems::SlicingConfig slicing = kiems::SlicingConfig::from(simulation, config);
@@ -210,7 +196,7 @@ std::string stitchingViaPlanInputsKey(const kiems::EMSConfig& config, const kiem
         }
         std::unordered_set<kiems::NetName, kiems::NetNameHash> includedNets;
         for (const kiems::InvolvedNetConfig& entry : simulation.involvedNets()) {
-            auto names = kiems::resolveInvolvedNetNames(paths, entry);
+            auto names = kiems::resolveInvolvedNetNames(board, entry);
             if (!names) {
                 if (error != nil) *error = makeError(names.error());
                 return nil;
@@ -219,7 +205,7 @@ std::string stitchingViaPlanInputsKey(const kiems::EMSConfig& config, const kiem
                 includedNets.insert(kiems::NetName(name));
             }
         }
-        auto groundNames = kiems::resolveGroundNetNames(paths, simulation.groundNet());
+        auto groundNames = kiems::resolveGroundNetNames(board, simulation.groundNet());
         if (!groundNames) {
             if (error != nil) *error = makeError(groundNames.error());
             return nil;
@@ -228,7 +214,7 @@ std::string stitchingViaPlanInputsKey(const kiems::EMSConfig& config, const kiem
         for (const std::string& name : *groundNames) {
             groundNets.insert(kiems::NetName(name));
         }
-        auto tracks = libkicad::allTracks(paths.kicadBoardPaths());
+        auto tracks = board.allTracks();
         if (!tracks) {
             if (error != nil) *error = makeError(tracks.error());
             return nil;
@@ -270,7 +256,55 @@ std::string stitchingViaPlanInputsKey(const kiems::EMSConfig& config, const kiem
 }
 @end
 
-@implementation KicadBoardBridge
+@implementation KicadRuntime {
+    std::optional<libkicad::Runtime> _runtime;
+}
+
++ (nullable KicadRuntime*)startWithError:(NSError**)error {
+    auto runtime = libkicad::Runtime::create();
+    if (!runtime) {
+        if (error != nil) *error = makeError(runtime.error());
+        return nil;
+    }
+    return [[KicadRuntime alloc] initWithRuntime:std::move(*runtime)];
+}
+
+- (instancetype)initWithRuntime:(libkicad::Runtime&&)runtime {
+    self = [super init];
+    if (self) {
+        _runtime.emplace(std::move(runtime));
+    }
+    return self;
+}
+
+- (libkicad::Runtime&)cxxRuntime {
+    return *_runtime;
+}
+
+@end
+
+@implementation KicadBoardBridge {
+    // Declared before _board: ivars are destroyed in reverse order, so the board is torn down while
+    // its runtime is still alive.
+    KicadRuntime* _runtime;
+    std::optional<libkicad::Board> _board;
+}
+
+- (instancetype)initWithRuntime:(KicadRuntime*)runtime kicadPcbPath:(NSString*)kicadPcbPath {
+    self = [super init];
+    if (self) {
+        _runtime = runtime;
+        _kicadPcbPath = [kicadPcbPath copy];
+        std::filesystem::path projectPath(kicadPcbPath.UTF8String);
+        projectPath.replace_extension(".kicad_pro");
+        _board.emplace(runtime.cxxRuntime, projectPath.string(), kicadPcbPath.UTF8String);
+    }
+    return self;
+}
+
+- (const libkicad::Board&)cxxBoard {
+    return *_board;
+}
 
 + (nullable KicadStitchingViaPlanRequest*)stitchingViaPlanRequestForConfig:(EMSConfigBridge*)config
                                                            simulationIndex:(NSInteger)simulationIndex {
@@ -286,19 +320,8 @@ std::string stitchingViaPlanInputsKey(const kiems::EMSConfig& config, const kiem
     return request;
 }
 
-+ (BOOL)prepareRuntime:(NSError**)error {
-    auto result = libkicad::initialize();
-    if (!result) {
-        if (error != nil) *error = makeError(result.error());
-        return NO;
-    }
-    return YES;
-}
-
-+ (nullable NSArray<NSString*>*)netClassesForBoard:(NSString*)kicadPcbPath
-                                               error:(NSError**)error {
-    const PathsConfig paths = pathsForBoard(kicadPcbPath);
-    auto result = libkicad::netClasses(paths.kicadBoardPaths());
+- (nullable NSArray<NSString*>*)netClassesWithError:(NSError**)error {
+    auto result = _board->netClasses();
     if (!result) {
         if (error != nil) *error = makeError(result.error());
         return nil;
@@ -306,10 +329,8 @@ std::string stitchingViaPlanInputsKey(const kiems::EMSConfig& config, const kiem
     return toNSStringArray(*result);
 }
 
-+ (nullable NSArray<NSString*>*)allNetsForBoard:(NSString*)kicadPcbPath
-                                           error:(NSError**)error {
-    const PathsConfig paths = pathsForBoard(kicadPcbPath);
-    auto result = libkicad::allNets(paths.kicadBoardPaths());
+- (nullable NSArray<NSString*>*)allNetsWithError:(NSError**)error {
+    auto result = _board->allNets();
     if (!result) {
         if (error != nil) *error = makeError(result.error());
         return nil;
@@ -317,11 +338,8 @@ std::string stitchingViaPlanInputsKey(const kiems::EMSConfig& config, const kiem
     return toNSStringArray(*result);
 }
 
-+ (nullable NSString*)netClassForNet:(NSString*)netName
-                               board:(NSString*)kicadPcbPath
-                               error:(NSError**)error {
-    const PathsConfig paths = pathsForBoard(kicadPcbPath);
-    auto result = libkicad::netClassForNet(paths.kicadBoardPaths(), netName.UTF8String);
+- (nullable NSString*)netClassForNet:(NSString*)netName error:(NSError**)error {
+    auto result = _board->netClassForNet(netName.UTF8String);
     if (!result) {
         if (error != nil) *error = makeError(result.error());
         return nil;
@@ -329,11 +347,8 @@ std::string stitchingViaPlanInputsKey(const kiems::EMSConfig& config, const kiem
     return @(result->c_str());
 }
 
-+ (nullable NSArray<NSString*>*)netsInNetClassForBoard:(NSString*)kicadPcbPath
-                                                netClass:(NSString*)netClass
-                                                   error:(NSError**)error {
-    const PathsConfig paths = pathsForBoard(kicadPcbPath);
-    auto result = libkicad::netsInNetClass(paths.kicadBoardPaths(), netClass.UTF8String);
+- (nullable NSArray<NSString*>*)netsInNetClass:(NSString*)netClass error:(NSError**)error {
+    auto result = _board->netsInNetClass(netClass.UTF8String);
     if (!result) {
         if (error != nil) *error = makeError(result.error());
         return nil;
@@ -341,10 +356,8 @@ std::string stitchingViaPlanInputsKey(const kiems::EMSConfig& config, const kiem
     return toNSStringArray(*result);
 }
 
-+ (nullable NSArray<KicadFootprintInfo*>*)footprintsForBoard:(NSString*)kicadPcbPath
-                                                         error:(NSError**)error {
-    const PathsConfig paths = pathsForBoard(kicadPcbPath);
-    auto result = libkicad::footprints(paths.kicadBoardPaths());
+- (nullable NSArray<KicadFootprintInfo*>*)footprintsWithError:(NSError**)error {
+    auto result = _board->footprints();
     if (!result) {
         if (error != nil) *error = makeError(result.error());
         return nil;
@@ -365,10 +378,8 @@ std::string stitchingViaPlanInputsKey(const kiems::EMSConfig& config, const kiem
     return footprints;
 }
 
-+ (nullable EMSGeometryPreview*)wholeBoardPreviewForBoard:(NSString*)kicadPcbPath
-                                                      error:(NSError**)error {
-    const PathsConfig paths = pathsForBoard(kicadPcbPath);
-    auto result = buildWholeBoardPreview(paths);
+- (nullable EMSGeometryPreview*)wholeBoardPreviewWithError:(NSError**)error {
+    auto result = buildWholeBoardPreview(*_board);
     if (!result) {
         if (error != nil) *error = makeError(result.error());
         return nil;
@@ -376,10 +387,8 @@ std::string stitchingViaPlanInputsKey(const kiems::EMSConfig& config, const kiem
     return *result;
 }
 
-+ (nullable EMSGeometryPreview*)layerCatalogPreviewForBoard:(NSString*)kicadPcbPath
-                                                 wholeBoard:(BOOL)wholeBoard
-                                                      error:(NSError**)error {
-    auto result = buildBoardLayerCatalogPreview(pathsForBoard(kicadPcbPath), wholeBoard);
+- (nullable EMSGeometryPreview*)layerCatalogPreviewForWholeBoard:(BOOL)wholeBoard error:(NSError**)error {
+    auto result = buildBoardLayerCatalogPreview(*_board, wholeBoard);
     if (!result) {
         if (error != nil) *error = makeError(result.error());
         return nil;
@@ -387,10 +396,8 @@ std::string stitchingViaPlanInputsKey(const kiems::EMSConfig& config, const kiem
     return *result;
 }
 
-+ (nullable EMSGeometryLayer*)layerPreviewForBoard:(NSString*)kicadPcbPath
-                                               name:(NSString*)layerName
-                                              error:(NSError**)error {
-    auto result = buildBoardLayerPreview(pathsForBoard(kicadPcbPath), layerName.UTF8String);
+- (nullable EMSGeometryLayer*)layerPreviewNamed:(NSString*)layerName error:(NSError**)error {
+    auto result = buildBoardLayerPreview(*_board, layerName.UTF8String);
     if (!result) {
         if (error != nil) *error = makeError(result.error());
         return nil;
@@ -398,15 +405,12 @@ std::string stitchingViaPlanInputsKey(const kiems::EMSConfig& config, const kiem
     return *result;
 }
 
-+ (BOOL)linkKicadPCB:(NSString*)kicadPcbPath
-               config:(EMSConfigBridge*)config
-                error:(NSError**)error {
-    const PathsConfig paths = pathsForBoard(kicadPcbPath);
-    if (auto result = kiems::importStackup(paths, config.cxxConfig); !result) {
+- (BOOL)linkToConfig:(EMSConfigBridge*)config error:(NSError**)error {
+    if (auto result = kiems::importStackup(*_board, config.cxxConfig); !result) {
         if (error != nil) *error = makeError(result.error());
         return NO;
     }
-    config.kicadPcbPath = kicadPcbPath;
+    config.kicadPcbPath = _kicadPcbPath;
     return YES;
 }
 

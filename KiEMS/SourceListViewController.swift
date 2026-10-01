@@ -941,7 +941,7 @@ final class SourceListViewController: NSViewController {
 
     /// Called after a KiCad board is linked (see DocumentWindowController).
     func refreshBoardData() {
-        guard let document, let kicadPcbPath = document.config.kicadPcbPath else { return }
+        guard let document, let board = document.board else { return }
 
         // In-memory already (populated by importStackup when the board was linked) -- no query
         // helper round trip needed, so this can happen synchronously, right here on the main thread.
@@ -967,7 +967,7 @@ final class SourceListViewController: NSViewController {
             case .netClass:
                 let names: [String]
                 do {
-                    names = try KicadBoardBridge.netClasses(forBoard: kicadPcbPath)
+                    names = try board.netClasses()
                         .sorted(by: Self.byLocalizedStandardName)
                 } catch {
                     names = []
@@ -978,9 +978,9 @@ final class SourceListViewController: NSViewController {
                 var names: [String] = []
                 var footprints: [KicadFootprintInfo] = []
                 do {
-                    names = try KicadBoardBridge.allNets(forBoard: kicadPcbPath)
+                    names = try board.allNets()
                         .sorted(by: Self.byLocalizedStandardName)
-                    footprints = try KicadBoardBridge.footprints(forBoard: kicadPcbPath)
+                    footprints = try board.footprints()
                 } catch {
                     queryError = error.localizedDescription
                 }
@@ -989,7 +989,7 @@ final class SourceListViewController: NSViewController {
             case .footprint:
                 var footprints: [KicadFootprintInfo] = []
                 do {
-                    footprints = try KicadBoardBridge.footprints(forBoard: kicadPcbPath)
+                    footprints = try board.footprints()
                         .sorted { Self.byLocalizedStandardName($0.reference, $1.reference) }
                 } catch {
                     queryError = error.localizedDescription

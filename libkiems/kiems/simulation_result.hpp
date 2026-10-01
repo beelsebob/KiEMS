@@ -47,7 +47,10 @@ public:
     /// Simulation::run()'s own spawned-worker path, whose worker process does that itself) -- an
     /// in-process portRunner must do that part itself (see kiems_fdtd_worker/main.cpp and
     /// copper_fdtd_worker/main.cpp for the exact sequence to mirror).
+    ///
+    /// `board` is the KiCad board `geometry.paths().kicadBoardPaths()` names.
     static std::expected<SimulationResult, std::string> run(const GeometryResult& geometry, const RunOptions& options,
+                                                              const libkicad::Board& board,
                                                               const FDTDPortRunner& portRunner = {});
 
     /// Reconstructs a SimulationResult by reading back Sx<port>.csv files from `inputDir` (usually

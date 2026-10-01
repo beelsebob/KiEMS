@@ -64,15 +64,42 @@ final class Document: NSDocument {
     /// on-disk output becoming orphaned under the old name too.
     private var pipelines: [String: EMSSimulationPipelineBridge] = [:]
 
+    /// The most recently requested board -- see board(at:).
+    private var cachedBoard: KicadBoardBridge?
+
     override class var autosavesInPlace: Bool { false }
+
+    private static var kicadRuntime: KicadRuntime {
+        guard let delegate = NSApp.delegate as? AppDelegate else {
+            preconditionFailure("KiEMS documents require the app's AppDelegate")
+        }
+        return delegate.kicadRuntime
+    }
 
     func pipeline(forSimulationNamed name: String) -> EMSSimulationPipelineBridge {
         if let existing = pipelines[name] {
             return existing
         }
-        let pipeline = EMSSimulationPipelineBridge(simulationName: name)
+        let pipeline = EMSSimulationPipelineBridge(simulationName: name, runtime: Self.kicadRuntime)
         pipelines[name] = pipeline
         return pipeline
+    }
+
+    /// The KiCad board config.kicadPcbPath links to, or nil before one is linked. See board(at:).
+    var board: KicadBoardBridge? {
+        config.kicadPcbPath.map(board(at:))
+    }
+
+    /// The board at `kicadPcbPath`, owned by this document so every view of it shares one parsed
+    /// board (reparsed only when its files change on disk) and it's released with the document.
+    /// Main thread only; the returned object itself is safe to query from any queue.
+    func board(at kicadPcbPath: String) -> KicadBoardBridge {
+        if let cachedBoard, cachedBoard.kicadPcbPath == kicadPcbPath {
+            return cachedBoard
+        }
+        let board = KicadBoardBridge(runtime: Self.kicadRuntime, kicadPcbPath: kicadPcbPath)
+        cachedBoard = board
+        return board
     }
 
     override func makeWindowControllers() {

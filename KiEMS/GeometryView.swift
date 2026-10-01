@@ -17,10 +17,10 @@ final class BoardLayerGeometryLoader {
     private var didDrain = false
     private let onDrained: (() -> Void)?
 
-    init(boardPath: String, preview: EMSGeometryPreview, view: GeometryView,
+    init(board: KicadBoardBridge, preview: EMSGeometryPreview, view: GeometryView,
          initiallyVisible: [String], generateAll: Bool = true,
          onDrained: (() -> Void)? = nil) {
-        self.load = { try? KicadBoardBridge.layerPreview(forBoard: boardPath, name: $0) }
+        self.load = { try? board.layerPreviewNamed($0) }
         self.onDrained = onDrained
         self.preview = preview
         self.view = view

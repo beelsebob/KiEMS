@@ -88,8 +88,8 @@ std::string _unescapeForDisplay(std::string name) {
 
 double _mmToSimUnits(double mm);
 
-std::expected<Position, std::string> _edgeCutsOrigin(const PathsConfig& paths) {
-    auto geometry = libkicad::boardGeometry(paths.kicadBoardPaths());
+std::expected<Position, std::string> _edgeCutsOrigin(const libkicad::Board& board) {
+    auto geometry = board.boardGeometry();
     if (!geometry) {
         return std::unexpected(std::move(geometry).error());
     }
@@ -177,7 +177,7 @@ struct _TraceProbeCandidate {
 /// component termination would measure near-field fringing, not the line's characteristic
 /// impedance), and returns the longest surviving runs' midpoints, longest first.
 std::expected<std::vector<_TraceProbeCandidate>, std::string> _findTraceProbePoints(
-    const PathsConfig& paths, const Position& edgeCutsOrigin, const EMSConfig& config,
+    const libkicad::Board& board, const Position& edgeCutsOrigin, const EMSConfig& config,
     const std::string& netName, const std::vector<PadIdentity>& pads) {
     struct _Run {
         Position start;
@@ -194,7 +194,7 @@ std::expected<std::vector<_TraceProbeCandidate>, std::string> _findTraceProbePoi
         double direction;
     };
 
-    auto tracksResult = libkicad::tracksOnNet(paths.kicadBoardPaths(), netName);
+    auto tracksResult = board.tracksOnNet(netName);
     if (!tracksResult) return std::unexpected(std::move(tracksResult).error());
 
     // KiCad track primitives carry the routing semantics Gerber loses: true segment endpoints,
@@ -368,11 +368,11 @@ std::optional<std::pair<LumpedComponentType, ComponentUnit>> _lumpedComponentKin
 // components on any real board); logs and skips a component that *is* in scope but couldn't
 // actually be modeled (unparseable value, pins on different/unknown layers, non-axis-aligned pins).
 std::expected<void, std::string> _resolveLumpedComponents(const EMSConfig& config, SimulationConfig& sim,
-                                                            const PathsConfig& paths, const Position& edgeCutsOrigin,
+                                                            const libkicad::Board& board, const Position& edgeCutsOrigin,
                                                             const std::vector<std::string>& orderedNets) {
     sim.lumpedComponents().clear();
 
-    auto groundNetsResult = resolveGroundNetNames(paths, sim.groundNet());
+    auto groundNetsResult = resolveGroundNetNames(board, sim.groundNet());
     if (!groundNetsResult) {
         return std::unexpected(std::move(groundNetsResult).error());
     }
@@ -382,13 +382,13 @@ std::expected<void, std::string> _resolveLumpedComponents(const EMSConfig& confi
     // copper is included must exist in the model, even when one or both nets are GeometryOnly.
     for (const InvolvedNetConfig& entry : sim.involvedNets()) {
         if (entry.inclusionLevel() != NetInclusionLevel::GeometryOnly) continue;
-        auto nets = resolveInvolvedNetNames(paths, entry);
+        auto nets = resolveInvolvedNetNames(board, entry);
         if (!nets) return std::unexpected(std::move(nets).error());
         membership.insert(nets->begin(), nets->end());
     }
     membership.insert(groundNetsResult->begin(), groundNetsResult->end());
 
-    auto footprintsResult = libkicad::footprints(paths.kicadBoardPaths());
+    auto footprintsResult = board.footprints();
     if (!footprintsResult) {
         return std::unexpected(std::move(footprintsResult).error());
     }
@@ -437,11 +437,11 @@ std::expected<void, std::string> _resolveLumpedComponents(const EMSConfig& confi
             continue;
         }
 
-        auto pad1Result = libkicad::resolvePin(paths.kicadBoardPaths(), footprint.reference, pin1.number);
+        auto pad1Result = board.resolvePin(footprint.reference, pin1.number);
         if (!pad1Result) {
             return std::unexpected(std::move(pad1Result).error());
         }
-        auto pad2Result = libkicad::resolvePin(paths.kicadBoardPaths(), footprint.reference, pin2.number);
+        auto pad2Result = board.resolvePin(footprint.reference, pin2.number);
         if (!pad2Result) {
             return std::unexpected(std::move(pad2Result).error());
         }
@@ -517,10 +517,10 @@ std::expected<void, std::string> _resolveLumpedComponents(const EMSConfig& confi
     return {};
 }
 
-std::expected<void, std::string> _resolvePortRef(const PathsConfig& paths, PortRef& ref, const _PortIndex& index,
+std::expected<void, std::string> _resolvePortRef(const libkicad::Board& board, PortRef& ref, const _PortIndex& index,
                                                   const std::vector<std::string>& involvedNets,
                                                   const std::string& simName, const std::string& fieldLabel) {
-    auto resolvedResult = libkicad::resolvePin(paths.kicadBoardPaths(), ref.footprint(), ref.pin());
+    auto resolvedResult = board.resolvePin(ref.footprint(), ref.pin());
     if (!resolvedResult) return std::unexpected(std::move(resolvedResult).error());
     const PadIdentity& resolved = *resolvedResult;
     if (std::find(involvedNets.begin(), involvedNets.end(), resolved.netName) == involvedNets.end()) {
@@ -545,8 +545,8 @@ std::expected<void, std::string> _resolvePortRef(const PathsConfig& paths, PortR
 // once per resolveSimulationPorts() call (not once per pair) since it only depends on the board.
 class _NetConnectivity {
 public:
-    static std::expected<_NetConnectivity, std::string> build(const PathsConfig& paths) {
-        auto fps = libkicad::footprints(paths.kicadBoardPaths());
+    static std::expected<_NetConnectivity, std::string> build(const libkicad::Board& board) {
+        auto fps = board.footprints();
         if (!fps) return std::unexpected(std::move(fps).error());
         _NetConnectivity nc;
         for (const libkicad::FootprintInfo& fp : *fps) {
@@ -589,11 +589,11 @@ private:
 };
 
 std::expected<std::vector<std::string>, std::string> _resolveDiffPairNetNames(
-    const PathsConfig& paths, const std::vector<DiffPairNetMember>& members, const std::string& context) {
+    const libkicad::Board& board, const std::vector<DiffPairNetMember>& members, const std::string& context) {
     std::vector<std::string> names;
     for (const DiffPairNetMember& member : members) {
         if (member.kind() == DiffPairNetKind::NetClass) {
-            auto classNets = libkicad::netsInNetClass(paths.kicadBoardPaths(), *member.netClass());
+            auto classNets = board.netsInNetClass(*member.netClass());
             if (!classNets) return std::unexpected(std::move(classNets).error());
             for (const std::string& classNet : *classNets) {
                 names.push_back(_unescapeForDisplay(classNet));
@@ -617,13 +617,13 @@ std::expected<std::vector<std::string>, std::string> _resolveDiffPairNetNames(
 // reserved for a hard board-query failure (a net-class lookup subprocess failing outright), which
 // aborts resolution entirely like every other libkicad call in this file.
 std::expected<std::optional<std::string>, std::string> _validateDiffPairSide(
-    const PathsConfig& paths, _NetConnectivity& connectivity, const std::vector<DiffPairNetMember>& netMembers,
+    const libkicad::Board& board, _NetConnectivity& connectivity, const std::vector<DiffPairNetMember>& netMembers,
     const std::string& excitationNet, const std::string& probeNet, const std::string& sideLabel,
     const std::string& context) {
     if (netMembers.empty()) {
         return sideLabel + " lists no nets";
     }
-    auto namesResult = _resolveDiffPairNetNames(paths, netMembers, context);
+    auto namesResult = _resolveDiffPairNetNames(board, netMembers, context);
     if (!namesResult) return std::unexpected(std::move(namesResult).error());
     const std::vector<std::string>& names = *namesResult;
 
@@ -657,8 +657,8 @@ bool geometryOnlyPinNeedsAbsorbingPort(const InvolvedNetConfig& entry,
            entry.probedPinAbsorbs(footprint, pin).value_or(false);
 }
 
-std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const PathsConfig& paths) {
-    auto edgeCutsOriginResult = _edgeCutsOrigin(paths);
+std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const libkicad::Board& board) {
+    auto edgeCutsOriginResult = _edgeCutsOrigin(board);
     if (!edgeCutsOriginResult) return std::unexpected(std::move(edgeCutsOriginResult).error());
     const Position& edgeCutsOrigin = *edgeCutsOriginResult;
 
@@ -683,7 +683,7 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
         std::erase_if(sim.diffPairs(), [](const DifferentialPairConfig& pair) { return pair.automatic(); });
         _PortIndex portIndex;
 
-        auto groundNamesResult = resolveGroundNetNames(paths, sim.groundNet());
+        auto groundNamesResult = resolveGroundNetNames(board, sim.groundNet());
         if (!groundNamesResult) return std::unexpected(std::move(groundNamesResult).error());
         std::unordered_set<NetName, NetNameHash> groundNets;
         for (const std::string& name : *groundNamesResult) groundNets.insert(NetName(name));
@@ -722,7 +722,7 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
             if (entry.inclusionLevel() == NetInclusionLevel::GeometryOnly) {
                 continue;
             }
-            auto nets = resolveInvolvedNetNames(paths, entry);
+            auto nets = resolveInvolvedNetNames(board, entry);
             if (!nets) return std::unexpected(std::move(nets).error());
             for (const std::string& netName : *nets) {
                 const auto [it, inserted] = netOwner.emplace(netName, &entry);
@@ -762,7 +762,7 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
         std::set<PhysicalPin> geometryAbsorbersAdded;
         for (const InvolvedNetConfig* entryPtr : geometryOnlyEntries) {
             const InvolvedNetConfig& entry = *entryPtr;
-            auto nets = resolveInvolvedNetNames(paths, entry);
+            auto nets = resolveInvolvedNetNames(board, entry);
             if (!nets) return std::unexpected(std::move(nets).error());
             for (const std::string& netName : *nets) {
                 // A broad geometry-only selector (typically a net class) can also cover a net that
@@ -770,7 +770,7 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                 // per-pad loop below; terminating them here too would put a second lumped load on
                 // the same pad, doubling every result column and loading the driven port.
                 if (netOwner.contains(netName)) continue;
-                auto padsResult = libkicad::padsOnNet(paths.kicadBoardPaths(), netName);
+                auto padsResult = board.padsOnNet(netName);
                 if (!padsResult) return std::unexpected(std::move(padsResult).error());
                 for (const PadIdentity& pad : *padsResult) {
                     const PhysicalPin pinKey{pad.footprintRef, pad.padNumber};
@@ -861,7 +861,7 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
 
         for (const std::string& netName : orderedNets) {
             const InvolvedNetConfig& entry = *netOwner.at(netName);
-            auto padsResult = libkicad::padsOnNet(paths.kicadBoardPaths(), netName);
+            auto padsResult = board.padsOnNet(netName);
             if (!padsResult) return std::unexpected(std::move(padsResult).error());
             const std::vector<PadIdentity>& pads = *padsResult;
 
@@ -1031,7 +1031,7 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
             // Differential-pair interpretation affects the configured pad ports and mixed-mode
             // results, but must not silently add trace probes when that separate setting is off.
             if (entry.kind() != NetSelectorKind::FootprintPin && entry.probeImpedance()) {
-                auto candidatesResult = _findTraceProbePoints(paths, edgeCutsOrigin, config, netName, pads);
+                auto candidatesResult = _findTraceProbePoints(board, edgeCutsOrigin, config, netName, pads);
                 if (!candidatesResult) return std::unexpected(std::move(candidatesResult).error());
                 if (candidatesResult->empty()) {
                     logWarning("Simulation \"" + sim.name() + "\": net \"" +
@@ -1139,7 +1139,7 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                 drivenPort.setProbe(true);
                 continue;
             }
-            auto resolvedResult = libkicad::resolvePin(paths.kicadBoardPaths(), excitation.footprint(),
+            auto resolvedResult = board.resolvePin(excitation.footprint(),
                                                        excitation.pin());
             if (!resolvedResult) return std::unexpected(std::move(resolvedResult).error());
             const PadIdentity& resolved = *resolvedResult;
@@ -1219,7 +1219,7 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
         }
 
         if (!sections.empty() && !netConnectivity.has_value()) {
-            auto built = _NetConnectivity::build(paths);
+            auto built = _NetConnectivity::build(board);
             if (!built) return std::unexpected(std::move(built).error());
             netConnectivity = std::move(*built);
         }
@@ -1316,33 +1316,33 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
         }
 
         for (SingleEndedConfig& trace : sim.traces()) {
-            if (auto r = _resolvePortRef(paths, trace.start(), portIndex, orderedNets, sim.name(), "trace start");
+            if (auto r = _resolvePortRef(board, trace.start(), portIndex, orderedNets, sim.name(), "trace start");
                 !r) {
                 return r;
             }
-            if (auto r = _resolvePortRef(paths, trace.stop(), portIndex, orderedNets, sim.name(), "trace stop"); !r) {
+            if (auto r = _resolvePortRef(board, trace.stop(), portIndex, orderedNets, sim.name(), "trace stop"); !r) {
                 return r;
             }
             trace.postInit();
         }
 
         for (DifferentialPairConfig& pair : sim.diffPairs()) {
-            if (auto r = _resolvePortRef(paths, pair.positiveExcitation(), portIndex, orderedNets, sim.name(),
+            if (auto r = _resolvePortRef(board, pair.positiveExcitation(), portIndex, orderedNets, sim.name(),
                                           "differential pair positive_excitation");
                 !r) {
                 return r;
             }
-            if (auto r = _resolvePortRef(paths, pair.positiveProbe(), portIndex, orderedNets, sim.name(),
+            if (auto r = _resolvePortRef(board, pair.positiveProbe(), portIndex, orderedNets, sim.name(),
                                           "differential pair positive_probe");
                 !r) {
                 return r;
             }
-            if (auto r = _resolvePortRef(paths, pair.negativeExcitation(), portIndex, orderedNets, sim.name(),
+            if (auto r = _resolvePortRef(board, pair.negativeExcitation(), portIndex, orderedNets, sim.name(),
                                           "differential pair negative_excitation");
                 !r) {
                 return r;
             }
-            if (auto r = _resolvePortRef(paths, pair.negativeProbe(), portIndex, orderedNets, sim.name(),
+            if (auto r = _resolvePortRef(board, pair.negativeProbe(), portIndex, orderedNets, sim.name(),
                                           "differential pair negative_probe");
                 !r) {
                 return r;
@@ -1351,7 +1351,7 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
             if (!pair.correct()) continue;
 
             if (!netConnectivity.has_value()) {
-                auto built = _NetConnectivity::build(paths);
+                auto built = _NetConnectivity::build(board);
                 if (!built) return std::unexpected(std::move(built).error());
                 netConnectivity = std::move(*built);
             }
@@ -1361,7 +1361,7 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                 sim.ports()[static_cast<std::size_t>(*pair.positiveExcitation().resolvedIndex())].netName();
             const std::string positiveProbeNet =
                 sim.ports()[static_cast<std::size_t>(*pair.positiveProbe().resolvedIndex())].netName();
-            auto positiveResult = _validateDiffPairSide(paths, *netConnectivity, pair.positiveNets(),
+            auto positiveResult = _validateDiffPairSide(board, *netConnectivity, pair.positiveNets(),
                                                           positiveExcitationNet, positiveProbeNet,
                                                           pairLabel + "'s positive_nets", sim.name());
             if (!positiveResult) return std::unexpected(std::move(positiveResult).error());
@@ -1374,7 +1374,7 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                 sim.ports()[static_cast<std::size_t>(*pair.negativeExcitation().resolvedIndex())].netName();
             const std::string negativeProbeNet =
                 sim.ports()[static_cast<std::size_t>(*pair.negativeProbe().resolvedIndex())].netName();
-            auto negativeResult = _validateDiffPairSide(paths, *netConnectivity, pair.negativeNets(),
+            auto negativeResult = _validateDiffPairSide(board, *netConnectivity, pair.negativeNets(),
                                                           negativeExcitationNet, negativeProbeNet,
                                                           pairLabel + "'s negative_nets", sim.name());
             if (!negativeResult) return std::unexpected(std::move(negativeResult).error());
@@ -1384,7 +1384,7 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
             }
         }
 
-        if (auto r = _resolveLumpedComponents(config, sim, paths, edgeCutsOrigin, orderedNets); !r) {
+        if (auto r = _resolveLumpedComponents(config, sim, board, edgeCutsOrigin, orderedNets); !r) {
             return r;
         }
     }

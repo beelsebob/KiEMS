@@ -90,9 +90,10 @@ inline void from_json(const nlohmann::json& j, ComputedGridLines& g) {
 /// Builds CSXCAD simulation geometry and orchestrates the selected Copper FDTD backend.
 class Simulation {
 public:
-    /// `simConfig`/`config`/`options`/`paths` must all outlive this Simulation (kept by reference).
+    /// `simConfig`/`config`/`options`/`paths`/`board` must all outlive this Simulation (kept by
+    /// reference). `board` is the KiCad board `paths.kicadBoardPaths()` names.
     Simulation(SimulationConfig& simConfig, const EMSConfig& config, const RunOptions& options,
-               const PathsConfig& paths);
+               const PathsConfig& paths, const libkicad::Board& board);
 
     /// Slices simConfig's board geometry (see board_slicing.hpp) -- simConfig.ports() must already
     /// be populated (resolveSimulationPorts(), called before any Simulation is constructed). Must
@@ -301,6 +302,7 @@ private:
     const EMSConfig& _config;
     const RunOptions& _options;
     const PathsConfig& _paths;
+    const libkicad::Board& _board;
     SlicedBoard _slicedBoard;
     // Set by adoptGridLines(); checked (only) by populateGeometry() to skip its own addGrid() call
     // -- see both their own doc comments.

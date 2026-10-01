@@ -5,6 +5,7 @@
 #import "EMSConfigBridge.h"
 #import "FieldSnapshotBridge.h"
 #import "GeometryPreviewBridge.h"
+#import "KicadBoardBridge.h"
 #import "SimulationResultsBridge.h"
 
 NS_ASSUME_NONNULL_BEGIN
@@ -81,7 +82,9 @@ typedef void (^EMSPipelineProgressHandler)(EMSPipelineProgress *progress);
 /// from scratch, and re-selecting an already-computed row is a pure, instant cache hit.
 @interface EMSSimulationPipelineBridge : NSObject
 
-- (instancetype)initWithSimulationName:(NSString *)simulationName NS_DESIGNATED_INITIALIZER;
+/// `runtime` is held for the bridge's lifetime -- it owns the KiCad board this pipeline loads.
+- (instancetype)initWithSimulationName:(NSString *)simulationName
+                               runtime:(KicadRuntime *)runtime NS_DESIGNATED_INITIALIZER;
 - (instancetype)init NS_UNAVAILABLE;
 
 /// Whether `stage`'s data is already cached -- a cheap, synchronous, main-thread-safe check that

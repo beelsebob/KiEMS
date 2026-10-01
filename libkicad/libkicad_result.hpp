@@ -272,9 +272,19 @@ struct ComponentModelExportResult {
 
 namespace detail {
 
-/// Initializes the process-global KiCad/wx runtime without loading a board. GUI applications must
-/// call this once on their main thread before dispatching board queries to worker queues.
-bool initializeRaw(std::string& error);
+/// Opaque across the c++20/c++23 boundary; both are defined in libkicad.cpp. See libkicad::Runtime
+/// and libkicad::Board, which own one each.
+struct RuntimeState;
+struct BoardState;
+
+/// Initializes KiCad's process-wide runtime (if not already) and returns a new RuntimeState, or
+/// nullptr with `error` set.
+RuntimeState* createRuntimeRaw(std::string& error);
+void destroyRuntimeRaw(RuntimeState* runtime);
+
+/// A board that loads lazily on its first query. Must be destroyed before `runtime`.
+BoardState* createBoardRaw(RuntimeState& runtime, std::string projectPath, std::string boardPath);
+void destroyBoardRaw(BoardState* board);
 
 struct RawStringListResult {
     bool ok = false;
@@ -376,28 +386,22 @@ struct RawNetColorsResult {
     std::vector<NetColor> colors;
 };
 
-RawPadCountsResult countPadsRaw(const std::string& projectPath, const std::string& boardPath);
+RawPadCountsResult countPadsRaw(BoardState& board);
 
-RawNetNameResult netForFootprintPinRaw(const std::string& projectPath, const std::string& boardPath,
-                                        const std::string& footprintRef, const std::string& pin);
+RawNetNameResult netForFootprintPinRaw(BoardState& board, const std::string& footprintRef, const std::string& pin);
 
 /// The highest-priority constituent of the effective net class KiCad resolves for one concrete
 /// net. Reuses RawNetNameResult's single string payload across the C++20/C++23 boundary; its
 /// `netName` field contains the class.
-RawNetNameResult netClassForNetRaw(const std::string& projectPath, const std::string& boardPath,
-                                    const std::string& netName);
+RawNetNameResult netClassForNetRaw(BoardState& board, const std::string& netName);
 
-RawPadResult resolvePinRaw(const std::string& projectPath, const std::string& boardPath,
-                            const std::string& footprintRef, const std::string& pin);
+RawPadResult resolvePinRaw(BoardState& board, const std::string& footprintRef, const std::string& pin);
 
-RawNetClassMembersResult netsInNetClassRaw(const std::string& projectPath, const std::string& boardPath,
-                                            const std::string& netClassName);
+RawNetClassMembersResult netsInNetClassRaw(BoardState& board, const std::string& netClassName);
 
-RawPadsOnNetResult padsOnNetRaw(const std::string& projectPath, const std::string& boardPath,
-                                 const std::string& netName);
+RawPadsOnNetResult padsOnNetRaw(BoardState& board, const std::string& netName);
 
-RawTracksOnNetResult tracksOnNetRaw(const std::string& projectPath, const std::string& boardPath,
-                                     const std::string& netName);
+RawTracksOnNetResult tracksOnNetRaw(BoardState& board, const std::string& netName);
 
 /// Every pad on the board regardless of net (PadPosition::netName is still populated per pad) --
 /// unlike looping allNets()+padsOnNet() per net, this is one single board load, not one per net. See
@@ -405,31 +409,29 @@ RawTracksOnNetResult tracksOnNetRaw(const std::string& projectPath, const std::s
 /// interference check for why that matters: a real board can have on the order of a hundred nets,
 /// and each public query may otherwise reload and reparse the whole board from
 /// scratch.
-RawPadsOnNetResult allPadsRaw(const std::string& projectPath, const std::string& boardPath);
+RawPadsOnNetResult allPadsRaw(BoardState& board);
 
-RawAllTracksResult allTracksRaw(const std::string& projectPath, const std::string& boardPath);
+RawAllTracksResult allTracksRaw(BoardState& board);
 
-RawZonesResult zonesRaw(const std::string& projectPath, const std::string& boardPath);
+RawZonesResult zonesRaw(BoardState& board);
 
-RawBoardGeometryResult boardGeometryRaw(const std::string& projectPath, const std::string& boardPath);
+RawBoardGeometryResult boardGeometryRaw(BoardState& board);
 
-RawBoardLayersResult boardLayersRaw(const std::string& projectPath, const std::string& boardPath);
+RawBoardLayersResult boardLayersRaw(BoardState& board);
 
-RawBoardLayerGeometryResult boardLayerGeometryRaw(const std::string& projectPath,
-                                                    const std::string& boardPath,
-                                                    const std::string& layerName);
+RawBoardLayerGeometryResult boardLayerGeometryRaw(BoardState& board, const std::string& layerName);
 
-RawStackupResult stackupRaw(const std::string& projectPath, const std::string& boardPath);
+RawStackupResult stackupRaw(BoardState& board);
 
-RawLayerColorsResult layerColorsRaw(const std::string& projectPath, const std::string& boardPath);
+RawLayerColorsResult layerColorsRaw(BoardState& board);
 
-RawNetColorsResult netColorsRaw(const std::string& projectPath, const std::string& boardPath);
+RawNetColorsResult netColorsRaw(BoardState& board);
 
-RawStringListResult netClassesRaw(const std::string& projectPath, const std::string& boardPath);
+RawStringListResult netClassesRaw(BoardState& board);
 
-RawStringListResult allNetsRaw(const std::string& projectPath, const std::string& boardPath);
+RawStringListResult allNetsRaw(BoardState& board);
 
-RawFootprintsResult footprintsRaw(const std::string& projectPath, const std::string& boardPath);
+RawFootprintsResult footprintsRaw(BoardState& board);
 
 struct RawThroughHolesResult {
     bool ok = false;
@@ -437,7 +439,7 @@ struct RawThroughHolesResult {
     std::vector<ThroughHole> holes;
 };
 
-RawThroughHolesResult throughHolesRaw(const std::string& projectPath, const std::string& boardPath);
+RawThroughHolesResult throughHolesRaw(BoardState& board);
 
 struct RawNonPlatedHolesResult {
     bool ok = false;
@@ -445,7 +447,7 @@ struct RawNonPlatedHolesResult {
     std::vector<NonPlatedHole> holes;
 };
 
-RawNonPlatedHolesResult nonPlatedHolesRaw(const std::string& projectPath, const std::string& boardPath);
+RawNonPlatedHolesResult nonPlatedHolesRaw(BoardState& board);
 
 struct RawComponentModelExportResult {
     bool ok = false;
@@ -453,8 +455,7 @@ struct RawComponentModelExportResult {
     ComponentModelExportResult result;
 };
 
-RawComponentModelExportResult exportComponentModelsRaw(const std::string& projectPath, const std::string& boardPath,
-                                                          const std::string& componentFilter,
+RawComponentModelExportResult exportComponentModelsRaw(BoardState& board, const std::string& componentFilter,
                                                           const std::string& outputStlPath);
 
 } // namespace detail

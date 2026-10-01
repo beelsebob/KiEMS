@@ -7,6 +7,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+@class KicadBoardBridge;
 @class KicadHullCutTracePoint;
 
 @interface KicadFootprintPin : NSObject
@@ -53,36 +54,40 @@ NS_ASSUME_NONNULL_BEGIN
 /// the same (unchanged) board produce the same plan, so ports, probes, absorbing/excitation state
 /// and other settings that can't move the cut or its vias never trigger a recompute.
 @property (nonatomic, copy, readonly) NSString* inputsKey;
-- (nullable KicadStitchingViaPlan*)computeForBoard:(NSString*)kicadPcbPath
-                                               error:(NSError**)error;
+- (nullable KicadStitchingViaPlan*)computeWithBoard:(KicadBoardBridge*)board error:(NSError**)error;
 @end
 
-/// Board-browsing operations, queried directly against wherever the user's KiCad project actually
-/// lives -- never against a copy (see EMSConfigBridge's kicadPcbPath doc comment). Every method
-/// here derives the sibling .kicad_pro path from `kicadPcbPath` the same way KiCad itself does
-/// (same directory, same base name). All parsing happens in-process through libkicad.
+/// KiCad's process-wide runtime, and the lock serializing every board query against it. Create
+/// one on the main thread at launch, before any board query is dispatched to a worker queue. Every
+/// KicadBoardBridge and EMSSimulationPipelineBridge holding it keeps it alive for as long as its
+/// own board.
+@interface KicadRuntime : NSObject
++ (nullable KicadRuntime*)startWithError:(NSError**)error;
+- (instancetype)init NS_UNAVAILABLE;
+@end
+
+/// One KiCad board, queried directly wherever the user's KiCad project actually lives -- never a
+/// copy (see EMSConfigBridge's kicadPcbPath doc comment). Owns the loaded board: the first query
+/// parses it, later queries reuse it, and it reparses when the .kicad_pcb or .kicad_pro changes on
+/// disk. The sibling .kicad_pro path is derived from `kicadPcbPath` the same way KiCad itself does
+/// (same directory, same base name). Queries are safe to run on any queue.
 @interface KicadBoardBridge : NSObject
 
-/// Initializes KiCad's process-global runtime. Call once on the application's main thread before
-/// any of the board-query methods are dispatched to worker queues.
-+ (BOOL)prepareRuntime:(NSError**)error;
+- (instancetype)initWithRuntime:(KicadRuntime*)runtime
+                    kicadPcbPath:(NSString*)kicadPcbPath NS_DESIGNATED_INITIALIZER;
+- (instancetype)init NS_UNAVAILABLE;
 
-+ (nullable NSArray<NSString*>*)netClassesForBoard:(NSString*)kicadPcbPath
-                                               error:(NSError**)error;
+@property (nonatomic, copy, readonly) NSString* kicadPcbPath;
 
-+ (nullable NSArray<NSString*>*)allNetsForBoard:(NSString*)kicadPcbPath
-                                           error:(NSError**)error;
+- (nullable NSArray<NSString*>*)netClassesWithError:(NSError**)error;
 
-+ (nullable NSString*)netClassForNet:(NSString*)netName
-                               board:(NSString*)kicadPcbPath
-                               error:(NSError**)error;
+- (nullable NSArray<NSString*>*)allNetsWithError:(NSError**)error;
 
-+ (nullable NSArray<NSString*>*)netsInNetClassForBoard:(NSString*)kicadPcbPath
-                                                netClass:(NSString*)netClass
-                                                   error:(NSError**)error;
+- (nullable NSString*)netClassForNet:(NSString*)netName error:(NSError**)error;
 
-+ (nullable NSArray<KicadFootprintInfo*>*)footprintsForBoard:(NSString*)kicadPcbPath
-                                                         error:(NSError**)error;
+- (nullable NSArray<NSString*>*)netsInNetClass:(NSString*)netClass error:(NSError**)error;
+
+- (nullable NSArray<KicadFootprintInfo*>*)footprintsWithError:(NSError**)error;
 
 /// Every net's own copper, on every copper layer, at its own real stackup Z -- the whole board,
 /// not clipped down to any one simulation's involved-nets hull the way EMSSimulationPipelineBridge.
@@ -92,31 +97,24 @@ NS_ASSUME_NONNULL_BEGIN
 /// the same GeometryView rendering code) as a per-simulation preview. Its copper uses KiCad's
 /// explicit-net/effective-net-class/layer color precedence, and its component mesh contains every
 /// footprint model KiCad can resolve; only simulation-specific vias/ports/grid fields are empty.
-+ (nullable EMSGeometryPreview*)wholeBoardPreviewForBoard:(NSString*)kicadPcbPath
-                                                      error:(NSError**)error;
+- (nullable EMSGeometryPreview*)wholeBoardPreviewWithError:(NSError**)error;
 
-/// Fast layer-name/color/bounds preview. Meshes are empty until layerPreviewForBoard:name:error:
-/// is scheduled; this is what lets the layer UI appear without waiting for hidden geometry.
-+ (nullable EMSGeometryPreview*)layerCatalogPreviewForBoard:(NSString*)kicadPcbPath
-                                                 wholeBoard:(BOOL)wholeBoard
-                                                      error:(NSError**)error;
+/// Fast layer-name/color/bounds preview. Meshes are empty until layerPreviewNamed:error: is
+/// scheduled; this is what lets the layer UI appear without waiting for hidden geometry.
+- (nullable EMSGeometryPreview*)layerCatalogPreviewForWholeBoard:(BOOL)wholeBoard error:(NSError**)error;
 
-+ (nullable EMSGeometryLayer*)layerPreviewForBoard:(NSString*)kicadPcbPath
-                                               name:(NSString*)layerName
-                                              error:(NSError**)error;
+- (nullable EMSGeometryLayer*)layerPreviewNamed:(NSString*)layerName error:(NSError**)error;
 
 /// Captures the selected simulation's current settings without retaining the mutable document
-/// model. Call the returned request's computeForBoard:error: on a worker queue.
+/// model. Call the returned request's computeWithBoard:error: on a worker queue.
 + (nullable KicadStitchingViaPlanRequest*)stitchingViaPlanRequestForConfig:(EMSConfigBridge*)config
                                                            simulationIndex:(NSInteger)simulationIndex;
 
-/// Stores `kicadPcbPath` on `config` (EMSConfigBridge.kicadPcbPath) and imports the board's
+/// Stores this board's path on `config` (EMSConfigBridge.kicadPcbPath) and imports the board's
 /// stackup into it. Purely a read-only query against the board plus an in-memory config edit --
 /// touches no filesystem location other than `kicadPcbPath`/its sibling .kicad_pro, so it works
 /// equally well on a document that's never been saved.
-+ (BOOL)linkKicadPCB:(NSString*)kicadPcbPath
-               config:(EMSConfigBridge*)config
-                error:(NSError**)error;
+- (BOOL)linkToConfig:(EMSConfigBridge*)config error:(NSError**)error;
 
 @end
 

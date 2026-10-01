@@ -1278,7 +1278,7 @@ struct GridGenerator::Impl {
         return result;
     }
 
-    CSRectGrid& generate(CSRectGrid& grid, const SimulationConfig& simConfig, const PathsConfig& paths) {
+    CSRectGrid& generate(CSRectGrid& grid, const SimulationConfig& simConfig, const libkicad::Board& board) {
         // The Boolean result from board slicing is the source of truth. In particular, do not reopen
         // the original board to derive ordinary density: even clipping those old hints afterward can
         // preserve line positions demanded only by copper that the hull cut removed.
@@ -1309,8 +1309,8 @@ struct GridGenerator::Impl {
 
         std::unordered_map<NetName, std::vector<TraceSegment>, NetNameHash> segmentsByNet;
         if (!differentialNets.empty()) {
-            auto geometryResult = libkicad::boardGeometry(paths.kicadBoardPaths());
-            auto allTracksResult = libkicad::allTracks(paths.kicadBoardPaths());
+            auto geometryResult = board.boardGeometry();
+            auto allTracksResult = board.allTracks();
             if (!geometryResult || !allTracksResult) {
                 logError(!geometryResult ? geometryResult.error() : allTracksResult.error());
                 std::exit(1);
@@ -1421,8 +1421,8 @@ double GridGenerator::pmlInnerYMax() const { return _impl->y.pmlInnerMax(); }
 double GridGenerator::pmlInnerZMin() const { return _impl->_pmlInnerZMin; }
 double GridGenerator::pmlInnerZMax() const { return _impl->_pmlInnerZMax; }
 
-CSRectGrid& GridGenerator::generate(CSRectGrid& grid, const SimulationConfig& simConfig, const PathsConfig& paths) {
-    return _impl->generate(grid, simConfig, paths);
+CSRectGrid& GridGenerator::generate(CSRectGrid& grid, const SimulationConfig& simConfig, const libkicad::Board& board) {
+    return _impl->generate(grid, simConfig, board);
 }
 
 } // namespace kiems

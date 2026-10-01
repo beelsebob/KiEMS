@@ -80,11 +80,13 @@ void _printFootprints(const std::vector<libkicad::FootprintInfo>& footprints) {
 // Output on success is line-oriented plain text (tab-separated for multi-field rows); on failure,
 // an error message goes to stderr and the process exits 1. No JSON library is linked into either
 // binary purely for this.
-int _runQuery(int argc, char** argv) {
+int _runQuery(libkicad::Runtime& runtime, int argc, char** argv) {
     const std::string command = argv[1];
+    // Every command names its board as argv[2]/argv[3]; only called once a branch has checked argc.
+    const auto board = [&] { return libkicad::Board(runtime, argv[2], argv[3]); };
 
     if (command == "net-for-pin" && argc == 6) {
-        const std::expected<std::string, std::string> net = libkicad::netForFootprintPin(argv[2], argv[3], argv[4], argv[5]);
+        const std::expected<std::string, std::string> net = board().netForFootprintPin(argv[4], argv[5]);
         if (!net.has_value()) {
             std::cerr << net.error() << "\n";
             return 1;
@@ -94,7 +96,7 @@ int _runQuery(int argc, char** argv) {
     }
 
     if (command == "net-class-for-net" && argc == 5) {
-        const std::expected<std::string, std::string> netClass = libkicad::netClassForNet(argv[2], argv[3], argv[4]);
+        const std::expected<std::string, std::string> netClass = board().netClassForNet(argv[4]);
         if (!netClass.has_value()) {
             std::cerr << netClass.error() << "\n";
             return 1;
@@ -104,7 +106,7 @@ int _runQuery(int argc, char** argv) {
     }
 
     if (command == "nets-in-class" && argc == 5) {
-        const std::expected<std::vector<std::string>, std::string> nets = libkicad::netsInNetClass(argv[2], argv[3], argv[4]);
+        const std::expected<std::vector<std::string>, std::string> nets = board().netsInNetClass(argv[4]);
         if (!nets.has_value()) {
             std::cerr << nets.error() << "\n";
             return 1;
@@ -116,7 +118,7 @@ int _runQuery(int argc, char** argv) {
     }
 
     if (command == "pads-on-net" && argc == 5) {
-        const std::expected<std::vector<libkicad::PadPosition>, std::string> pads = libkicad::padsOnNet(argv[2], argv[3], argv[4]);
+        const std::expected<std::vector<libkicad::PadPosition>, std::string> pads = board().padsOnNet(argv[4]);
         if (!pads.has_value()) {
             std::cerr << pads.error() << "\n";
             return 1;
@@ -129,7 +131,7 @@ int _runQuery(int argc, char** argv) {
 
     if (command == "tracks-on-net" && argc == 5) {
         const std::expected<std::vector<libkicad::TrackSegment>, std::string> tracks =
-            libkicad::tracksOnNet(argv[2], argv[3], argv[4]);
+            board().tracksOnNet(argv[4]);
         if (!tracks.has_value()) {
             std::cerr << tracks.error() << "\n";
             return 1;
@@ -143,7 +145,7 @@ int _runQuery(int argc, char** argv) {
     }
 
     if (command == "all-pads" && argc == 4) {
-        const std::expected<std::vector<libkicad::PadPosition>, std::string> pads = libkicad::allPads(argv[2], argv[3]);
+        const std::expected<std::vector<libkicad::PadPosition>, std::string> pads = board().allPads();
         if (!pads.has_value()) {
             std::cerr << pads.error() << "\n";
             return 1;
@@ -156,7 +158,7 @@ int _runQuery(int argc, char** argv) {
 
     if (command == "all-tracks" && argc == 4) {
         const std::expected<std::vector<std::pair<std::string, libkicad::TrackSegment>>, std::string> tracks =
-            libkicad::allTracks(argv[2], argv[3]);
+            board().allTracks();
         if (!tracks.has_value()) {
             std::cerr << tracks.error() << "\n";
             return 1;
@@ -170,7 +172,7 @@ int _runQuery(int argc, char** argv) {
     }
 
     if (command == "zones" && argc == 4) {
-        const std::expected<std::vector<libkicad::ZoneInfo>, std::string> zones = libkicad::zones(argv[2], argv[3]);
+        const std::expected<std::vector<libkicad::ZoneInfo>, std::string> zones = board().zones();
         if (!zones.has_value()) {
             std::cerr << zones.error() << "\n";
             return 1;
@@ -187,7 +189,7 @@ int _runQuery(int argc, char** argv) {
 
     if (command == "board-geometry" && argc == 4) {
         const std::expected<libkicad::BoardGeometry, std::string> geometry =
-                libkicad::boardGeometry(argv[2], argv[3]);
+                board().boardGeometry();
         if (!geometry.has_value()) {
             std::cerr << geometry.error() << "\n";
             return 1;
@@ -220,7 +222,7 @@ int _runQuery(int argc, char** argv) {
     }
 
     if (command == "board-layers" && argc == 4) {
-        const auto layers = libkicad::boardLayers(argv[2], argv[3]);
+        const auto layers = board().boardLayers();
         if (!layers) {
             std::cerr << layers.error() << "\n";
             return 1;
@@ -233,7 +235,7 @@ int _runQuery(int argc, char** argv) {
     }
 
     if (command == "board-layer-geometry" && argc == 5) {
-        const auto geometry = libkicad::boardLayerGeometry(argv[2], argv[3], argv[4]);
+        const auto geometry = board().boardLayerGeometry(argv[4]);
         if (!geometry) {
             std::cerr << geometry.error() << "\n";
             return 1;
@@ -244,7 +246,7 @@ int _runQuery(int argc, char** argv) {
     }
 
     if (command == "resolve-pin" && argc == 6) {
-        const std::expected<libkicad::PadPosition, std::string> pad = libkicad::resolvePin(argv[2], argv[3], argv[4], argv[5]);
+        const std::expected<libkicad::PadPosition, std::string> pad = board().resolvePin(argv[4], argv[5]);
         if (!pad.has_value()) {
             std::cerr << pad.error() << "\n";
             return 1;
@@ -255,7 +257,7 @@ int _runQuery(int argc, char** argv) {
 
     if (command == "stackup" && argc == 4) {
         const std::expected<std::vector<libkicad::StackupLayer>, std::string> layers =
-                libkicad::stackup(argv[2], argv[3]);
+                board().stackup();
         if (!layers.has_value()) {
             std::cerr << layers.error() << "\n";
             return 1;
@@ -268,7 +270,7 @@ int _runQuery(int argc, char** argv) {
 
     if (command == "layer-colors" && argc == 4) {
         const std::expected<std::vector<libkicad::LayerColor>, std::string> colors =
-                libkicad::layerColors(argv[2], argv[3]);
+                board().layerColors();
         if (!colors.has_value()) {
             std::cerr << colors.error() << "\n";
             return 1;
@@ -281,7 +283,7 @@ int _runQuery(int argc, char** argv) {
 
     if (command == "net-colors" && argc == 4) {
         const std::expected<std::vector<libkicad::NetColor>, std::string> colors =
-                libkicad::netColors(argv[2], argv[3]);
+                board().netColors();
         if (!colors.has_value()) {
             std::cerr << colors.error() << "\n";
             return 1;
@@ -293,7 +295,7 @@ int _runQuery(int argc, char** argv) {
     }
 
     if (command == "net-classes" && argc == 4) {
-        const std::expected<std::vector<std::string>, std::string> classes = libkicad::netClasses(argv[2], argv[3]);
+        const std::expected<std::vector<std::string>, std::string> classes = board().netClasses();
         if (!classes.has_value()) {
             std::cerr << classes.error() << "\n";
             return 1;
@@ -305,7 +307,7 @@ int _runQuery(int argc, char** argv) {
     }
 
     if (command == "all-nets" && argc == 4) {
-        const std::expected<std::vector<std::string>, std::string> nets = libkicad::allNets(argv[2], argv[3]);
+        const std::expected<std::vector<std::string>, std::string> nets = board().allNets();
         if (!nets.has_value()) {
             std::cerr << nets.error() << "\n";
             return 1;
@@ -318,7 +320,7 @@ int _runQuery(int argc, char** argv) {
 
     if (command == "footprints" && argc == 4) {
         const std::expected<std::vector<libkicad::FootprintInfo>, std::string> footprints =
-                libkicad::footprints(argv[2], argv[3]);
+                board().footprints();
         if (!footprints.has_value()) {
             std::cerr << footprints.error() << "\n";
             return 1;
@@ -329,7 +331,7 @@ int _runQuery(int argc, char** argv) {
 
     if (command == "through-holes" && argc == 4) {
         const std::expected<std::vector<libkicad::ThroughHole>, std::string> holes =
-                libkicad::throughHoles(argv[2], argv[3]);
+                board().throughHoles();
         if (!holes.has_value()) {
             std::cerr << holes.error() << "\n";
             return 1;
@@ -345,7 +347,7 @@ int _runQuery(int argc, char** argv) {
 
     if (command == "non-plated-holes" && argc == 4) {
         const std::expected<std::vector<libkicad::NonPlatedHole>, std::string> holes =
-                libkicad::nonPlatedHoles(argv[2], argv[3]);
+                board().nonPlatedHoles();
         if (!holes.has_value()) {
             std::cerr << holes.error() << "\n";
             return 1;
@@ -360,7 +362,7 @@ int _runQuery(int argc, char** argv) {
 
     if (command == "export-component-models" && argc == 6) {
         const std::expected<libkicad::ComponentModelExportResult, std::string> exportResult =
-                libkicad::exportComponentModels(argv[2], argv[3], argv[4], argv[5]);
+                board().exportComponentModels(argv[4], argv[5]);
         if (!exportResult.has_value()) {
             std::cerr << exportResult.error() << "\n";
             return 1;
@@ -409,14 +411,15 @@ int _runQuery(int argc, char** argv) {
 // Human-readable dev smoketest (this file's original purpose): loads a board, exercises every
 // libkicad function against it, and prints a plain-English summary. Used to manually verify
 // libkicad changes against a real board -- not invoked by port_resolution.cpp.
-int _runSmoketest(int argc, char** argv) {
+int _runSmoketest(libkicad::Runtime& runtime, int argc, char** argv) {
     if (argc != 3 && argc != 6) {
         std::cerr << "usage: " << argv[0]
                    << " <project.kicad_pro> <board.kicad_pcb> [footprintRef pin netClassName]\n";
         return 1;
     }
+    const libkicad::Board board(runtime, argv[1], argv[2]);
 
-    std::expected<libkicad::PadCounts, std::string> result = libkicad::countPads(argv[1], argv[2]);
+    std::expected<libkicad::PadCounts, std::string> result = board.countPads();
     if (!result.has_value()) {
         std::cerr << "FAILED: " << result.error() << "\n";
         return 1;
@@ -426,7 +429,7 @@ int _runSmoketest(int argc, char** argv) {
                << ", Zones: " << result->zoneCount << "\n";
     std::cout << "GetItems(PAD) via protobuf handler returned " << result->padCount << " items\n";
 
-    std::expected<std::vector<libkicad::StackupLayer>, std::string> stackup = libkicad::stackup(argv[1], argv[2]);
+    std::expected<std::vector<libkicad::StackupLayer>, std::string> stackup = board.stackup();
     if (!stackup.has_value()) {
         std::cerr << "FAILED stackup: " << stackup.error() << "\n";
         return 1;
@@ -439,7 +442,7 @@ int _runSmoketest(int argc, char** argv) {
     }
     std::cout << "\n";
 
-    std::expected<std::vector<std::string>, std::string> allNets = libkicad::allNets(argv[1], argv[2]);
+    std::expected<std::vector<std::string>, std::string> allNets = board.allNets();
     if (!allNets.has_value()) {
         std::cerr << "FAILED allNets: " << allNets.error() << "\n";
         return 1;
@@ -450,7 +453,7 @@ int _runSmoketest(int argc, char** argv) {
     }
     std::cout << "\n";
 
-    std::expected<std::vector<std::string>, std::string> netClasses = libkicad::netClasses(argv[1], argv[2]);
+    std::expected<std::vector<std::string>, std::string> netClasses = board.netClasses();
     if (!netClasses.has_value()) {
         std::cerr << "FAILED netClasses: " << netClasses.error() << "\n";
         return 1;
@@ -462,7 +465,7 @@ int _runSmoketest(int argc, char** argv) {
     std::cout << "\n";
 
     std::expected<std::vector<libkicad::FootprintInfo>, std::string> footprints =
-            libkicad::footprints(argv[1], argv[2]);
+            board.footprints();
     if (!footprints.has_value()) {
         std::cerr << "FAILED footprints: " << footprints.error() << "\n";
         return 1;
@@ -479,7 +482,7 @@ int _runSmoketest(int argc, char** argv) {
         const std::string pin = argv[4];
         const std::string netClassName = argv[5];
 
-        std::expected<std::string, std::string> net = libkicad::netForFootprintPin(argv[1], argv[2], footprintRef, pin);
+        std::expected<std::string, std::string> net = board.netForFootprintPin(footprintRef, pin);
         if (!net.has_value()) {
             std::cerr << "FAILED netForFootprintPin: " << net.error() << "\n";
             return 1;
@@ -487,7 +490,7 @@ int _runSmoketest(int argc, char** argv) {
         std::cout << footprintRef << "." << pin << " is on net \"" << *net << "\"\n";
 
         std::expected<std::vector<std::string>, std::string> members =
-                libkicad::netsInNetClass(argv[1], argv[2], netClassName);
+                board.netsInNetClass(netClassName);
         if (!members.has_value()) {
             std::cerr << "FAILED netsInNetClass: " << members.error() << "\n";
             return 1;
@@ -498,7 +501,7 @@ int _runSmoketest(int argc, char** argv) {
         }
         std::cout << "\n";
 
-        std::expected<std::vector<libkicad::PadPosition>, std::string> pads = libkicad::padsOnNet(argv[1], argv[2], *net);
+        std::expected<std::vector<libkicad::PadPosition>, std::string> pads = board.padsOnNet(*net);
         if (!pads.has_value()) {
             std::cerr << "FAILED padsOnNet: " << pads.error() << "\n";
             return 1;
@@ -527,9 +530,14 @@ const std::vector<std::string> kQueryCommands = {"net-for-pin", "net-class-for-n
 } // namespace
 
 int main(int argc, char** argv) {
+    auto runtime = libkicad::Runtime::create();
+    if (!runtime) {
+        std::cerr << "FAILED: " << runtime.error() << "\n";
+        return 1;
+    }
     if (argc >= 2 &&
         std::find(kQueryCommands.begin(), kQueryCommands.end(), std::string(argv[1])) != kQueryCommands.end()) {
-        return _runQuery(argc, argv);
+        return _runQuery(*runtime, argc, argv);
     }
-    return _runSmoketest(argc, argv);
+    return _runSmoketest(*runtime, argc, argv);
 }

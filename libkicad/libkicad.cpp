@@ -10,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <system_error>
+#include <algorithm>
 #include <utility>
 
 // KiCad and wx headers aren't built against this project's strict warning settings and aren't
@@ -68,6 +69,27 @@
 
 namespace libkicad::detail {
 
+struct RuntimeState {
+    // Serializes every use of KiCad's process-wide state (SETTINGS_MANAGER, Pgm(), wx, and several
+    // KiCad caches) across every board opened from this runtime.
+    std::mutex mutex;
+    // Every board currently holding a loaded HEADLESS_PCB_CONTEXT; see _loadBoard() for why loading
+    // a different project must unload these first. Guarded by `mutex`.
+    std::vector<BoardState*> loadedBoards;
+};
+
+struct BoardState {
+    RuntimeState& runtime;
+    std::string projectPath;
+    std::string boardPath;
+    // Everything below is guarded by runtime.mutex, and empty until the first query loads it.
+    std::filesystem::file_time_type projectMTime;
+    std::filesystem::file_time_type boardMTime;
+    std::shared_ptr<HEADLESS_PCB_CONTEXT> context;
+    BOARD* board = nullptr;
+    PROJECT* project = nullptr;
+};
+
 namespace {
 
 // PGM_BASE has exactly one pure-virtual method; a minimal, non-mock, real subclass covers it.
@@ -77,8 +99,9 @@ public:
 };
 
 bool _ensureWxInitialized() {
-    static bool initialized = false;
-    if (initialized) {
+    // KiCad's runtime (wx, Pgm(), SETTINGS_MANAGER) is process-global and lives until exit; a
+    // Runtime created after an earlier one was destroyed finds it already initialized.
+    if (PgmOrNull()) {
         return true;
     }
 
@@ -128,7 +151,6 @@ bool _ensureWxInitialized() {
     // this is data-only and required by the board reader.
     Pgm().GetCommonSettings()->InitializeEnvironment();
 
-    initialized = true;
     return true;
 }
 
@@ -256,7 +278,8 @@ RawComponentModelExportResult _failComponentModelExport(std::string error) {
     return result;
 }
 
-// Keeps the BOARD alive (owned by the context) for as long as the caller needs it.
+// Keeps the BOARD alive (owned by its BoardState's context) and KiCad's process-wide state locked
+// for as long as the caller needs it.
 struct LoadedBoard {
     // SETTINGS_MANAGER, Pgm(), wxWidgets initialization, and several KiCad caches are process-wide
     // mutable state.  Keep the lock for the complete lifetime of the loaded BOARD, not merely for
@@ -266,23 +289,22 @@ struct LoadedBoard {
     BOARD* board = nullptr;
 };
 
-std::mutex g_kicadMutex;
+// Unloads `project` unless a loaded board still uses it -- which also removes the
+// ~<project>.kicad_pro.lck LoadProject() created next to the user's project file.
+void _releaseUnusedProject(RuntimeState& runtime, PROJECT* project) {
+    if (project && std::ranges::none_of(runtime.loadedBoards,
+                                        [project](const BoardState* other) { return other->project == project; })) {
+        Pgm().GetSettingsManager().UnloadProject(project, /* aSave = */ false);
+    }
+}
 
-// Caches the most recently loaded board so that a burst of queries against the same
-// (projectPath, boardPath) -- e.g. resolvePin() called once per pin while resolving ports --
-// reparses neither file after the first call. Invalidated by path mismatch or either file's mtime
-// changing (e.g. the user re-saves the board in KiCad), so callers never see stale geometry.
-// Guarded by g_kicadMutex, same as everything else that touches KiCad's process-wide state.
-struct BoardCacheEntry {
-    std::string projectPath;
-    std::string boardPath;
-    std::filesystem::file_time_type projectMTime;
-    std::filesystem::file_time_type boardMTime;
-    std::shared_ptr<HEADLESS_PCB_CONTEXT> context;
-    BOARD* board = nullptr;
-};
-
-std::optional<BoardCacheEntry> g_boardCache;
+void _unloadBoard(BoardState& state) {
+    PROJECT* project = std::exchange(state.project, nullptr);
+    state.context.reset();
+    state.board = nullptr;
+    std::erase(state.runtime.loadedBoards, &state);
+    _releaseUnusedProject(state.runtime, project);
+}
 
 std::optional<std::string> _unreadableFileError(const std::string& path, const char* description) {
     if (path.empty()) {
@@ -317,68 +339,72 @@ std::optional<std::string> _unreadableFileError(const std::string& path, const c
     return std::nullopt;
 }
 
-// Shared board-loading sequence: wx init, SETTINGS_MANAGER project load, PCB_IO_KICAD_SEXPR board
-// load, HEADLESS_PCB_CONTEXT construction (this is what wires BOARD::SetProject(), needed before
-// any netclass query -- see netsInNetClassRaw). Bypasses PCB_IO_MGR's format registry (which
+// Shared board-loading sequence: SETTINGS_MANAGER project load, PCB_IO_KICAD_SEXPR board load,
+// HEADLESS_PCB_CONTEXT construction (this is what wires BOARD::SetProject(), needed before any
+// netclass query -- see netsInNetClassRaw). Bypasses PCB_IO_MGR's format registry (which
 // unconditionally links in every foreign-format importer, per pcbnew/pcb_io/pcb_io_mgr.cpp's
 // static REGISTER_PLUGIN globals) and goes straight to the one real KiCad-format plugin needed;
 // this is still the exact same LoadBoard() implementation PCB_IO_MGR would have dispatched to for
 // KICAD_SEXP.
-std::optional<LoadedBoard> _loadBoard(const std::string& projectPath, const std::string& boardPath,
-                                       std::string& error) {
-    std::unique_lock<std::mutex> lock(g_kicadMutex);
+//
+// `state` keeps the loaded board, so a burst of queries against the same Board -- e.g.
+// resolvePin() called once per pin while resolving ports -- reparses neither file after the first
+// call. It reloads when either file's mtime changes (e.g. the user re-saves the board in KiCad),
+// so callers never see stale geometry.
+std::optional<LoadedBoard> _loadBoard(BoardState& state, std::string& error) {
+    std::unique_lock<std::mutex> lock(state.runtime.mutex);
 
-    if (auto accessError = _unreadableFileError(projectPath, "project")) {
+    if (auto accessError = _unreadableFileError(state.projectPath, "project")) {
         error = std::move(*accessError);
         return std::nullopt;
     }
-    if (auto accessError = _unreadableFileError(boardPath, "board")) {
+    if (auto accessError = _unreadableFileError(state.boardPath, "board")) {
         error = std::move(*accessError);
-        return std::nullopt;
-    }
-
-    bool wxInitialized = _ensureWxInitialized();
-    if (!wxInitialized) {
-        error = "wxInitialize failed";
         return std::nullopt;
     }
 
     std::error_code projectMTimeError;
     std::error_code boardMTimeError;
     const std::filesystem::file_time_type projectMTime =
-            std::filesystem::last_write_time(projectPath, projectMTimeError);
-    const std::filesystem::file_time_type boardMTime = std::filesystem::last_write_time(boardPath, boardMTimeError);
+            std::filesystem::last_write_time(state.projectPath, projectMTimeError);
+    const std::filesystem::file_time_type boardMTime =
+            std::filesystem::last_write_time(state.boardPath, boardMTimeError);
 
-    if (!projectMTimeError && !boardMTimeError && g_boardCache && g_boardCache->projectPath == projectPath &&
-        g_boardCache->boardPath == boardPath && g_boardCache->projectMTime == projectMTime &&
-        g_boardCache->boardMTime == boardMTime) {
+    if (state.context && !projectMTimeError && !boardMTimeError && state.projectMTime == projectMTime &&
+        state.boardMTime == boardMTime) {
         LoadedBoard result;
         result.lock = std::move(lock);
-        result.context = g_boardCache->context;
-        result.board = g_boardCache->board;
+        result.context = state.context;
+        result.board = state.board;
         return result;
     }
 
-    // Drop any stale cache entry before touching SETTINGS_MANAGER: it holds exactly one active
-    // PROJECT, so LoadProject() below may silently unload and delete a different
-    // previously-loaded project out from under a cached BOARD that still points at it (KiCad has
-    // no "no MDI yet" concept of multiple simultaneously-loaded projects). Releasing our own
-    // reference first runs HEADLESS_PCB_CONTEXT's (and BOARD::ClearProject's) cleanup while that
-    // PROJECT is still the one SETTINGS_MANAGER has live, instead of after LoadProject has already
-    // freed it out from under us.
-    g_boardCache.reset();
+    // Drop stale boards before touching SETTINGS_MANAGER: it holds exactly one active PROJECT, so
+    // LoadProject() below may silently unload and delete a different previously-loaded project out
+    // from under a loaded BOARD that still points at it (KiCad has no "no MDI yet" concept of
+    // multiple simultaneously-loaded projects). Releasing those contexts first runs
+    // HEADLESS_PCB_CONTEXT's (and BOARD::ClearProject's) cleanup while their PROJECT is still the
+    // one SETTINGS_MANAGER has live, instead of after LoadProject has already freed it. Boards on
+    // other projects reload on their next query.
+    _unloadBoard(state);
+    const std::vector<BoardState*> loadedBoards = state.runtime.loadedBoards;
+    for (BoardState* other : loadedBoards) {
+        if (other->projectPath != state.projectPath) {
+            _unloadBoard(*other);
+        }
+    }
 
     SETTINGS_MANAGER& settingsManager = Pgm().GetSettingsManager();
-    wxString wxProjectPath = wxString::FromUTF8(projectPath);
+    wxString wxProjectPath = wxString::FromUTF8(state.projectPath);
 
     bool projectLoaded = false;
     try {
         projectLoaded = settingsManager.LoadProject(wxProjectPath);
     } catch (const std::exception& exception) {
-        error = "Could not load the KiCad project file \"" + projectPath + "\": " + exception.what();
+        error = "Could not load the KiCad project file \"" + state.projectPath + "\": " + exception.what();
         return std::nullopt;
     } catch (...) {
-        error = "Could not load the KiCad project file \"" + projectPath + "\"";
+        error = "Could not load the KiCad project file \"" + state.projectPath + "\"";
         return std::nullopt;
     }
     if (!projectLoaded) {
@@ -393,19 +419,22 @@ std::optional<LoadedBoard> _loadBoard(const std::string& projectPath, const std:
     }
 
     PCB_IO_KICAD_SEXPR plugin;
-    wxString wxBoardPath = wxString::FromUTF8(boardPath);
+    wxString wxBoardPath = wxString::FromUTF8(state.boardPath);
     std::unique_ptr<BOARD> board;
     try {
         board.reset(plugin.LoadBoard(wxBoardPath, nullptr, nullptr, project));
     } catch (const std::exception& exception) {
-        error = "Could not load the KiCad board file \"" + boardPath + "\": " + exception.what();
+        error = "Could not load the KiCad board file \"" + state.boardPath + "\": " + exception.what();
+        _releaseUnusedProject(state.runtime, project);
         return std::nullopt;
     } catch (...) {
-        error = "Could not load the KiCad board file \"" + boardPath + "\"";
+        error = "Could not load the KiCad board file \"" + state.boardPath + "\"";
+        _releaseUnusedProject(state.runtime, project);
         return std::nullopt;
     }
     if (!board) {
         error = "LoadBoard failed";
+        _releaseUnusedProject(state.runtime, project);
         return std::nullopt;
     }
 
@@ -413,15 +442,17 @@ std::optional<LoadedBoard> _loadBoard(const std::string& projectPath, const std:
     auto context = std::make_shared<HEADLESS_PCB_CONTEXT>(std::move(board), project, nullptr);
     if (!context->GetBoard()) {
         error = "HEADLESS_PCB_CONTEXT has no board";
+        context.reset(); // its destructor still unlinks the board from `project`
+        _releaseUnusedProject(state.runtime, project);
         return std::nullopt;
     }
 
-    g_boardCache = BoardCacheEntry{.projectPath = projectPath,
-                                    .boardPath = boardPath,
-                                    .projectMTime = projectMTime,
-                                    .boardMTime = boardMTime,
-                                    .context = context,
-                                    .board = boardPtr};
+    state.projectMTime = projectMTime;
+    state.boardMTime = boardMTime;
+    state.context = context;
+    state.board = boardPtr;
+    state.project = project;
+    state.runtime.loadedBoards.push_back(&state);
 
     LoadedBoard result;
     result.lock = std::move(lock);
@@ -502,20 +533,38 @@ void _appendCopperPolygons(const SHAPE_POLY_SET& polygons, const VECTOR2I& auxOr
 
 } // namespace
 
-bool initializeRaw(std::string& error) {
-    std::lock_guard<std::mutex> lock(g_kicadMutex);
+RuntimeState* createRuntimeRaw(std::string& error) {
     if (!_ensureWxInitialized()) {
         error = "KiCad/wx runtime initialization failed";
-        return false;
+        return nullptr;
     }
-    return true;
+    return new RuntimeState();
 }
 
-RawPadCountsResult countPadsRaw(const std::string& projectPath, const std::string& boardPath) {
+void destroyRuntimeRaw(RuntimeState* runtime) {
+    delete runtime;
+}
+
+BoardState* createBoardRaw(RuntimeState& runtime, std::string projectPath, std::string boardPath) {
+    return new BoardState{.runtime = runtime, .projectPath = std::move(projectPath), .boardPath = std::move(boardPath)};
+}
+
+void destroyBoardRaw(BoardState* state) {
+    if (!state) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(state->runtime.mutex);
+        _unloadBoard(*state);
+    }
+    delete state;
+}
+
+RawPadCountsResult countPadsRaw(BoardState& state) {
     ensureGeneratorsRegistered();
 
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
     if (!loaded) {
         return _fail(std::move(error));
     }
@@ -533,7 +582,7 @@ RawPadCountsResult countPadsRaw(const std::string& projectPath, const std::strin
     kiapi::common::commands::GetItems getItems;
     getItems.mutable_header()->mutable_document()->set_type(kiapi::common::types::DocumentType::DOCTYPE_PCB);
     getItems.mutable_header()->mutable_document()->set_board_filename(
-            wxFileName(wxString::FromUTF8(boardPath)).GetFullName().ToStdString());
+            wxFileName(wxString::FromUTF8(state.boardPath)).GetFullName().ToStdString());
     getItems.add_types(kiapi::common::types::KOT_PCB_PAD);
 
     kiapi::common::ApiRequest request;
@@ -563,10 +612,9 @@ RawPadCountsResult countPadsRaw(const std::string& projectPath, const std::strin
     return result;
 }
 
-RawNetNameResult netForFootprintPinRaw(const std::string& projectPath, const std::string& boardPath,
-                                        const std::string& footprintRef, const std::string& pin) {
+RawNetNameResult netForFootprintPinRaw(BoardState& state, const std::string& footprintRef, const std::string& pin) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
     if (!loaded) {
         return _failNetName(std::move(error));
     }
@@ -584,10 +632,9 @@ RawNetNameResult netForFootprintPinRaw(const std::string& projectPath, const std
     return result;
 }
 
-RawNetNameResult netClassForNetRaw(const std::string& projectPath, const std::string& boardPath,
-                                    const std::string& netName) {
+RawNetNameResult netClassForNetRaw(BoardState& state, const std::string& netName) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
     if (!loaded) {
         return _failNetName(std::move(error));
     }
@@ -621,10 +668,9 @@ RawNetNameResult netClassForNetRaw(const std::string& projectPath, const std::st
     return _failNetName("No net named \"" + netName + "\" exists on the board");
 }
 
-RawPadResult resolvePinRaw(const std::string& projectPath, const std::string& boardPath,
-                            const std::string& footprintRef, const std::string& pin) {
+RawPadResult resolvePinRaw(BoardState& state, const std::string& footprintRef, const std::string& pin) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
     if (!loaded) {
         return _failPad(std::move(error));
     }
@@ -660,10 +706,9 @@ RawPadResult resolvePinRaw(const std::string& projectPath, const std::string& bo
     return result;
 }
 
-RawNetClassMembersResult netsInNetClassRaw(const std::string& projectPath, const std::string& boardPath,
-                                            const std::string& netClassName) {
+RawNetClassMembersResult netsInNetClassRaw(BoardState& state, const std::string& netClassName) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
     if (!loaded) {
         return _failNetClassMembers(std::move(error));
     }
@@ -691,10 +736,9 @@ RawNetClassMembersResult netsInNetClassRaw(const std::string& projectPath, const
     return result;
 }
 
-RawPadsOnNetResult padsOnNetRaw(const std::string& projectPath, const std::string& boardPath,
-                                 const std::string& netName) {
+RawPadsOnNetResult padsOnNetRaw(BoardState& state, const std::string& netName) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
     if (!loaded) {
         return _failPadsOnNet(std::move(error));
     }
@@ -737,10 +781,9 @@ RawPadsOnNetResult padsOnNetRaw(const std::string& projectPath, const std::strin
     return result;
 }
 
-RawTracksOnNetResult tracksOnNetRaw(const std::string& projectPath, const std::string& boardPath,
-                                     const std::string& netName) {
+RawTracksOnNetResult tracksOnNetRaw(BoardState& state, const std::string& netName) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
     if (!loaded) {
         return _failTracksOnNet(std::move(error));
     }
@@ -770,9 +813,9 @@ RawTracksOnNetResult tracksOnNetRaw(const std::string& projectPath, const std::s
     return result;
 }
 
-RawPadsOnNetResult allPadsRaw(const std::string& projectPath, const std::string& boardPath) {
+RawPadsOnNetResult allPadsRaw(BoardState& state) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
     if (!loaded) {
         return _failPadsOnNet(std::move(error));
     }
@@ -801,9 +844,9 @@ RawPadsOnNetResult allPadsRaw(const std::string& projectPath, const std::string&
     return result;
 }
 
-RawAllTracksResult allTracksRaw(const std::string& projectPath, const std::string& boardPath) {
+RawAllTracksResult allTracksRaw(BoardState& state) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
     if (!loaded) {
         RawAllTracksResult result;
         result.ok = false;
@@ -870,9 +913,9 @@ RawAllTracksResult allTracksRaw(const std::string& projectPath, const std::strin
     return result;
 }
 
-RawZonesResult zonesRaw(const std::string& projectPath, const std::string& boardPath) {
+RawZonesResult zonesRaw(BoardState& state) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
     if (!loaded) {
         return _failZones(std::move(error));
     }
@@ -914,9 +957,9 @@ RawZonesResult zonesRaw(const std::string& projectPath, const std::string& board
     return result;
 }
 
-RawBoardLayersResult boardLayersRaw(const std::string& projectPath, const std::string& boardPath) {
+RawBoardLayersResult boardLayersRaw(BoardState& state) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
     if (!loaded) return _failBoardLayers(std::move(error));
 
     RawBoardLayersResult result;
@@ -932,11 +975,9 @@ RawBoardLayersResult boardLayersRaw(const std::string& projectPath, const std::s
     return result;
 }
 
-RawBoardLayerGeometryResult boardLayerGeometryRaw(const std::string& projectPath,
-                                                    const std::string& boardPath,
-                                                    const std::string& layerName) {
+RawBoardLayerGeometryResult boardLayerGeometryRaw(BoardState& state, const std::string& layerName) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
     if (!loaded) return _failBoardLayerGeometry(std::move(error));
     BOARD* board = loaded->board;
 
@@ -1022,9 +1063,9 @@ RawBoardLayerGeometryResult boardLayerGeometryRaw(const std::string& projectPath
     return result;
 }
 
-RawBoardGeometryResult boardGeometryRaw(const std::string& projectPath, const std::string& boardPath) {
+RawBoardGeometryResult boardGeometryRaw(BoardState& state) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
     if (!loaded) {
         return _failBoardGeometry(std::move(error));
     }
@@ -1193,9 +1234,9 @@ RawBoardGeometryResult boardGeometryRaw(const std::string& projectPath, const st
     return result;
 }
 
-RawStackupResult stackupRaw(const std::string& projectPath, const std::string& boardPath) {
+RawStackupResult stackupRaw(BoardState& state) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
     if (!loaded) {
         return _failStackup(std::move(error));
     }
@@ -1253,9 +1294,9 @@ RawStackupResult stackupRaw(const std::string& projectPath, const std::string& b
     return result;
 }
 
-RawLayerColorsResult layerColorsRaw(const std::string& projectPath, const std::string& boardPath) {
+RawLayerColorsResult layerColorsRaw(BoardState& state) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
     if (!loaded) {
         return _failLayerColors(std::move(error));
     }
@@ -1281,9 +1322,9 @@ RawLayerColorsResult layerColorsRaw(const std::string& projectPath, const std::s
     return result;
 }
 
-RawNetColorsResult netColorsRaw(const std::string& projectPath, const std::string& boardPath) {
+RawNetColorsResult netColorsRaw(BoardState& state) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
     if (!loaded) {
         return _failNetColors(std::move(error));
     }
@@ -1327,9 +1368,9 @@ RawNetColorsResult netColorsRaw(const std::string& projectPath, const std::strin
     return result;
 }
 
-RawStringListResult netClassesRaw(const std::string& projectPath, const std::string& boardPath) {
+RawStringListResult netClassesRaw(BoardState& state) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
     if (!loaded) {
         return _failStringList(std::move(error));
     }
@@ -1349,9 +1390,9 @@ RawStringListResult netClassesRaw(const std::string& projectPath, const std::str
     return result;
 }
 
-RawStringListResult allNetsRaw(const std::string& projectPath, const std::string& boardPath) {
+RawStringListResult allNetsRaw(BoardState& state) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
     if (!loaded) {
         return _failStringList(std::move(error));
     }
@@ -1368,9 +1409,9 @@ RawStringListResult allNetsRaw(const std::string& projectPath, const std::string
     return result;
 }
 
-RawFootprintsResult footprintsRaw(const std::string& projectPath, const std::string& boardPath) {
+RawFootprintsResult footprintsRaw(BoardState& state) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
     if (!loaded) {
         return _failFootprints(std::move(error));
     }
@@ -1406,9 +1447,9 @@ RawFootprintsResult footprintsRaw(const std::string& projectPath, const std::str
     return result;
 }
 
-RawThroughHolesResult throughHolesRaw(const std::string& projectPath, const std::string& boardPath) {
+RawThroughHolesResult throughHolesRaw(BoardState& state) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
     if (!loaded) {
         return _failThroughHoles(std::move(error));
     }
@@ -1471,9 +1512,9 @@ RawThroughHolesResult throughHolesRaw(const std::string& projectPath, const std:
     return result;
 }
 
-RawNonPlatedHolesResult nonPlatedHolesRaw(const std::string& projectPath, const std::string& boardPath) {
+RawNonPlatedHolesResult nonPlatedHolesRaw(BoardState& state) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
     if (!loaded) {
         return _failNonPlatedHoles(std::move(error));
     }
@@ -1500,11 +1541,10 @@ RawNonPlatedHolesResult nonPlatedHolesRaw(const std::string& projectPath, const 
     return result;
 }
 
-RawComponentModelExportResult exportComponentModelsRaw(const std::string& projectPath, const std::string& boardPath,
-                                                          const std::string& componentFilter,
+RawComponentModelExportResult exportComponentModelsRaw(BoardState& state, const std::string& componentFilter,
                                                           const std::string& outputStlPath) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(projectPath, boardPath, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
     if (!loaded) {
         return _failComponentModelExport(std::move(error));
     }

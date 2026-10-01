@@ -117,8 +117,8 @@ bool _viaIntersectsOutline(double x, double y, double diameter, const std::vecto
     return _distanceToPolygonBoundary(x, y, outline) <= diameter / 2;
 }
 
-std::expected<std::pair<double, double>, std::string> _boardOrigin(const PathsConfig& paths) {
-    auto geometry = libkicad::boardGeometry(paths.kicadBoardPaths());
+std::expected<std::pair<double, double>, std::string> _boardOrigin(const libkicad::Board& board) {
+    auto geometry = board.boardGeometry();
     if (!geometry) {
         return std::unexpected(std::move(geometry).error());
     }
@@ -241,13 +241,14 @@ std::vector<std::pair<std::vector<double>, std::vector<double>>> _clipPolygonToO
 } // namespace
 
 Simulation::Simulation(SimulationConfig& simConfig, const EMSConfig& config, const RunOptions& options,
-                        const PathsConfig& paths)
+                        const PathsConfig& paths, const libkicad::Board& board)
     : _csx(std::make_unique<ContinuousStructure>()),
       _grid(nullptr),
       _simConfig(simConfig),
       _config(config),
       _options(options),
       _paths(paths),
+      _board(board),
       _planeMaterial(nullptr),
       _viaMaterial(nullptr),
       _viaFillingMaterial(nullptr),
@@ -263,11 +264,11 @@ Simulation::Simulation(SimulationConfig& simConfig, const EMSConfig& config, con
 
 std::expected<void, std::string> Simulation::sliceBoard() {
     logInfo("Slicing board for " + _simConfig.name());
-    auto geometry = libkicad::boardGeometry(_paths.kicadBoardPaths());
+    auto geometry = _board.boardGeometry();
     if (!geometry) {
         return std::unexpected(std::move(geometry).error());
     }
-    auto copper = classifyCopperForSimulation(_simConfig, *geometry, _paths);
+    auto copper = classifyCopperForSimulation(_simConfig, *geometry, _board);
     if (!copper) {
         return std::unexpected(std::move(copper).error());
     }
@@ -279,11 +280,11 @@ std::expected<void, std::string> Simulation::sliceBoard() {
     // Best-effort: if the KiCad hole query fails, slicing/stitching just proceed without this data
     // rather than failing the whole slice over it (the same as if the board genuinely had none).
     std::vector<ViaHole> existingVias;
-    if (auto vias = getVias(_paths, origin->xMin, origin->yMin); vias) {
+    if (auto vias = getVias(_board, origin->xMin, origin->yMin); vias) {
         existingVias = std::move(*vias);
     }
     std::vector<NPTHHole> npthHoles;
-    if (auto holes = getNPTHHoles(_paths, origin->xMin, origin->yMin); holes) {
+    if (auto holes = getNPTHHoles(_board, origin->xMin, origin->yMin); holes) {
         npthHoles = std::move(*holes);
     }
 
@@ -477,7 +478,7 @@ void Simulation::addGrid() {
     addPortGrid();
     addLumpedComponentGrid();
     logInfo("Compiling grid");
-    _gridGen->generate(*_grid, _simConfig, _paths);
+    _gridGen->generate(*_grid, _simConfig, _board);
     printGridStats();
 }
 
@@ -933,11 +934,11 @@ void Simulation::addSolderMask() {
 
 std::expected<void, std::string> Simulation::addVias() {
     logInfo("Adding vias from KiCad board geometry");
-    auto originResult = _boardOrigin(_paths);
+    auto originResult = _boardOrigin(_board);
     if (!originResult) {
         return std::unexpected(originResult.error());
     }
-    auto viasResult = getVias(_paths, originResult->first, originResult->second);
+    auto viasResult = getVias(_board, originResult->first, originResult->second);
     if (!viasResult) {
         return std::unexpected(viasResult.error());
     }

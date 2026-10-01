@@ -50,8 +50,8 @@ CGPoint toCGPoint(const kiems::Position& position) {
 // needs applying by the caller, this just handles the unit conversion.
 double mmToSimUnits(double mm) { return mm / 1000.0 / kiems::constants::baseUnit * kiems::constants::unitMultiplier; }
 
-std::expected<std::pair<double, double>, std::string> boardOrigin(const PathsConfig& paths) {
-    auto geometry = libkicad::boardGeometry(paths.kicadBoardPaths());
+std::expected<std::pair<double, double>, std::string> boardOrigin(const libkicad::Board& board) {
+    auto geometry = board.boardGeometry();
     if (!geometry) {
         return std::unexpected(std::move(geometry).error());
     }
@@ -124,9 +124,9 @@ struct RealHoleSize {
 // each into this preview's frame. Best-effort: an empty result leaves every via falling back to
 // kPreviewViaAnnularRingMarginSimUnits instead, not a hard error -- the ring is a cosmetic preview
 // detail, never worth failing the whole geometry step over.
-std::vector<RealHoleSize> buildRealHoleSizes(const kiems::PathsConfig& paths, double originX, double originY) {
+std::vector<RealHoleSize> buildRealHoleSizes(const libkicad::Board& board, double originX, double originY) {
     std::vector<RealHoleSize> sizes;
-    auto holesResult = libkicad::throughHoles(paths.kicadBoardPaths());
+    auto holesResult = board.throughHoles();
     if (!holesResult) {
         return sizes;
     }
@@ -303,7 +303,7 @@ struct ComponentExportOutcome {
 // whole geometry preview -- this is a debug visualization aid, never something the real FDTD
 // geometry depends on. A per-component failure (e.g. a missing 3D model file) isn't hard-fatal --
 // messages carries it, triangles still has every other requested component's mesh.
-ComponentExportOutcome exportComponentTriangles(const PathsConfig& paths, const std::vector<std::string>& refs) {
+ComponentExportOutcome exportComponentTriangles(const libkicad::Board& board, const std::vector<std::string>& refs) {
     if (refs.empty()) {
         logInfo("GeometryPreview: no included footprint references, skipping component model export");
         return {};
@@ -317,19 +317,16 @@ ComponentExportOutcome exportComponentTriangles(const PathsConfig& paths, const 
     }
     // Still written to disk as an incidental debug artifact (see exportComponentModels()'s own doc
     // comment) -- not read back here, the colored mesh comes straight from the query's own result.
-    // A whole-board preview queries the source board directly and has no fabDir. A relative path
-    // there makes a GUI launch try to write in `/`, so the exporter fails and returns no mesh.
-    std::filesystem::path artifactDir = paths.fabDir;
-    if (artifactDir.empty()) {
-        std::error_code error;
-        artifactDir = std::filesystem::temp_directory_path(error);
-        if (error) artifactDir = "/tmp";
-    }
-    const std::size_t artifactKey = std::hash<std::string>{}(paths.fabBoardFile.string() + "\n" + refsCsv);
+    // Never next to the board itself: a whole-board preview queries the user's own KiCad project
+    // directory directly.
+    std::error_code tempError;
+    std::filesystem::path artifactDir = std::filesystem::temp_directory_path(tempError);
+    if (tempError) artifactDir = "/tmp";
+    const std::size_t artifactKey = std::hash<std::string>{}(board.paths().boardPath + "\n" + refsCsv);
     const std::filesystem::path outPath =
         artifactDir / ("kiems_geometry_preview_components_" + std::to_string(artifactKey) + ".stl");
     logInfo("GeometryPreview: exporting component models for [" + refsCsv + "]");
-    auto exportResult = libkicad::exportComponentModels(paths.kicadBoardPaths(), refsCsv, outPath.string());
+    auto exportResult = board.exportComponentModels(refsCsv, outPath.string());
     if (!exportResult) {
         logWarning("GeometryPreview: exportComponentModels failed: " + exportResult.error());
         return {};
@@ -1137,13 +1134,13 @@ NSData* buildMaterialEdgeColors(ContinuousStructure& csx, const kiems::ComputedG
 }
 
 MaterialGridBuffers buildMaterialGrid(const SlicedBoard& sliced, const SimulationConfig& simConfig,
-                                      const EMSConfig& config, const PathsConfig& paths,
-                                      const kiems::ComputedGridLines& grid) {
+                                      const EMSConfig& config, const kiems::PathsConfig& paths,
+                                      const libkicad::Board& board, const kiems::ComputedGridLines& grid) {
     if (grid.x.empty() || grid.y.empty() || grid.z.empty()) return {};
     SimulationConfig configCopy = simConfig;
     kiems::RunOptions options;
     options.backend = kiems::FDTDBackend::CopperGPU;
-    kiems::Simulation simulation(configCopy, config, options, paths);
+    kiems::Simulation simulation(configCopy, config, options, paths, board);
     simulation.adoptSlicedBoard(sliced);
     simulation.adoptGridLines(grid);
     if (auto result = simulation.populateGeometry(); !result) {
@@ -1212,14 +1209,15 @@ MaterialGridBuffers buildMaterialGrid(const SlicedBoard& sliced, const Simulatio
 } // namespace
 
 EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const SimulationConfig& simConfig,
-                                          const EMSConfig& scaledConfig, const PathsConfig& paths,
+                                          const EMSConfig& scaledConfig, const kiems::PathsConfig& paths,
+                                          const libkicad::Board& board,
                                           const kiems::ComputedGridLines* gridLines) {
     // Best-effort: the board's own KiCad color theme, if readable (see layerColors's own doc
     // comment for what "readable" means outside a full GUI session) -- a lookup failure here isn't
     // fatal to the geometry step itself, it just leaves every layer's hexColor nil, which callers
     // fall back to their own default palette for.
     std::unordered_map<std::string, std::string> colorsByLayerName;
-    if (auto colorsResult = libkicad::layerColors(paths.kicadBoardPaths()); colorsResult) {
+    if (auto colorsResult = board.layerColors(); colorsResult) {
         for (const auto& layerColor : *colorsResult) {
             colorsByLayerName.emplace(layerColor.name, layerColor.hex);
         }
@@ -1306,11 +1304,11 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
     // coordinate this preview uses already has (see getVias()'s own doc comment) -- re-derived here
     // rather than threaded through, matching sliceBoardForSimulation()'s own internal re-derivation
     // of the identical value.
-    if (auto originResult = boardOrigin(paths); originResult) {
+    if (auto originResult = boardOrigin(board); originResult) {
         // Queried once, up front, rather than per-via -- see buildRealHoleSizes()'s own comment.
         const std::vector<RealHoleSize> realHoleSizes =
-            buildRealHoleSizes(paths, originResult->first, originResult->second);
-        if (auto realVias = kiems::getVias(paths, originResult->first, originResult->second); realVias) {
+            buildRealHoleSizes(board, originResult->first, originResult->second);
+        if (auto realVias = kiems::getVias(board, originResult->first, originResult->second); realVias) {
             for (const auto& via : *realVias) {
                 // Tested against both ends of the via's own centerline -- for a plain round via
                 // (x2==x, y2==y) this is just the same point twice; for an elongated one (see
@@ -1405,8 +1403,8 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
         for (const auto& ref : refs) {
             [renderedRefs addObject:@(ref.c_str())];
         }
-        if (auto originResult = boardOrigin(paths); originResult) {
-            const ComponentExportOutcome outcome = exportComponentTriangles(paths, refs);
+        if (auto originResult = boardOrigin(board); originResult) {
+            const ComponentExportOutcome outcome = exportComponentTriangles(board, refs);
             for (const auto& message : outcome.messages) {
                 [componentModelExportMessages addObject:@(message.c_str())];
             }
@@ -1524,7 +1522,7 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
     // data, and the packed Metal buffers are far smaller/faster than putting hundreds of thousands
     // of edge classifications into geometry.json.
     const MaterialGridBuffers materialGrid =
-        gridLines ? buildMaterialGrid(sliced, simConfig, scaledConfig, paths, *gridLines) : MaterialGridBuffers{};
+        gridLines ? buildMaterialGrid(sliced, simConfig, scaledConfig, paths, board, *gridLines) : MaterialGridBuffers{};
 
     return [[EMSGeometryPreview alloc] initWithLayers:layers
                                            wholeBoard:NO
@@ -1587,12 +1585,12 @@ std::optional<simd_double4> previewColorFromHex(const std::string& hex) {
     }
 }
 
-std::unordered_map<std::string, simd_double4> previewNetColors(const kiems::PathsConfig& paths) {
+std::unordered_map<std::string, simd_double4> previewNetColors(const libkicad::Board& board) {
     std::unordered_map<std::string, simd_double4> colorsByNetName;
     // libkicad resolves KiCad's two project-file colour sources with the PCB editor's precedence:
     // explicit net colour, then effective net-class colour. Nets with neither deliberately remain
     // absent so GeometryView falls back to the copper layer's own theme colour.
-    if (auto colorsResult = libkicad::netColors(paths.kicadBoardPaths()); colorsResult) {
+    if (auto colorsResult = board.netColors(); colorsResult) {
         for (const auto& netColor : *colorsResult) {
             if (auto color = previewColorFromHex(netColor.hex)) {
                 colorsByNetName.emplace(netColor.name, *color);
@@ -1615,10 +1613,10 @@ struct PreviewLayerPlacement {
     double bottom = 0;
 };
 
-PreviewLayerPlacement previewLayerPlacement(const kiems::PathsConfig& paths) {
+PreviewLayerPlacement previewLayerPlacement(const libkicad::Board& board) {
     PreviewLayerPlacement result;
     kiems::EMSConfig config;
-    if (!kiems::importStackup(paths, config)) return result;
+    if (!kiems::importStackup(board, config)) return result;
     double z = 0;
     for (const auto& layer : config.layers()) {
         if (layer.kind() == kiems::LayerKind::Substrate) z -= layer.thickness();
@@ -1696,16 +1694,16 @@ PreviewOutlineFrame previewOutlineFrame(const std::vector<libkicad::PolygonLoop>
 } // namespace
 
 std::expected<EMSGeometryPreview*, std::string> buildBoardLayerCatalogPreview(
-    const kiems::PathsConfig& paths, bool wholeBoard) {
-    auto catalog = libkicad::boardLayers(paths.kicadBoardPaths());
+    const libkicad::Board& board, bool wholeBoard) {
+    auto catalog = board.boardLayers();
     if (!catalog) return std::unexpected(std::move(catalog).error());
-    auto edge = libkicad::boardLayerGeometry(paths.kicadBoardPaths(), "Edge.Cuts");
+    auto edge = board.boardLayerGeometry("Edge.Cuts");
     if (!edge) return std::unexpected(std::move(edge).error());
     const PreviewOutlineFrame frame = previewOutlineFrame(edge->boardOutline);
-    const PreviewLayerPlacement placement = previewLayerPlacement(paths);
+    const PreviewLayerPlacement placement = previewLayerPlacement(board);
 
     std::unordered_map<std::string, std::string> colors;
-    if (auto result = libkicad::layerColors(paths.kicadBoardPaths()); result) {
+    if (auto result = board.layerColors(); result) {
         for (const auto& color : *result) colors[color.name] = color.hex;
     }
     NSMutableArray<EMSGeometryLayer*>* layers = [NSMutableArray arrayWithCapacity:catalog->size()];
@@ -1726,17 +1724,17 @@ std::expected<EMSGeometryPreview*, std::string> buildBoardLayerCatalogPreview(
 }
 
 static std::expected<EMSGeometryLayer*, std::string> buildBoardLayerPreviewImpl(
-    const kiems::PathsConfig& paths, const std::string& layerName,
+    const libkicad::Board& board, const std::string& layerName,
     const PolygonSet* clip, double tessellationTolerance) {
-    auto result = libkicad::boardLayerGeometry(paths.kicadBoardPaths(), layerName);
+    auto result = board.boardLayerGeometry(layerName);
     if (!result) return std::unexpected(std::move(result).error());
     const PreviewOutlineFrame frame = previewOutlineFrame(result->boardOutline);
-    const PreviewLayerPlacement placement = previewLayerPlacement(paths);
+    const PreviewLayerPlacement placement = previewLayerPlacement(board);
     NSString* hex = nil;
-    if (auto colors = libkicad::layerColors(paths.kicadBoardPaths()); colors) {
+    if (auto colors = board.layerColors(); colors) {
         for (const auto& color : *colors) if (color.name == layerName) { hex = @(color.hex.c_str()); break; }
     }
-    const std::unordered_map<std::string, simd_double4> colorsByNetName = previewNetColors(paths);
+    const std::unordered_map<std::string, simd_double4> colorsByNetName = previewNetColors(board);
 
     NSMutableArray<EMSGeometryTriangle*>* triangles = [NSMutableArray array];
     if (result->layer.copper) {
@@ -1787,21 +1785,21 @@ static std::expected<EMSGeometryLayer*, std::string> buildBoardLayerPreviewImpl(
 }
 
 std::expected<EMSGeometryLayer*, std::string> buildBoardLayerPreview(
-    const kiems::PathsConfig& paths, const std::string& layerName) {
-    return buildBoardLayerPreviewImpl(paths, layerName, nullptr,
+    const libkicad::Board& board, const std::string& layerName) {
+    return buildBoardLayerPreviewImpl(board, layerName, nullptr,
                                       kWholeBoardTessellationToleranceSimUnits);
 }
 
 std::expected<EMSGeometryLayer*, std::string> buildSlicedBoardLayerPreview(
-    const kiems::PathsConfig& paths, const std::string& layerName,
+    const libkicad::Board& board, const std::string& layerName,
     const kiems::SlicedBoard& sliced, double tessellationTolerance) {
     const PolygonSet clip = sliced.cutoutLoops.empty() ? PolygonSet{sliced.outline} : sliced.cutoutLoops;
-    return buildBoardLayerPreviewImpl(paths, layerName, &clip, tessellationTolerance);
+    return buildBoardLayerPreviewImpl(board, layerName, &clip, tessellationTolerance);
 }
 
-std::expected<EMSGeometryPreview*, std::string> buildWholeBoardPreview(const kiems::PathsConfig& paths) {
+std::expected<EMSGeometryPreview*, std::string> buildWholeBoardPreview(const libkicad::Board& board) {
     const auto previewStartedAt = std::chrono::steady_clock::now();
-    auto geometryResult = libkicad::boardGeometry(paths.kicadBoardPaths());
+    auto geometryResult = board.boardGeometry();
     if (!geometryResult) return std::unexpected(std::move(geometryResult).error());
     const libkicad::BoardGeometry& geometry = *geometryResult;
 
@@ -1815,18 +1813,18 @@ std::expected<EMSGeometryPreview*, std::string> buildWholeBoardPreview(const kie
     // exact same way the real FDTD geometry places them (kiems::Simulation::addGerbers()) -- not
     // for anything sliced/simulated. A throwaway config, never a real SimulationConfig's own.
     kiems::EMSConfig stackupConfig;
-    if (auto stackupImported = kiems::importStackup(paths, stackupConfig); !stackupImported) {
+    if (auto stackupImported = kiems::importStackup(board, stackupConfig); !stackupImported) {
         return std::unexpected(std::move(stackupImported).error());
     }
 
     std::unordered_map<std::string, std::string> colorsByLayerName;
-    if (auto colorsResult = libkicad::layerColors(paths.kicadBoardPaths()); colorsResult) {
+    if (auto colorsResult = board.layerColors(); colorsResult) {
         for (const auto& layerColor : *colorsResult) {
             colorsByLayerName.emplace(layerColor.name, layerColor.hex);
         }
     }
 
-    const std::unordered_map<std::string, simd_double4> colorsByNetName = previewNetColors(paths);
+    const std::unordered_map<std::string, simd_double4> colorsByNetName = previewNetColors(board);
 
     const std::vector<kiems::LayerConfig> metals = stackupConfig.getMetals();
     std::vector<double> metalOffsets;
@@ -1851,7 +1849,7 @@ std::expected<EMSGeometryPreview*, std::string> buildWholeBoardPreview(const kie
     NSMutableArray<EMSGeometryComponentTriangle*>* viaTriangles = [NSMutableArray array];
     std::vector<IndexedHoleCutout> platedHoleCutouts;
     PolygonSet allPlatedHoleCutouts;
-    if (auto holes = libkicad::throughHoles(paths.kicadBoardPaths()); holes) {
+    if (auto holes = board.throughHoles(); holes) {
         platedHoleCutouts.reserve(holes->size());
         for (const auto& hole : *holes) {
             const double cx = mmToSimUnits(hole.xMm) - originX;
@@ -2121,7 +2119,7 @@ std::expected<EMSGeometryPreview*, std::string> buildWholeBoardPreview(const kie
     NSMutableArray<NSString*>* componentModelExportMessages = [NSMutableArray array];
     {
         std::vector<std::string> refs;
-        if (auto footprintsResult = libkicad::footprints(paths.kicadBoardPaths());
+        if (auto footprintsResult = board.footprints();
             footprintsResult) {
             refs.reserve(footprintsResult->size());
             for (const auto& footprint : *footprintsResult) {
@@ -2132,7 +2130,7 @@ std::expected<EMSGeometryPreview*, std::string> buildWholeBoardPreview(const kie
             logWarning("GeometryPreview: footprint listing failed, skipping whole-board component model "
                        "export: " + footprintsResult.error());
         }
-        const ComponentExportOutcome outcome = exportComponentTriangles(paths, refs);
+        const ComponentExportOutcome outcome = exportComponentTriangles(board, refs);
         for (const auto& message : outcome.messages) {
             [componentModelExportMessages addObject:@(message.c_str())];
         }
@@ -2163,7 +2161,7 @@ std::expected<EMSGeometryPreview*, std::string> buildWholeBoardPreview(const kie
     // weighted by each segment's own physical length) rather than approximating "distance along the
     // copper" from triangulated fill geometry alone.
     NSMutableArray<EMSGeometryTrackSegment*>* trackSegments = [NSMutableArray array];
-    if (auto tracksResult = libkicad::allTracks(paths.kicadBoardPaths()); tracksResult) {
+    if (auto tracksResult = board.allTracks(); tracksResult) {
         trackSegments = [NSMutableArray arrayWithCapacity:tracksResult->size()];
         for (const auto& [netName, segment] : *tracksResult) {
             const CGPoint start = CGPointMake(mmToSimUnits(segment.startXMm) - originX,

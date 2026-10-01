@@ -904,7 +904,7 @@ enum class LayerKind {
     SolderMaskBottom,
 };
 
-/// One layer of a resolved board stackup (see libkicad::stackup()) -- copper, substrate, or
+/// One layer of a resolved board stackup (see libkicad::Board::stackup()) -- copper, substrate, or
 /// (top/bottom) solder mask, already scaled to simulation units.
 class LayerConfig {
 public:
@@ -1237,7 +1237,7 @@ public:
     EMSConfig scaledToSimulationUnits() const;
 
     /// Replaces layers() with `layers` (already resolved by the caller from the live board via
-    /// libkicad::stackup() -- see importer.cpp's importStackup()).
+    /// libkicad::Board::stackup() -- see importer.cpp's importStackup()).
     void loadStackup(std::vector<LayerConfig> layers);
 
     /// The .kicad_pcb this document is linked to -- an absolute path to wherever the user's KiCad

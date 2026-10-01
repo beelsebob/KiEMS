@@ -68,8 +68,8 @@ std::expected<void, std::string> exportKicadPcb(const PathsConfig& paths, const 
     return {};
 }
 
-std::expected<std::vector<ViaHole>, std::string> getVias(const PathsConfig& paths, double originX, double originY) {
-    auto source = libkicad::throughHoles(paths.kicadBoardPaths());
+std::expected<std::vector<ViaHole>, std::string> getVias(const libkicad::Board& board, double originX, double originY) {
+    auto source = board.throughHoles();
     if (!source) return std::unexpected(std::move(source).error());
     std::vector<ViaHole> vias;
     vias.reserve(source->size());
@@ -89,9 +89,9 @@ std::expected<std::vector<ViaHole>, std::string> getVias(const PathsConfig& path
     return vias;
 }
 
-std::expected<std::vector<NPTHHole>, std::string> getNPTHHoles(const PathsConfig& paths, double originX,
+std::expected<std::vector<NPTHHole>, std::string> getNPTHHoles(const libkicad::Board& board, double originX,
                                                                   double originY) {
-    auto source = libkicad::nonPlatedHoles(paths.kicadBoardPaths());
+    auto source = board.nonPlatedHoles();
     if (!source) return std::unexpected(std::move(source).error());
     std::vector<NPTHHole> holes;
     holes.reserve(source->size());
@@ -105,13 +105,13 @@ std::expected<std::vector<NPTHHole>, std::string> getNPTHHoles(const PathsConfig
     return holes;
 }
 
-std::expected<void, std::string> importStackup(const PathsConfig& paths, EMSConfig& config) {
+std::expected<void, std::string> importStackup(const libkicad::Board& board, EMSConfig& config) {
     // Queries the live board's own Board Setup > Board Stackup data via libkicad rather than a hand-maintained
     // stackup.json: the board file is the actual source of truth, and keeping a second,
     // easily-stale copy of the same data in sync by hand was never anything but a workaround for
     // not having this query available yet. Requires fab/board.kicad_pcb (persisted by
     // exportKicadPcb()), exactly like port_resolution.cpp's own ki calls.
-    auto stackupResult = libkicad::stackup(paths.kicadBoardPaths());
+    auto stackupResult = board.stackup();
     if (!stackupResult) {
         return std::unexpected(stackupResult.error());
     }

@@ -179,18 +179,19 @@ private:
 
 /// Slices `data.configuration()`'s board (see Simulation::sliceBoard()) into a SimulationGeometry.
 /// Combine with `data` via SimulationData<Geometry>'s own constructor to advance the pipeline:
-/// `SimulationData<SimulationStage::Geometry>(data, *generateGeometry(data, config, paths))`.
+/// `SimulationData<SimulationStage::Geometry>(data, *generateGeometry(data, config, board))`.
 /// `onProgress`, when supplied, reports completed polygon-operation and triangulation primitive
 /// batches, followed by a finishing phase while the remaining bookkeeping completes.
 std::expected<SimulationGeometry, std::string> generateGeometry(const SimulationData<SimulationStage::Configured>& data,
-                                                                  const EMSConfig& config, const PathsConfig& paths,
+                                                                  const EMSConfig& config, const libkicad::Board& board,
                                                                   const GeometryProcessingProgressCallback& onProgress = {});
 
 /// Places grid lines (see Simulation::addGrid()/gridLines()) for `data.geometry()`'s already-sliced
 /// board into a SimulationGrid. Combine with `data` via SimulationData<Grid>'s own constructor to
-/// advance the pipeline: `SimulationData<SimulationStage::Grid>(data, generateGrid(data, config, options, paths))`.
+/// advance the pipeline: `SimulationData<SimulationStage::Grid>(data, generateGrid(data, config, options, paths, board))`.
 SimulationGrid generateGrid(const SimulationData<SimulationStage::Geometry>& data, const EMSConfig& config,
-                             const RunOptions& options, const PathsConfig& paths);
+                             const RunOptions& options, const PathsConfig& paths,
+                             const libkicad::Board& board);
 
 /// Runs every excited port's own FDTD pass (see FDTDPortRunner and
 /// `data.configuration().ports()`'s own excite() flags) against `data.grid()`'s
@@ -205,7 +206,7 @@ SimulationGrid generateGrid(const SimulationData<SimulationStage::Geometry>& dat
 /// comment.
 std::expected<SimulationResults, std::string> generateResults(const SimulationData<SimulationStage::Grid>& data,
                                                                 const EMSConfig& config, const RunOptions& options,
-                                                                const PathsConfig& paths,
+                                                                const PathsConfig& paths, const libkicad::Board& board,
                                                                 const std::vector<double>& frequencies,
                                                                 const FDTDPortRunner& portRunner = {});
 

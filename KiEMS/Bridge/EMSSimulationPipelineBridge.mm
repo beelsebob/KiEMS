@@ -2,6 +2,7 @@
 #import "EMSConfigBridge+Private.h"
 #import "FieldSnapshotBridge+Private.h"
 #import "GeometryPreviewBridge+Private.h"
+#import "KicadBoardBridge+Private.h"
 #import "SimulationResultsBridge+Private.h"
 
 #include <algorithm>
@@ -457,6 +458,9 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
 
 @implementation EMSSimulationPipelineBridge {
     std::string _simulationName;
+    // Declared before _board: ivars are destroyed in reverse order, so the board is torn down while
+    // its runtime is still alive.
+    KicadRuntime* _runtime;
 
     // Reset together, only the first time any stage needs computing since construction or the last
     // invalidateFromStage: call -- see -ensurePrepared:error:. `_simConfig` points into
@@ -465,6 +469,8 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
     std::optional<EMSConfig> _scaledConfig;
     SimulationConfig* _simConfig;
     std::optional<PathsConfig> _paths;
+    // The fab/ copy of the KiCad board under `_paths` -- loaded on first use, reset with `_paths`.
+    std::optional<libkicad::Board> _board;
     std::optional<SimulationData<SimulationStage::Configured>> _configured;
 
     std::optional<SimulationData<SimulationStage::Geometry>> _geometry;
@@ -515,10 +521,11 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
     std::atomic<bool> _lastEnsureStageWroteOutput;
 }
 
-- (instancetype)initWithSimulationName:(NSString*)simulationName {
+- (instancetype)initWithSimulationName:(NSString*)simulationName runtime:(KicadRuntime*)runtime {
     self = [super init];
     if (self) {
         _simulationName = simulationName.UTF8String;
+        _runtime = runtime;
         _simConfig = nullptr;
         _cancelRequested.store(false);
         _lastEnsureStageWroteOutput.store(false);
@@ -600,11 +607,12 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
         if (error) *error = makeError(result.error());
         return NO;
     }
-    if (auto result = kiems::importStackup(paths, trimmedConfig); !result) {
+    libkicad::Board board(_runtime.cxxRuntime, paths.kicadBoardPaths());
+    if (auto result = kiems::importStackup(board, trimmedConfig); !result) {
         if (error) *error = makeError(result.error());
         return NO;
     }
-    if (auto result = kiems::resolveSimulationPorts(trimmedConfig, paths); !result) {
+    if (auto result = kiems::resolveSimulationPorts(trimmedConfig, board); !result) {
         if (error) *error = makeError(result.error());
         return NO;
     }
@@ -625,6 +633,7 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
     // the trim above already found the one named _simulationName, or bailed out if it didn't exist.
     _simConfig = &_scaledConfig->simulations().front();
     _paths.emplace(std::move(paths));
+    _board.emplace(std::move(board));
     _configured.emplace(*_simConfig);
 
     const std::optional<std::string> currentCacheInputs = pipelineCacheInputs(*_paths);
@@ -754,7 +763,7 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
             return NO;
         }
         reportGeometryProgress(0.0);
-        auto geometryResult = kiems::generateGeometry(*_configured, *_scaledConfig, *_paths,
+        auto geometryResult = kiems::generateGeometry(*_configured, *_scaledConfig, *_board,
                                                        reportGeometryProcessingProgress);
         if (!geometryResult) {
             if (error) *error = makeError(geometryResult.error());
@@ -782,7 +791,7 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
         // Polygon processing and triangulation occupy the first 99%; grid placement, persistence,
         // and the remaining bookkeeping deliberately stay in the final one-percent tail.
         reportGeometryProgress(0.99);
-        auto grid = kiems::generateGrid(*_geometry, *_scaledConfig, options, *_paths);
+        auto grid = kiems::generateGrid(*_geometry, *_scaledConfig, options, *_paths, *_board);
         _grid.emplace(*_geometry, std::move(grid));
         // A cached -geometryPreview built while only EMSPipelineStageGeometry had run (gridLines
         // still empty) would otherwise keep serving that stale, grid-less snapshot forever now that
@@ -880,7 +889,7 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
             return result;
         };
         auto resultsResult =
-            kiems::generateResults(*_grid, *_scaledConfig, options, *_paths, frequencies, portRunner);
+            kiems::generateResults(*_grid, *_scaledConfig, options, *_paths, *_board, frequencies, portRunner);
         if (!resultsResult) {
             // generateResults() only ever sees "cancelled" as a plain error string bubbled up from
             // portRunner (runGPUPortInProcess) -- it has no concept of cancellation itself -- so it
@@ -934,15 +943,16 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
     }
     const kiems::ComputedGridLines* gridLines = _grid.has_value() ? &_grid->grid().gridLines : nullptr;
     _geometryPreviewCache =
-        buildGeometryPreview(_geometry->geometry().slicedBoard, *_simConfig, *_scaledConfig, *_paths, gridLines);
+        buildGeometryPreview(_geometry->geometry().slicedBoard, *_simConfig, *_scaledConfig, *_paths, *_board,
+                             gridLines);
     return _geometryPreviewCache;
 }
 
 - (nullable EMSGeometryLayer*)geometryLayerNamed:(NSString*)layerName error:(NSError**)error {
-    if (!_geometry || !_scaledConfig || !_paths) return nil;
+    if (!_geometry || !_scaledConfig || !_board) return nil;
     const double tolerance = static_cast<double>(_scaledConfig->pixelSize()) *
                              kiems::constants::unitMultiplier;
-    auto result = buildSlicedBoardLayerPreview(*_paths, layerName.UTF8String,
+    auto result = buildSlicedBoardLayerPreview(*_board, layerName.UTF8String,
                                                 _geometry->geometry().slicedBoard, tolerance);
     if (!result) {
         if (error != nil) *error = makeError(result.error());
@@ -1121,6 +1131,7 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
         _geometry.reset();
         _geometryPreviewCache = nil;
         _configured.reset();
+        _board.reset();
         _paths.reset();
         _simConfig = nullptr;
         _scaledConfig.reset();

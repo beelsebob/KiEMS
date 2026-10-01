@@ -407,10 +407,10 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
     /// Called after a KiCad board is linked (see DocumentWindowController) -- the ground-net
     /// popup's choices depend on the board that was just linked.
     func refreshNetLists() {
-        guard let document, let kicadPcbPath = document.config.kicadPcbPath else { return }
+        guard let document, let board = document.board else { return }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let classes = (try? KicadBoardBridge.netClasses(forBoard: kicadPcbPath)) ?? []
-            let nets = (try? KicadBoardBridge.allNets(forBoard: kicadPcbPath)) ?? []
+            let classes = (try? board.netClasses()) ?? []
+            let nets = (try? board.allNets()) ?? []
             DispatchQueue.main.async {
                 self?.groundNetClassNames = classes
                 self?.groundNetNames = nets

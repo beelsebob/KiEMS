@@ -250,16 +250,16 @@ SlicingConfig SlicingConfig::from(const SimulationConfig& sim, const EMSConfig& 
 }
 
 std::expected<std::vector<std::string>, std::string> resolveInvolvedNetNames(
-    const PathsConfig& paths, const InvolvedNetConfig& entry) {
+    const libkicad::Board& board, const InvolvedNetConfig& entry) {
     switch (entry.kind()) {
         case NetSelectorKind::Net:
             return std::vector<std::string>{*entry.net()};
         case NetSelectorKind::NetClass:
-            return libkicad::netsInNetClass(paths.kicadBoardPaths(), *entry.netClass());
+            return board.netsInNetClass(*entry.netClass());
         case NetSelectorKind::FootprintPin: {
             std::vector<std::string> nets;
             for (const std::string& pin : entry.pins()) {
-                auto net = libkicad::netForFootprintPin(paths.kicadBoardPaths(), *entry.footprint(), pin);
+                auto net = board.netForFootprintPin(*entry.footprint(), pin);
                 if (!net) return std::unexpected(std::move(net).error());
                 if (std::find(nets.begin(), nets.end(), *net) == nets.end()) {
                     nets.push_back(std::move(*net));
@@ -272,12 +272,12 @@ std::expected<std::vector<std::string>, std::string> resolveInvolvedNetNames(
 }
 
 std::expected<std::vector<std::string>, std::string> resolveGroundNetNames(
-    const PathsConfig& paths, const GroundNetConfig& ground) {
+    const libkicad::Board& board, const GroundNetConfig& ground) {
     switch (ground.kind()) {
         case GroundSelectorKind::Net:
             return std::vector<std::string>{*ground.net()};
         case GroundSelectorKind::NetClass:
-            return libkicad::netsInNetClass(paths.kicadBoardPaths(), *ground.netClass());
+            return board.netsInNetClass(*ground.netClass());
     }
     return std::vector<std::string>{};
 }
@@ -296,12 +296,12 @@ std::expected<BoundingBox<double>, std::string> boardBoundsInSimulationUnits(
 
 std::expected<ClassifiedCopper, std::string> classifyCopperForSimulation(const SimulationConfig& sim,
                                                                            const libkicad::BoardGeometry& geometry,
-                                                                           const PathsConfig& paths) {
+                                                                           const libkicad::Board& board) {
     std::unordered_set<NetName, NetNameHash> involvedNets;
     std::unordered_set<NetName, NetNameHash> geometryOnlyNets;
     std::vector<std::pair<std::unordered_set<NetName, NetNameHash>, double>> hullSelectors;
     for (const InvolvedNetConfig& entry : sim.involvedNets()) {
-        auto nets = resolveInvolvedNetNames(paths, entry);
+        auto nets = resolveInvolvedNetNames(board, entry);
         if (!nets) return std::unexpected(std::move(nets).error());
         auto& target = entry.inclusionLevel() == NetInclusionLevel::GeometryOnly ? geometryOnlyNets : involvedNets;
         std::unordered_set<NetName, NetNameHash> selectorNets;
@@ -315,7 +315,7 @@ std::expected<ClassifiedCopper, std::string> classifyCopperForSimulation(const S
     }
     std::unordered_set<NetName, NetNameHash> groundNets;
     {
-        auto nets = resolveGroundNetNames(paths, sim.groundNet());
+        auto nets = resolveGroundNetNames(board, sim.groundNet());
         if (!nets) return std::unexpected(std::move(nets).error());
         for (const std::string& net : *nets) {
             groundNets.insert(NetName(net));

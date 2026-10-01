@@ -317,12 +317,12 @@ std::expected<BoundingBox<double>, std::string> boardBoundsInSimulationUnits(
 
 std::expected<ClassifiedCopper, std::string> classifyCopperForSimulation(const SimulationConfig& sim,
                                                                            const libkicad::BoardGeometry& geometry,
-                                                                           const PathsConfig& paths);
+                                                                           const libkicad::Board& board);
 
 std::expected<std::vector<std::string>, std::string> resolveInvolvedNetNames(
-    const PathsConfig& paths, const InvolvedNetConfig& entry);
+    const libkicad::Board& board, const InvolvedNetConfig& entry);
 std::expected<std::vector<std::string>, std::string> resolveGroundNetNames(
-    const PathsConfig& paths, const GroundNetConfig& ground);
+    const libkicad::Board& board, const GroundNetConfig& ground);
 
 /// Slices a simulation's board geometry, given `slicing` (see SlicingConfig's own doc comment).
 /// `geometry`, the three net-classified copper polygon lists (see classifyCopperForSimulation(),

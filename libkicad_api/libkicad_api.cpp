@@ -10,111 +10,110 @@
 
 namespace libkicad {
 
-std::expected<void, std::string> initialize() {
+std::expected<Runtime, std::string> Runtime::create() {
     std::string error;
-    if (!detail::initializeRaw(error)) {
+    detail::RuntimeState* state = detail::createRuntimeRaw(error);
+    if (!state) {
         return std::unexpected(std::move(error));
     }
-    return {};
+    return Runtime(state);
 }
 
-std::expected<PadCounts, std::string> countPads(const std::string& projectPath, const std::string& boardPath) {
-    detail::RawPadCountsResult raw = detail::countPadsRaw(projectPath, boardPath);
+void Runtime::Deleter::operator()(detail::RuntimeState* state) const {
+    detail::destroyRuntimeRaw(state);
+}
+
+Board::Board(Runtime& runtime, std::string projectPath, std::string boardPath)
+    : _paths{std::move(projectPath), std::move(boardPath)},
+      _state(detail::createBoardRaw(*runtime._state, _paths.projectPath, _paths.boardPath)) {}
+
+void Board::Deleter::operator()(detail::BoardState* state) const {
+    detail::destroyBoardRaw(state);
+}
+
+std::expected<PadCounts, std::string> Board::countPads() const {
+    detail::RawPadCountsResult raw = detail::countPadsRaw(*_state);
     if (!raw.ok) {
         return std::unexpected(std::move(raw.error));
     }
     return raw.counts;
 }
 
-std::expected<std::string, std::string> netForFootprintPin(const std::string& projectPath,
-                                                             const std::string& boardPath,
-                                                             const std::string& footprintRef, const std::string& pin) {
-    detail::RawNetNameResult raw = detail::netForFootprintPinRaw(projectPath, boardPath, footprintRef, pin);
+std::expected<std::string, std::string> Board::netForFootprintPin(const std::string& footprintRef,
+        const std::string& pin) const {
+    detail::RawNetNameResult raw = detail::netForFootprintPinRaw(*_state, footprintRef, pin);
     if (!raw.ok) {
         return std::unexpected(std::move(raw.error));
     }
     return raw.netName;
 }
 
-std::expected<std::string, std::string> netClassForNet(const std::string& projectPath,
-                                                         const std::string& boardPath,
-                                                         const std::string& netName) {
-    detail::RawNetNameResult raw = detail::netClassForNetRaw(projectPath, boardPath, netName);
+std::expected<std::string, std::string> Board::netClassForNet(const std::string& netName) const {
+    detail::RawNetNameResult raw = detail::netClassForNetRaw(*_state, netName);
     if (!raw.ok) {
         return std::unexpected(std::move(raw.error));
     }
     return raw.netName;
 }
 
-std::expected<PadPosition, std::string> resolvePin(const std::string& projectPath, const std::string& boardPath,
-                                                     const std::string& footprintRef, const std::string& pin) {
-    detail::RawPadResult raw = detail::resolvePinRaw(projectPath, boardPath, footprintRef, pin);
+std::expected<PadPosition, std::string> Board::resolvePin(const std::string& footprintRef,
+        const std::string& pin) const {
+    detail::RawPadResult raw = detail::resolvePinRaw(*_state, footprintRef, pin);
     if (!raw.ok) {
         return std::unexpected(std::move(raw.error));
     }
     return raw.pad;
 }
 
-std::expected<std::vector<std::string>, std::string> netsInNetClass(const std::string& projectPath,
-                                                                      const std::string& boardPath,
-                                                                      const std::string& netClassName) {
-    detail::RawNetClassMembersResult raw = detail::netsInNetClassRaw(projectPath, boardPath, netClassName);
+std::expected<std::vector<std::string>, std::string> Board::netsInNetClass(const std::string& netClassName) const {
+    detail::RawNetClassMembersResult raw = detail::netsInNetClassRaw(*_state, netClassName);
     if (!raw.ok) {
         return std::unexpected(std::move(raw.error));
     }
     return raw.netNames;
 }
 
-std::expected<std::vector<PadPosition>, std::string> padsOnNet(const std::string& projectPath,
-                                                                 const std::string& boardPath,
-                                                                 const std::string& netName) {
-    detail::RawPadsOnNetResult raw = detail::padsOnNetRaw(projectPath, boardPath, netName);
+std::expected<std::vector<PadPosition>, std::string> Board::padsOnNet(const std::string& netName) const {
+    detail::RawPadsOnNetResult raw = detail::padsOnNetRaw(*_state, netName);
     if (!raw.ok) {
         return std::unexpected(std::move(raw.error));
     }
     return raw.pads;
 }
 
-std::expected<std::vector<TrackSegment>, std::string> tracksOnNet(const std::string& projectPath,
-                                                                    const std::string& boardPath,
-                                                                    const std::string& netName) {
-    detail::RawTracksOnNetResult raw = detail::tracksOnNetRaw(projectPath, boardPath, netName);
+std::expected<std::vector<TrackSegment>, std::string> Board::tracksOnNet(const std::string& netName) const {
+    detail::RawTracksOnNetResult raw = detail::tracksOnNetRaw(*_state, netName);
     if (!raw.ok) {
         return std::unexpected(std::move(raw.error));
     }
     return raw.tracks;
 }
 
-std::expected<std::vector<ZoneInfo>, std::string> zones(const std::string& projectPath,
-                                                           const std::string& boardPath) {
-    detail::RawZonesResult raw = detail::zonesRaw(projectPath, boardPath);
+std::expected<std::vector<ZoneInfo>, std::string> Board::zones() const {
+    detail::RawZonesResult raw = detail::zonesRaw(*_state);
     if (!raw.ok) {
         return std::unexpected(std::move(raw.error));
     }
     return raw.zones;
 }
 
-std::expected<BoardGeometry, std::string> boardGeometry(const std::string& projectPath,
-                                                           const std::string& boardPath) {
-    detail::RawBoardGeometryResult raw = detail::boardGeometryRaw(projectPath, boardPath);
+std::expected<BoardGeometry, std::string> Board::boardGeometry() const {
+    detail::RawBoardGeometryResult raw = detail::boardGeometryRaw(*_state);
     if (!raw.ok) {
         return std::unexpected(std::move(raw.error));
     }
     return raw.geometry;
 }
 
-std::expected<std::vector<BoardLayerInfo>, std::string> boardLayers(const std::string& projectPath,
-                                                                     const std::string& boardPath) {
-    detail::RawBoardLayersResult raw = detail::boardLayersRaw(projectPath, boardPath);
+std::expected<std::vector<BoardLayerInfo>, std::string> Board::boardLayers() const {
+    detail::RawBoardLayersResult raw = detail::boardLayersRaw(*_state);
     if (!raw.ok) return std::unexpected(std::move(raw.error));
     return raw.layers;
 }
 
-std::expected<BoardLayerGeometry, std::string> boardLayerGeometry(const std::string& projectPath,
-                                                                   const std::string& boardPath,
-                                                                   const std::string& layerName) {
+std::expected<BoardLayerGeometry, std::string> Board::boardLayerGeometry(const std::string& layerName) const {
     detail::RawBoardLayerGeometryResult raw =
-        detail::boardLayerGeometryRaw(projectPath, boardPath, layerName);
+        detail::boardLayerGeometryRaw(*_state, layerName);
     if (!raw.ok) return std::unexpected(std::move(raw.error));
     return raw.geometry;
 }
@@ -136,102 +135,90 @@ std::expected<BoardBounds, std::string> boardBounds(const BoardGeometry& geometr
     return result;
 }
 
-std::expected<std::vector<PadPosition>, std::string> allPads(const std::string& projectPath,
-                                                                const std::string& boardPath) {
-    detail::RawPadsOnNetResult raw = detail::allPadsRaw(projectPath, boardPath);
+std::expected<std::vector<PadPosition>, std::string> Board::allPads() const {
+    detail::RawPadsOnNetResult raw = detail::allPadsRaw(*_state);
     if (!raw.ok) {
         return std::unexpected(std::move(raw.error));
     }
     return raw.pads;
 }
 
-std::expected<std::vector<std::pair<std::string, TrackSegment>>, std::string> allTracks(
-    const std::string& projectPath, const std::string& boardPath) {
-    detail::RawAllTracksResult raw = detail::allTracksRaw(projectPath, boardPath);
+std::expected<std::vector<std::pair<std::string, TrackSegment>>, std::string> Board::allTracks() const {
+    detail::RawAllTracksResult raw = detail::allTracksRaw(*_state);
     if (!raw.ok) {
         return std::unexpected(std::move(raw.error));
     }
     return raw.tracks;
 }
 
-std::expected<std::vector<StackupLayer>, std::string> stackup(const std::string& projectPath,
-                                                                const std::string& boardPath) {
-    detail::RawStackupResult raw = detail::stackupRaw(projectPath, boardPath);
+std::expected<std::vector<StackupLayer>, std::string> Board::stackup() const {
+    detail::RawStackupResult raw = detail::stackupRaw(*_state);
     if (!raw.ok) {
         return std::unexpected(std::move(raw.error));
     }
     return raw.layers;
 }
 
-std::expected<std::vector<LayerColor>, std::string> layerColors(const std::string& projectPath,
-                                                                  const std::string& boardPath) {
-    detail::RawLayerColorsResult raw = detail::layerColorsRaw(projectPath, boardPath);
+std::expected<std::vector<LayerColor>, std::string> Board::layerColors() const {
+    detail::RawLayerColorsResult raw = detail::layerColorsRaw(*_state);
     if (!raw.ok) {
         return std::unexpected(std::move(raw.error));
     }
     return raw.colors;
 }
 
-std::expected<std::vector<NetColor>, std::string> netColors(const std::string& projectPath,
-                                                              const std::string& boardPath) {
-    detail::RawNetColorsResult raw = detail::netColorsRaw(projectPath, boardPath);
+std::expected<std::vector<NetColor>, std::string> Board::netColors() const {
+    detail::RawNetColorsResult raw = detail::netColorsRaw(*_state);
     if (!raw.ok) {
         return std::unexpected(std::move(raw.error));
     }
     return raw.colors;
 }
 
-std::expected<std::vector<std::string>, std::string> netClasses(const std::string& projectPath,
-                                                                  const std::string& boardPath) {
-    detail::RawStringListResult raw = detail::netClassesRaw(projectPath, boardPath);
+std::expected<std::vector<std::string>, std::string> Board::netClasses() const {
+    detail::RawStringListResult raw = detail::netClassesRaw(*_state);
     if (!raw.ok) {
         return std::unexpected(std::move(raw.error));
     }
     return raw.values;
 }
 
-std::expected<std::vector<std::string>, std::string> allNets(const std::string& projectPath,
-                                                               const std::string& boardPath) {
-    detail::RawStringListResult raw = detail::allNetsRaw(projectPath, boardPath);
+std::expected<std::vector<std::string>, std::string> Board::allNets() const {
+    detail::RawStringListResult raw = detail::allNetsRaw(*_state);
     if (!raw.ok) {
         return std::unexpected(std::move(raw.error));
     }
     return raw.values;
 }
 
-std::expected<std::vector<FootprintInfo>, std::string> footprints(const std::string& projectPath,
-                                                                    const std::string& boardPath) {
-    detail::RawFootprintsResult raw = detail::footprintsRaw(projectPath, boardPath);
+std::expected<std::vector<FootprintInfo>, std::string> Board::footprints() const {
+    detail::RawFootprintsResult raw = detail::footprintsRaw(*_state);
     if (!raw.ok) {
         return std::unexpected(std::move(raw.error));
     }
     return raw.footprints;
 }
 
-std::expected<std::vector<ThroughHole>, std::string> throughHoles(const std::string& projectPath,
-                                                                     const std::string& boardPath) {
-    detail::RawThroughHolesResult raw = detail::throughHolesRaw(projectPath, boardPath);
+std::expected<std::vector<ThroughHole>, std::string> Board::throughHoles() const {
+    detail::RawThroughHolesResult raw = detail::throughHolesRaw(*_state);
     if (!raw.ok) {
         return std::unexpected(std::move(raw.error));
     }
     return raw.holes;
 }
 
-std::expected<std::vector<NonPlatedHole>, std::string> nonPlatedHoles(const std::string& projectPath,
-                                                                        const std::string& boardPath) {
-    detail::RawNonPlatedHolesResult raw = detail::nonPlatedHolesRaw(projectPath, boardPath);
+std::expected<std::vector<NonPlatedHole>, std::string> Board::nonPlatedHoles() const {
+    detail::RawNonPlatedHolesResult raw = detail::nonPlatedHolesRaw(*_state);
     if (!raw.ok) {
         return std::unexpected(std::move(raw.error));
     }
     return raw.holes;
 }
 
-std::expected<ComponentModelExportResult, std::string> exportComponentModels(const std::string& projectPath,
-                                                                                const std::string& boardPath,
-                                                                                const std::string& componentFilter,
-                                                                                const std::string& outputStlPath) {
+std::expected<ComponentModelExportResult, std::string> Board::exportComponentModels(const std::string& componentFilter,
+        const std::string& outputStlPath) const {
     detail::RawComponentModelExportResult raw =
-        detail::exportComponentModelsRaw(projectPath, boardPath, componentFilter, outputStlPath);
+        detail::exportComponentModelsRaw(*_state, componentFilter, outputStlPath);
     if (!raw.ok) {
         return std::unexpected(std::move(raw.error));
     }

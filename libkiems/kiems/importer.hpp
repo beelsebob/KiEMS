@@ -59,7 +59,7 @@ std::expected<void, std::string> exportKicadPcb(const PathsConfig& paths, const 
 /// Reads plated through-hole positions and drill shapes directly from libkicad and re-origins them
 /// by (originX, originY), preserving the downstream capsule representation used for round and
 /// slotted holes.
-std::expected<std::vector<ViaHole>, std::string> getVias(const PathsConfig& paths, double originX, double originY);
+std::expected<std::vector<ViaHole>, std::string> getVias(const libkicad::Board& board, double originX, double originY);
 
 /// A non-plated through-hole -- a bare mechanical/alignment hole with no copper of its own anywhere
 /// (unlike ViaHole), modeled as a capsule/stadium shape between two endpoints with `diameter` as the
@@ -79,12 +79,12 @@ struct NPTHHole : Hole {
 
 /// Reads every mechanical hole directly from KiCad NPTH pads and re-origins it like getVias().
 /// This is a hole to be subtracted from copper, never copper to add.
-std::expected<std::vector<NPTHHole>, std::string> getNPTHHoles(const PathsConfig& paths, double originX,
+std::expected<std::vector<NPTHHole>, std::string> getNPTHHoles(const libkicad::Board& board, double originX,
                                                                   double originY);
 
 /// Imports stackup information (copper/dielectric layer thicknesses and dielectric constants) from
 /// the live board, via ki, into `config`. Requires fab/board.kicad_pcb (persisted by
 /// exportKicadPcb()).
-std::expected<void, std::string> importStackup(const PathsConfig& paths, EMSConfig& config);
+std::expected<void, std::string> importStackup(const libkicad::Board& board, EMSConfig& config);
 
 } // namespace kiems

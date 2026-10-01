@@ -31,30 +31,31 @@ EMSGeometryPreview* buildGeometryPreview(const kiems::SlicedBoard& sliced,
                                           const kiems::SimulationConfig& simConfig,
                                           const kiems::EMSConfig& scaledConfig,
                                           const kiems::PathsConfig& paths,
+                                          const libkicad::Board& board,
                                           const kiems::ComputedGridLines* gridLines);
 
 /// Builds a renderable EMSGeometryPreview for the *whole* board -- every net's own copper, on
 /// every copper layer, at its own real stackup Z -- independent of any one SimulationConfig.
 /// Unlike buildGeometryPreview() above, nothing here is clipped to a simulation's own
-/// involved-nets hull: it queries the board directly (libkicad::boardGeometry()/importStackup()/
-/// libkicad::layerColors()/netColors()), so it needs no already-sliced input, and there is no per-simulation
+/// involved-nets hull: it queries the board directly (libkicad::Board::boardGeometry()/importStackup()/
+/// layerColors()/netColors()), so it needs no already-sliced input, and there is no per-simulation
 /// cache to fall back on if a query fails -- a failure here is a real error, not a best-effort
 /// degrade. It also exports every resolvable footprint STEP model, KiCad-expanded silkscreen, and
 /// real plated through-hole/via geometry. Grid lines and ports are empty because this preview has
 /// no simulation to derive them from.
-std::expected<EMSGeometryPreview*, std::string> buildWholeBoardPreview(const kiems::PathsConfig& paths);
+std::expected<EMSGeometryPreview*, std::string> buildWholeBoardPreview(const libkicad::Board& board);
 
 /// Cheap first paint: layer names/colors/order and board bounds only. Individual meshes are loaded
 /// with buildBoardLayerPreview(), so presenting either layer browser never waits for hidden layers.
 std::expected<EMSGeometryPreview*, std::string> buildBoardLayerCatalogPreview(
-    const kiems::PathsConfig& paths, bool wholeBoard);
+    const libkicad::Board& board, bool wholeBoard);
 
 /// Tessellates one named KiCad layer. Safe to schedule serially in a visibility-priority queue.
 std::expected<EMSGeometryLayer*, std::string> buildBoardLayerPreview(
-    const kiems::PathsConfig& paths, const std::string& layerName);
+    const libkicad::Board& board, const std::string& layerName);
 
 std::expected<EMSGeometryLayer*, std::string> buildSlicedBoardLayerPreview(
-    const kiems::PathsConfig& paths, const std::string& layerName,
+    const libkicad::Board& board, const std::string& layerName,
     const kiems::SlicedBoard& sliced, double tessellationTolerance);
 
 NS_ASSUME_NONNULL_END

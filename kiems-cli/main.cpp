@@ -554,11 +554,20 @@ int main(int argc, char** argv) {
     // count to load Sx<port>.csv files. Requires fab/board.kicad_pcb (persisted by exportKicadPcb())
     // from this invocation's own -i or an earlier one, and fab/stackup.json (importStackup()) for
     // resolveSimulationPorts()'s copper-layer-index lookup.
-    if (auto result = importStackup(paths, config); !result) {
+    // Owned by main so the loaded KiCad board is torn down before main returns, while KiCad's own
+    // process-wide state is still alive -- not from exit()'s static destructors.
+    auto runtime = libkicad::Runtime::create();
+    if (!runtime) {
+        logError(runtime.error());
+        return EXIT_FAILURE;
+    }
+    const libkicad::Board board(*runtime, paths.kicadBoardPaths());
+
+    if (auto result = importStackup(board, config); !result) {
         logError(result.error());
         return EXIT_FAILURE;
     }
-    if (auto result = resolveSimulationPorts(config, paths); !result) {
+    if (auto result = resolveSimulationPorts(config, board); !result) {
         logError(result.error());
         return EXIT_FAILURE;
     }
@@ -589,7 +598,7 @@ int main(int argc, char** argv) {
     if (args.geometry() || args.all()) {
         logInfo("Creating geometry");
         createDir(paths.geometryDir, true);
-        auto result = GeometryResult::build(std::move(config), options, paths, printGeometryProgress);
+        auto result = GeometryResult::build(std::move(config), options, paths, board, printGeometryProgress);
         if (!result) {
             logError(result.error());
             return EXIT_FAILURE;
@@ -614,13 +623,13 @@ int main(int argc, char** argv) {
         // this process's own stdout, not a separate process's.
         auto result =
             options.backend != FDTDBackend::CopperGPU
-                ? SimulationResult::run(*geometryResult, options)
+                ? SimulationResult::run(*geometryResult, options, board)
                 : (dumpRequested
-                       ? SimulationResult::run(*geometryResult, options,
+                       ? SimulationResult::run(*geometryResult, options, board,
                                                 [&dumpOptions](Simulation& sim, std::int32_t excitedPortNumber) {
                                                     return dumpGPUPortInProcess(sim, excitedPortNumber, dumpOptions);
                                                 })
-                       : SimulationResult::run(*geometryResult, options,
+                       : SimulationResult::run(*geometryResult, options, board,
                                                 [](Simulation& sim, std::int32_t excitedPortNumber) {
                                                     return runGPUPortInProcess(sim, excitedPortNumber);
                                                 }));

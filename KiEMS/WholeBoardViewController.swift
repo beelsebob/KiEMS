@@ -473,7 +473,7 @@ final class WholeBoardViewController: NSViewController {
     /// running, so the UI update is guarded by both board path and current net name.
     private func resolveNetClassForSelection() {
         guard let netName = selection?.netName, !netName.isEmpty,
-              let boardPath = document?.config.kicadPcbPath
+              let board = document?.board
         else {
             selectedNetClassName = nil
             isLoadingSelectedNetClass = false
@@ -488,9 +488,9 @@ final class WholeBoardViewController: NSViewController {
         selectedNetClassName = nil
         isLoadingSelectedNetClass = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let resolved = try? KicadBoardBridge.netClass(forNet: netName, board: boardPath)
+            let resolved = try? board.netClass(forNet: netName)
             DispatchQueue.main.async {
-                guard let self, self.loadedForPath == boardPath else { return }
+                guard let self, self.loadedForPath == board.kicadPcbPath else { return }
                 let value = resolved ?? ""
                 self.netClassByNet[netName] = value
                 guard self.selection?.netName == netName else { return }
@@ -1153,7 +1153,7 @@ final class WholeBoardViewController: NSViewController {
         plannedStitchingViaDiameter = 0
         hullCutTracePoints = []
         guard let document, let selectedSimulationIndex,
-              let boardPath = document.config.kicadPcbPath, let request
+              let board = document.board, let request
         else {
             boardView.activity = computeActivityHighlight()
             return
@@ -1166,7 +1166,7 @@ final class WholeBoardViewController: NSViewController {
             let plan: KicadStitchingViaPlan?
             let planningError: Error?
             do {
-                plan = try request.compute(forBoard: boardPath)
+                plan = try request.compute(withBoard: board)
                 planningError = nil
             } catch {
                 plan = nil
@@ -1174,7 +1174,7 @@ final class WholeBoardViewController: NSViewController {
             }
             DispatchQueue.main.async {
                 guard let self, self.stitchingViaPlanRevision == revision,
-                      self.loadedForPath == boardPath,
+                      self.loadedForPath == board.kicadPcbPath,
                       self.selectedSimulationIndex == selectedSimulationIndex else { return }
                 if let planningError {
                     NSLog("Hull-cut/via planning failed: %@", planningError.localizedDescription)
@@ -1197,7 +1197,7 @@ final class WholeBoardViewController: NSViewController {
     /// checkbox edit blocks the UI on board parsing.
     private func resolveActivityNetClassesIfNeeded() {
         guard let simulation = selectedSimulation,
-              let boardPath = document?.config.kicadPcbPath else { return }
+              let board = document?.board else { return }
         var requiredClasses = Set(simulation.involvedNets.compactMap { entry -> String? in
             guard entry.kind == .netClass, let name = entry.netClass, !name.isEmpty else { return nil }
             return name
@@ -1210,12 +1210,11 @@ final class WholeBoardViewController: NSViewController {
             where netsByNetClass[netClass] == nil && !resolvingActivityNetClasses.contains(netClass) {
             resolvingActivityNetClasses.insert(netClass)
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                let members = (try? KicadBoardBridge.netsInNetClass(
-                    forBoard: boardPath, netClass: netClass)) ?? []
+                let members = (try? board.nets(inNetClass: netClass)) ?? []
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.resolvingActivityNetClasses.remove(netClass)
-                    guard self.loadedForPath == boardPath else { return }
+                    guard self.loadedForPath == board.kicadPcbPath else { return }
                     self.netsByNetClass[netClass] = Set(members)
                     self.boardView.activity = self.computeActivityHighlight()
                 }
@@ -1589,7 +1588,8 @@ final class WholeBoardViewController: NSViewController {
     /// after invalidate() clears that memory.
     @discardableResult
     func refresh() -> Bool {
-        guard let document, let kicadPcbPath = document.config.kicadPcbPath else { return false }
+        guard let document, let board = document.board else { return false }
+        let kicadPcbPath = board.kicadPcbPath
         guard loadedForPath != kicadPcbPath else { return false }
         loadedForPath = kicadPcbPath
         stitchingViaPlanInputsKey = nil
@@ -1602,8 +1602,7 @@ final class WholeBoardViewController: NSViewController {
             let catalog: EMSGeometryPreview?
             let loadError: Error?
             do {
-                catalog = try KicadBoardBridge.layerCatalogPreview(
-                    forBoard: kicadPcbPath, wholeBoard: true)
+                catalog = try board.layerCatalogPreview(forWholeBoard: true)
                 loadError = nil
             } catch {
                 catalog = nil
@@ -1622,10 +1621,10 @@ final class WholeBoardViewController: NSViewController {
                 }
                 self.boardView.preview = catalog
                 let visible = ["F.Cu", "F.Adhesive", "F.Adhes", "F.Mask", "F.Fab", "Edge.Cuts"]
-                let loader = BoardLayerGeometryLoader(boardPath: kicadPcbPath, preview: catalog,
+                let loader = BoardLayerGeometryLoader(board: board, preview: catalog,
                                                        view: self.boardView, initiallyVisible: visible,
                                                        generateAll: false) { [weak self] in
-                    self?.loadWholeBoardDetails(for: kicadPcbPath, catalog: catalog)
+                    self?.loadWholeBoardDetails(for: board, catalog: catalog)
                 }
                 self.layerGeometryLoader = loader
                 self.onLoadingStateChanged?(false)
@@ -1639,22 +1638,22 @@ final class WholeBoardViewController: NSViewController {
     /// Runs only after the initially-visible layer meshes have landed. Keeping this behind that
     /// small priority batch both bounds concurrent KiCad board loads and prevents the old detailed
     /// preview path from delaying the layers the user can actually see.
-    private func loadWholeBoardDetails(for kicadPcbPath: String, catalog: EMSGeometryPreview) {
+    private func loadWholeBoardDetails(for board: KicadBoardBridge, catalog: EMSGeometryPreview) {
         layerGeometryLoader?.cancel()
         layerGeometryLoader = nil
         boardView.onLayerNeedsGeometry = nil
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let detailed = try? KicadBoardBridge.wholeBoardPreview(forBoard: kicadPcbPath)
-            let footprints = (try? KicadBoardBridge.footprints(forBoard: kicadPcbPath)) ?? []
+            let detailed = try? board.wholeBoardPreview()
+            let footprints = (try? board.footprints()) ?? []
             DispatchQueue.main.async {
-                guard let self, self.loadedForPath == kicadPcbPath else { return }
+                guard let self, self.loadedForPath == board.kicadPcbPath else { return }
                 self.allFootprints = footprints
                 self.refreshActivityHighlight()
                 if let detailed, let preview = self.boardView.preview {
                     preview.mergeLoadedPreview(detailed)
                     self.boardView.refreshLoadedGeometry()
                 }
-                let loader = BoardLayerGeometryLoader(boardPath: kicadPcbPath, preview: catalog,
+                let loader = BoardLayerGeometryLoader(board: board, preview: catalog,
                                                        view: self.boardView,
                                                        initiallyVisible: self.boardView.visibleLayerNames)
                 self.layerGeometryLoader = loader

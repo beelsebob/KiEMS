@@ -9,17 +9,17 @@ namespace kiems {
 using namespace Cu;
 
 std::expected<SimulationGeometry, std::string> generateGeometry(const SimulationData<SimulationStage::Configured>& data,
-                                                                  const EMSConfig& config, const PathsConfig& paths,
+                                                                  const EMSConfig& config, const libkicad::Board& board,
                                                                   const GeometryProcessingProgressCallback& onProgress) {
     // sliceBoardForSimulation() is a plain, pure function -- no Simulation/CSXCAD/openEMS object
     // needed just to slice a board (see board_slicing.hpp). The board load and net-name resolution
     // it needs (classifyCopperForSimulation()) are the only IO in this pipeline stage.
     logInfo("Slicing board for " + data.configuration().name());
-    auto geometry = libkicad::boardGeometry(paths.kicadBoardPaths());
+    auto geometry = board.boardGeometry();
     if (!geometry) {
         return std::unexpected(std::move(geometry).error());
     }
-    auto copper = classifyCopperForSimulation(data.configuration(), *geometry, paths);
+    auto copper = classifyCopperForSimulation(data.configuration(), *geometry, board);
     if (!copper) {
         return std::unexpected(std::move(copper).error());
     }
@@ -31,11 +31,11 @@ std::expected<SimulationGeometry, std::string> generateGeometry(const Simulation
     // Best-effort: if the KiCad hole query fails, slicing/stitching just proceed without this data
     // rather than failing the whole slice over it (the same as if the board genuinely had none).
     std::vector<ViaHole> existingVias;
-    if (auto vias = getVias(paths, origin->xMin, origin->yMin); vias) {
+    if (auto vias = getVias(board, origin->xMin, origin->yMin); vias) {
         existingVias = std::move(*vias);
     }
     std::vector<NPTHHole> npthHoles;
-    if (auto holes = getNPTHHoles(paths, origin->xMin, origin->yMin); holes) {
+    if (auto holes = getNPTHHoles(board, origin->xMin, origin->yMin); holes) {
         npthHoles = std::move(*holes);
     }
 
@@ -55,12 +55,13 @@ std::expected<SimulationGeometry, std::string> generateGeometry(const Simulation
 }
 
 SimulationGrid generateGrid(const SimulationData<SimulationStage::Geometry>& data, const EMSConfig& config,
-                             const RunOptions& options, const PathsConfig& paths) {
+                             const RunOptions& options, const PathsConfig& paths,
+                             const libkicad::Board& board) {
     // Placing grid lines does need a real Simulation (addGrid() reads/writes its own CSXCAD grid
     // object) -- this one is thrown away once gridLines() has been read off it, exactly like
     // GeometryResult::build()'s own canonical Simulation is discarded once saveSimulationData() is
     // done with it.
-    Simulation sim(data.configuration(), config, options, paths);
+    Simulation sim(data.configuration(), config, options, paths, board);
     sim.adoptSlicedBoard(data.geometry().slicedBoard);
     sim.addGrid();
     return SimulationGrid{sim.computedGridLines()};
@@ -68,7 +69,7 @@ SimulationGrid generateGrid(const SimulationData<SimulationStage::Geometry>& dat
 
 std::expected<SimulationResults, std::string> generateResults(const SimulationData<SimulationStage::Grid>& data,
                                                                 const EMSConfig& config, const RunOptions& options,
-                                                                const PathsConfig& paths,
+                                                                const PathsConfig& paths, const libkicad::Board& board,
                                                                 const std::vector<double>& frequencies,
                                                                 const FDTDPortRunner& portRunner) {
     SimulationResults results;
@@ -83,7 +84,7 @@ std::expected<SimulationResults, std::string> generateResults(const SimulationDa
         // ContinuousStructure and configured ports, never sharing them across runs. `data`
         // itself is only ever read here, never mutated, so the same SimulationGeometry/
         // SimulationGrid gets reused for every port with no encode/decode step anywhere.
-        Simulation sim(data.configuration(), config, options, paths);
+        Simulation sim(data.configuration(), config, options, paths, board);
         sim.adoptSlicedBoard(data.geometry().slicedBoard);
         sim.adoptGridLines(data.grid().gridLines);
         if (auto result = sim.populateGeometry(); !result) {

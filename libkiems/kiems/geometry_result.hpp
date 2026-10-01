@@ -68,7 +68,7 @@ public:
     /// `onProgress`, if given, is invoked entering and leaving each simulation's SlicingBoard and
     /// PlacingGrid phases (see GeometryPhase's own doc comment).
     static std::expected<GeometryResult, std::string> build(EMSConfig config, const RunOptions& options,
-                                                              const PathsConfig& paths,
+                                                              const PathsConfig& paths, const libkicad::Board& board,
                                                               const GeometryProgressCallback& onProgress = {});
 
     /// Reconstructs a GeometryResult by deserializing every simulation's SimulationData<Grid> from

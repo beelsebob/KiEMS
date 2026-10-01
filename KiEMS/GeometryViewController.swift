@@ -233,11 +233,10 @@ final class GeometryViewController: NSViewController {
 
     private func loadLayerCatalogIfNeeded(forSimulationIndex index: Int) {
         guard layerCatalogs[index] == nil, !loadingLayerCatalogs.contains(index),
-              let document, let boardPath = document.config.kicadPcbPath else { return }
+              let document, let board = document.board else { return }
         loadingLayerCatalogs.insert(index)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let preview = try? KicadBoardBridge.layerCatalogPreview(forBoard: boardPath,
-                                                                     wholeBoard: false)
+            let preview = try? board.layerCatalogPreview(forWholeBoard: false)
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.loadingLayerCatalogs.remove(index)

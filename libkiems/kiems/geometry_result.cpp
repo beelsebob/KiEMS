@@ -37,7 +37,7 @@ const SimulationData<SimulationStage::Grid>* GeometryResult::simulationData(cons
 }
 
 std::expected<GeometryResult, std::string> GeometryResult::build(EMSConfig config, const RunOptions& options,
-                                                                   const PathsConfig& paths,
+                                                                   const PathsConfig& paths, const libkicad::Board& board,
                                                                    const GeometryProgressCallback& onProgress) {
     // config arrives in file units (see EMSConfig::scaledToSimulationUnits()'s doc comment) --
     // everything from here on (board slicing, grid generation, port placement) needs simulation
@@ -69,7 +69,7 @@ std::expected<GeometryResult, std::string> GeometryResult::build(EMSConfig confi
         SimulationData<SimulationStage::Configured> configured(simConfig);
 
         report(GeometryPhase::SlicingBoard, 0);
-        auto geometry = generateGeometry(configured, *ownedConfig, paths);
+        auto geometry = generateGeometry(configured, *ownedConfig, board);
         if (!geometry) {
             return std::unexpected(geometry.error());
         }
@@ -78,7 +78,7 @@ std::expected<GeometryResult, std::string> GeometryResult::build(EMSConfig confi
 
         report(GeometryPhase::PlacingGrid, 0);
         SimulationData<SimulationStage::Grid> gridData(geometryData,
-                                                         generateGrid(geometryData, *ownedConfig, options, paths));
+                                                         generateGrid(geometryData, *ownedConfig, options, paths, board));
         report(GeometryPhase::PlacingGrid, 1);
 
         if (auto result = saveSimulationData(gridData, simulationDataFile(paths, simConfig.name())); !result) {
