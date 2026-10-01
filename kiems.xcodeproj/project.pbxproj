@@ -76,6 +76,7 @@
 		71B4EE9B304224FD002796EC /* libCopperUtils.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 71B4EE8E304224C5002796EC /* libCopperUtils.a */; };
 		7927928D62C83DD9538C10AF /* CSPrimWire.cpp in Sources */ = {isa = PBXBuildFile; fileRef = DFB34E1830D6A43D7D93419D /* CSPrimWire.cpp */; };
 		7A76B8DB5C0FDE31D6F72BB1 /* CSPrimUserDefined.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A25590547D328A76A372C1BC /* CSPrimUserDefined.cpp */; };
+		7E57CB0000000000000000C5 /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B8F4508947040AF3A200E11 /* libCSXCAD.dylib */; };
 		828DBB24BCE54FE076A3D616 /* CSPrimPolygon.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 30A0506109278583137803EB /* CSPrimPolygon.cpp */; };
 		846A32C3BB81E3C29B621792 /* libhdf5.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 30877432D1026706D7E805DA /* libhdf5.dylib */; };
 		888CB706001C0A6703D7A727 /* liblibkicad.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */; };
@@ -110,7 +111,6 @@
 		C0FFEE0000000000000002 /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B8F4508947040AF3A200E11 /* libCSXCAD.dylib */; };
 		C0FFEE0000000000000003 /* libhdf5.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 30877432D1026706D7E805DA /* libhdf5.dylib */; };
 		C0FFEE0000000000000005 /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B8F4508947040AF3A200E11 /* libCSXCAD.dylib */; };
-		7E57CB0000000000000000C5 /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B8F4508947040AF3A200E11 /* libCSXCAD.dylib */; };
 		C0FFEE0000000000000006 /* Copper.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71AD3CD6302FAAD5006D5847 /* Copper.framework */; };
 		C1FE7C82D3B6D6DF1E6CAFAC /* CSPrimSphericalShell.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 4CCA7271B4E816E2DE044E5C /* CSPrimSphericalShell.cpp */; };
 		D1A3596A45AFCC1D666CCAD9 /* CSPrimSphere.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A4ABB3E67FA995DFC15350A7 /* CSPrimSphere.cpp */; };
@@ -150,13 +150,6 @@
 			proxyType = 1;
 			remoteGlobalIDString = 71AD3CD5302FAAD5006D5847;
 			remoteInfo = Copper;
-		};
-		7E57CB0000000000000000C7 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 71AD228A30263515006D5847 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = B0B651E8085482933DC2AFFE;
-			remoteInfo = libkicad;
 		};
 		2A075E9DC0149148EA251C93 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -283,6 +276,13 @@
 			proxyType = 1;
 			remoteGlobalIDString = 917B3FABD7921813B7A8BF98;
 			remoteInfo = CSXCAD;
+		};
+		7E57CB0000000000000000C7 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B0B651E8085482933DC2AFFE;
+			remoteInfo = libkicad;
 		};
 		7F0606D12D7446556C7E5509 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -1719,15 +1719,15 @@
 			target = 71B4EE8D304224C5002796EC /* CopperUtils */;
 			targetProxy = 71B4EE9C304224FD002796EC /* PBXContainerItemProxy */;
 		};
-		7E57CB0000000000000000C6 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = B0B651E8085482933DC2AFFE /* libkicad */;
-			targetProxy = 7E57CB0000000000000000C7 /* PBXContainerItemProxy */;
-		};
 		7B143B2514242142CF40DD14 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = B0B651E8085482933DC2AFFE /* libkicad */;
 			targetProxy = 2A075E9DC0149148EA251C93 /* PBXContainerItemProxy */;
+		};
+		7E57CB0000000000000000C6 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B0B651E8085482933DC2AFFE /* libkicad */;
+			targetProxy = 7E57CB0000000000000000C7 /* PBXContainerItemProxy */;
 		};
 		81A43D489AC76EB27962E954 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
