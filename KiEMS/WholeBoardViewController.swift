@@ -137,6 +137,9 @@ final class WholeBoardViewController: NSViewController {
         self.document = document
         self.propertiesViewController = propertiesViewController
         super.init(nibName: nil, bundle: nil)
+        propertiesViewController.onDifferentialPairEnabled = { [weak self] simulation in
+            self?.reconcileDifferentialPairs(in: simulation)
+        }
     }
 
     @available(*, unavailable)
@@ -589,6 +592,72 @@ final class WholeBoardViewController: NSViewController {
         second.differentialPairPartner = firstName
         first.simulateAsDifferentialPair = true
         second.simulateAsDifferentialPair = true
+    }
+
+    /// Brings everything already configured on `simulation` to the state it would have reached had
+    /// isDifferentialPair been on while it was being added -- called when the Differential Pair
+    /// checkbox is ticked (SimulationPropertiesViewController.onDifferentialPairEnabled), so
+    /// "add nets, then tick" and "tick, then add nets" produce the same configuration. For every
+    /// Net-kind entry whose heuristic partner net exists on the board: includes the partner at the
+    /// same level, marks the pair, and mirrors each explicit pin choice and excitation onto the
+    /// partner pin of the same footprint, exactly as includedToggled()/probedToggled()/
+    /// absorbingToggled()/excitedToggled() do one pin at a time. Existing partner-side state is
+    /// never overwritten, and entries already paired with some other net are left alone.
+    func reconcileDifferentialPairs(in simulation: EMSSimulationBridge) {
+        let netNames = simulation.involvedNets.compactMap { $0.kind == .net ? $0.net : nil }
+        for netName in netNames {
+            guard let entry = involvedNet(named: netName, in: simulation),
+                  let partnerName = differentialPairPartnerNetName(for: netName),
+                  entry.differentialPairPartner == nil || entry.differentialPairPartner == partnerName
+            else { continue }
+            if let partner = involvedNet(named: partnerName, in: simulation) {
+                guard partner.differentialPairPartner == nil || partner.differentialPairPartner == netName
+                else { continue }
+                if entry.inclusionLevel == .simulationNet {
+                    partner.inclusionLevel = .simulationNet
+                }
+            } else if entry.inclusionLevel == .simulationNet {
+                includeNet(named: partnerName, in: simulation)
+            } else {
+                includeNetGeometryOnly(named: partnerName, in: simulation)
+            }
+            markDifferentialPair(netName, partnerName, in: simulation)
+
+            for pin in entry.probedPins {
+                guard let partnerPin = differentialPairPartnerPin(footprintReference: pin.footprintReference,
+                                                                  netName: netName),
+                      partnerPin.netName == partnerName, partnerPin.number != pin.pin,
+                      let partnerEntry = involvedNet(named: partnerName, in: simulation),
+                      !partnerEntry.probedPins.contains(where: {
+                          $0.footprintReference == pin.footprintReference && $0.pin == partnerPin.number
+                      })
+                else { continue }
+                if pin.probe {
+                    applyProbed(true, absorbing: pin.absorbSignal, footprintReference: pin.footprintReference,
+                                netName: partnerName, padNumber: partnerPin.number, in: simulation)
+                } else {
+                    applyAbsorbing(pin.absorbSignal, probed: false, footprintReference: pin.footprintReference,
+                                   netName: partnerName, padNumber: partnerPin.number, in: simulation)
+                }
+            }
+        }
+
+        for source in simulation.excitations where source.hullCutPortID == nil {
+            let reference = source.footprintReference
+            guard let netName = allFootprints.first(where: { $0.reference == reference })?.pins
+                      .first(where: { $0.number == source.pin })?.netName,
+                  let partnerPin = differentialPairPartnerPin(footprintReference: reference, netName: netName),
+                  partnerPin.number != source.pin,
+                  involvedNet(named: netName, in: simulation)?.differentialPairPartner == partnerPin.netName,
+                  excitation(reference: reference, pin: partnerPin.number, in: simulation) == nil
+            else { continue }
+            applyExcited(true, footprintReference: reference, netName: partnerPin.netName,
+                         padNumber: partnerPin.number, in: simulation)
+            if let mirrored = excitation(reference: reference, pin: partnerPin.number, in: simulation) {
+                configureDifferentialComplement(mirrored, from: source)
+            }
+        }
+        configurationChanged()
     }
 
     /// Makes a just-added excitation an ideal odd-mode drive relative to `source` -- mirrors
