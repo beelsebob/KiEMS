@@ -24,6 +24,65 @@ enum NetNameFormatting {
         segments(for: Substring(name), font: font, baselineOffset: 0, isOverlined: false)
     }
 
+    /// Sorts net/net-class names by how they read on screen, not by their raw markup:
+    /// - Compared on the formatted text first ("V_{2}", "V3", "V_{4}" read as V2, V3, V4), with
+    ///   `/` before every other character (so hierarchical "/Sheet/..." names come before top-level
+    ///   ones, and "/A/B" before "/AB"), case-insensitively, and with digit runs compared numerically
+    ///   ("N2" before "N10").
+    /// - Names that read the same are then ordered character by character by style: normal, then
+    ///   superscript, then subscript, then negated -- so V3, V^{3}, V_{3}, V~{3}.
+    /// Each name's sort key is built once up front, since building one means parsing the markup.
+    static func sortedForDisplay(_ names: [String]) -> [String] {
+        names.map { (name: $0, key: SortKey($0)) }
+            .sorted { $0.key < $1.key }
+            .map(\.name)
+    }
+
+    private struct SortKey: Comparable {
+        /// The formatted text, split on `/`: comparing component by component is exactly the
+        /// "`/` sorts first" rule.
+        let components: [String]
+        /// One entry per formatted character: (isOverlined, normal 0 / superscript 1 / subscript 2).
+        /// Comparing (overline, script) pairs gives normal < super < sub < negated.
+        let styles: [Int]
+        let raw: String
+
+        init(_ name: String) {
+            let segments = NetNameFormatting.segments(for: name, font: NSFont.systemFont(ofSize: NSFont.systemFontSize))
+            let text = segments.map(\.text).joined()
+            components = text.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+            styles = segments.flatMap { segment -> [Int] in
+                let script = segment.baselineOffset > 0 ? 1 : segment.baselineOffset < 0 ? 2 : 0
+                let style = (segment.isOverlined ? 3 : 0) + script
+                return Array(repeating: style, count: segment.text.count)
+            }
+            raw = name
+        }
+
+        static func < (lhs: SortKey, rhs: SortKey) -> Bool {
+            for (a, b) in zip(lhs.components, rhs.components) {
+                switch a.localizedStandardCompare(b) {
+                case .orderedAscending: return true
+                case .orderedDescending: return false
+                case .orderedSame: continue
+                }
+            }
+            if lhs.components.count != rhs.components.count {
+                return lhs.components.count < rhs.components.count
+            }
+            if lhs.styles != rhs.styles {
+                return lhs.styles.lexicographicallyPrecedes(rhs.styles)
+            }
+            return lhs.raw < rhs.raw // Stable tie-break, e.g. names differing only in case.
+        }
+    }
+
+    /// The text a reader sees for `name` once formatted, with the markup stripped (e.g. "V_{3.3}"
+    /// reads as "V3.3") -- for matching what a user types against how a name looks on screen.
+    static func displayText(for name: String) -> String {
+        segments(for: name, font: NSFont.systemFont(ofSize: NSFont.systemFontSize)).map(\.text).joined()
+    }
+
     /// A plain NSAttributedString built from `segments(for:font:)` -- sub/superscript renders
     /// correctly wherever this is used (it's a real NSAttributedString attribute), but `isOverlined`
     /// segments just render as plain text: nothing else here knows how to draw an overline. Only

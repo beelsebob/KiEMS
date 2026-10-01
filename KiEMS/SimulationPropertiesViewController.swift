@@ -5,11 +5,7 @@ import Cocoa
 /// setSelectedSimulationIndex) -- viaPlatingThickness/viaFillingEpsilon/frequencyStart/frequencyStop
 /// stay editable regardless (they're document-level, not per-simulation), but the rest disable
 /// themselves when nothing is selected.
-/// One row's net picker in the edge-terminated-nets table -- a distinct type so the shared
-/// NSComboBoxDelegate callbacks below can tell these apart from the ground-net combo box.
-private final class EdgeTerminationComboBox: NSComboBox {}
-
-final class SimulationPropertiesViewController: NSViewController, NSComboBoxDelegate, NSTableViewDataSource,
+final class SimulationPropertiesViewController: NSViewController, NSTableViewDataSource,
     NSTableViewDelegate {
     private static let formFont = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
     private weak var document: Document?
@@ -32,22 +28,24 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
     /// affect geometry at all (it's a pure FDTD-run setting, document-level like frequency/via
     /// plating above it), so it only needs to invalidate simulation *results*, and for every
     /// simulation in the document at once (maxSteps isn't per-simulation). Too low a value truncates
+    /// the FDTD run before its energy has decayed, which is exactly the bug this field exists to let
+    /// the user fix -- so a stale cached result from before raising it would defeat the point.
+    var onFDTDParametersChanged: (() -> Void)?
+    var onResultsParametersChanged: ((Int) -> Void)?
     /// Called when the Differential Pair checkbox is ticked, so nets/pins/excitations added before
     /// it was ticked get the same partner mirroring WholeBoardViewController applies to ones added
     /// after -- see WholeBoardViewController.reconcileDifferentialPairs(in:). Only that controller
     /// has the board's footprint/pin data needed to find partner pins.
     var onDifferentialPairEnabled: ((EMSSimulationBridge) -> Void)?
-    /// the FDTD run before its energy has decayed, which is exactly the bug this field exists to let
-    /// the user fix -- so a stale cached result from before raising it would defeat the point.
-    var onFDTDParametersChanged: (() -> Void)?
-    var onResultsParametersChanged: ((Int) -> Void)?
 
     // Gates SimulationConfig::isDifferentialPair() -- see its own doc comment for exactly what
     // that changes (whether reciprocal net-pair metadata actually gets turned into a diffPairs()
     // entry, or the simulation stays plain single-ended regardless of any such metadata).
     private let differentialPairCheckbox = NSButton(checkboxWithTitle: "Differential Pair", target: nil, action: nil)
     private let nameField = NSTextField(string: "")
-    private let groundNameComboBox = NSComboBox()
+    // NetNameComboBox rather than NSComboBox so net names render with their KiCad markup
+    // (overlines included) in the field and its menu -- see NetNameComboBox.
+    private let groundNameComboBox = NetNameComboBox()
     // kiems::SimulationConfig::edgeTerminatedNets(): one row per net, each picked with a combo box.
     private let edgeTerminationTable = NSTableView()
     private let edgeTerminationScroll = NSScrollView()
@@ -106,12 +104,6 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
     private var groundNetClassNames: [String] = []
     private var groundNetNames: [String] = []
 
-    private struct GroundMenuChoice {
-        let kind: EMSGroundSelectorKind
-        let name: String
-    }
-    private var groundChoicesByComboIndex: [Int: GroundMenuChoice] = [:]
-    private var isUpdatingGroundComboBox = false
 
     init(document: Document) {
         self.document = document
@@ -181,12 +173,9 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
         nameField.target = self
         nameField.action = #selector(nameChanged)
 
-        groundNameComboBox.target = self
-        groundNameComboBox.action = #selector(groundNameChanged)
-        groundNameComboBox.delegate = self
+        groundNameComboBox.onCommit = { [weak self] name, tag in self?.groundNameChanged(name, tag: tag) }
         groundNameComboBox.controlSize = .small
         groundNameComboBox.font = Self.formFont
-        groundNameComboBox.completes = true
 
         viaEdgeDistanceField.formatter = viaEdgeDistanceFormatter
         viaSpacingField.formatter = viaSpacingFormatter
@@ -363,7 +352,7 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
             viaSpacingField.stringValue = ""
             eyeBitRateField.stringValue = ""
             differentialPairCheckbox.state = .off
-            groundNameComboBox.removeAllItems()
+            groundNameComboBox.entries = []
             groundNameComboBox.stringValue = ""
             edgeTerminatedNetRows = []
             edgeTerminationTable.reloadData()
@@ -417,8 +406,8 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
             let classes = (try? board.netClasses()) ?? []
             let nets = (try? board.allNets()) ?? []
             DispatchQueue.main.async {
-                self?.groundNetClassNames = classes
-                self?.groundNetNames = nets
+                self?.groundNetClassNames = NetNameFormatting.sortedForDisplay(classes)
+                self?.groundNetNames = NetNameFormatting.sortedForDisplay(nets)
                 self?.updateGroundNameComboBox()
                 self?.edgeTerminationTable.reloadData()
             }
@@ -427,42 +416,10 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
 
     private func updateGroundNameComboBox() {
         guard let sim = selectedSimulation else { return }
-        isUpdatingGroundComboBox = true
-        defer { isUpdatingGroundComboBox = false }
-        groundNameComboBox.removeAllItems()
-        groundChoicesByComboIndex.removeAll()
-        let font = groundNameComboBox.font ?? Self.formFont
-
-        func addHeading(_ title: String) {
-            groundNameComboBox.addItem(withObjectValue: NSAttributedString(
-                string: title,
-                attributes: [.font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize,
-                                                       weight: .semibold),
-                             .foregroundColor: NSColor.secondaryLabelColor]))
-        }
-
-        func addChoices(_ names: [String], kind: EMSGroundSelectorKind) {
-            for name in names {
-                let index = groundNameComboBox.numberOfItems
-                groundNameComboBox.addItem(
-                    withObjectValue: NetNameFormatting.attributedString(for: name, font: font))
-                groundChoicesByComboIndex[index] = GroundMenuChoice(kind: kind, name: name)
-            }
-        }
-
-        addHeading("Nets")
-        addChoices(groundNetNames, kind: .net)
-        groundNameComboBox.addItem(withObjectValue: NSAttributedString(
-            string: "────────",
-            attributes: [.font: font, .foregroundColor: NSColor.separatorColor]))
-        addHeading("Net Classes")
-        addChoices(groundNetClassNames, kind: .netClass)
-
-        let selectedIndex = groundChoicesByComboIndex.first {
-            let choice = $0.value
-            return choice.kind == sim.groundNetKind && choice.name == sim.groundNetName
-        }?.key
-        if let selectedIndex { groundNameComboBox.selectItem(at: selectedIndex) }
+        groundNameComboBox.entries = [.heading("Nets")]
+            + groundNetNames.map { .name($0, tag: EMSGroundSelectorKind.net.rawValue) }
+            + [.separator, .heading("Net Classes")]
+            + groundNetClassNames.map { .name($0, tag: EMSGroundSelectorKind.netClass.rawValue) }
         groundNameComboBox.stringValue = sim.groundNetName ?? ""
     }
 
@@ -498,71 +455,35 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
         updateGroundNameComboBox()
     }
 
-    @objc private func groundNameChanged() {
-        guard !isUpdatingGroundComboBox, let sim = selectedSimulation else { return }
-        let typedName = groundNameComboBox.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let selectedChoice = groundChoicesByComboIndex[groundNameComboBox.indexOfSelectedItem]
-            .flatMap { $0.name == typedName ? $0 : nil }
-        var choice = selectedChoice
-        if choice == nil {
+    /// `tag` is the picked menu entry's EMSGroundSelectorKind, or nil for typed text -- which is
+    /// accepted only if it names a real net or net class; anything else reverts the field.
+    private func groundNameChanged(_ name: String, tag: Int?) {
+        guard let sim = selectedSimulation else { return }
+        var kind = tag.flatMap { EMSGroundSelectorKind(rawValue: $0) }
+        if kind == nil {
             // If a net and net class share a name, preserve the current kind when possible. A new
             // typed value otherwise resolves to a concrete net before a net class.
-            if sim.groundNetKind == .net, groundNetNames.contains(typedName) {
-                choice = GroundMenuChoice(kind: .net, name: typedName)
-            } else if sim.groundNetKind == .netClass, groundNetClassNames.contains(typedName) {
-                choice = GroundMenuChoice(kind: .netClass, name: typedName)
-            } else if groundNetNames.contains(typedName) {
-                choice = GroundMenuChoice(kind: .net, name: typedName)
-            } else if groundNetClassNames.contains(typedName) {
-                choice = GroundMenuChoice(kind: .netClass, name: typedName)
+            if sim.groundNetKind == .net, groundNetNames.contains(name) {
+                kind = .net
+            } else if sim.groundNetKind == .netClass, groundNetClassNames.contains(name) {
+                kind = .netClass
+            } else if groundNetNames.contains(name) {
+                kind = .net
+            } else if groundNetClassNames.contains(name) {
+                kind = .netClass
             }
         }
-        guard let choice else {
-            // Headings, the visual separator, and arbitrary text are not valid model values.
+        guard let kind, sim.groundNetKind != kind || sim.groundNetName != name else {
             updateGroundNameComboBox()
             return
         }
-        guard sim.groundNetKind != choice.kind || sim.groundNetName != choice.name else {
-            updateGroundNameComboBox()
-            return
-        }
-        sim.groundNetKind = choice.kind
-        sim.groundNetName = choice.name
+        sim.groundNetKind = kind
+        sim.groundNetName = name
         document?.updateChangeCount(.changeDone)
         if let selectedIndex {
             onGeometryParametersChanged?(selectedIndex)
         }
         updateGroundNameComboBox()
-    }
-
-    func comboBoxSelectionDidChange(_ notification: Notification) {
-        if let rowComboBox = notification.object as? EdgeTerminationComboBox {
-            // The selection lands after this notification; read it on the next turn of the run loop.
-            DispatchQueue.main.async { [weak self] in self?.edgeTerminatedNetChanged(rowComboBox) }
-            return
-        }
-        guard let comboBox = notification.object as? NSComboBox,
-              comboBox === groundNameComboBox else { return }
-        groundNameChanged()
-    }
-
-    func controlTextDidEndEditing(_ notification: Notification) {
-        if let rowComboBox = notification.object as? EdgeTerminationComboBox {
-            edgeTerminatedNetChanged(rowComboBox)
-            return
-        }
-        guard let comboBox = notification.object as? NSComboBox,
-              comboBox === groundNameComboBox else { return }
-        groundNameChanged()
-    }
-
-    func comboBox(_ comboBox: NSComboBox, completedString string: String) -> String? {
-        if comboBox is EdgeTerminationComboBox {
-            return groundNetNames.first { $0.range(of: string, options: [.anchored, .caseInsensitive]) != nil }
-        }
-        guard comboBox === groundNameComboBox else { return nil }
-        let choices = groundNetNames + groundNetClassNames
-        return choices.first { $0.range(of: string, options: [.anchored, .caseInsensitive]) != nil }
     }
 
     // MARK: Edge-terminated nets
@@ -572,50 +493,42 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let comboBox = EdgeTerminationComboBox()
+        let comboBox = NetNameComboBox(bordered: false)
         comboBox.controlSize = .small
         comboBox.font = Self.formFont
-        comboBox.completes = true
-        comboBox.isBordered = false
-        comboBox.drawsBackground = false
-        comboBox.delegate = self
-        comboBox.target = self
-        comboBox.action = #selector(edgeTerminatedNetComboBoxAction(_:))
-        comboBox.tag = row
-        let font = comboBox.font ?? Self.formFont
-        for name in groundNetNames {
-            comboBox.addItem(withObjectValue: NetNameFormatting.attributedString(for: name, font: font))
-        }
-        let name = edgeTerminatedNetRows[row]
-        if let index = groundNetNames.firstIndex(of: name) { comboBox.selectItem(at: index) }
-        comboBox.stringValue = name
+        comboBox.entries = groundNetNames.map { .name($0, tag: 0) }
+        comboBox.stringValue = edgeTerminatedNetRows[row]
         comboBox.isEnabled = selectedSimulation != nil
+        comboBox.onCommit = { [weak self, weak comboBox] name, _ in
+            guard let self, let comboBox else { return }
+            edgeTerminatedNetChanged(comboBox, name: name)
+        }
         return comboBox
     }
 
-    @objc private func edgeTerminatedNetComboBoxAction(_ sender: NSComboBox) {
-        guard let rowComboBox = sender as? EdgeTerminationComboBox else { return }
-        edgeTerminatedNetChanged(rowComboBox)
-    }
-
     /// Accepts a picked menu item, or typed text naming a real net; anything else reverts the row.
-    private func edgeTerminatedNetChanged(_ comboBox: EdgeTerminationComboBox) {
-        let row = comboBox.tag
+    private func edgeTerminatedNetChanged(_ comboBox: NetNameComboBox, name: String) {
+        // Looked up afresh rather than trusting the row captured when the cell was made: Return
+        // and end-of-editing can both commit, and the first may already have removed a row.
+        let row = edgeTerminationTable.row(for: comboBox)
         guard let sim = selectedSimulation, edgeTerminatedNetRows.indices.contains(row) else { return }
-        let typed = comboBox.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let selectedIndex = comboBox.indexOfSelectedItem
-        let name: String
-        if groundNetNames.contains(typed) {
-            name = typed
-        } else if groundNetNames.indices.contains(selectedIndex),
-                  NetNameFormatting.attributedString(for: groundNetNames[selectedIndex],
-                                                     font: comboBox.font ?? Self.formFont).string == typed {
-            name = groundNetNames[selectedIndex]
-        } else {
-            comboBox.stringValue = edgeTerminatedNetRows[row]
+        guard groundNetNames.contains(name) else {
+            if edgeTerminatedNetRows[row].isEmpty {
+                // A row added with (+) and left without picking a net: drop it rather than keep a
+                // blank entry around. Deferred so the table isn't edited mid end-editing callback.
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, edgeTerminationTable.row(for: comboBox) == row,
+                          edgeTerminatedNetRows.indices.contains(row),
+                          edgeTerminatedNetRows[row].isEmpty else { return }
+                    edgeTerminatedNetRows.remove(at: row)
+                    commitEdgeTerminatedNets(to: sim)
+                    edgeTerminationTable.reloadData()
+                }
+            } else {
+                comboBox.stringValue = edgeTerminatedNetRows[row]
+            }
             return
         }
-        comboBox.stringValue = name
         guard edgeTerminatedNetRows[row] != name else { return }
         edgeTerminatedNetRows[row] = name
         commitEdgeTerminatedNets(to: sim)
@@ -630,6 +543,8 @@ final class SimulationPropertiesViewController: NSViewController, NSComboBoxDele
         let row = edgeTerminatedNetRows.count - 1
         edgeTerminationTable.scrollRowToVisible(row)
         edgeTerminationTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        (edgeTerminationTable.view(atColumn: 0, row: row, makeIfNecessary: true) as? NetNameComboBox)?
+            .beginEditing()
     }
 
     @objc private func removeEdgeTerminatedNet() {
