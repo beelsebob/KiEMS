@@ -177,6 +177,39 @@ struct BoardActivityHighlight: Equatable {
     /// Distinguishes "no simulation selected" from a selected simulation that currently has no
     /// included nets. Only the latter should mute every net on the board.
     var hasSelectedSimulation = false
+
+    /// Everything rebuildBoardBuffers() reads: copper/component muting, the hull seed copper, and
+    /// the hull-cut pick discs (by position, not role).
+    struct BoardInputs: Equatable {
+        var includedNets: Set<String>
+        var hullPaddingByNet: [String: Double]
+        var configurationIncludedNets: Set<String>
+        var fullySaturatedNets: Set<String>
+        var involvedComponentReferences: Set<String>
+        var invalidComponentReferences: Set<String>
+        var passiveBridges: [PassiveBridge]
+        var hullCutPickSpots: [String]
+        var hasSelectedSimulation: Bool
+    }
+    var boardInputs: BoardInputs {
+        BoardInputs(includedNets: includedNets, hullPaddingByNet: hullPaddingByNet,
+                    configurationIncludedNets: configurationIncludedNets,
+                    fullySaturatedNets: fullySaturatedNets,
+                    involvedComponentReferences: involvedComponentReferences,
+                    invalidComponentReferences: invalidComponentReferences,
+                    passiveBridges: passiveBridges,
+                    hullCutPickSpots: hullCutPortSpots.map {
+                        "\($0.identifier)|\($0.netName)|\($0.position.x)|\($0.position.y)"
+                    },
+                    hasSelectedSimulation: hasSelectedSimulation)
+    }
+
+    /// Everything rebuildActivityBuffers() reads beyond boardInputs.
+    struct FlowInputs: Equatable {
+        var excitedPins: [ExcitedPin]
+        var hullExpandingNets: Set<String>
+    }
+    var flowInputs: FlowInputs { FlowInputs(excitedPins: excitedPins, hullExpandingNets: hullExpandingNets) }
 }
 
 /// Renders an EMSGeometryPreview -- the sliced board geometry the geometry pipeline step just
@@ -271,8 +304,17 @@ final class GeometryView: MTKView, MTKViewDelegate {
     var activity: BoardActivityHighlight? {
         didSet {
             guard activity != oldValue else { return }
-            rebuildBoardBuffers()
-            rebuildActivityBuffers()
+            // Most Setup edits (port roles, impedance, planned vias) only move dots. Re-tessellating
+            // the board, and re-running the flow-graph search, is reserved for edits that change
+            // their own inputs.
+            if activity?.boardInputs != oldValue?.boardInputs {
+                rebuildBoardBuffers() // Also rebuilds the activity and marker buffers.
+            } else {
+                if activity?.flowInputs != oldValue?.flowInputs {
+                    rebuildActivityBuffers()
+                }
+                rebuildMarkerBuffers()
+            }
             updateAnimationState()
             needsDisplay = true
         }
@@ -380,6 +422,14 @@ final class GeometryView: MTKView, MTKViewDelegate {
     // explicitly asked for exactly this combined behavior, not compounding dims).
     private var boardMuteFlagBuffer: MTLBuffer?
     private var boardVertexCount = 0
+
+    // Port/probe/excitation and planned-via dots -- see rebuildMarkerBuffers(). Same vertex layout
+    // as the board buffers, drawn with the same opaque pipeline straight after them.
+    private var markerPositionBuffer: MTLBuffer?
+    private var markerColorBuffer: MTLBuffer?
+    private var markerNormalBuffer: MTLBuffer?
+    private var markerMuteFlagBuffer: MTLBuffer?
+    private var markerVertexCount = 0
 
     // Filled copper zones are translucent and drawn before opaque tracks/pads, so the latter stay
     // crisp where they occupy the same physical copper plane.
@@ -864,6 +914,14 @@ final class GeometryView: MTKView, MTKViewDelegate {
             encoder.setVertexBuffer(normals, offset: 0, index: 2)
             encoder.setVertexBuffer(muteFlags, offset: 0, index: 4)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: boardVertexCount)
+        }
+        if markerVertexCount > 0, let positions = markerPositionBuffer, let colors = markerColorBuffer,
+           let normals = markerNormalBuffer, let muteFlags = markerMuteFlagBuffer {
+            encoder.setVertexBuffer(positions, offset: 0, index: 0)
+            encoder.setVertexBuffer(colors, offset: 0, index: 1)
+            encoder.setVertexBuffer(normals, offset: 0, index: 2)
+            encoder.setVertexBuffer(muteFlags, offset: 0, index: 4)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: markerVertexCount)
         }
         // Pours are also stored back-to-front. Draw them over the completed opaque stack so an
         // upper-layer pour correctly blends over lower copper; their tiny rearward Z offset (set
@@ -1609,6 +1667,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
             activityVertexCount = 0
             outlineVertexCount = 0
             crossVertexCount = 0
+            markerVertexCount = 0
             maskVertexCount = 0
             regionSeedGroups = []
             return
@@ -1621,10 +1680,6 @@ final class GeometryView: MTKView, MTKViewDelegate {
         // one -- same z-fighting concern FieldView's own markerZ avoids, same fix (a small nudge,
         // 1% of board thickness, rather than reusing the topmost layer's own Z exactly).
         let markerZ = topZ + max(topZ - bottomZ, 1) * 0.01
-        // Stacked marker colours are separate coplanar discs. Give each foreground colour a small
-        // physical depth step as well as a smaller radius; draw order alone would otherwise leave
-        // their shared interiors vulnerable to z-fighting.
-        let markerDepthStep = max(topZ - bottomZ, 1) * 0.001
 
         var positions: [Position3] = []
         var colors: [SIMD4<Float>] = []
@@ -1913,15 +1968,6 @@ final class GeometryView: MTKView, MTKViewDelegate {
             positionsByTarget[pickTarget, default: []].append(contentsOf: [a, b, c])
         }
 
-        // Setup shows the exact accepted candidates from a dry run of board slicing as flat gold
-        // dots. The real Geometry view continues to show its completed vias as full 3D meshes.
-        let plannedViaRadius = max((activity?.plannedStitchingViaDiameter ?? 0) / 2, 1)
-        for point in activity?.plannedStitchingViaPositions ?? [] {
-            Self.appendDisc(center: point, radius: plannedViaRadius, z: markerZ,
-                            color: Self.plannedViaColor, positions: &positions, colors: &colors,
-                            normals: &normals, muteFlags: &muteFlags)
-        }
-
         // Every trace/hull intersection remains pickable even before it has a port role, but an
         // inactive candidate is deliberately invisible. Configured roles use the same concentric
         // blue/yellow/red language as pin ports.
@@ -1936,6 +1982,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
                 identifierByTarget[target] = identifier
                 targetsByIdentifier[identifier] = target
             }
+            // Only the pick disc lives here; its visible role markers are drawn by
+            // rebuildMarkerBuffers(), so toggling a role doesn't rebuild the board.
             var discPositions: [Position3] = []
             var discColors: [SIMD4<Float>] = []
             var discNormals: [Position3] = []
@@ -1943,75 +1991,9 @@ final class GeometryView: MTKView, MTKViewDelegate {
             Self.appendDisc(center: spot.position, radius: Self.absorbingPinMarkerRadius, z: markerZ,
                             color: Self.absorbingPinColor, positions: &discPositions, colors: &discColors,
                             normals: &discNormals, muteFlags: &discMuteFlags)
-            if spot.absorbing {
-                positions.append(contentsOf: discPositions)
-                colors.append(contentsOf: discColors)
-                normals.append(contentsOf: discNormals)
-                muteFlags.append(contentsOf: discMuteFlags)
-            }
             priorityPickingPositions.append(contentsOf: discPositions)
             priorityPickingIdentifiers.append(contentsOf: repeatElement(identifier, count: discPositions.count))
             positionsByTarget[target, default: []].append(contentsOf: discPositions)
-            if spot.probed {
-                Self.appendDisc(center: spot.position, radius: Self.probedPinMarkerRadius,
-                                z: markerZ + markerDepthStep, color: Self.probedPinColor,
-                                positions: &positions, colors: &colors, normals: &normals,
-                                muteFlags: &muteFlags)
-            }
-            if spot.excited {
-                Self.appendDisc(center: spot.position, radius: Self.excitedPinMarkerRadius,
-                                z: markerZ + 2 * markerDepthStep, color: Self.excitedPinColor,
-                                positions: &positions, colors: &colors, normals: &normals,
-                                muteFlags: &muteFlags)
-            }
-        }
-
-        for port in preview.ports {
-            let radius = max(CGFloat(port.width) / 2, 1)
-            Self.appendDisc(center: port.position, radius: radius, z: markerZ,
-                             color: port.absorbSignal ? Self.portColor : Self.probeColor,
-                             positions: &positions, colors: &colors, normals: &normals, muteFlags: &muteFlags)
-        }
-
-        // Absorbing pins form the large blue backing/border for any yellow probe or red excitation
-        // marker subsequently placed on the same pin.
-        for pin in activity?.absorbingPins ?? [] {
-            guard let pinPositions = Self.positions(reference: pin.reference, padNumber: pin.padNumber,
-                                                      in: positionsByTarget),
-                  let centroid = Self.centroid(of: pinPositions)
-            else { continue }
-            Self.appendDisc(center: CGPoint(x: CGFloat(centroid.x), y: CGFloat(centroid.y)),
-                             radius: Self.absorbingPinMarkerRadius, z: markerZ,
-                             color: Self.absorbingPinColor,
-                             positions: &positions, colors: &colors, normals: &normals, muteFlags: &muteFlags)
-        }
-
-        // Probed pins get a smaller yellow centre, slightly forward of the blue absorbing disc.
-        for pin in activity?.probedPins ?? [] {
-            guard let pinPositions = Self.positions(reference: pin.reference, padNumber: pin.padNumber,
-                                                      in: positionsByTarget),
-                  let centroid = Self.centroid(of: pinPositions)
-            else { continue }
-            Self.appendDisc(center: CGPoint(x: CGFloat(centroid.x), y: CGFloat(centroid.y)),
-                             radius: Self.probedPinMarkerRadius, z: markerZ + markerDepthStep,
-                             color: Self.probedPinColor,
-                             positions: &positions, colors: &colors, normals: &normals, muteFlags: &muteFlags)
-        }
-
-        // Excited pins get their own bright marker, distinct from every port/probe color above --
-        // and sit one more depth step forward so red remains unambiguous if a pin is also probed.
-        // See BoardActivityHighlight.ExcitedPin's own doc comment. positionsByTarget is this
-        // function's own still-local pick geometry (not yet assigned to self.pickPositionsByTarget),
-        // but already has every pin's real pad position by this point in the loop above.
-        for pin in activity?.excitedPins ?? [] {
-            guard let pinPositions = Self.positions(reference: pin.reference, padNumber: pin.padNumber,
-                                                      in: positionsByTarget),
-                  let centroid = Self.centroid(of: pinPositions)
-            else { continue }
-            Self.appendDisc(center: CGPoint(x: CGFloat(centroid.x), y: CGFloat(centroid.y)),
-                             radius: Self.excitedPinMarkerRadius, z: markerZ + 2 * markerDepthStep,
-                             color: Self.excitedPinColor,
-                             positions: &positions, colors: &colors, normals: &normals, muteFlags: &muteFlags)
         }
 
         // The controller has already restricted passive candidates by net membership. Apply the
@@ -2163,6 +2145,119 @@ final class GeometryView: MTKView, MTKViewDelegate {
             bytes: outlinePositions, length: MemoryLayout<Position3>.stride * outlinePositions.count)
         outlineColorBuffer = outlineColors.isEmpty ? nil : device.makeBuffer(
             bytes: outlineColors, length: MemoryLayout<SIMD4<Float>>.stride * outlineColors.count)
+
+        rebuildMarkerBuffers()
+    }
+
+    /// Port/probe/excitation dots, planned stitching vias and rejected-via crosses. Kept apart from
+    /// rebuildBoardBuffers() so a port-role edit in Setup (absorbing, probed, excited, impedance)
+    /// only redraws these few hundred vertices instead of re-tessellating the whole board. Reads
+    /// pad positions from pickPositionsByTarget, so it must run after the board buffers are built.
+    private func rebuildMarkerBuffers() {
+        guard let device, let preview else {
+            markerVertexCount = 0
+            crossVertexCount = 0
+            return
+        }
+        let layerZValues = preview.layers.map { Float($0.z) }
+        let topZ = layerZValues.max() ?? 0
+        let bottomZ = layerZValues.min() ?? 0
+        let markerZ = topZ + max(topZ - bottomZ, 1) * 0.01
+        // Stacked marker colours are separate coplanar discs. Give each foreground colour a small
+        // physical depth step as well as a smaller radius; draw order alone would otherwise leave
+        // their shared interiors vulnerable to z-fighting.
+        let markerDepthStep = max(topZ - bottomZ, 1) * 0.001
+
+        var positions: [Position3] = []
+        var colors: [SIMD4<Float>] = []
+        var normals: [Position3] = []
+        var muteFlags: [Float] = []
+
+        // Setup shows the exact accepted candidates from a dry run of board slicing as flat gold
+        // dots. The real Geometry view continues to show its completed vias as full 3D meshes.
+        let plannedViaRadius = max((activity?.plannedStitchingViaDiameter ?? 0) / 2, 1)
+        for point in activity?.plannedStitchingViaPositions ?? [] {
+            Self.appendDisc(center: point, radius: plannedViaRadius, z: markerZ,
+                            color: Self.plannedViaColor, positions: &positions, colors: &colors,
+                            normals: &normals, muteFlags: &muteFlags)
+        }
+
+        for spot in activity?.hullCutPortSpots ?? [] {
+            if spot.absorbing {
+                Self.appendDisc(center: spot.position, radius: Self.absorbingPinMarkerRadius, z: markerZ,
+                                color: Self.absorbingPinColor, positions: &positions, colors: &colors,
+                                normals: &normals, muteFlags: &muteFlags)
+            }
+            if spot.probed {
+                Self.appendDisc(center: spot.position, radius: Self.probedPinMarkerRadius,
+                                z: markerZ + markerDepthStep, color: Self.probedPinColor,
+                                positions: &positions, colors: &colors, normals: &normals,
+                                muteFlags: &muteFlags)
+            }
+            if spot.excited {
+                Self.appendDisc(center: spot.position, radius: Self.excitedPinMarkerRadius,
+                                z: markerZ + 2 * markerDepthStep, color: Self.excitedPinColor,
+                                positions: &positions, colors: &colors, normals: &normals,
+                                muteFlags: &muteFlags)
+            }
+        }
+
+        for port in preview.ports {
+            let radius = max(CGFloat(port.width) / 2, 1)
+            Self.appendDisc(center: port.position, radius: radius, z: markerZ,
+                             color: port.absorbSignal ? Self.portColor : Self.probeColor,
+                             positions: &positions, colors: &colors, normals: &normals, muteFlags: &muteFlags)
+        }
+
+        // Absorbing pins form the large blue backing/border for any yellow probe or red excitation
+        // marker subsequently placed on the same pin.
+        for pin in activity?.absorbingPins ?? [] {
+            guard let pinPositions = Self.positions(reference: pin.reference, padNumber: pin.padNumber,
+                                                      in: pickPositionsByTarget),
+                  let centroid = Self.centroid(of: pinPositions)
+            else { continue }
+            Self.appendDisc(center: CGPoint(x: CGFloat(centroid.x), y: CGFloat(centroid.y)),
+                             radius: Self.absorbingPinMarkerRadius, z: markerZ,
+                             color: Self.absorbingPinColor,
+                             positions: &positions, colors: &colors, normals: &normals, muteFlags: &muteFlags)
+        }
+
+        // Probed pins get a smaller yellow centre, slightly forward of the blue absorbing disc.
+        for pin in activity?.probedPins ?? [] {
+            guard let pinPositions = Self.positions(reference: pin.reference, padNumber: pin.padNumber,
+                                                      in: pickPositionsByTarget),
+                  let centroid = Self.centroid(of: pinPositions)
+            else { continue }
+            Self.appendDisc(center: CGPoint(x: CGFloat(centroid.x), y: CGFloat(centroid.y)),
+                             radius: Self.probedPinMarkerRadius, z: markerZ + markerDepthStep,
+                             color: Self.probedPinColor,
+                             positions: &positions, colors: &colors, normals: &normals, muteFlags: &muteFlags)
+        }
+
+        // Excited pins get their own bright marker, distinct from every port/probe color above --
+        // and sit one more depth step forward so red remains unambiguous if a pin is also probed.
+        // See BoardActivityHighlight.ExcitedPin's own doc comment. Pad positions come from the
+        // board's already-built pick geometry.
+        for pin in activity?.excitedPins ?? [] {
+            guard let pinPositions = Self.positions(reference: pin.reference, padNumber: pin.padNumber,
+                                                      in: pickPositionsByTarget),
+                  let centroid = Self.centroid(of: pinPositions)
+            else { continue }
+            Self.appendDisc(center: CGPoint(x: CGFloat(centroid.x), y: CGFloat(centroid.y)),
+                             radius: Self.excitedPinMarkerRadius, z: markerZ + 2 * markerDepthStep,
+                             color: Self.excitedPinColor,
+                             positions: &positions, colors: &colors, normals: &normals, muteFlags: &muteFlags)
+        }
+
+        markerVertexCount = positions.count
+        markerPositionBuffer = positions.isEmpty ? nil : device.makeBuffer(
+            bytes: positions, length: MemoryLayout<Position3>.stride * positions.count)
+        markerColorBuffer = colors.isEmpty ? nil : device.makeBuffer(
+            bytes: colors, length: MemoryLayout<SIMD4<Float>>.stride * colors.count)
+        markerNormalBuffer = normals.isEmpty ? nil : device.makeBuffer(
+            bytes: normals, length: MemoryLayout<Position3>.stride * normals.count)
+        markerMuteFlagBuffer = muteFlags.isEmpty ? nil : device.makeBuffer(
+            bytes: muteFlags, length: MemoryLayout<Float>.stride * muteFlags.count)
 
         // Setup's rejected candidates use the planned annular-ring diameter. Completed Geometry
         // previews instead size from an existing via, with a fixed fallback only when neither is
