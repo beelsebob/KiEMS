@@ -137,6 +137,10 @@ final class JobScheduler {
     private(set) var jobs: [Job] = []
     private let executionQueue = DispatchQueue(label: "com.tomdavie.kiems-studio.jobscheduler", qos: .userInitiated)
     private var isExecuting = false
+    /// Set by shutDown(completion:): no further job may start, and `shutdownCompletion` fires once the
+    /// in-flight job (if any) has genuinely returned and executionQueue has drained.
+    private var isShuttingDown = false
+    private var shutdownCompletion: (() -> Void)?
 
     private struct SimKey: Hashable {
         let document: ObjectIdentifier
@@ -223,7 +227,11 @@ final class JobScheduler {
         // marked .running yet, or a VC watching a chain of its own jobs (e.g. SimulationResultsViewController
         // watching both .geometryGeneration and .simulation) would misread that transient gap as
         // "nothing's running any more" and wrongly conclude the whole thing was cancelled.
-        startNextIfIdle()
+        if isShuttingDown {
+            completeShutdown()
+        } else {
+            startNextIfIdle()
+        }
         notifyObservers()
     }
 
@@ -315,6 +323,35 @@ final class JobScheduler {
         // until this document's own in-flight GPU work has genuinely stopped.
     }
 
+    /// Called on app termination -- drops every queued job, asks the running one (if any) to cancel,
+    /// and calls `completion` (main thread) only once that job's background call has actually returned
+    /// and everything already queued on executionQueue (e.g. cleanUpDirectory(...)) has run. Letting
+    /// the process exit while a GPU run is still on executionQueue meant exit()'s static destructors
+    /// ran underneath it -- which crashed in FieldFrameSeriesWriter's teardown.
+    func shutDown(completion: @escaping () -> Void) {
+        guard !isShuttingDown else { return }
+        isShuttingDown = true
+        shutdownCompletion = completion
+        for job in jobs where job.status == .running {
+            job.status = .cancelling
+            job.document?.pipeline(forSimulationNamed: job.simulationName).requestCancellation()
+        }
+        jobs.removeAll { $0.status == .queued }
+        notifyObservers()
+        if !isExecuting {
+            completeShutdown()
+        }
+        // Otherwise finishExecution(_:error:) calls completeShutdown() once the running job returns.
+    }
+
+    private func completeShutdown() {
+        guard let completion = shutdownCompletion else { return }
+        shutdownCompletion = nil
+        executionQueue.async {
+            DispatchQueue.main.async(execute: completion)
+        }
+    }
+
     /// Deletes `directory` once any currently-executing job has genuinely finished, rather than
     /// immediately -- called by Document.deinit for its own scratch directory instead of removing it
     /// directly. requestCancellation() (see cancelAll(for:) above) only sets a flag a running job's
@@ -372,7 +409,7 @@ final class JobScheduler {
     /// mutating JobScheduler method is -- see this class's own top comment), which is what makes it
     /// safe to build ExecutionContext here.
     private func startNextIfIdle() {
-        guard !isExecuting, let next = jobs.first(where: { $0.status == .queued }) else { return }
+        guard !isExecuting, !isShuttingDown, let next = jobs.first(where: { $0.status == .queued }) else { return }
         isExecuting = true
         next.status = .running
         next.startedAt = Date()

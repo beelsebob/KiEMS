@@ -22,6 +22,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = buildMainMenu()
     }
 
+    /// Defers termination until JobScheduler has stopped its running job -- exiting with a GPU run
+    /// still in flight tore down static state underneath it and crashed (see JobScheduler.shutDown).
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if JobScheduler.shared.jobs.contains(where: { $0.status == .running || $0.status == .cancelling }) {
+            for window in sender.windows where window.isVisible {
+                window.contentView = Self.stoppingJobsView()
+            }
+        }
+        JobScheduler.shared.shutDown {
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
+    /// Shown in place of every window's content while quitting waits for a running job to stop.
+    private static func stoppingJobsView() -> NSView {
+        let label = NSTextField(labelWithString: "Stopping Jobs…")
+        label.font = .systemFont(ofSize: 28, weight: .semibold)
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.controlSize = .large
+        spinner.isIndeterminate = true
+        spinner.startAnimation(nil)
+        let stack = NSStackView(views: [spinner, label])
+        stack.orientation = .vertical
+        stack.spacing = 16
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        let container = NSView()
+        container.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+        ])
+        return container
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }

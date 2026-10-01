@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <limits>
 #include <mutex>
 #include <thread>
@@ -84,9 +85,14 @@ blosc2_context* threadLocalDecompressContext() {
 // throughput: two chunks decoding fully concurrently would already oversubscribe the CPU against each
 // other (each filter invocation already uses a full hardwareThreads-worker context internally), so
 // serializing chunk-at-a-time while keeping each one's own internal multithreading is no real loss.
+//
+// Deliberately leaked, never destroyed: on quit, exit() runs static destructors while a GPU job's
+// worker thread can still be closing its FieldFrameSeriesWriter, whose H5Dclose flushes chunks
+// through this filter. Locking an already-destroyed std::mutex throws std::system_error, which
+// unwound through HDF5's C frames into HId's noexcept destructor and terminated the app.
 std::mutex& blosc2FilterMutex() {
-    static std::mutex mutex;
-    return mutex;
+    static std::mutex* mutex = new std::mutex;
+    return *mutex;
 }
 
 // Every failure path below logs to stderr with enough detail (direction, sizes, the actual blosc2
@@ -98,8 +104,7 @@ std::mutex& blosc2FilterMutex() {
 // board's mesh is enormously larger than the smoketest's synthetic 3x2x2 grid, so a size-class failure
 // that only manifests on real data would never show up there. Prior fixes were shipped on plausible-
 // but-ultimately-wrong theories with no actual evidence from a failing run; this doesn't repeat that.
-size_t filterBlosc2(unsigned int flags, size_t /*parameterCount*/, const unsigned int* /*parameters*/,
-                    size_t inputBytes, size_t* bufferBytes, void** buffer) {
+size_t filterBlosc2Body(unsigned int flags, size_t inputBytes, size_t* bufferBytes, void** buffer) {
     std::lock_guard lock(blosc2FilterMutex());
     const bool reverse = (flags & H5Z_FLAG_REVERSE) != 0;
     if (buffer == nullptr || *buffer == nullptr || bufferBytes == nullptr) {
@@ -198,6 +203,20 @@ size_t filterBlosc2(unsigned int flags, size_t /*parameterCount*/, const unsigne
     *buffer = output;
     *bufferBytes = maximumOutput;
     return static_cast<size_t>(encoded);
+}
+
+// HDF5 calls this from C; no C++ exception may unwind through its frames. Returning 0 is HDF5's
+// ordinary filter-failure signal.
+size_t filterBlosc2(unsigned int flags, size_t /*parameterCount*/, const unsigned int* /*parameters*/,
+                    size_t inputBytes, size_t* bufferBytes, void** buffer) noexcept {
+    try {
+        return filterBlosc2Body(flags, inputBytes, bufferBytes, buffer);
+    } catch (const std::exception& error) {
+        std::fprintf(stderr, "Copper: Blosc2 filter threw: %s\n", error.what());
+    } catch (...) {
+        std::fprintf(stderr, "Copper: Blosc2 filter threw an unknown exception\n");
+    }
+    return 0;
 }
 
 const H5Z_class2_t kBlosc2Filter = {
