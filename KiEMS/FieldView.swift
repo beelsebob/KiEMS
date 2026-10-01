@@ -137,22 +137,21 @@ final class FieldView: MTKView, MTKViewDelegate {
     }
 
     /// While paused there is no presentation deadline. Decode in short chunks so Play can change
-    /// policy promptly: finish the successor first, then continue the displayed frame until every
-    /// detail tile is present. Each current-frame chunk is installed immediately so the stationary
-    /// image visibly sharpens rather than changing only after the entire frame has decoded.
+    /// policy promptly: finish the displayed frame first, then prefetch the successor. The data
+    /// source keeps only the displayed frame plus one prepared frame, so after a seek or a backward
+    /// step the successor is usually cold; decoding it first would leave the frame the user is
+    /// looking at as a preview for the whole of that full-resolution decode. Each current-frame
+    /// chunk is installed immediately so the stationary image visibly sharpens rather than changing
+    /// only after the entire frame has decoded.
     private func refineWhilePaused(frames: [EMSFieldFrame], generation: Int) {
         let currentIndex = currentFrameIndex
         let nextIndex = min(currentIndex + 1, frames.count - 1)
-        func refineCurrent() {
-            refineUntilComplete(frames: frames, frameIndex: currentIndex, generation: generation,
-                                redrawCurrent: true, completion: {})
+        refineUntilComplete(frames: frames, frameIndex: currentIndex, generation: generation,
+                            redrawCurrent: true) { [weak self] in
+            guard let self, nextIndex != currentIndex else { return }
+            self.refineUntilComplete(frames: frames, frameIndex: nextIndex, generation: generation,
+                                     redrawCurrent: false, completion: {})
         }
-        guard nextIndex != currentIndex else {
-            refineCurrent()
-            return
-        }
-        refineUntilComplete(frames: frames, frameIndex: nextIndex, generation: generation,
-                            redrawCurrent: false, completion: refineCurrent)
     }
 
     private func refineUntilComplete(frames: [EMSFieldFrame], frameIndex: Int, generation: Int,
