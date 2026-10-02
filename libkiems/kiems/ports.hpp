@@ -15,7 +15,7 @@
 #include <string>
 #include <vector>
 
-#include <CSXCAD/ContinuousStructure.h>
+#include <ContinuousStructure.h>
 
 #include "csx_helpers.hpp"
 

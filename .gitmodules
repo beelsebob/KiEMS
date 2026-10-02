@@ -1,0 +1,3 @@
+[submodule "submodules/CSXCAD"]
+	path = submodules/CSXCAD
+	url = https://github.com/beelsebob/CSXCAD

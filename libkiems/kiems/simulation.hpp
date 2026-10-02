@@ -14,7 +14,7 @@
 #include <utility>
 #include <vector>
 
-#include <CSXCAD/ContinuousStructure.h>
+#include <ContinuousStructure.h>
 
 #include <nlohmann/json.hpp>
 

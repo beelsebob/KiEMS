@@ -21,6 +21,7 @@
 /* End PBXAggregateTarget section */
 
 /* Begin PBXBuildFile section */
+		C5B0B1EC0000000000000003 /* CSObject.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C5B0B1EC0000000000000001 /* CSObject.cpp */; };
 		08091C43255C7E607DB3203F /* liblibkiems.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 922BA8FA4CD5D8901DCAC9DA /* liblibkiems.a */; };
 		0A4F8D836CCEAB4E92E50750 /* CSPrimPoint.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 8BAEFA9E1EC092E0D890A14C /* CSPrimPoint.cpp */; };
 		0EB3189D8E8C0E15ECDFCF07 /* CSPrimCylindricalShell.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C092FF8B6A375F76FC193A6E /* CSPrimCylindricalShell.cpp */; };
@@ -353,6 +354,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		C5B0B1EC0000000000000001 /* CSObject.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = CSObject.cpp; sourceTree = "<group>"; };
+		C5B0B1EC0000000000000002 /* CSObject.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CSObject.h; sourceTree = "<group>"; };
 		041AB224FEAA3879BCE70995 /* ParameterCoord.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = ParameterCoord.h; sourceTree = "<group>"; };
 		041FC8C8C4A04AC1ACFCC824 /* CSSpatialIndex.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSSpatialIndex.cpp; sourceTree = "<group>"; };
 		099AD36F929C43F1AEBF30DB /* CSPropDumpBox.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropDumpBox.cpp; sourceTree = "<group>"; };
@@ -880,9 +883,11 @@
 				FDE3476E04DBF2031C2CCF48 /* ParameterObjects.h */,
 				46F7EE12182CFA425BB001B4 /* CSSpatialIndex.h */,
 				041FC8C8C4A04AC1ACFCC824 /* CSSpatialIndex.cpp */,
+				C5B0B1EC0000000000000002 /* CSObject.h */,
+				C5B0B1EC0000000000000001 /* CSObject.cpp */,
 			);
 			name = CSXCAD;
-			path = CSXCAD/CSXCAD;
+			path = submodules/CSXCAD/src;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -1460,6 +1465,7 @@
 				D1B97BD0204C249DCB935BE0 /* ParameterCoord.cpp in Sources */,
 				3D4617AE4F349584B8319E2C /* ParameterObjects.cpp in Sources */,
 				BB5902830D5CD46321F04EF3 /* CSSpatialIndex.cpp in Sources */,
+				C5B0B1EC0000000000000003 /* CSObject.cpp in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -2007,6 +2013,10 @@
 				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
 				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
 				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				WARNING_CFLAGS = (
+					"$(inherited)",
+					"-Wno-documentation-deprecated-sync",
+				);
 				CLANG_WARN_EMPTY_BODY = YES;
 				CLANG_WARN_ENUM_CONVERSION = YES;
 				CLANG_WARN_FLOAT_CONVERSION = YES_ERROR;
@@ -2072,7 +2082,7 @@
 				SDKROOT = macosx;
 				SYSTEM_HEADER_SEARCH_PATHS = (
 					"$(HOMEBREW_PREFIX)/include",
-					"$(SRCROOT)/CSXCAD",
+					"$(SRCROOT)/submodules/CSXCAD/src",
 					"$(SRCROOT)/vendor",
 				);
 			};
@@ -2099,6 +2109,10 @@
 				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
 				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
 				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				WARNING_CFLAGS = (
+					"$(inherited)",
+					"-Wno-documentation-deprecated-sync",
+				);
 				CLANG_WARN_EMPTY_BODY = YES;
 				CLANG_WARN_ENUM_CONVERSION = YES;
 				CLANG_WARN_FLOAT_CONVERSION = YES_ERROR;
@@ -2161,7 +2175,7 @@
 				SDKROOT = macosx;
 				SYSTEM_HEADER_SEARCH_PATHS = (
 					"$(HOMEBREW_PREFIX)/include",
-					"$(SRCROOT)/CSXCAD",
+					"$(SRCROOT)/submodules/CSXCAD/src",
 					"$(SRCROOT)/vendor",
 				);
 			};
@@ -2264,7 +2278,7 @@
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SYSTEM_HEADER_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(SRCROOT)/CSXCAD/CSXCAD",
+					"$(SRCROOT)/submodules/CSXCAD/src",
 					"$(BUILT_PRODUCTS_DIR)/hdf5-local-prefix/include",
 					"$(BUILT_PRODUCTS_DIR)/blosc2-local-prefix/include",
 				);
@@ -2308,7 +2322,7 @@
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SYSTEM_HEADER_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(SRCROOT)/CSXCAD/CSXCAD",
+					"$(SRCROOT)/submodules/CSXCAD/src",
 					"$(BUILT_PRODUCTS_DIR)/hdf5-local-prefix/include",
 					"$(BUILT_PRODUCTS_DIR)/blosc2-local-prefix/include",
 				);
@@ -2333,7 +2347,7 @@
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SYSTEM_HEADER_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(SRCROOT)/CSXCAD/CSXCAD",
+					"$(SRCROOT)/submodules/CSXCAD/src",
 					"$(BUILT_PRODUCTS_DIR)/hdf5-local-prefix/include",
 					"$(BUILT_PRODUCTS_DIR)/blosc2-local-prefix/include",
 				);
@@ -2356,7 +2370,7 @@
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SYSTEM_HEADER_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(SRCROOT)/CSXCAD/CSXCAD",
+					"$(SRCROOT)/submodules/CSXCAD/src",
 					"$(BUILT_PRODUCTS_DIR)/hdf5-local-prefix/include",
 					"$(BUILT_PRODUCTS_DIR)/blosc2-local-prefix/include",
 				);

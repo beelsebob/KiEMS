@@ -13,7 +13,7 @@
 #include <string>
 #include <vector>
 
-#include <CSXCAD/CSRectGrid.h>
+#include <CSRectGrid.h>
 
 namespace kiems {
 

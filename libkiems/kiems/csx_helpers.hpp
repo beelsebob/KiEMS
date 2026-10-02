@@ -15,17 +15,17 @@
 #include <string>
 #include <vector>
 
-#include <CSXCAD/ContinuousStructure.h>
-#include <CSXCAD/CSPropConductingSheet.h>
-#include <CSXCAD/CSPropDumpBox.h>
-#include <CSXCAD/CSPropExcitation.h>
-#include <CSXCAD/CSPropLumpedElement.h>
-#include <CSXCAD/CSPropMaterial.h>
-#include <CSXCAD/CSPropMetal.h>
-#include <CSXCAD/CSPropProbeBox.h>
-#include <CSXCAD/CSPrimBox.h>
-#include <CSXCAD/CSPrimLinPoly.h>
-#include <CSXCAD/CSPrimPolygon.h>
+#include <ContinuousStructure.h>
+#include <CSPropConductingSheet.h>
+#include <CSPropDumpBox.h>
+#include <CSPropExcitation.h>
+#include <CSPropLumpedElement.h>
+#include <CSPropMaterial.h>
+#include <CSPropMetal.h>
+#include <CSPropProbeBox.h>
+#include <CSPrimBox.h>
+#include <CSPrimLinPoly.h>
+#include <CSPrimPolygon.h>
 
 namespace kiems {
 

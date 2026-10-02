@@ -7,7 +7,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include <CSXCAD/CSRectGrid.h>
+#include <CSRectGrid.h>
 
 #include "config.hpp"
 #include "gerber_io.hpp"
