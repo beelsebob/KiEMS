@@ -44,9 +44,19 @@ pixman           0.46  KiCad headers
 freetype         2.14  KiCad headers
 harfbuzz         14    KiCad headers
 opencascade      7.9   KiCad link (libTK*.dylib)
+cmake            4     KiCad build (Scripts/build_kicad.sh)
+ninja            1.13  KiCad build
+pkgconf          3     KiCad build
+libngspice       46    KiCad build
+libgit2          1.9   KiCad build
+nng              1.12  KiCad build
+zstd             1.5   KiCad build
+protobuf         35    KiCad build
+fontconfig       2.18  KiCad build
+unixodbc         2.3   KiCad build
 "
 
-SUBMODULES="submodules/CSXCAD submodules/fparser submodules/tinyxml"
+SUBMODULES="submodules/CSXCAD submodules/fparser submodules/tinyxml submodules/kicad"
 
 if [ -t 1 ]; then
   RED=$'\033[31m'; YELLOW=$'\033[33m'; GREEN=$'\033[32m'; BOLD=$'\033[1m'; RESET=$'\033[0m'
@@ -179,13 +189,39 @@ if [ -n "$EMPTY_SUBMODULES" ] && confirm "Run 'git submodule update --init${EMPT
   git -C "$REPO_ROOT" submodule update --init $EMPTY_SUBMODULES && EMPTY_SUBMODULES=""
 fi
 
+# --- KiCad build ---------------------------------------------------------------------------------
+# libkicad links pieces of the KiCad submodule built by Scripts/build_kicad.sh (too slow to run from
+# Xcode). This only checks the build exists; it can't tell whether it is current with the submodule.
+echo; echo "${BOLD}KiCad build${RESET}"
+KICAD_BUILD="$REPO_ROOT/build/kicad"
+KICAD_PRODUCTS="common/libcommon.a common/libpcbcommon.a kicad/KiCad.app/Contents/Frameworks/libkicommon.dylib
+  kicad/KiCad.app/Contents/Frameworks/libkigal.dylib kicad/KiCad.app/Contents/Frameworks/libkiapi.dylib"
+kicad_built() {
+  for product in $KICAD_PRODUCTS; do [ -e "$KICAD_BUILD/$product" ] || return 1; done
+}
+KICAD_MISSING=""
+if kicad_built; then
+  ok "build/kicad"
+elif [ -n "$MISSING" ] || [ -n "$EMPTY_SUBMODULES" ]; then
+  fail "build/kicad is missing; fix the errors above, then run Scripts/build_kicad.sh"
+  KICAD_MISSING=" build/kicad"
+else
+  fail "build/kicad is missing or incomplete"
+  if confirm "Run Scripts/build_kicad.sh now (a full build takes a long time)?" && \
+     "$REPO_ROOT/Scripts/build_kicad.sh" && kicad_built; then
+    ok "build/kicad"
+  else
+    KICAD_MISSING=" build/kicad"
+  fi
+fi
+
 # --- Summary --------------------------------------------------------------------------------------
 # libkicad/DependencyCheck.h (force-included into every compile) #errors until this file exists.
 STAMP="$REPO_ROOT/libkicad/DependenciesChecked.generated.h"
 rm -f "$STAMP"
 echo
-if [ -n "$MISSING" ] || [ -n "$EMPTY_SUBMODULES" ]; then
-  echo "${RED}Missing dependencies:${MISSING}${EMPTY_SUBMODULES}${RESET}"
+if [ -n "$MISSING" ] || [ -n "$EMPTY_SUBMODULES" ] || [ -n "$KICAD_MISSING" ]; then
+  echo "${RED}Missing dependencies:${MISSING}${EMPTY_SUBMODULES}${KICAD_MISSING}${RESET}"
   exit 1
 fi
 {
