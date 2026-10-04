@@ -152,7 +152,7 @@ final class SourceListViewController: NSViewController {
     private var selectedIndex: Int?
 
     /// Fired whenever the selected simulation's involvedNets()/excitations() membership changes (see
-    /// includedToggled/excitedToggled/mainExcitationToggled) -- DocumentWindowController wires this
+    /// includedToggled/excitedToggled/excitationTypeChanged) -- DocumentWindowController wires this
     /// to InvolvedNetsViewController.refresh(), which has no other way to learn that its own summary
     /// table (nets *and* which of their pins are excited) is now stale.
     var onInvolvedNetsChanged: (() -> Void)?
@@ -260,7 +260,8 @@ final class SourceListViewController: NSViewController {
     // yields the same full absorbing-port structure Probe+Absorb Signal does, regardless of this
     // pin's own probe/absorb state (see PortConfig::absorbSignal()'s own doc comment).
     private let excitedCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
-    private let mainExcitationCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    /// Primary (item 0) = a main excitation (isMain); Adversarial (item 1) = a non-main tone burst.
+    private let excitationTypePopUp = NSPopUpButton()
     private let startTimeField = NSTextField(string: "")
     private let durationField = NSTextField(string: "")
     private let phaseField = NSTextField(string: "")
@@ -566,8 +567,9 @@ final class SourceListViewController: NSViewController {
 
         excitedCheckbox.target = self
         excitedCheckbox.action = #selector(excitedToggled)
-        mainExcitationCheckbox.target = self
-        mainExcitationCheckbox.action = #selector(mainExcitationToggled)
+        excitationTypePopUp.addItems(withTitles: ["Primary", "Adversarial"])
+        excitationTypePopUp.target = self
+        excitationTypePopUp.action = #selector(excitationTypeChanged)
 
         startTimeField.formatter = startTimeFormatter
         durationField.formatter = durationFormatter
@@ -593,7 +595,7 @@ final class SourceListViewController: NSViewController {
         frequencyOnlyRows = [frequencyRow]
 
         excitationFieldsContainer = NSStackView(views: [
-            checkboxRow(mainExcitationCheckbox, title: "Main Excitation"),
+            labeled("Type:", excitationTypePopUp),
             labeled("Start time:", startTimeField),
             labeled("Duration:", durationField),
             labeled("Phase:", phaseField),
@@ -1421,7 +1423,7 @@ final class SourceListViewController: NSViewController {
     }
 
     private func populateExcitationFields(from excitation: EMSExcitationBridge) {
-        mainExcitationCheckbox.state = excitation.isMain ? .on : .off
+        excitationTypePopUp.selectItem(at: excitation.isMain ? 0 : 1)
         startTimeField.doubleValue = excitation.startTime
         durationField.doubleValue = excitation.duration
         phaseField.doubleValue = excitation.phaseDegrees
@@ -2043,9 +2045,9 @@ final class SourceListViewController: NSViewController {
                                      padNumber: pin.number)
     }
 
-    @objc private func mainExcitationToggled() {
+    @objc private func excitationTypeChanged() {
         guard let node = selectedNode, let excitation = matchingExcitation(for: node) else { return }
-        excitation.isMain = mainExcitationCheckbox.state == .on
+        excitation.isMain = excitationTypePopUp.indexOfSelectedItem == 0
         if !excitation.isMain {
             // Frequency and amplitude are required for a non-main excitation. Populate sensible
             // values when revealing those controls so a newly-created (main-by-default) source

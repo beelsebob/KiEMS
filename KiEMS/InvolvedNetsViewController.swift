@@ -252,7 +252,7 @@ final class InvolvedNetsViewController: NSViewController {
 
     /// Called whenever something that could change the resolved net list happens: the selected
     /// simulation's involvedNets()/excitations() membership (SourceListViewController.
-    /// includedToggled/excitedToggled/mainExcitationToggled, via DocumentWindowController's wiring)
+    /// includedToggled/excitedToggled/excitationTypeChanged, via DocumentWindowController's wiring)
     /// or the linked board itself (a fresh import).
     func refresh() {
         guard let document, let selectedIndex, selectedIndex >= 0,
@@ -441,7 +441,7 @@ private extension InvolvedNetsNode {
             let base = function.isEmpty
                 ? "\(footprintReference) pin \(pin.number)"
                 : "\(footprintReference) pin \(pin.number) (\(function))"
-            return isMain ? "\(base) (Main Excitation)" : base
+            return isMain ? "\(base) (Primary Excitation)" : base
         case .probedPin(let footprintReference, let pin, let absorbSignal):
             let function = SourceListNode.strippingTrailingNumericSuffix(pin.function)
             let base = function.isEmpty

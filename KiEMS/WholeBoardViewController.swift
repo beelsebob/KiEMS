@@ -56,7 +56,8 @@ final class WholeBoardViewController: NSViewController {
     private let netClassHullPaddingFormatter = MicrometerValueFormatter()
     private let netClassImpedanceProbedCheckbox = NSButton(checkboxWithTitle: "Impedance Probed", target: nil, action: nil)
     private let excitedCheckbox = NSButton(checkboxWithTitle: "Excited", target: nil, action: nil)
-    private let mainExcitationCheckbox = NSButton(checkboxWithTitle: "Main Excitation", target: nil, action: nil)
+    /// Primary (item 0) = a main excitation (isMain); Adversarial (item 1) = a non-main tone burst.
+    private let excitationTypePopUp = NSPopUpButton()
     private let phaseField = NSTextField(string: "")
     private let relativeAmplitudeField = NSTextField(string: "")
     private let frequencyField = NSTextField(string: "")
@@ -194,7 +195,7 @@ final class WholeBoardViewController: NSViewController {
         for checkbox in [includedCheckbox, simulatedCheckbox, impedanceProbedCheckbox,
                          netClassIncludedCheckbox, netClassSimulatedCheckbox,
                          netClassImpedanceProbedCheckbox, excitedCheckbox,
-                         mainExcitationCheckbox, probedCheckbox, absorbingCheckbox] {
+                         probedCheckbox, absorbingCheckbox] {
             checkbox.controlSize = .small
             checkbox.font = Self.formFont
         }
@@ -216,13 +217,16 @@ final class WholeBoardViewController: NSViewController {
         pinImpedanceField.target = self
         pinImpedanceField.action = #selector(pinImpedanceChanged)
         pinImpedanceField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        mainExcitationCheckbox.target = self
-        mainExcitationCheckbox.action = #selector(mainExcitationToggled)
+        excitationTypePopUp.addItems(withTitles: ["Primary", "Adversarial"])
+        excitationTypePopUp.controlSize = .small
+        excitationTypePopUp.font = Self.formFont
+        excitationTypePopUp.target = self
+        excitationTypePopUp.action = #selector(excitationTypeChanged)
         frequencyRow = excitationValueRow(title: "Frequency:", field: frequencyField)
         let phaseRow = excitationValueRow(title: "Phase:", field: phaseField)
         let relativeAmplitudeRow = excitationValueRow(title: "Relative Amplitude:", field: relativeAmplitudeField)
         configureControlStack(excitationControls, views: [
-            mainExcitationCheckbox,
+            excitationValueRow(title: "Type:", field: excitationTypePopUp),
             phaseRow,
             relativeAmplitudeRow,
             frequencyRow,
@@ -380,7 +384,7 @@ final class WholeBoardViewController: NSViewController {
         return formatter
     }()
 
-    private func excitationValueRow(title: String, field: NSTextField) -> NSStackView {
+    private func excitationValueRow(title: String, field: NSControl) -> NSStackView {
         let label = NSTextField(labelWithString: title)
         label.font = Self.formFont
         label.textColor = .secondaryLabelColor
@@ -730,7 +734,7 @@ final class WholeBoardViewController: NSViewController {
         netClassHullPaddingField.isEnabled = false
         netClassImpedanceProbedCheckbox.isEnabled = false
         excitedCheckbox.isEnabled = false
-        mainExcitationCheckbox.isEnabled = false
+        excitationTypePopUp.isEnabled = false
         probedCheckbox.isEnabled = false
         absorbingCheckbox.isEnabled = false
         pinImpedanceField.isEnabled = false
@@ -744,7 +748,7 @@ final class WholeBoardViewController: NSViewController {
         netClassHullPaddingField.stringValue = ""
         netClassImpedanceProbedCheckbox.state = .off
         excitedCheckbox.state = .off
-        mainExcitationCheckbox.state = .off
+        excitationTypePopUp.selectItem(at: 0)
         excitationControls.isHidden = true
         probedCheckbox.state = .off
         absorbingCheckbox.state = .off
@@ -883,8 +887,8 @@ final class WholeBoardViewController: NSViewController {
                 excitedCheckbox.state = .on
                 absorbingCheckbox.state = .on
                 excitationControls.isHidden = false
-                mainExcitationCheckbox.isEnabled = true
-                mainExcitationCheckbox.state = excitation.isMain ? .on : .off
+                excitationTypePopUp.isEnabled = true
+                excitationTypePopUp.selectItem(at: excitation.isMain ? 0 : 1)
                 phaseField.doubleValue = excitation.phaseDegrees
                 relativeAmplitudeField.objectValue = excitation.amplitude ?? NSNumber(value: 1)
                 frequencyField.objectValue = excitation.frequency ?? NSNumber(value: document?.config.frequencyStart ?? 0)
@@ -919,8 +923,8 @@ final class WholeBoardViewController: NSViewController {
                 // Probe/Absorbing entry.
                 absorbingCheckbox.state = .on
                 excitationControls.isHidden = false
-                mainExcitationCheckbox.isEnabled = true
-                mainExcitationCheckbox.state = excitation.isMain ? .on : .off
+                excitationTypePopUp.isEnabled = true
+                excitationTypePopUp.selectItem(at: excitation.isMain ? 0 : 1)
                 phaseField.doubleValue = excitation.phaseDegrees
                 relativeAmplitudeField.objectValue = excitation.amplitude ?? NSNumber(value: 1)
                 frequencyField.objectValue = excitation.frequency ?? NSNumber(value: document?.config.frequencyStart ?? 0)
@@ -1409,7 +1413,7 @@ final class WholeBoardViewController: NSViewController {
             if excitationIndex(reference: footprintReference, pin: padNumber, in: simulation) == nil {
                 let excitation = simulation.addExcitation(forFootprint: footprintReference, pin: padNumber)
                 // The normal case is a broadband drive using the simulation's sweep. A user can
-                // uncheck Main Excitation to reveal and configure a narrowband frequency instead.
+                // set Type to Adversarial to reveal and configure a narrowband frequency instead.
                 excitation.isMain = true
                 excitation.phaseDegrees = 0
                 excitation.amplitude = NSNumber(value: 1)
@@ -1459,11 +1463,11 @@ final class WholeBoardViewController: NSViewController {
         configurationChanged()
     }
 
-    @objc private func mainExcitationToggled() {
+    @objc private func excitationTypeChanged() {
         if case let .hullCutPort(identifier)? = selection?.kind,
            let simulation = selectedSimulation,
            let excitation = hullCutExcitation(identifier: identifier, in: simulation) {
-            excitation.isMain = mainExcitationCheckbox.state == .on
+            excitation.isMain = excitationTypePopUp.indexOfSelectedItem == 0
             if !excitation.isMain {
                 if excitation.frequency == nil || excitation.frequency?.doubleValue == 0 {
                     excitation.frequency = NSNumber(value: document?.config.frequencyStart ?? 0)
@@ -1477,7 +1481,7 @@ final class WholeBoardViewController: NSViewController {
               let simulation = selectedSimulation,
               let excitation = excitation(reference: reference, pin: number, in: simulation)
         else { return }
-        excitation.isMain = mainExcitationCheckbox.state == .on
+        excitation.isMain = excitationTypePopUp.indexOfSelectedItem == 0
         if !excitation.isMain {
             if excitation.frequency == nil || excitation.frequency?.doubleValue == 0 {
                 excitation.frequency = NSNumber(value: document?.config.frequencyStart ?? 0)
@@ -1737,11 +1741,13 @@ final class WholeBoardViewController: NSViewController {
                                      enabled: excitedCheckbox.isEnabled) {
             [weak self] in self?.toggle(self?.excitedCheckbox, #selector(WholeBoardViewController.excitedToggled))
         })
-        let isMain = mainExcitationCheckbox.state == .on
-        menu.addItem(ClosureMenuItem(title: isMain ? "Make Secondary Excitation" : "Make Main Excitation",
-                                     enabled: excited && mainExcitationCheckbox.isEnabled) {
+        let isPrimary = excitationTypePopUp.indexOfSelectedItem == 0
+        menu.addItem(ClosureMenuItem(title: isPrimary ? "Make Adversarial Excitation" : "Make Primary Excitation",
+                                     enabled: excited && excitationTypePopUp.isEnabled) {
             [weak self] in
-            self?.toggle(self?.mainExcitationCheckbox, #selector(WholeBoardViewController.mainExcitationToggled))
+            guard let self else { return }
+            excitationTypePopUp.selectItem(at: isPrimary ? 1 : 0)
+            excitationTypeChanged()
         })
         menu.addItem(ClosureMenuItem(title: probedCheckbox.state == .on ? "Don't Probe" : "Probe",
                                      key: "p", shift: true, enabled: probedCheckbox.isEnabled) {
