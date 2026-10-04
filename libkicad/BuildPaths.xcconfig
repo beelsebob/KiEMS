@@ -7,6 +7,9 @@ KICAD_SOURCE_ROOT = $(SRCROOT)/submodules/kicad
 KICAD_BUILD_ROOT = $(SRCROOT)/build/kicad
 KICAD_FRAMEWORK_ROOT = $(KICAD_BUILD_ROOT)/kicad/KiCad.app/Contents/Frameworks
 HOMEBREW_PREFIX = /opt/homebrew
+// Homebrew's VTK puts its major.minor version in header directory and library names (vtk-9.6,
+// -lvtkCommonCore-9.6); Scripts/check_dependencies.sh overrides it to match the installed VTK.
+VTK_VERSION = 9.6
 
 // Fails every compile with an #error until Scripts/check_dependencies.sh has passed on this machine.
 OTHER_CFLAGS = $(inherited) -include $(SRCROOT)/libkicad/DependencyCheck.h

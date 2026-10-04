@@ -36,7 +36,7 @@ cgal             6.2   CSXCAD
 boost            1.90  CSXCAD, KiCad headers
 gmp              6.3   CSXCAD
 mpfr             4.2   CSXCAD
-vtk              9.6   CSXCAD (links -9.6 suffixed libraries)
+vtk              9     CSXCAD (VTK_VERSION build setting follows the installed version)
 wxwidgets@3.2    3.2   KiCad headers (wx-3.2 include paths)
 glm              1.0   KiCad headers
 cairo            1.18  KiCad headers
@@ -100,21 +100,26 @@ fi
 BREW_PREFIX="$("$BREW" --prefix)"
 ok "$BREW (prefix $BREW_PREFIX)"
 
-# The Xcode project reads HOMEBREW_PREFIX from libkicad/BuildPaths.xcconfig (default /opt/homebrew),
-# overridable by the untracked BuildPaths.local.xcconfig. Point it at this machine's Homebrew.
+# The Xcode project reads machine-specific settings (HOMEBREW_PREFIX, VTK_VERSION) from
+# libkicad/BuildPaths.xcconfig, overridable by the untracked BuildPaths.local.xcconfig. Make the
+# override match this machine, writing it only when it differs from the checked-in default.
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOCAL_XCCONFIG="$REPO_ROOT/libkicad/BuildPaths.local.xcconfig"
-DEFAULT_PREFIX="$(sed -n 's/^HOMEBREW_PREFIX *= *//p' "$REPO_ROOT/libkicad/BuildPaths.xcconfig")"
-CONFIGURED_PREFIX="$(sed -n 's/^HOMEBREW_PREFIX *= *//p' "$LOCAL_XCCONFIG" 2>/dev/null | tail -1)"
-if [ -n "$CONFIGURED_PREFIX" ]; then
-  if [ "$CONFIGURED_PREFIX" != "$BREW_PREFIX" ]; then
-    sed -i '' "s|^HOMEBREW_PREFIX *=.*|HOMEBREW_PREFIX = $BREW_PREFIX|" "$LOCAL_XCCONFIG"
-    ok "HOMEBREW_PREFIX updated from $CONFIGURED_PREFIX to $BREW_PREFIX in ${LOCAL_XCCONFIG#"$REPO_ROOT"/}"
+set_build_setting() {  # name value
+  local name="$1" value="$2" default configured
+  default="$(sed -n "s/^$name *= *//p" "$REPO_ROOT/libkicad/BuildPaths.xcconfig")"
+  configured="$(sed -n "s/^$name *= *//p" "$LOCAL_XCCONFIG" 2>/dev/null | tail -1)"
+  if [ -n "$configured" ]; then
+    if [ "$configured" != "$value" ]; then
+      sed -i '' "s|^$name *=.*|$name = $value|" "$LOCAL_XCCONFIG"
+      ok "$name updated from $configured to $value in ${LOCAL_XCCONFIG#"$REPO_ROOT"/}"
+    fi
+  elif [ "$value" != "$default" ]; then
+    echo "$name = $value" >> "$LOCAL_XCCONFIG"
+    ok "$name set to $value in ${LOCAL_XCCONFIG#"$REPO_ROOT"/}"
   fi
-elif [ "$BREW_PREFIX" != "$DEFAULT_PREFIX" ]; then
-  echo "HOMEBREW_PREFIX = $BREW_PREFIX" >> "$LOCAL_XCCONFIG"
-  ok "HOMEBREW_PREFIX set to $BREW_PREFIX in ${LOCAL_XCCONFIG#"$REPO_ROOT"/}"
-fi
+}
+set_build_setting HOMEBREW_PREFIX "$BREW_PREFIX"
 
 # The version of the keg $BREW_PREFIX/opt/<formula> points at -- i.e. the one the build links.
 linked_version() {
@@ -171,6 +176,11 @@ if [ -n "$MISSING" ]; then
       fail "brew install failed"
     fi
   fi
+fi
+
+# Homebrew's VTK names its header directory and libraries after its major.minor version.
+if version="$(linked_version vtk)"; then
+  set_build_setting VTK_VERSION "$(echo "$version" | cut -d. -f1-2)"
 fi
 
 # --- Git submodules -------------------------------------------------------------------------------
