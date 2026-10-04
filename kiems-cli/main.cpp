@@ -62,7 +62,7 @@ std::vector<double> linspace(double start, double stop, std::int32_t num) {
 void printUsage() {
     std::cout << "Usage: EM-Simulator [-c CONFIG_FILE] [--update-config] [-g] [-s] [-p] [-a]\n"
                  "                    [--export-field [{outer,cu-outer,cu-inner,substrate} ...]]\n"
-                 "                    [--oversampling N] [-t] [--plot-phase] [-i INPUT] [-o OUTPUT]\n"
+                 "                    [--oversampling N] [--absorbing-boundary-cells N] [-t] [--plot-phase] [-i INPUT] [-o OUTPUT]\n"
                  "                    [-d | -l {DEBUG,INFO,WARNING,ERROR}]\n\n"
                  "This application performs EM simulations directly from KiCad PCB files.\n\n"
                  "  -c, --config CONFIG_FILE   Path to config file [default: ./simulation.json]\n"
@@ -73,6 +73,11 @@ void printUsage() {
                  "  -a, --all                  Execute all steps (geometry, simulation, postprocessing)\n"
                  "  --export-field, --ef [...] [s] Export electric field data from the simulation\n"
                  "  --oversampling N           [s] Field dump time-oversampling (default: 4)\n"
+                 "  --absorbing-boundary-cells N\n"
+                 "                             [g] Depth in cells of the absorbing boundary on every face\n"
+                 "                                 (CPML, plus the matched ring on an irregular domain),\n"
+                 "                                 overriding grid.absorbing_boundary_cells (default: 8).\n"
+                 "                                 Changes the geometry, so needs -g or -a\n"
                  "  -t, --transparent          [p] Export graphs with transparent background\n"
                  "  --plot-phase               [p] Plot phase on S-param graphs\n"
                  "  -i, --input INPUT          [p] Directory with input S-param files, OR a .kicad_pcb\n"
@@ -171,6 +176,16 @@ Arguments parseArguments(int argc, char** argv, DumpOptions& dumpOptions) {
                 missingValue(tok);
             }
             args.setOversampling(std::stoi(tokens[i]));
+        } else if (tok == "--absorbing-boundary-cells") {
+            if (++i >= tokens.size()) {
+                missingValue(tok);
+            }
+            const std::int32_t depth = std::stoi(tokens[i]);
+            if (depth < 1 || depth > 64) {
+                std::cerr << "argument --absorbing-boundary-cells: must be between 1 and 64\n";
+                printUsageAndExit(2);
+            }
+            args.setAbsorbingBoundaryCells(depth);
         } else if (tok == "-t" || tok == "--transparent") {
             args.setTransparent(true);
         } else if (tok == "--plot-phase") {
@@ -438,7 +453,7 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     portConfig.maxTimesteps = sim.maxTimesteps();
     const copper::CopperFDTDRunResult gpuResult =
         copper::runFDTDPortOnGPU(sim.csx(), portConfig, printCopperProgress, cpmlAlphaMax,
-                                  constants::pmlDepthCells);
+                                  static_cast<std::uint32_t>(sim.config().grid().absorbingBoundaryCells()));
     std::filesystem::current_path(cwd);
     if (!gpuResult.success) {
         return std::unexpected(gpuResult.errorMessage);
@@ -480,7 +495,7 @@ std::expected<void, std::string> dumpGPUPortInProcess(Simulation& sim, std::int3
         const std::filesystem::path portDir = *dumpOptions.dir / ("port" + std::to_string(excitedPortNumber));
         const std::string error =
             copper::dumpEarlyFrames(sim.csx(), portConfig, portDir, dumpOptions.frameCount,
-                                     dumpOptions.marginCells, cpmlAlphaMax, constants::pmlDepthCells);
+                                     dumpOptions.marginCells, cpmlAlphaMax, static_cast<std::uint32_t>(sim.config().grid().absorbingBoundaryCells()));
         if (!error.empty()) {
             std::filesystem::current_path(cwd);
             return std::unexpected(error);
@@ -490,7 +505,7 @@ std::expected<void, std::string> dumpGPUPortInProcess(Simulation& sim, std::int3
         std::fprintf(stdout, "Copper: dumpDetailedTrace for excited port %d\n", excitedPortNumber);
         const std::string error =
             copper::dumpDetailedTrace(sim.csx(), portConfig, dumpOptions.traceSteps,
-                                       dumpOptions.traceBoxSide, cpmlAlphaMax, constants::pmlDepthCells);
+                                       dumpOptions.traceBoxSide, cpmlAlphaMax, static_cast<std::uint32_t>(sim.config().grid().absorbingBoundaryCells()));
         if (!error.empty()) {
             std::filesystem::current_path(cwd);
             return std::unexpected(error);
@@ -538,6 +553,15 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
     EMSConfig config = std::move(*configResult);
+    if (args.absorbingBoundaryCells().has_value()) {
+        // A standalone -s reuses the cached grid, built with whatever depth -g had: running it with
+        // another would grade the wrong cells as CPML.
+        if (!args.geometry() && !args.all()) {
+            logError("--absorbing-boundary-cells changes the geometry: run it with -g or -a");
+            return EXIT_FAILURE;
+        }
+        config.grid().setAbsorbingBoundaryCells(*args.absorbingBoundaryCells());
+    }
     setupLogging(args);
     if (args.updateConfig()) {
         return EXIT_SUCCESS;

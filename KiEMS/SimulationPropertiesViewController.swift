@@ -59,6 +59,9 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
     // each paired with its own caption via labeled(), the same way gridDensityField/maxStepsField
     // are, so the two rows' columns line up (see gridAndStepsRow/derivedTimingRow below).
     private let gridDensityField = NSTextField(string: "")
+    // The absorbing boundary's depth in cells on every face -- document-level like gridDensityField, and
+    // like it changes every simulation's geometry (the grid gains that many cells on each side).
+    private let absorbingBoundaryField = NSTextField(string: "")
     private let maxTimestepValueLabel = NSTextField(labelWithString: "")
     private let simulationRealTimeValueLabel = NSTextField(labelWithString: "")
     private let viaEdgeDistanceField = NSTextField(string: "")
@@ -98,6 +101,15 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
         formatter.maximumFractionDigits = 0 // Timesteps are a plain integer count, never fractional.
+        return formatter
+    }()
+
+    private let absorbingBoundaryFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.maximumFractionDigits = 0
+        formatter.minimum = 1
+        formatter.maximum = 64
         return formatter
     }()
 
@@ -186,10 +198,11 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
         eyeBitRateField.formatter = eyeBitRateFormatter
         maxStepsField.formatter = maxStepsFormatter
         gridDensityField.formatter = gridDensityFormatter
+        absorbingBoundaryField.formatter = absorbingBoundaryFormatter
 
         for field in [viaEdgeDistanceField, viaSpacingField, platingThicknessField,
                       fillingEpsilonField, frequencyStartField, frequencyStopField, maxStepsField,
-                      gridDensityField, eyeBitRateField] {
+                      gridDensityField, absorbingBoundaryField, eyeBitRateField] {
             field.controlSize = .small
             field.font = Self.formFont
             field.alignment = .right
@@ -233,6 +246,7 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
             ])
         let resolutionSection = section("Resolution", views: [
                 labeled("Min Resolution:", gridDensityField),
+                labeled("Absorbing Boundary (cells):", absorbingBoundaryField),
                 labeled("Timestep Length:", maxTimestepValueLabel),
                 labeled("Max Timesteps:", maxStepsField),
                 labeled("Sim Real Time:", simulationRealTimeValueLabel),
@@ -344,6 +358,7 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
         frequencyStopField.doubleValue = document.config.frequencyStop
         maxStepsField.integerValue = document.config.maxSteps
         gridDensityField.doubleValue = document.config.gridDensity
+        absorbingBoundaryField.integerValue = document.config.absorbingBoundaryCells
         updateDerivedTimingLabels()
 
         guard let sim = selectedSimulation else {
@@ -594,6 +609,10 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
             // pipeline stage's own output (mesh line placement) -- every simulation's cached
             // geometry needs invalidating, not just whichever one happens to be selected right now.
             document.config.gridDensity = sender.doubleValue
+            affectsAllGeometry = true
+        case absorbingBoundaryField:
+            // Document-level and geometry-changing, exactly like gridDensityField.
+            document.config.absorbingBoundaryCells = sender.integerValue
             affectsAllGeometry = true
         default: break
         }

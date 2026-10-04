@@ -264,6 +264,10 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 /// micrometers -- the primary "how fine is the mesh" knob (diagonal/perpendicular/max cell sizes
 /// scale relative to this one). Document-level (EMSConfig), not per-simulation, same as maxSteps.
 @property (nonatomic) double gridDensity;
+/// The absorbing boundary's depth in cells on every face of the domain (kiems::Grid::absorbingBoundaryCells()):
+/// GridGenerator appends that many dedicated cells beyond the mesh, so changing it changes every
+/// simulation's geometry. Document-level, like gridDensity.
+@property (nonatomic) NSInteger absorbingBoundaryCells;
 
 /// Every copper layer's name, board-top to board-bottom, in the same 0-based order
 /// InvolvedNetConfig::plane()/PortConfig::plane() index into (substrate layers don't count towards

@@ -593,6 +593,7 @@ void to_json(nlohmann::json& j, const Grid& g) {
     j = nlohmann::json{
         {"inter_layers", g._interLayers}, {"optimal", g._optimal},           {"diagonal", g._diagonal},
         {"perpendicular", g._perpendicular}, {"max", g._max}, {"margin", g._margin}, {"cell_ratio", g._cellRatio},
+        {"absorbing_boundary_cells", g._absorbingBoundaryCells},
     };
 }
 
@@ -605,6 +606,7 @@ void from_json(const nlohmann::json& j, Grid& g) {
     g._max = j.value("max", def._max);
     g._margin = j.value("margin", def._margin);
     g._cellRatio = j.value("cell_ratio", def._cellRatio);
+    g._absorbingBoundaryCells = j.value("absorbing_boundary_cells", def._absorbingBoundaryCells);
 }
 
 void SimulationConfig::scaleToSimulationUnits(std::int32_t unitMultiplier) {

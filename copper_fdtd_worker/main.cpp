@@ -172,7 +172,7 @@ int main(int argc, char** argv) {
     }
 
     const std::filesystem::path probeDir = std::filesystem::current_path();
-    // Pass pmlDepthCells explicitly so Copper and GridGenerator use the same CPML shell depth.
+    // Pass the configured absorbing boundary depth explicitly so Copper and GridGenerator use the same one.
     const double cpmlAlphaMax = copper::cpmlAlphaMaxForFrequency(simulation.config().frequency().start());
     copper::CopperFDTDPortConfig portConfig;
     portConfig.boundaryIsPEC = simulation.boundaryIsPEC();
@@ -188,9 +188,8 @@ int main(int argc, char** argv) {
         }
         const auto& gridLines = simDataResult->grid().gridLines;
         const auto& bounds = simulation.slicedBoard().bounds;
-        if (gridLines.x.size() > 2 * kiems::constants::pmlDepthCells &&
-            gridLines.y.size() > 2 * kiems::constants::pmlDepthCells) {
-            const auto depth = static_cast<std::size_t>(kiems::constants::pmlDepthCells);
+        const auto depth = static_cast<std::size_t>(simulation.config().grid().absorbingBoundaryCells());
+        if (gridLines.x.size() > 2 * depth && gridLines.y.size() > 2 * depth) {
             portConfig.domainPadding = std::max({bounds.xMin - gridLines.x[depth],
                                                  gridLines.x[gridLines.x.size() - depth - 1] - bounds.xMax,
                                                  bounds.yMin - gridLines.y[depth],
@@ -200,7 +199,7 @@ int main(int argc, char** argv) {
     }
     const copper::CopperFDTDRunResult gpuResult = copper::runFDTDPortOnGPU(
         simulation.csx(), portConfig, {}, cpmlAlphaMax,
-        kiems::constants::pmlDepthCells);
+        static_cast<std::uint32_t>(simulation.config().grid().absorbingBoundaryCells()));
     std::filesystem::current_path(cwd);
     if (!gpuResult.success) {
         writeError(simPath, gpuResult.errorMessage);

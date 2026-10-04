@@ -150,7 +150,7 @@ int main(int argc, char** argv) {
     }
 
     const std::filesystem::path probeDir = std::filesystem::current_path();
-    // Pass pmlDepthCells explicitly so Copper and GridGenerator use the same CPML shell depth.
+    // Pass the configured absorbing boundary depth explicitly so Copper and GridGenerator use the same one.
     const double cpmlAlphaMax = copper::cpmlAlphaMaxForFrequency(simulation.config().frequency().start());
     copper::CopperFDTDPortConfig portConfig;
     portConfig.boundaryIsPEC = simulation.boundaryIsPEC();
@@ -159,7 +159,7 @@ int main(int argc, char** argv) {
     portConfig.maxTimesteps = simulation.maxTimesteps();
     const copper::CopperFDTDRunResult cpuResult = copper::runFDTDPortOnCPU(
         simulation.csx(), portConfig, {}, cpmlAlphaMax,
-        kiems::constants::pmlDepthCells);
+        static_cast<std::uint32_t>(simulation.config().grid().absorbingBoundaryCells()));
     std::filesystem::current_path(cwd);
     if (!cpuResult.success) {
         writeError(simPath, cpuResult.errorMessage);

@@ -771,6 +771,13 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
     _config.grid().setOptimal(value);
 }
 
+- (NSInteger)absorbingBoundaryCells {
+    return _config.grid().absorbingBoundaryCells();
+}
+- (void)setAbsorbingBoundaryCells:(NSInteger)value {
+    _config.grid().setAbsorbingBoundaryCells(static_cast<std::int32_t>(value));
+}
+
 - (EMSSimulationBridge*)_wrapperForSimulationIndex:(NSInteger)index {
     EMSSimulationBridge* wrapper = [[EMSSimulationBridge alloc] init];
     wrapper->_parent = self;

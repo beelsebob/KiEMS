@@ -13,6 +13,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "constants.hpp"
+
 namespace kiems {
 
 /// Which Copper engine backend actually runs the per-port simulation -- see Simulation::run(),
@@ -1064,6 +1066,11 @@ public:
     Margin& margin() { return _margin; }
     const CellRatio& cellRatio() const { return _cellRatio; }
     CellRatio& cellRatio() { return _cellRatio; }
+    /// Absorbing boundary depth in cells on every face (the CPML, and an irregular domain's matched
+    /// ring): GridGenerator appends this many dedicated cells beyond the mesh on each side, and
+    /// Copper's absorber grades them -- so changing it changes the geometry.
+    std::int32_t absorbingBoundaryCells() const { return _absorbingBoundaryCells; }
+    void setAbsorbingBoundaryCells(std::int32_t value) { _absorbingBoundaryCells = value; }
 
     /// Clamp max/perpendicular/diagonal/optimal based on the minimum simulated wavelength
     /// (mirrors the grid-related portion of _Config.__post_init__).
@@ -1084,6 +1091,7 @@ private:
     double _max = 500;
     Margin _margin;
     CellRatio _cellRatio;
+    std::int32_t _absorbingBoundaryCells = constants::defaultAbsorbingBoundaryCells;
 };
 
 void to_json(nlohmann::json& j, const Grid& g);

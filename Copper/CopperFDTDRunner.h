@@ -249,9 +249,9 @@ using CopperFDTDProgressCallback = std::function<void(const CopperFDTDProgress&)
 /// energy CPML exists to prevent). See Internal/CopperCPML.hpp for why a run must never have called
 /// openEMS's own Set_BC_PML() (the caller is responsible for that; this is just told the depth it
 /// would otherwise have passed there, in cells, uniform on all 6 faces) and instead computes its own
-/// shell geometry directly from this value. Defaults to 16, matching kiems::constants::
-/// pmlDepthCells -- a caller linking kiems should pass that constant explicitly rather than rely
-/// on this default staying in sync with it.
+/// slab geometry directly from this value. Defaults to 8, matching kiems::constants::
+/// defaultAbsorbingBoundaryCells -- a caller linking kiems should pass its config's
+/// Grid::absorbingBoundaryCells() explicitly rather than rely on this default.
 ///
 /// `isCancelled`, if given, is checked once per timestep (the same per-step sampler callback the
 /// energy-decay end criteria already uses to stop the loop early -- see CopperFDTDRunner.cpp) --
@@ -264,7 +264,7 @@ using CopperFDTDProgressCallback = std::function<void(const CopperFDTDProgress&)
 /// (nullopt) preserves the original in-memory CopperFDTDRunResult::fieldSnapshot behaviour.
 CopperFDTDRunResult runFDTDPortOnGPU(ContinuousStructure& csx, const CopperFDTDPortConfig& portConfig,
                                       const CopperFDTDProgressCallback& onProgress = {},
-                                      double cpmlAlphaMax = -1.0, std::uint32_t pmlDepthCells = 16,
+                                      double cpmlAlphaMax = -1.0, std::uint32_t pmlDepthCells = 8,
                                       const std::function<bool()>& isCancelled = {},
                                       const std::optional<FieldFrameSeriesRequest>& fieldFrameSeries = std::nullopt);
 
@@ -280,7 +280,7 @@ CopperFDTDRunResult runFDTDPortOnGPU(ContinuousStructure& csx, const CopperFDTDP
 /// anything in this codebase.
 CopperFDTDRunResult runFDTDPortOnCPU(ContinuousStructure& csx, const CopperFDTDPortConfig& portConfig,
                                       const CopperFDTDProgressCallback& onProgress = {},
-                                      double cpmlAlphaMax = -1.0, std::uint32_t pmlDepthCells = 16,
+                                      double cpmlAlphaMax = -1.0, std::uint32_t pmlDepthCells = 8,
                                       const std::function<bool()>& isCancelled = {},
                                       const std::optional<FieldFrameSeriesRequest>& fieldFrameSeries = std::nullopt);
 
@@ -297,7 +297,7 @@ CopperFDTDRunResult runFDTDPortOnCPU(ContinuousStructure& csx, const CopperFDTDP
 std::string dumpEarlyFrames(ContinuousStructure& csx, const CopperFDTDPortConfig& portConfig,
                              const std::filesystem::path& outputDir, std::uint32_t frameCount = 100,
                              std::uint32_t marginCells = 25, double cpmlAlphaMax = -1.0,
-                             std::uint32_t pmlDepthCells = 16);
+                             std::uint32_t pmlDepthCells = 8);
 
 /// A second one-off diagnostic, even more targeted than dumpEarlyFrames(): instead of just before/
 /// after field snapshots, prints every *intermediate* term of the update formula -- the raw neighbor
@@ -313,6 +313,6 @@ std::string dumpEarlyFrames(ContinuousStructure& csx, const CopperFDTDPortConfig
 /// contract.
 std::string dumpDetailedTrace(ContinuousStructure& csx, const CopperFDTDPortConfig& portConfig,
                                std::uint32_t stepCount = 4, std::uint32_t boxSide = 4,
-                               double cpmlAlphaMax = -1.0, std::uint32_t pmlDepthCells = 16);
+                               double cpmlAlphaMax = -1.0, std::uint32_t pmlDepthCells = 8);
 
 } // namespace copper

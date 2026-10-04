@@ -1165,7 +1165,7 @@ MaterialGridBuffers buildMaterialGrid(const SlicedBoard& sliced, const Simulatio
         for (const auto& point : loop) outputLoop.push_back({point.x(), point.y()});
         domainConfig.domainCutoutLoops.push_back(std::move(outputLoop));
     }
-    constexpr std::size_t pmlDepth = kiems::constants::pmlDepthCells;
+    const auto pmlDepth = static_cast<std::size_t>(config.grid().absorbingBoundaryCells());
     if (grid.x.size() > 2 * pmlDepth && grid.y.size() > 2 * pmlDepth) {
         domainConfig.domainPadding = std::max({sliced.bounds.xMin - grid.x[pmlDepth],
                                                grid.x[grid.x.size() - pmlDepth - 1] - sliced.bounds.xMax,

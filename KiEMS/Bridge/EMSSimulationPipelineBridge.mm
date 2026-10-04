@@ -251,7 +251,7 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     // own value instead, or late-time energy from the under-damped gap between the two frequencies
     // persists and visibly grows over a long run.
     //
-    // Pass pmlDepthCells explicitly so Copper and GridGenerator use the same CPML shell depth.
+    // Pass the configured absorbing boundary depth explicitly so Copper and GridGenerator use the same one.
     const double cpmlAlphaMax = copper::cpmlAlphaMaxForFrequency(sim.config().frequency().start());
     copper::CopperFDTDPortConfig portConfig;
     portConfig.boundaryIsPEC = sim.boundaryIsPEC();
@@ -266,9 +266,8 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     }
     const auto gridLines = sim.computedGridLines();
     const auto& bounds = sim.slicedBoard().bounds;
-    if (gridLines.x.size() > 2 * kiems::constants::pmlDepthCells &&
-        gridLines.y.size() > 2 * kiems::constants::pmlDepthCells) {
-        const auto depth = static_cast<std::size_t>(kiems::constants::pmlDepthCells);
+    const auto depth = static_cast<std::size_t>(sim.config().grid().absorbingBoundaryCells());
+    if (gridLines.x.size() > 2 * depth && gridLines.y.size() > 2 * depth) {
         portConfig.domainPadding = std::max({bounds.xMin - gridLines.x[depth],
                                              gridLines.x[gridLines.x.size() - depth - 1] - bounds.xMax,
                                              bounds.yMin - gridLines.y[depth],
@@ -320,7 +319,7 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
     // viewer's resident memory remains bounded independently of the series length.
     const copper::CopperFDTDRunResult gpuResult = copper::runFDTDPortOnGPU(
         sim.csx(), portConfig, onCopperProgress, cpmlAlphaMax,
-        kiems::constants::pmlDepthCells, [&] { return cancelRequested.load(); }, fieldSeries);
+        static_cast<std::uint32_t>(depth), [&] { return cancelRequested.load(); }, fieldSeries);
     // Best-effort restore -- `cwd` no longer existing shouldn't discard an otherwise-successful run's
     // own results (unlike currentPathOrError()'s other two call sites above, both load-bearing).
     std::error_code restoreEc;

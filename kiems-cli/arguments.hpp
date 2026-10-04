@@ -39,6 +39,10 @@ public:
     std::int32_t oversampling() const { return _oversampling; }
     void setOversampling(std::int32_t value) { _oversampling = value; }
 
+    /// --absorbing-boundary-cells N: overrides the config's grid.absorbing_boundary_cells (absorbing cells on every face).
+    const std::optional<std::int32_t>& absorbingBoundaryCells() const { return _absorbingBoundaryCells; }
+    void setAbsorbingBoundaryCells(std::optional<std::int32_t> value) { _absorbingBoundaryCells = value; }
+
     bool transparent() const { return _transparent; }
     void setTransparent(bool value) { _transparent = value; }
 
@@ -69,6 +73,7 @@ private:
     bool _all = false;
     std::optional<std::vector<std::string>> _exportField;
     std::int32_t _oversampling = 4;
+    std::optional<std::int32_t> _absorbingBoundaryCells;
     bool _transparent = false;
     bool _plotPhase = false;
     std::filesystem::path _input;

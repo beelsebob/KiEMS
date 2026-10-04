@@ -747,7 +747,7 @@ public:
         }
         logInfo("### Grid Generator: " + _axis + " axis core mesh extent = [" + std::to_string(_pmlInnerMin) +
                  ", " + std::to_string(_pmlInnerMax) + "] ###");
-        grid = grid_detail::appendUniformPMLCells(std::move(grid), constants::pmlDepthCells);
+        grid = grid_detail::appendUniformPMLCells(std::move(grid), _grid.absorbingBoundaryCells());
 
         // `grid` is in the same absolute, Edge_Cuts-bounding-box-relative frame as every geometry
         // primitive this Simulation adds (addSubstrates()/addGerbers()/addMslPort()/addVias() all
@@ -1243,17 +1243,17 @@ struct GridGenerator::Impl {
         }
         logInfo("### Grid Generator: z axis core mesh extent = [" + std::to_string(_pmlInnerZMin) + ", " +
                  std::to_string(_pmlInnerZMax) + "] ###");
-        // Appends constants::pmlDepthCells brand-new, dedicated PML-only cells beyond each end --
+        // Appends Grid::absorbingBoundaryCells() brand-new, dedicated PML-only cells beyond each end --
         // exactly mirroring GridGeneratorAxis::compileGrid()'s own identical call for X/Y (a few
         // hundred lines up in this same file). Without this, Set_BC_PML()'s outermost-N-cells
-        // classification (constants::pmlDepthCells = 16) reclassified part of the *margin* band
+        // classification (16 cells deep then) reclassified part of the *margin* band
         // above as PML -- and since that margin band is only ~8 cells deep in Z (unlike X/Y's own,
         // comfortably wider than 16), the other 8 cells of "PML" landed squarely inside the real
         // substrate stack, overwriting perfectly correct dielectric vv/vi coefficients with PML's
         // own absorbing-boundary ones in every substrate layer within 16 cells of either Z face --
         // every one of them except the thick middle layer, which was the entire pattern behind the
         // vi/vv "collapse" this was traced back from.
-        zLines = grid_detail::appendUniformPMLCells(std::move(zLines), constants::pmlDepthCells);
+        zLines = grid_detail::appendUniformPMLCells(std::move(zLines), gridCfg.absorbingBoundaryCells());
 
         {
             // _dedupGrid() sorts internally, so zLines is already sorted here -- one entry per

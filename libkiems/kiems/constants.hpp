@@ -35,11 +35,11 @@ inline const std::filesystem::path fabProjectFile = "fab/board.kicad_pro";
 // Via geometry is approximated using n-sided right prism
 inline constexpr std::int32_t viaPolygon = 12;
 
-// CPML boundary shell depth, in cells, on every one of the domain's 6 faces -- shared between
-// Copper's absorber and GridGenerator's outermost-cell regrading (which makes sure those same cells
-// are smoothly, predictably sized rather than whatever the general-purpose mesh densification
-// produced there).
-inline constexpr std::int32_t pmlDepthCells = 16;
+// Default absorbing boundary depth, in cells, on every one of the domain's 6 faces
+// (Grid::absorbingBoundaryCells() is the configured value) -- shared between Copper's absorber and
+// GridGenerator's dedicated band. 8 absorbs as well as 16 did to ~-80 dB on the Keyboard Hub board
+// (docs/copper_field_storage_experiments.md, "A thinner CPML") at ~25% less time per step.
+inline constexpr std::int32_t defaultAbsorbingBoundaryCells = 8;
 
 inline constexpr std::string_view configFormatVersion = "2.0";
 
