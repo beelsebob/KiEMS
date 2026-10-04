@@ -174,6 +174,8 @@ struct CopperFDTDRunResult {
     /// data), but a caller that distinguishes "genuinely failed" from "the user cancelled it" should
     /// check this rather than treating every `!success` the same way.
     bool cancelled = false;
+    /// Timesteps actually run -- below `maxTimesteps` when the energy-decay end criteria stopped it.
+    std::uint32_t timestepsRun = 0;
     std::vector<CopperProbeResult> probes;
     /// Populated only when a requested FieldFrameSeriesRequest was written and closed successfully.
     /// In that case fieldSnapshot contains mesh metadata but no frames.

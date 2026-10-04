@@ -680,6 +680,7 @@ CopperFDTDRunResult runFDTDPortImpl(ContinuousStructure& csx, const CopperFDTDPo
             result.errorMessage = "Cancelled";
         } else {
             result.success = true;
+            result.timestepsRun = stepsActuallyRun;
         }
     } catch (const std::exception& error) {
         result.errorMessage = std::string("Copper FDTD run failed: ") + error.what();

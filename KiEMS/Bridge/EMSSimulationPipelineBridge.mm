@@ -193,7 +193,7 @@ std::vector<double> linspace(double start, double stop, std::int32_t num) {
 /// `outFieldFrameSeriesPath`, if non-null, is overwritten with this port's own on-disk field series
 /// on success. The caller supplies a distinct path per excitation so every completed run remains
 /// available to the field viewer.
-std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32_t excitedPortNumber,
+std::expected<std::uint32_t, std::string> runGPUPortInProcess(Simulation& sim, std::int32_t excitedPortNumber,
                                                        EMSPipelineProgressHandler progressHandler,
                                                        std::size_t totalExcitedPorts, std::size_t& portsCompleted,
                                                        const std::string& simulationName,
@@ -346,7 +346,7 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
         }
         probeFile << probeResult.data();
     }
-    return {};
+    return gpuResult.timestepsRun;
 }
 
 struct SavedFieldFrameSeries {

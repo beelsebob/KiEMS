@@ -2,6 +2,7 @@
 // kiems/simulation.py.
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <complex>
 #include <cstdint>
@@ -10,6 +11,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -38,7 +40,12 @@ class Simulation;
 /// nested in SimulationResult, where it originally lived) so simulation_data.hpp's
 /// generateResults() can use the same type without simulation_result.hpp/geometry_result.hpp's own
 /// circular include back onto this header.
-using FDTDPortRunner = std::function<std::expected<void, std::string>(Simulation& sim, std::int32_t excitedPortNumber)>;
+///
+/// Returns the number of timesteps the run actually took (it may stop early on energy decay), or 0
+/// when the backend can't tell -- generateResults() uses it to cap adversarial ports' runs at the
+/// primary runs' length (see Simulation::setMaxTimestepsCap()).
+using FDTDPortRunner =
+    std::function<std::expected<std::uint32_t, std::string>(Simulation& sim, std::int32_t excitedPortNumber)>;
 
 /// The grid line positions Simulation::addGrid() placed along each axis -- see
 /// Simulation::computedGridLines()/adoptGridLines(). At namespace scope (not nested in Simulation,
@@ -258,8 +265,16 @@ public:
     const std::array<bool, 6>& boundaryIsPEC() const { return _boundaryIsPEC; }
 
     /// `config().maxSteps()`, pre-cast to the unsigned type
-    /// copper::CopperFDTDPortConfig::maxTimesteps expects.
-    std::uint32_t maxTimesteps() const { return static_cast<std::uint32_t>(_config.maxSteps()); }
+    /// copper::CopperFDTDPortConfig::maxTimesteps expects, and limited to setMaxTimestepsCap()'s cap.
+    std::uint32_t maxTimesteps() const {
+        const auto configured = static_cast<std::uint32_t>(_config.maxSteps());
+        return _maxTimestepsCap.has_value() ? std::min(configured, *_maxTimestepsCap) : configured;
+    }
+
+    /// Caps maxTimesteps() below the configured maxSteps -- an adversarial-only port's run is never
+    /// used past the primary runs' length (see excitationRecordEnd()), so generateResults() stops it
+    /// there, and the progress it reports (total steps, planned time) reflects that real length.
+    void setMaxTimestepsCap(std::optional<std::uint32_t> cap) { _maxTimestepsCap = cap; }
 
     /// The Gaussian pulse center frequency/half-bandwidth derived from config().frequency(), exposed
     /// so a Copper worker can build copper::CopperFDTDPortConfig::f0/fc directly.
@@ -308,6 +323,7 @@ private:
     // -- see both their own doc comments.
     bool _gridLinesAdopted = false;
     std::array<bool, 6> _boundaryIsPEC = {false, false, false, false, false, false};
+    std::optional<std::uint32_t> _maxTimestepsCap;
 
     std::vector<std::unique_ptr<Port>> _ports;
     std::vector<CSProperties*> _gerberMaterials;   // owned by _csx

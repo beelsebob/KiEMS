@@ -1,3 +1,4 @@
+#include <set>
 #include "simulation_data.hpp"
 
 #include <fstream>
@@ -74,11 +75,31 @@ std::expected<SimulationResults, std::string> generateResults(const SimulationDa
                                                                 const FDTDPortRunner& portRunner) {
     SimulationResults results;
     const auto& ports = data.configuration().ports();
-    for (std::size_t index = 0; index < ports.size(); ++index) {
-        if (!ports[index].excite()) {
-            continue;
+    // A port driven only by adversarial (non-main) excitations is never used past the primary runs'
+    // length (see excitationRecordEnd()), so primary ports run first and the rest are capped at the
+    // longest primary run. A port with no excitation at all counts as primary (uncapped).
+    std::set<std::int32_t> primaryPorts;
+    std::set<std::int32_t> adversarialPorts;
+    for (const auto& excitation : data.configuration().excitations()) {
+        if (excitation.drivenPortIndex().has_value()) {
+            (excitation.isMain() ? primaryPorts : adversarialPorts).insert(*excitation.drivenPortIndex());
         }
-        const auto excitedPortIndex = static_cast<std::int32_t>(index);
+    }
+    std::vector<std::int32_t> runOrder;
+    for (const bool adversarialPass : {false, true}) {
+        for (std::size_t index = 0; index < ports.size(); ++index) {
+            const auto portIndex = static_cast<std::int32_t>(index);
+            const bool adversarial = adversarialPorts.contains(portIndex) && !primaryPorts.contains(portIndex);
+            if (ports[index].excite() && adversarial == adversarialPass) {
+                runOrder.push_back(portIndex);
+            }
+        }
+    }
+    std::uint32_t primaryTimesteps = 0;
+    bool primaryTimestepsKnown = true;
+    for (const std::int32_t excitedPortIndex : runOrder) {
+        const bool adversarial =
+            adversarialPorts.contains(excitedPortIndex) && !primaryPorts.contains(excitedPortIndex);
 
         // A fresh, independent Simulation per excited port so each run owns its mutable
         // ContinuousStructure and configured ports, never sharing them across runs. `data`
@@ -91,9 +112,18 @@ std::expected<SimulationResults, std::string> generateResults(const SimulationDa
             return std::unexpected(result.error());
         }
         sim.setupPorts(excitedPortIndex);
-        auto runResult = portRunner ? portRunner(sim, excitedPortIndex) : sim.run(excitedPortIndex);
+        if (adversarial && primaryTimestepsKnown && primaryTimesteps > 0) {
+            sim.setMaxTimestepsCap(primaryTimesteps);
+        }
+        auto runResult = portRunner ? portRunner(sim, excitedPortIndex)
+                                    : sim.run(excitedPortIndex).transform([] { return std::uint32_t{0}; });
         if (!runResult) {
             return std::unexpected(runResult.error());
+        }
+        if (!adversarial) {
+            // An unknown primary length (0) disables the cap rather than guessing one.
+            primaryTimestepsKnown = primaryTimestepsKnown && *runResult > 0;
+            primaryTimesteps = std::max(primaryTimesteps, *runResult);
         }
 
         // populateGeometry() never rebuilds the lightweight C++-side _ports bookkeeping addPorts()

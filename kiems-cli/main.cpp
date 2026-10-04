@@ -439,7 +439,7 @@ void printCopperProgress(const copper::CopperFDTDProgress& progress) {
 /// do the FDTD-specific part (prepareRunDirectory()/runFDTDPortOnGPU()), mirroring
 /// copper_fdtd_worker/main.cpp's own sequence; the only difference is *where* it runs: here, in the
 /// CLI's own process, rather than a spawned child's.
-std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32_t excitedPortNumber) {
+std::expected<std::uint32_t, std::string> runGPUPortInProcess(Simulation& sim, std::int32_t excitedPortNumber) {
     const std::filesystem::path cwd = std::filesystem::current_path();
     if (auto result = sim.prepareRunDirectory(excitedPortNumber); !result) {
         return std::unexpected(result.error());
@@ -470,7 +470,7 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
         }
         probeFile << probeResult.data();
     }
-    return {};
+    return gpuResult.timestepsRun;
 }
 
 /// --dump-early-frames/--dump-detailed-trace's own FDTDPortRunner -- same prepareRunDirectory()/
@@ -479,7 +479,7 @@ std::expected<void, std::string> runGPUPortInProcess(Simulation& sim, std::int32
 /// not a normal run, so there are no probe files to write afterward. dumpEarlyFrames() writes into
 /// `dumpOptions.dir`/port<excitedPortNumber>/ so a multi-port config doesn't clobber one port's dump
 /// with another's; dumpDetailedTrace() just prints to stdout, no directory needed.
-std::expected<void, std::string> dumpGPUPortInProcess(Simulation& sim, std::int32_t excitedPortNumber,
+std::expected<std::uint32_t, std::string> dumpGPUPortInProcess(Simulation& sim, std::int32_t excitedPortNumber,
                                                         const DumpOptions& dumpOptions) {
     const std::filesystem::path cwd = std::filesystem::current_path();
     if (auto result = sim.prepareRunDirectory(excitedPortNumber); !result) {
@@ -512,7 +512,7 @@ std::expected<void, std::string> dumpGPUPortInProcess(Simulation& sim, std::int3
         }
     }
     std::filesystem::current_path(cwd);
-    return {};
+    return std::uint32_t{0}; // a diagnostic capture, not a full run
 }
 
 } // namespace
