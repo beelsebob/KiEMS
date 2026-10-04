@@ -149,7 +149,7 @@ public:
     double edgeLength(int axis, const unsigned int pos[3], bool dualMesh = false) const;
 
     /// Native-CSX-unit (unscaled) mesh line, primary or dual -- ported from Operator::GetDiscLine.
-    /// CopperCPML.hpp's own buildCPMLShells() needs this directly (matching what it read off a real
+    /// CopperCPML.hpp's own buildCPML() needs this directly (matching what it read off a real
     /// Operator before).
     double discLine(int axis, unsigned int pos, bool dualMesh = false) const;
 
@@ -159,7 +159,7 @@ public:
     unsigned int numberOfLines(int axis) const { return numLines(axis); }
 
     /// Ported from Operator::GetGridDelta -- native-CSX-unit-to-metres scale factor
-    /// (CSRectGrid::GetDeltaUnit()). CopperCPML.hpp's own buildCPMLShells() needs this directly.
+    /// (CSRectGrid::GetDeltaUnit()). CopperCPML.hpp's own buildCPML() needs this directly.
     double gridDeltaMetres() const { return _gridDeltaMetres; }
 
 private:

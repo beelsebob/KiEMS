@@ -19,6 +19,7 @@ namespace copper {
 /// (rather than a nested type) so neither Metal nor CPU-backend-specific state ever needs to appear
 /// here -- plain C++ callers only ever see the pimpl pointer below.
 class EngineBackend;
+struct CopperLumpedRLCCell;
 
 /// Interior E/H update kernels, plus optional CFS-PML boundary shells (see CopperCPML.hpp) and
 /// optional excitation injection (see CopperExcitation.hpp). A PEC-only run (no shell list) needs
@@ -41,17 +42,15 @@ public:
     /// cost -- see CopperCPUEngine.cpp's own file comment for the tradeoffs.
     enum class Backend { Metal, CPU };
 
-    /// Initializes `grid`'s coefficients (and each `cpmlShells`/`excitation` entry's, if any) into
-    /// the chosen backend and zero-initializes every E/H field and auxiliary PML state
-    /// buffer (matching FDTD's own E=H=0 initial condition). Throws std::runtime_error if `backend`
-    /// is Metal and no Metal device is available or the shader library fails to load/compile.
+    /// Initializes `grid`'s coefficients (and `cpml`'s and `excitation`'s, if any) into the chosen
+    /// backend and zero-initializes every E/H field and auxiliary PML state buffer (matching FDTD's
+    /// own E=H=0 initial condition). Throws std::runtime_error if `backend` is Metal and no Metal
+    /// device is available or the shader library fails to load/compile.
     ///
-    /// `zcpml` is an irregular domain's Z-only CPML (see CopperZCPML), applied inside the interior
-    /// update; `cpmlShells` is the general per-shell CPML a rectangular domain uses. Either may be
-    /// empty.
+    /// `cpml` (see CopperCPML) is applied inside the interior update; it may be empty.
     explicit CopperEngine(const CopperYeeGrid& grid, const CopperExcitation& excitation = {},
-                          const std::vector<CopperCPMLShell>& cpmlShells = {}, Backend backend = Backend::Metal,
-                          const CopperDomainMask& domainMask = {}, const CopperZCPML& zcpml = {});
+                          const CopperCPML& cpml = {}, Backend backend = Backend::Metal,
+                          const CopperDomainMask& domainMask = {});
     ~CopperEngine();
 
     CopperEngine(const CopperEngine&) = delete;
@@ -155,6 +154,23 @@ public:
     /// Current GPU-resident allocation size in bytes (MTLDevice::currentAllocatedSize) -- 0 for the
     /// CPU backend. Diagnostic only: see EngineBackend::currentAllocatedMetalBytes()'s own comment.
     std::size_t currentAllocatedMetalBytes() const;
+
+    /// Declares the E cells a MidStepCorrection passed to runWithProbeSampling() will write (only
+    /// each entry's x/y/z are used). The Metal backend then keeps them out of COPPER_FUSED's fused
+    /// E+H kernel, which can't stop between the E and H updates for the correction, and under
+    /// COPPER_FIELD_MIXED keeps their tiles fp32. Correct results don't depend on it otherwise.
+    void declareMidStepCorrectionCells(const std::vector<CopperLumpedRLCCell>& cells);
+
+    /// Has the engine itself apply these SERIES lumped RLC elements' ADE correction every step, at the
+    /// point a MidStepCorrection would run (after the E update and excitation, before the H update) --
+    /// the same arithmetic CopperFDTDRunner's CPU correction applies through readFieldCell()/
+    /// writeFieldCell(), but on the GPU, so a step no longer stops halfway for the CPU. Each element's
+    /// ADE state starts at zero when the engine next runs. Replaces any earlier set.
+    void setLumpedRLC(const std::vector<CopperLumpedRLCCell>& cells);
+
+    /// How many 4x4x1 tiles COPPER_FUSED's fused E+H kernel updates (0 when it's off), as of the last
+    /// run. Diagnostic only.
+    std::size_t fusedTileCount() const;
 
 private:
     std::unique_ptr<EngineBackend> _backend;

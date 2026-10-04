@@ -9,6 +9,7 @@
 
 #include "CopperTestFixtures.hpp"
 #include "Internal/CopperExcitation.hpp"
+#include "Internal/CopperLumpedRLC.hpp"
 #include "Internal/CopperOperator.hpp"
 #include "Internal/CopperPhysicalConstants.hpp"
 #include "Internal/CopperYeeGrid.hpp"
@@ -101,6 +102,12 @@ using namespace copper::test;
     const copper::CopperYeeGrid& grid = op.grid();
 
     copper::CopperEngine corrected(grid);
+    copper::CopperLumpedRLCCell correctedCell;
+    correctedCell.x = 1;
+    correctedCell.y = 1;
+    correctedCell.z = 1;
+    correctedCell.axis = 2;
+    corrected.declareMidStepCorrectionCells({correctedCell});
     std::uint32_t correctionCalls = 0;
     corrected.runWithProbeSampling(
         1, [](std::uint32_t) { return true; },

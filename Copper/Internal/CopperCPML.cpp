@@ -61,20 +61,26 @@ BaseGrading computeBaseGrading(CopperOperator& op, std::uint32_t pmlDepthCells, 
     if (pmlDepthCells == 0) {
         return g;
     }
+    // Depth is measured from the PML's inner edge directly, never as width minus the distance from
+    // the outer edge: the compiler contracts `width - distance * delta` into an FMA, which leaves the
+    // inner edge at width's own rounding error instead of exactly 0 wherever the line positions
+    // don't scale to metres exactly -- and defaultSigmaGrading() jumps to its full inner-edge value
+    // for any depth above 0. On the Keyboard Hub board that graded the E side of the upper X and Y
+    // faces' first planes and, in the per-face shells this file used to build, the plane just inside
+    // each lower face wherever another face's shell covered it: a non-separable stretch.
     const auto totalLines = static_cast<unsigned int>(op.numberOfLines(axis));
     if (pos[axis] <= pmlDepthCells) {
         g.inPML = true;
         g.lower = true;
         g.width = (op.discLine(axis, pmlDepthCells) - op.discLine(axis, 0)) * op.gridDeltaMetres();
-        g.depth = g.width - (op.discLine(axis, pos[axis]) - op.discLine(axis, 0)) * op.gridDeltaMetres();
+        g.depth = (op.discLine(axis, pmlDepthCells) - op.discLine(axis, pos[axis])) * op.gridDeltaMetres();
         g.dl = g.width / pmlDepthCells;
     } else if (pos[axis] >= totalLines - 1 - pmlDepthCells) {
         g.inPML = true;
         g.lower = false;
-        g.width = (op.discLine(axis, totalLines - 1) - op.discLine(axis, totalLines - pmlDepthCells - 1)) *
-                   op.gridDeltaMetres();
-        g.depth =
-            g.width - (op.discLine(axis, totalLines - 1) - op.discLine(axis, pos[axis])) * op.gridDeltaMetres();
+        const unsigned int inner = totalLines - 1 - pmlDepthCells;
+        g.width = (op.discLine(axis, totalLines - 1) - op.discLine(axis, inner)) * op.gridDeltaMetres();
+        g.depth = (op.discLine(axis, pos[axis]) - op.discLine(axis, inner)) * op.gridDeltaMetres();
         g.dl = g.width / pmlDepthCells;
     }
     return g;
@@ -127,24 +133,16 @@ Grading finishGrading(const BaseGrading& base, CopperOperator& op, int axis, con
     return {sigma, sigma + alphaGrading(depth, base.width, alphaMax)};
 }
 
-void calcGrading(CopperOperator& op, std::uint32_t pmlDepthCells, int ny, const unsigned int pos[3], bool isVSide,
-                  double alphaMax, Grading out[3]) {
-    for (int axis = 0; axis < 3; ++axis) {
-        const BaseGrading base = computeBaseGrading(op, pmlDepthCells, axis, pos);
-        out[axis] = finishGrading(base, op, axis, pos, isVSide, ny, alphaMax);
-    }
-}
-
-// eq. (7.99)/(7.102), kappa=1: b = exp(-(sigma+alpha)*dT/EPS0), c = sigma*(b-1)/(sigma+alpha).
-// sigma=alpha=0 (outside any graded region) gives b=1, c=0 -- psi's own recursive update (eq. 7.101,
-// psi[n] = b*psi[n-1] + c*curlTerm) then leaves psi permanently at its zero initial value, so this is
-// a true no-op there, not an approximation of one.
 // computeBaseGrading() puts line `pmlDepthCells` of the lower face and line `n-1-pmlDepthCells` of
 // the upper face on the PML's inner edge. At the lower one both E (on the line) and H (half a cell
 // further in) grade to zero, but the upper one's H sits half a cell *inside* the PML and grades to
 // sigma(dl/2) -- so an upper face needs that extra plane to own every nonzero grading of its axis.
 std::uint32_t upperFaceDepth(std::uint32_t pmlDepthCells) { return pmlDepthCells + 1; }
 
+// eq. (7.99)/(7.102), kappa=1: b = exp(-(sigma+alpha)*dT/EPS0), c = sigma*(b-1)/(sigma+alpha).
+// sigma=alpha=0 (outside any graded region) gives b=1, c=0 -- psi's own recursive update (eq. 7.101,
+// psi[n] = b*psi[n-1] + c*curlTerm) then leaves psi permanently at its zero initial value, so this is
+// a true no-op there, not an approximation of one.
 void computeBC(const Grading& g, double dT, float& b, float& c) {
     const double sigmaEff = g.sigmaEff; // sigma + alpha
     if (sigmaEff <= 0) {
@@ -159,177 +157,58 @@ void computeBC(const Grading& g, double dT, float& b, float& c) {
 
 } // namespace
 
-std::vector<CopperCPMLShell> buildCPMLShells(CopperOperator& op, double alphaMax, std::uint32_t pmlDepthCells) {
-    std::vector<CopperCPMLShell> shells;
-    if (pmlDepthCells == 0) {
-        return shells;
+std::size_t CopperCPML::psiCount(const CopperGridDims& dims, int axis) const {
+    const std::size_t layers = axes[axis].layerCount();
+    switch (axis) {
+    case 0: return layers * dims.ny * dims.nz;
+    case 1: return static_cast<std::size_t>(dims.nx) * layers * dims.nz;
+    default: return static_cast<std::size_t>(dims.nx) * dims.ny * layers;
     }
-
-    // domainN{x,y,z}, not n{x,y,z} -- "ny" specifically is already the field-component-axis
-    // parameter name used throughout this file's own grading helpers (calcGrading() et al.), and the
-    // per-cell loop below needs its own local `ny` with that same meaning.
-    const auto domainNx = static_cast<std::uint32_t>(op.numberOfLines(0));
-    const auto domainNy = static_cast<std::uint32_t>(op.numberOfLines(1));
-    const auto domainNz = static_cast<std::uint32_t>(op.numberOfLines(2));
-    // kiems's own grid generation (grid_gen.cpp's _extendPMLBand()/GridGeneratorAxis::
-    // compileGrid()) always reserves at least pmlDepthCells dedicated cells on every face -- this
-    // should never actually trigger, but a shell narrower than the domain it claims to span would
-    // silently produce nonsense geometry below, so fail loudly instead.
-    if (domainNx <= 2 * pmlDepthCells || domainNy <= 2 * pmlDepthCells || domainNz <= 2 * pmlDepthCells) {
-        return shells;
-    }
-
-    // One shell per *face* (X-lo, X-hi, Y-lo, Y-hi, Z-lo, Z-hi -- matching Set_BC_PML()'s own idx
-    // convention, and openEMS's own Operator_Ext_UPML::Create_UPML()'s box construction, which this
-    // mirrors even though no such extension is ever created for a CPML run -- see CopperCPML.hpp's
-    // own top comment): each face spans the *full* width of the other two axes, "a pml in
-    // x-direction over the full width of yz-space" per that function's own comment. That overlap at
-    // edges/corners is harmless for UPML (SetVV/SetVI/etc. are plain overwrites -- whichever shell's
-    // BuildExtension() runs last just wins, still numerically bounded either way) but not for CPML:
-    // each shell here keeps its own independent psi accumulator state, and the engine dispatches one
-    // cpml_correct_e/h kernel *per shell* -- so without deduplication, an edge/corner cell claimed by
-    // two (or, at a true corner, three) overlapping shells gets its additive psi correction applied
-    // that many times *every single timestep*. That's precisely the kind of compounding double-count
-    // that turns an individually-stable (|b|<1 by construction) correction into unbounded growth over
-    // a few hundred timesteps -- confirmed in practice: a real board's first NaN traced back to
-    // exactly such an edge cell (near both a Y-face and a Z-face simultaneously). `claimed` tracks,
-    // across every shell built so far, which global cells already got their correction computed by an
-    // earlier shell in this loop; a cell already claimed gets the inert b=1/c=0 (no-op) coefficient
-    // here instead of a second real one, and is left off subsequent shells' psi-driving grading
-    // entirely -- each cell's correction is computed and applied exactly once, regardless of how many
-    // faces' PML regions it geometrically falls within.
-    //
-    // The upper faces are one cell deeper than the lower ones (see upperFaceDepth()): their first
-    // plane carries only the H-side half-cell grading, but it must be *in* the face. Otherwise a cell
-    // on that plane only gets its grading where some other face happens to claim it first (edges and
-    // corners), so e.g. sigma_x on the plane x = nx-1-depth varies with y and z -- a non-separable
-    // stretch, which feeds slow late-time growth pinned to where two such planes meet (see
-    // CopperCPML.hpp's irregular-domain overload for why a stretch must depend on its own axis
-    // alone).
-    const std::uint32_t upperDepth = upperFaceDepth(pmlDepthCells);
-    struct FaceSpec {
-        std::uint32_t startX, startY, startZ, nX, nY, nZ;
-    };
-    const std::array<FaceSpec, 6> faces = {{
-        {0, 0, 0, pmlDepthCells, domainNy, domainNz},                              // X-lo
-        {domainNx - upperDepth, 0, 0, upperDepth, domainNy, domainNz},             // X-hi
-        {0, 0, 0, domainNx, pmlDepthCells, domainNz},                              // Y-lo
-        {0, domainNy - upperDepth, 0, domainNx, upperDepth, domainNz},             // Y-hi
-        {0, 0, 0, domainNx, domainNy, pmlDepthCells},                              // Z-lo
-        {0, 0, domainNz - upperDepth, domainNx, domainNy, upperDepth},             // Z-hi
-    }};
-
-    std::vector<bool> claimed(static_cast<std::size_t>(domainNx) * domainNy * domainNz, false);
-    auto globalIndex = [&](unsigned int x, unsigned int y, unsigned int z) {
-        return static_cast<std::size_t>(x) +
-               static_cast<std::size_t>(domainNx) * (static_cast<std::size_t>(y) + static_cast<std::size_t>(domainNy) * z);
-    };
-
-    for (const FaceSpec& face : faces) {
-        CopperCPMLShell shell;
-        shell.startX = face.startX;
-        shell.startY = face.startY;
-        shell.startZ = face.startZ;
-        shell.dims.nx = face.nX;
-        shell.dims.ny = face.nY;
-        shell.dims.nz = face.nZ;
-        const std::uint32_t localCellCount = shell.dims.cellCount();
-        for (int axis = 0; axis < 3; ++axis) {
-            shell.bE[axis].resize(localCellCount);
-            shell.cE[axis].resize(localCellCount);
-            shell.bH[axis].resize(localCellCount);
-            shell.cH[axis].resize(localCellCount);
-            shell.psiE0[axis].assign(localCellCount, 0.0F);
-            shell.psiE1[axis].assign(localCellCount, 0.0F);
-            shell.psiH0[axis].assign(localCellCount, 0.0F);
-            shell.psiH1[axis].assign(localCellCount, 0.0F);
-        }
-
-        const double dT = op.timestepSeconds();
-        unsigned int pos[3];
-        for (unsigned int lz = 0; lz < shell.dims.nz; ++lz) {
-            pos[2] = lz + shell.startZ;
-            for (unsigned int ly = 0; ly < shell.dims.ny; ++ly) {
-                pos[1] = ly + shell.startY;
-                for (unsigned int lx = 0; lx < shell.dims.nx; ++lx) {
-                    pos[0] = lx + shell.startX;
-                    const std::uint32_t localIdx = copperGridIndex(shell.dims, lx, ly, lz);
-
-                    // See buildCPMLShells()'s own top comment: a cell already claimed by an earlier
-                    // shell in this same loop gets the inert b=1/c=0 coefficient below instead of a
-                    // second real one, so its correction is never applied twice.
-                    const std::size_t globalIdx = globalIndex(pos[0], pos[1], pos[2]);
-                    const bool alreadyClaimed = claimed[globalIdx];
-                    claimed[globalIdx] = true;
-
-                    // b[w]/c[w] hold *grading*-axis w's off-axis (axis != field-component) CFS
-                    // coefficients -- the only ones psi ever needs (a component's own two psi terms
-                    // are always driven by the *other* two axes' curl derivatives, never its own
-                    // axis; see this file's finishGrading()). finishGrading()'s V-side/I-side
-                    // "matches" branches only ever test axis==ny, never ny's specific value, so any
-                    // ny != w gives the identical off-axis result -- calcGrading(..., ny=(w+1)%3,
-                    // ...) is exactly that, chosen arbitrarily among the two valid choices.
-                    for (int w = 0; w < 3; ++w) {
-                        if (alreadyClaimed) {
-                            shell.bE[w][localIdx] = 1.0F;
-                            shell.cE[w][localIdx] = 0.0F;
-                            shell.bH[w][localIdx] = 1.0F;
-                            shell.cH[w][localIdx] = 0.0F;
-                            continue;
-                        }
-                        const int ny = (w + 1) % 3;
-                        Grading gV[3];
-                        Grading gI[3];
-                        calcGrading(op, pmlDepthCells, ny, pos, /*isVSide=*/true, alphaMax, gV);
-                        calcGrading(op, pmlDepthCells, ny, pos, /*isVSide=*/false, alphaMax, gI);
-
-                        float b, c;
-                        computeBC(gV[w], dT, b, c);
-                        shell.bE[w][localIdx] = b;
-                        shell.cE[w][localIdx] = c;
-                        computeBC(gI[w], dT, b, c);
-                        shell.bH[w][localIdx] = b;
-                        shell.cH[w][localIdx] = c;
-                    }
-                }
-            }
-        }
-
-        shells.push_back(std::move(shell));
-    }
-    return shells;
 }
 
-CopperZCPML buildZCPML(CopperOperator& op, double alphaMax, std::uint32_t pmlDepthCells) {
-    CopperZCPML result;
-    const auto nz = static_cast<std::uint32_t>(op.numberOfLines(2));
-    if (pmlDepthCells == 0 || nz <= 2 * pmlDepthCells) return result;
+CopperCPML buildCPML(CopperOperator& op, double alphaMax, std::uint32_t pmlDepthCells, CopperCPMLFaces faces) {
+    CopperCPML cpml;
+    if (pmlDepthCells == 0) return cpml;
+    const std::uint32_t lines[3] = {static_cast<std::uint32_t>(op.numberOfLines(0)),
+                                    static_cast<std::uint32_t>(op.numberOfLines(1)),
+                                    static_cast<std::uint32_t>(op.numberOfLines(2))};
+    auto graded = [&](int axis) { return faces == CopperCPMLFaces::All || axis == 2; };
+    // kiems's own grid generation (grid_gen.cpp's _extendPMLBand()/GridGeneratorAxis::compileGrid())
+    // always reserves at least pmlDepthCells dedicated cells on every face, so this should never
+    // trigger -- but overlapping slabs would silently produce nonsense, so give up instead.
+    for (int axis = 0; axis < 3; ++axis) {
+        if (graded(axis) && lines[axis] <= 2 * pmlDepthCells) return cpml;
+    }
 
-    // The upper slab is one plane deeper, exactly like the rectangular builder's upper faces (see
-    // upperFaceDepth()). Z grading depends on z alone (computeBaseGrading/finishGrading only ever
-    // read pos[2] for axis 2), so x and y are left at 0.
     const double dT = op.timestepSeconds();
     const std::uint32_t upperDepth = upperFaceDepth(pmlDepthCells);
-    const std::array<std::pair<std::uint32_t, std::uint32_t>, 2> slabs = {{{0u, pmlDepthCells},
-                                                                             {nz - upperDepth, upperDepth}}};
-    result.layerOfZ.assign(nz, CopperZCPML::kNoLayer);
-    unsigned int pos[3] = {0, 0, 0};
-    for (const auto& [startZ, slabDepth] : slabs) {
-        for (std::uint32_t lz = 0; lz < slabDepth; ++lz) {
-            pos[2] = startZ + lz;
-            const int component = 0; // any off-axis component gives the required CPML staggering
-            const BaseGrading base = computeBaseGrading(op, pmlDepthCells, 2, pos);
-            float bE, cE, bH, cH;
-            computeBC(finishGrading(base, op, 2, pos, true, component, alphaMax), dT, bE, cE);
-            computeBC(finishGrading(base, op, 2, pos, false, component, alphaMax), dT, bH, cH);
-            result.layerOfZ[pos[2]] = result.layerCount();
-            result.bE.push_back(bE);
-            result.cE.push_back(cE);
-            result.bH.push_back(bH);
-            result.cH.push_back(cH);
+    for (int axis = 0; axis < 3; ++axis) {
+        CopperCPML::Axis& out = cpml.axes[axis];
+        out.layerOf.assign(lines[axis], CopperCPML::kNoLayer);
+        if (!graded(axis)) continue;
+        const std::array<std::pair<std::uint32_t, std::uint32_t>, 2> slabs = {
+            {{0U, pmlDepthCells}, {lines[axis] - upperDepth, upperDepth}}};
+        // The grading along `axis` depends on pos[axis] alone (computeBaseGrading/finishGrading
+        // never read the others). Any component off `axis` gives the staggering psi needs: a
+        // component's psi is only ever driven along one of the other two axes.
+        unsigned int pos[3] = {0, 0, 0};
+        const int component = (axis + 1) % 3;
+        for (const auto& [start, depth] : slabs) {
+            for (std::uint32_t line = start; line < start + depth; ++line) {
+                pos[axis] = line;
+                const BaseGrading base = computeBaseGrading(op, pmlDepthCells, axis, pos);
+                float bE, cE, bH, cH;
+                computeBC(finishGrading(base, op, axis, pos, /*isVSide=*/true, component, alphaMax), dT, bE, cE);
+                computeBC(finishGrading(base, op, axis, pos, /*isVSide=*/false, component, alphaMax), dT, bH, cH);
+                out.layerOf[line] = out.layerCount();
+                out.bE.push_back(bE);
+                out.cE.push_back(cE);
+                out.bH.push_back(bH);
+                out.cH.push_back(cH);
+            }
         }
     }
-    return result;
+    return cpml;
 }
 
 namespace {

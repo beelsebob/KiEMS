@@ -4,11 +4,10 @@
 
 namespace copper {
 
-CopperEngine::CopperEngine(const CopperYeeGrid& grid, const CopperExcitation& excitation,
-                            const std::vector<CopperCPMLShell>& cpmlShells,
-                            Backend backend, const CopperDomainMask& domainMask, const CopperZCPML& zcpml)
-    : _backend(backend == Backend::Metal ? makeMetalEngineBackend(grid, excitation, cpmlShells, domainMask, zcpml)
-                                          : makeCPUEngineBackend(grid, excitation, cpmlShells, domainMask, zcpml)) {}
+CopperEngine::CopperEngine(const CopperYeeGrid& grid, const CopperExcitation& excitation, const CopperCPML& cpml,
+                            Backend backend, const CopperDomainMask& domainMask)
+    : _backend(backend == Backend::Metal ? makeMetalEngineBackend(grid, excitation, cpml, domainMask)
+                                          : makeCPUEngineBackend(grid, excitation, cpml, domainMask)) {}
 
 CopperEngine::~CopperEngine() = default;
 
@@ -42,5 +41,13 @@ double CopperEngine::estimateEnergy() const { return _backend->estimateEnergy();
 const CopperGridDims& CopperEngine::dims() const { return _backend->dims(); }
 
 std::size_t CopperEngine::currentAllocatedMetalBytes() const { return _backend->currentAllocatedMetalBytes(); }
+
+std::size_t CopperEngine::fusedTileCount() const { return _backend->fusedTileCount(); }
+
+void CopperEngine::setLumpedRLC(const std::vector<CopperLumpedRLCCell>& cells) { _backend->setLumpedRLC(cells); }
+
+void CopperEngine::declareMidStepCorrectionCells(const std::vector<CopperLumpedRLCCell>& cells) {
+    _backend->declareMidStepCorrectionCells(cells);
+}
 
 } // namespace copper

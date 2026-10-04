@@ -95,17 +95,20 @@ using namespace copper::test;
     // -- see CopperCPML.hpp), graded along Z alone and so stored per plane: `depth` planes at the
     // bottom and one more at the top, whose first plane holds only the H-side half-cell grading.
     const auto nz = op.numberOfLines(2);
-    const copper::CopperZCPML zcpml = copper::buildZCPML(op, 2 * M_PI * 100e6 * copper::physical::epsilon0, depth);
-    XCTAssertEqual(zcpml.layerOfZ.size(), static_cast<std::size_t>(nz));
-    XCTAssertEqual(zcpml.layerCount(), 2 * depth + 1);
+    const copper::CopperCPML cpml =
+        copper::buildCPML(op, 2 * M_PI * 100e6 * copper::physical::epsilon0, depth, copper::CopperCPMLFaces::ZOnly);
+    const copper::CopperCPML::Axis& zAxis = cpml.axes[2];
+    XCTAssertEqual(cpml.axes[0].layerCount() + cpml.axes[1].layerCount(), 0U, @"only Z is a CPML");
+    XCTAssertEqual(zAxis.layerOf.size(), static_cast<std::size_t>(nz));
+    XCTAssertEqual(zAxis.layerCount(), 2 * depth + 1);
     for (std::uint32_t z = 0; z < nz; ++z) {
         const bool graded = z < depth || z >= nz - depth - 1;
-        XCTAssertEqual(zcpml.layerOfZ[z] != copper::CopperZCPML::kNoLayer, graded, @"plane %u", z);
+        XCTAssertEqual(zAxis.layerOf[z] != copper::CopperCPML::kNoLayer, graded, @"plane %u", z);
     }
-    const std::uint32_t upperFirst = zcpml.layerOfZ[nz - depth - 1];
-    XCTAssertEqual(zcpml.cE[upperFirst], 0.0F, @"E-side grading is zero on the PML's inner edge");
-    XCTAssertLessThan(zcpml.cH[upperFirst], 0.0F, @"H-side grading is not");
-    XCTAssertLessThan(zcpml.cE[zcpml.layerOfZ[nz - depth]], 0.0F);
+    const std::uint32_t upperFirst = zAxis.layerOf[nz - depth - 1];
+    XCTAssertEqual(zAxis.cE[upperFirst], 0.0F, @"E-side grading is zero on the PML's inner edge");
+    XCTAssertLessThan(zAxis.cH[upperFirst], 0.0F, @"H-side grading is not");
+    XCTAssertLessThan(zAxis.cE[zAxis.layerOf[nz - depth]], 0.0F);
 }
 
 /// The ring absorber samples its profile at each Yee component's own staggered XY position: the
@@ -174,9 +177,10 @@ using namespace copper::test;
                                   {op.discLine(0, x0), op.discLine(1, y1)}}};
     config.domainCPMLCellSize = op.discLine(0, 1) - op.discLine(0, 0);
     const copper::CopperDomainMask mask = copper::buildDomainMask(op, config, depth);
-    const copper::CopperZCPML zcpml = copper::buildZCPML(op, 2 * M_PI * 100e6 * copper::physical::epsilon0, depth);
+    const copper::CopperCPML cpml =
+        copper::buildCPML(op, 2 * M_PI * 100e6 * copper::physical::epsilon0, depth, copper::CopperCPMLFaces::ZOnly);
 
-    copper::CopperEngine cpu(op.grid(), {}, {}, copper::CopperEngine::Backend::CPU, mask, zcpml);
+    copper::CopperEngine cpu(op.grid(), {}, cpml, copper::CopperEngine::Backend::CPU, mask);
     cpu.writeFieldCell(copper::CopperEngine::Field::Ez, nx / 2, ny / 2, nz / 2, 1.0F);
     const double initialEnergy = cpu.estimateEnergy();
     cpu.run(500);
@@ -207,10 +211,11 @@ using namespace copper::test;
                                   {op.discLine(0, x0), op.discLine(1, y1)}}};
     config.domainCPMLCellSize = op.discLine(0, 1) - op.discLine(0, 0);
     const copper::CopperDomainMask mask = copper::buildDomainMask(op, config, depth);
-    const copper::CopperZCPML zcpml = copper::buildZCPML(op, 2 * M_PI * 100e6 * copper::physical::epsilon0, depth);
+    const copper::CopperCPML cpml =
+        copper::buildCPML(op, 2 * M_PI * 100e6 * copper::physical::epsilon0, depth, copper::CopperCPMLFaces::ZOnly);
 
-    copper::CopperEngine metal(op.grid(), {}, {}, copper::CopperEngine::Backend::Metal, mask, zcpml);
-    copper::CopperEngine cpu(op.grid(), {}, {}, copper::CopperEngine::Backend::CPU, mask, zcpml);
+    copper::CopperEngine metal(op.grid(), {}, cpml, copper::CopperEngine::Backend::Metal, mask);
+    copper::CopperEngine cpu(op.grid(), {}, cpml, copper::CopperEngine::Backend::CPU, mask);
     const std::uint32_t seedX = (x0 + x1) / 2, seedY = (y0 + y1) / 2, seedZ = nz / 2;
     metal.writeFieldCell(copper::CopperEngine::Field::Ez, seedX, seedY, seedZ, 1.0F);
     cpu.writeFieldCell(copper::CopperEngine::Field::Ez, seedX, seedY, seedZ, 1.0F);
@@ -226,7 +231,7 @@ using namespace copper::test;
             maxValue = std::max(maxValue, std::abs(cpuValues[i]));
             maxDifference = std::max(maxDifference, std::abs(metalValues[i] - cpuValues[i]));
         }
-        XCTAssertLessThanOrEqual(maxDifference, 1e-5F * std::max(maxValue, 1.0F));
+        XCTAssertLessThanOrEqual(maxDifference, fieldParityTolerance(1e-5F) * std::max(maxValue, 1.0F));
 
         for (std::uint32_t y = 0; y < ny; ++y) {
             for (std::uint32_t x = 0; x < nx; ++x) {

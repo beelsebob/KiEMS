@@ -22,8 +22,8 @@
 // correction with no effect anywhere sigma=alpha=0.
 //
 // "grid.vv/vi/ii/iv represent the real host medium" is only true if nothing else has *also* graded
-// them -- which is why, unlike an earlier version of this file, buildCPMLShells() no longer discovers
-// its own shell geometry from an actual Operator_Ext_UPML extension at all. Set_BC_PML() causes
+// them -- which is why, unlike an earlier version of this file, buildCPML() no longer discovers
+// its own slab geometry from an actual Operator_Ext_UPML extension at all. Set_BC_PML() causes
 // openEMS's own Operator::CalcECOperator() to unconditionally call BuildExtension() on every extension
 // it creates (operator.cpp's own CalcECOperator(), regardless of which boundary algorithm the *caller*
 // ultimately wants) -- so if kiems ever called Set_BC_PML() before a CPML run, grid.vv/vi/ii/iv at
@@ -34,7 +34,7 @@
 // eleven orders of magnitude off the ~217 a genuine vacuum cell reads, and reproducible with plain
 // UPML -- no CPML involved at all -- disabled). kiems now uses Set_BC_Type()+MUR (never
 // Set_BC_PML()) for a CPML run specifically so no Operator_Ext_UPML ever gets created, and this file
-// computes its own shell geometry directly from `pmlDepthCells` (the same value kiems would
+// computes its own slab geometry directly from `pmlDepthCells` (the same value kiems would
 // otherwise have passed to Set_BC_PML()) and the Operator's own line counts instead.
 //
 // kappa (CPML's coordinate-*stretching* parameter, unrelated to openEMS's own same-named-but-
@@ -44,6 +44,7 @@
 // above entirely.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -53,95 +54,77 @@
 
 namespace copper {
 
-/// One PML face's auxiliary CPML state. This never touches grid.vv/vi/ii/iv or needs any "flux"
-/// swap: it is a pure additive correction, applied by
-/// cpml_correct_e/cpml_correct_h kernels dispatched *after* update_e_interior/update_h_interior (same
-/// H/E snapshot either order, since neither kernel here writes the field it reads).
+/// The CPML's auxiliary state and coefficients. It never touches grid.vv/vi/ii/iv or needs any
+/// "flux" swap: it is a pure additive correction, which both engines fold into the interior update
+/// (CopperFDTD.metal's cpmlTerms) for every cell in some axis's slabs.
 ///
-/// All arrays are local-indexed (copperGridIndex(dims, lx, ly, lz)) and axis-major merged for GPU
-/// upload.
-struct CopperCPMLShell {
-    std::uint32_t startX = 0, startY = 0, startZ = 0;
-    CopperGridDims dims;
-
-    // Per-*grading*-axis (w=x,y,z) CFS coefficients (eq. 7.99/7.102, kappa=1):
-    //   b[w] = exp(-(sigma_w + alpha_w) * dT / EPS0)
-    //   c[w] = sigma_w * (b[w] - 1) / (sigma_w + alpha_w)      (0 if sigma_w=alpha_w=0)
-    // Evaluated at the V-side (E-update, eq. 7.105) and I-side (H-update, eq. 7.110) positions
-    // separately -- these differ by the same half-cell Yee-staggering offset the vv/vi (V-side) vs
-    // ii/iv (I-side) split already accounts for, so two separate coefficient sets
-    // are needed, not one shared set.
-    std::vector<float> bE[3], cE[3];
-    std::vector<float> bH[3], cH[3];
-
-    // Auxiliary convolution state (psi, eq. 7.101), zero-initialized. For field component n (0=x,
-    // 1=y, 2=z), psiE0[n]/psiH0[n] is driven by the *nP*-axis curl term (nP=(n+1)%3) -- e.g. n=0
-    // (Ex)'s own dHz/dy term -- and psiE1[n]/psiH1[n] by the *nPP*-axis term (e.g. Ex's dHy/dz),
-    // mirroring the update_e_interior/update_h_interior kernels' own two-term curl construction
-    // exactly (first term -> slot 0, second term -> slot 1) so cpml_correct_e/h can recompute the
-    // identical raw difference each kernel already trusts, rather than re-deriving it.
-    std::vector<float> psiE0[3], psiE1[3];
-    std::vector<float> psiH0[3], psiH1[3];
-};
-
-/// `alphaMax` is CPML's own alpha (CFS) parameter, S/m, graded per axis alongside sigma (see
-/// CopperCPML.cpp) -- standard choice is `2*pi*f_low*EPS0` for this
-/// simulation's own lowest frequency of interest. alphaMax=0 makes every b[w]/c[w] collapse to what
-/// the same axis's *sigma-only* stretched-coordinate CPML would produce (not identical to plain UPML
-/// bit-for-bit, since this is a structurally different formulation -- see this header's own top
-/// comment -- but the psi correction itself becomes purely alpha-independent decay-toward-zero
-/// bookkeeping with no effect on stability either way).
+/// A stretched-coordinate PML is only stable when each axis's stretch depends on that axis alone --
+/// sigma_x(x), sigma_y(y), sigma_z(z) -- because only then is it a genuine complex coordinate
+/// transformation of Maxwell's equations (the stretched derivatives d/dx~ and d/dy~ commute, so
+/// div(curl) stays zero). So the grading is stored per grid line of each axis, not per cell: a
+/// per-cell layout could only ever repeat these tables, and anything else would be the unstable
+/// non-separable kind. Along each graded axis there's a slab of `pmlDepthCells` lines at the lower
+/// face and one more at the upper (see upperFaceDepth() in CopperCPML.cpp), spanning the other two
+/// axes completely; edges and corners are simply where two or three axes' slabs overlap.
 ///
-/// `pmlDepthCells` is the PML shell's own depth, in cells, uniform on all 6 domain faces -- the same
-/// value the caller must *not* have passed to openEMS's own Set_BC_PML() (see this header's own top
-/// comment for why); shell geometry here is computed directly from it and `op`'s own line counts,
-/// with no Operator_Ext_UPML extension involved at all. 0 returns no shells (a caller with no PML on
-/// this run -- e.g. a MUR-only smoketest -- can pass 0 rather than special-casing the call away).
-std::vector<CopperCPMLShell> buildCPMLShells(CopperOperator& op, double alphaMax, std::uint32_t pmlDepthCells);
-/// Irregular-domain CPML: the conventional lower and upper Z slabs only, graded along Z alone and
-/// spanning every active XY column. Absorption across the irregular XY outline is NOT a CPML -- it's
-/// applyRingAbsorber() below.
-///
-/// Why the XY rings can't be a CPML: the stretched-coordinate PML this file implements is only
-/// stable when each axis's stretch depends on that axis alone -- sigma_x(x), sigma_y(y),
-/// sigma_z(z) -- because only then is it a genuine complex coordinate transformation of Maxwell's
-/// equations (the stretched derivatives d/dx~ and d/dy~ commute, so div(curl) stays zero). An
-/// outline-following ring necessarily makes sigma_x vary along y (every curved or diagonal
-/// section, and wherever an axis's grading switches on or off), and then any field variation along
-/// z drives an exponentially growing mode pinned to where sigma_x varies with y (or sigma_y with
-/// x). This is not a tuning problem: an earlier ring-graded CPML here diverged from roundoff within
-/// a few hundred steps whatever sigma/alpha/grading-selection rule was used, stayed stable in pure
-/// 2D (kz=0) runs, and a plain rectangular CPML whose X-lo face was merely truncated halfway along y
-/// diverges the same way, with the growing mode sitting exactly on the truncation line. Z grading
-/// is still separable (the ring absorber is Z-invariant), which is why the Z slabs stay a CPML.
-///
-/// Grading along Z alone shrinks the state a CopperCPMLShell would need. The coefficients depend on
-/// z only, so they're one set per graded plane rather than per cell. And of each component's two
-/// psi terms only the one driven by a d/dz curl term can ever be non-zero -- Ex's (dHy/dz) and Ey's
-/// (dHx/dz), Hx's (dEy/dz) and Hy's (dEx/dz); every other term has b=1, c=0, so it starts at zero
-/// and stays there. Ez and Hz have no d/dz term, so a Z-only CPML never touches them. The engines
-/// fold the correction into the interior update itself (it needs only the cell's freshly updated
-/// value and curl differences the update already read), which leaves two psi read-modify-writes
-/// per graded cell as its only extra memory traffic. The psi state itself is allocated, zeroed, by
-/// the engine: one value per XY node per graded plane for each of those four terms.
-struct CopperZCPML {
+/// Of each field component's two psi terms (eq. 7.101), the one driven along axis w has b=1, c=0
+/// outside w's slabs, so it starts at zero and stays there: psi is only stored over the slabs of the
+/// axis driving it. For axis w that's two terms per cell of its slabs: component (w+1)%3's second
+/// (subtracted) curl term and component (w+2)%3's first (added) one -- e.g. along Z, Ex's dHy/dz
+/// and Ey's dHx/dz, and Hx's dEy/dz and Hy's dEx/dz. Each is laid out like the grid with w's extent
+/// replaced by its layer count. The engines allocate it, zeroed: psiCount() cells per term.
+struct CopperCPML {
     static constexpr std::uint32_t kNoLayer = 0xFFFFFFFFu;
 
-    /// Per grid z-plane: the index of its entry in the per-plane arrays below, or kNoLayer outside
-    /// the slabs.
-    std::vector<std::uint32_t> layerOfZ;
-    /// Per graded plane, eq. (7.99)/(7.102) for the Z axis exactly as CopperCPMLShell's b[2]/c[2],
-    /// at the V-side (E update) and I-side (H update) positions.
-    std::vector<float> bE, cE, bH, cH;
+    struct Axis {
+        /// Per grid line along this axis: the index of its layer in the per-layer arrays below, or
+        /// kNoLayer outside the axis's slabs (every line, for an axis that isn't graded).
+        std::vector<std::uint32_t> layerOf;
+        /// Per layer, eq. (7.99)/(7.102) with kappa = 1:
+        ///   b = exp(-(sigma + alpha) * dT / EPS0)
+        ///   c = sigma * (b - 1) / (sigma + alpha)      (0 if sigma = alpha = 0)
+        /// at the V-side (E update, eq. 7.105) and I-side (H update, eq. 7.110) positions, which
+        /// differ by the same half-cell Yee stagger the vv/vi vs ii/iv split accounts for.
+        std::vector<float> bE, cE, bH, cH;
 
-    std::uint32_t layerCount() const { return static_cast<std::uint32_t>(bE.size()); }
-    bool empty() const { return bE.empty(); }
+        std::uint32_t layerCount() const { return static_cast<std::uint32_t>(bE.size()); }
+    };
+    Axis axes[3];
+
+    bool empty() const { return axes[0].layerCount() + axes[1].layerCount() + axes[2].layerCount() == 0; }
+    /// The cells in each of axis `axis`'s two psi terms on a grid of `dims`.
+    std::size_t psiCount(const CopperGridDims& dims, int axis) const;
 };
 
-/// Builds the irregular domain's Z-only CPML: `pmlDepthCells` planes at the bottom and one more at
-/// the top (see upperFaceDepth() in CopperCPML.cpp), graded exactly like the rectangular overload's
-/// Z faces. Empty when `pmlDepthCells` is 0 or the grid is too thin to hold both slabs.
-CopperZCPML buildZCPML(CopperOperator& op, double alphaMax, std::uint32_t pmlDepthCells);
+/// Which faces a CPML grades.
+///
+/// ZOnly is the irregular domain's: the conventional lower and upper Z slabs, spanning every active
+/// XY column. Absorption across the irregular XY outline is NOT a CPML -- it's applyRingAbsorber()
+/// below -- because an outline-following ring necessarily makes sigma_x vary along y (every curved
+/// or diagonal section, and wherever an axis's grading switches on or off), and then any field
+/// variation along z drives an exponentially growing mode pinned to where sigma_x varies with y (or
+/// sigma_y with x). This is not a tuning problem: an earlier ring-graded CPML here diverged from
+/// roundoff within a few hundred steps whatever sigma/alpha/grading-selection rule was used, stayed
+/// stable in pure 2D (kz=0) runs, and a plain rectangular CPML whose X-lo face was merely truncated
+/// halfway along y diverges the same way, with the growing mode sitting exactly on the truncation
+/// line. Z grading is still separable (the ring absorber is Z-invariant), which is why the Z slabs
+/// stay a CPML.
+enum class CopperCPMLFaces { All, ZOnly };
+
+/// `alphaMax` is CPML's own alpha (CFS) parameter, S/m, graded per axis alongside sigma (see
+/// CopperCPML.cpp) -- standard choice is `2*pi*f_low*EPS0` for this simulation's own lowest frequency
+/// of interest. alphaMax=0 makes every b/c collapse to what the same axis's *sigma-only*
+/// stretched-coordinate CPML would produce (not identical to plain UPML bit-for-bit, since this is a
+/// structurally different formulation -- see this header's own top comment).
+///
+/// `pmlDepthCells` is the PML's depth in cells, uniform on every graded face -- the same value the
+/// caller must *not* have passed to openEMS's own Set_BC_PML() (see this header's own top comment
+/// for why); the geometry here is computed directly from it and `op`'s own line counts, with no
+/// Operator_Ext_UPML extension involved at all. 0 returns an empty CPML (a caller with no PML on
+/// this run -- e.g. a MUR-only smoketest -- can pass 0 rather than special-casing the call away), as
+/// does a grid too thin along a graded axis to hold both of its slabs.
+CopperCPML buildCPML(CopperOperator& op, double alphaMax, std::uint32_t pmlDepthCells,
+                     CopperCPMLFaces faces = CopperCPMLFaces::All);
 
 /// Folds the irregular domain's XY absorbing rings into one engine backend's own copies of the
 /// Yee coefficients (both backends call this at construction; `vv`/`vi`/`ii`/`iv` are per-axis

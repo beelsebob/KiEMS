@@ -19,6 +19,7 @@
 #include "CopperTestFixtures.hpp"
 #include "Internal/CopperCPML.hpp"
 #include "Internal/CopperExcitation.hpp"
+#include "Internal/CopperLumpedRLC.hpp"
 #include "Internal/CopperOperator.hpp"
 #include "Internal/CopperPhysicalConstants.hpp"
 #include "Internal/CopperYeeGrid.hpp"
@@ -151,7 +152,149 @@ NSString* backendName(Engine::Backend backend) { return backend == Engine::Backe
         engine.run(5);
         const FieldDiff diff = reference.diff(engine);
         XCTAssertGreaterThan(diff.maxAbsValue, 0.0F, @"%@: impulse never propagated", backendName(backend));
-        XCTAssertLessThanOrEqual(diff.maxAbsDiff, 1e-5F * std::max(diff.maxAbsValue, 1.0F), @"%@", backendName(backend));
+        XCTAssertLessThanOrEqual(diff.maxAbsDiff, fieldParityTolerance(1e-5F) * std::max(diff.maxAbsValue, 1.0F), @"%@", backendName(backend));
+    }
+}
+
+/// COPPER_FIELD_Q16 regression: a whole board went NaN by step 160. The lumped-RLC correction writes
+/// cells through writeFieldCell, which re-encodes the cell's tile on the CPU; in the tail of a
+/// wavefront that tile spans next to nothing, its scale came out subnormal, and -- the CPU keeping
+/// subnormals where Metal flushes them -- 1/scale was infinite and the tile's bias 0 * inf = NaN.
+/// Tiles spanning under 2^-110 must flush to zero instead, then run on finitely.
+- (void)testQ16TinyCellWritesStayFinite {
+    const std::unique_ptr<ContinuousStructure> csx(buildPecCavityNoExcitation());
+    const copper::CopperOperator op(*csx, pulseConfig(10));
+    const copper::CopperGridDims dims = op.dims();
+    const ScopedEnvironment q16({{"COPPER_FIELD_Q16", "1"}, {"COPPER_FIELD_FP16", "0"}});
+    Engine engine(op.grid(), {}, {}, Engine::Backend::Metal);
+    const std::uint32_t x = dims.nx / 2, y = dims.ny / 2, z = dims.nz / 2;
+
+    // A unit impulse to propagate, plus tiny values alone in otherwise-zero tiles: one subnormal, one
+    // just under the flush threshold, one just over it (which must survive).
+    engine.writeFieldCell(Engine::Field::Ez, x, y, z, 1.0F);
+    engine.writeFieldCell(Engine::Field::Ex, 1, 1, z, 1e-40F);
+    engine.writeFieldCell(Engine::Field::Ey, 1, 1, z, 0x1p-111F);
+    engine.writeFieldCell(Engine::Field::Hz, 1, 1, z, 0x1p-109F);
+    XCTAssertEqual(engine.readFieldCell(Engine::Field::Ex, 1, 1, z), 0.0F);
+    XCTAssertEqual(engine.readFieldCell(Engine::Field::Ey, 1, 1, z), 0.0F);
+    XCTAssertEqual(engine.readFieldCell(Engine::Field::Hz, 1, 1, z), 0x1p-109F);
+    XCTAssertEqual(engine.readFieldCell(Engine::Field::Ez, x, y, z), 1.0F);
+
+    std::vector<float> values;
+    for (std::uint32_t step = 0; step < 20; ++step) {
+        engine.run(1);
+        // Re-touch a cell each step, as the lumped-RLC correction does, with a value in the tail.
+        engine.writeFieldCell(Engine::Field::Ex, 1, 1, z, 1e-40F);
+        for (const Engine::Field field : kAllFields) {
+            engine.readField(field, values);
+            if (!std::all_of(values.begin(), values.end(), [](float value) { return std::isfinite(value); })) {
+                XCTFail(@"field %d went non-finite at step %u", static_cast<int>(field), step + 1);
+                return;
+            }
+        }
+    }
+    XCTAssertTrue(std::isfinite(engine.estimateEnergy()));
+    XCTAssertGreaterThan(engine.estimateEnergy(), 0.0);
+}
+
+/// COPPER_FUSED: the fused E+H kernel must reproduce the separate E and H kernels -- over a CPML
+/// cavity, so the interior runs fused while the absorbing slabs around it (and the tiles whose halo
+/// reaches into them) run the separate kernels, against the same ping-ponged buffers. Tiles held in
+/// fp32 (COPPER_FIELD_MIXED with every tile pinned) must agree to float rounding. Q16 tiles agree
+/// only to Q16's own precision: the fused H update uses the new E straight from registers, the
+/// separate one reads it back after it was rounded to 16 bits.
+- (void)testFusedEHKernelMatchesSeparateKernels {
+    const std::unique_ptr<ContinuousStructure> csx(buildCpmlCavityNoExcitation());
+    copper::CopperOperator op(*csx, pulseConfig(30, /*pecBox=*/false));
+    const copper::CopperCPML cpml =
+        copper::buildCPML(op, 2 * copper::physical::pi * 100e6 * copper::physical::epsilon0, 8);
+
+    struct Mode {
+        const char* label;
+        std::initializer_list<std::pair<const char*, const char*>> vars;
+        float tolerance;
+    };
+    const Mode modes[] = {
+        {"fp32 tiles", {{"COPPER_FIELD_MIXED", "1"}, {"COPPER_MIXED_PIN_ALL", "1"}, {"COPPER_FIELD_FP16", "0"}}, 1e-6F},
+        {"Q16 tiles", {{"COPPER_FIELD_Q16", "1"}, {"COPPER_FIELD_MIXED", "0"}, {"COPPER_FIELD_FP16", "0"}}, 1e-4F},
+    };
+    for (const auto& [label, vars, tolerance] : modes) {
+        // Whatever the suite as a whole is running with, this test picks its own modes.
+        const ScopedEnvironment mode(vars);
+        std::unique_ptr<Engine> separateEngine;
+        {
+            const ScopedEnvironment separateEnv({{"COPPER_FUSED", "0"}});
+            separateEngine = std::make_unique<Engine>(op.grid(), copper::CopperExcitation{}, cpml, Engine::Backend::Metal);
+        }
+        Engine& separate = *separateEngine;
+        std::unique_ptr<Engine> fused;
+        {
+            const ScopedEnvironment fusedEnv({{"COPPER_FUSED", "1"}});
+            fused = std::make_unique<Engine>(op.grid(), copper::CopperExcitation{}, cpml, Engine::Backend::Metal);
+        }
+        for (Engine* engine : {&separate, fused.get()}) {
+            engine->writeFieldCell(Engine::Field::Ez, 15, 15, 15, 1.0F); // fused interior
+            // Inside the CPML -- small, since an H seed drives E two orders of magnitude larger.
+            engine->writeFieldCell(Engine::Field::Hy, 6, 15, 15, 0.005F);
+            engine->run(40);
+        }
+        XCTAssertGreaterThan(fused->fusedTileCount(), static_cast<std::size_t>(0), @"%s: nothing ran fused", label);
+        float maxValue = 0.0F, maxDifference = 0.0F;
+        for (const Engine::Field field : kAllFields) {
+            const std::vector<float> a = separate.readField(field), b = fused->readField(field);
+            for (std::size_t i = 0; i < a.size(); ++i) {
+                maxValue = std::max(maxValue, std::fabs(a[i]));
+                maxDifference = std::max(maxDifference, std::fabs(a[i] - b[i]));
+            }
+        }
+        XCTAssertGreaterThan(maxValue, 0.0F);
+        XCTAssertLessThanOrEqual(maxDifference, tolerance * maxValue, @"%s: fused E+H differs from separate E, H", label);
+    }
+}
+
+/// COPPER_FUSED with its E corrections (the default): tiles holding voltage excitation or GPU lumped
+/// RLC elements run fused too, the kernel applying both after its E update -- including to the
+/// neighbouring cells it computes as halo, from their elements' old state. With fp32 tiles it must
+/// match the separate kernels (and COPPER_FUSED_CORRECTIONS=0, which leaves those tiles to them) to
+/// float rounding.
+- (void)testFusedEHKernelAppliesExcitationAndLumpedRLC {
+    const std::unique_ptr<ContinuousStructure> csx(buildTinyVacuumGrid());
+    const copper::CopperOperator op(*csx, pulseConfig(150));
+    XCTAssertFalse(op.excitation().voltageCells.empty());
+    const std::unique_ptr<ContinuousStructure> lumpedCsx(buildSeriesLumpedRLCFixture(50.0, 2e-9, 1e-12));
+    copper::CopperOperator lumpedOp(*lumpedCsx, pulseConfig(150));
+    // The same 11x11x3 grid: put the fixture's element on the excited grid, one cell over.
+    std::vector<copper::CopperLumpedRLCCell> lumpedRLC = copper::discoverLumpedRLC(*lumpedCsx, lumpedOp.grid(), lumpedOp);
+    XCTAssertEqual(lumpedRLC.size(), static_cast<std::size_t>(1));
+    lumpedRLC[0].x = 4;
+
+    const ScopedEnvironment fp32Tiles({{"COPPER_FIELD_MIXED", "1"}, {"COPPER_MIXED_PIN_ALL", "1"}, {"COPPER_FIELD_FP16", "0"}});
+    std::unique_ptr<Engine> separateEngine, fused, fusedWithout;
+    {
+        const ScopedEnvironment separateEnv({{"COPPER_FUSED", "0"}});
+        separateEngine = std::make_unique<Engine>(op.grid(), op.excitation(), copper::CopperCPML{},
+                                                  Engine::Backend::Metal);
+    }
+    Engine& separate = *separateEngine;
+    {
+        const ScopedEnvironment fusedEnv({{"COPPER_FUSED", "1"}, {"COPPER_FUSED_CORRECTIONS", "1"}});
+        fused = std::make_unique<Engine>(op.grid(), op.excitation(), copper::CopperCPML{},
+                                         Engine::Backend::Metal);
+        const ScopedEnvironment without({{"COPPER_FUSED_CORRECTIONS", "0"}});
+        fusedWithout = std::make_unique<Engine>(op.grid(), op.excitation(), copper::CopperCPML{},
+                                                Engine::Backend::Metal);
+    }
+    for (Engine* engine : {&separate, fused.get(), fusedWithout.get()}) {
+        engine->setLumpedRLC(lumpedRLC);
+        engine->runWithProbeSampling(100, [](std::uint32_t) { return true; });
+    }
+    // Every tile of this PEC box is plain once excitation and lumped RLC can be fused; without the
+    // corrections, the excited/lumped tile and those whose halo reaches it can't be.
+    XCTAssertGreaterThan(fused->fusedTileCount(), fusedWithout->fusedTileCount());
+    for (Engine* engine : {fused.get(), fusedWithout.get()}) {
+        const FieldDiff diff = diffFields(*engine, separate);
+        XCTAssertGreaterThan(diff.maxAbsValue, 0.0F);
+        XCTAssertLessThanOrEqual(diff.maxAbsDiff, 1e-6F * diff.maxAbsValue);
     }
 }
 
@@ -169,7 +312,7 @@ NSString* backendName(Engine::Backend backend) { return backend == Engine::Backe
         engine.run(100);
         const FieldDiff diff = reference.diff(engine);
         XCTAssertGreaterThan(diff.maxAbsValue, 0.0F, @"%@: excitation never landed", backendName(backend));
-        XCTAssertLessThanOrEqual(diff.maxAbsDiff, 1e-4F * std::max(diff.maxAbsValue, 1.0F), @"%@", backendName(backend));
+        XCTAssertLessThanOrEqual(diff.maxAbsDiff, fieldParityTolerance(1e-4F) * std::max(diff.maxAbsValue, 1.0F), @"%@", backendName(backend));
     }
 }
 
@@ -191,7 +334,7 @@ NSString* backendName(Engine::Backend backend) { return backend == Engine::Backe
         engine.run(30);
         const FieldDiff diff = reference.diff(engine);
         XCTAssertGreaterThan(diff.maxAbsValue, 0.0F);
-        XCTAssertLessThanOrEqual(diff.maxAbsDiff, 1e-4F * std::max(diff.maxAbsValue, 1.0F), @"%@", backendName(backend));
+        XCTAssertLessThanOrEqual(diff.maxAbsDiff, fieldParityTolerance(1e-4F) * std::max(diff.maxAbsValue, 1.0F), @"%@", backendName(backend));
     }
 }
 
@@ -271,17 +414,17 @@ NSString* backendName(Engine::Backend backend) { return backend == Engine::Backe
 }
 
 /// CPML isn't modelled by ReferenceYee, so the backends are held to each other: a seeded impulse
-/// inside the x-min shell, absorbed for several domain crossings, must come out the same on both,
+/// inside the x-min slab, absorbed for several domain crossings, must come out the same on both,
 /// stay finite, and lose energy.
 - (void)testCPMLRunAgreesAcrossBackendsAndAbsorbs {
     const std::unique_ptr<ContinuousStructure> csx(buildCpmlCavityNoExcitation());
     copper::CopperOperator op(*csx, pulseConfig(30, /*pecBox=*/false));
-    const std::vector<copper::CopperCPMLShell> shells =
-        copper::buildCPMLShells(op, 2 * copper::physical::pi * 100e6 * copper::physical::epsilon0, 8);
-    XCTAssertEqual(shells.size(), static_cast<std::size_t>(6));
+    const copper::CopperCPML cpml =
+        copper::buildCPML(op, 2 * copper::physical::pi * 100e6 * copper::physical::epsilon0, 8);
+    XCTAssertFalse(cpml.empty());
 
-    Engine metal(op.grid(), {}, shells, Engine::Backend::Metal);
-    Engine cpu(op.grid(), {}, shells, Engine::Backend::CPU);
+    Engine metal(op.grid(), {}, cpml, Engine::Backend::Metal);
+    Engine cpu(op.grid(), {}, cpml, Engine::Backend::CPU);
     double energyAtStart = 0.0;
     for (Engine* engine : {&metal, &cpu}) {
         engine->writeFieldCell(Engine::Field::Ez, 6, 15, 15, 1.0F);
@@ -296,7 +439,7 @@ NSString* backendName(Engine::Backend backend) { return backend == Engine::Backe
     }
     const FieldDiff diff = diffFields(metal, cpu);
     XCTAssertGreaterThan(diff.maxAbsValue, 0.0F);
-    XCTAssertLessThanOrEqual(diff.maxAbsDiff, 1e-4F * std::max(diff.maxAbsValue, 1.0F));
+    XCTAssertLessThanOrEqual(diff.maxAbsDiff, fieldParityTolerance(1e-4F) * std::max(diff.maxAbsValue, 1.0F));
 }
 
 @end

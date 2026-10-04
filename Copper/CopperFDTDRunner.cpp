@@ -14,6 +14,7 @@
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <cstdlib>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -211,35 +212,28 @@ CopperFDTDRunResult runFDTDPortImpl(ContinuousStructure& csx, const CopperFDTDPo
                          total == 0 ? 0.0 : 100.0 * static_cast<double>(skipped) / static_cast<double>(total),
                          domainMask.dispatchBoxes.size());
         }
-        // A rectangular domain gets the general per-face CPML; an irregular one only its Z slabs,
-        // whose compact form the engines fold into the interior update (see CopperZCPML).
-        std::vector<CopperCPMLShell> cpmlShells;
-        CopperZCPML zcpml;
-        if (domainMask.empty()) {
-            cpmlShells = buildCPMLShells(newOp, cpmlAlphaMax, pmlDepthCells);
-        } else {
-            zcpml = buildZCPML(newOp, cpmlAlphaMax, pmlDepthCells);
-        }
+        // A rectangular domain gets a CPML on all six faces; an irregular one only its Z slabs (see
+        // CopperCPMLFaces). Either way the engines fold it into the interior update.
+        const CopperCPML cpml = buildCPML(newOp, cpmlAlphaMax, pmlDepthCells,
+                                          domainMask.empty() ? CopperCPMLFaces::All : CopperCPMLFaces::ZOnly);
+        // Cells in some axis's slabs: the whole grid but the box inside them all (an irregular
+        // domain's active XY nodes times its Z layers).
         std::uint64_t pmlCellTotal = 0;
-        std::size_t shellCount = 0;
-        shellCount = cpmlShells.size();
-        for (const CopperCPMLShell& shell : cpmlShells) {
-            pmlCellTotal += shell.dims.cellCount();
-        }
-        if (!zcpml.empty()) {
+        if (!cpml.empty() && domainMask.empty()) {
+            std::uint64_t inside = 1;
+            const std::uint32_t lines[3] = {grid.dims.nx, grid.dims.ny, grid.dims.nz};
+            for (int axis = 0; axis < 3; ++axis) inside *= lines[axis] - cpml.axes[axis].layerCount();
+            pmlCellTotal = grid.dims.cellCount() - inside;
+        } else if (!cpml.empty()) {
             std::uint64_t activeNodes = 0;
             for (const auto& box : domainMask.dispatchBoxes) activeNodes += std::uint64_t{box.width} * box.height;
-            pmlCellTotal += activeNodes * zcpml.layerCount();
+            pmlCellTotal = activeNodes * cpml.axes[2].layerCount();
         }
         if (!onProgress) {
-            timer.mark("buildCPMLShells");
-            if (zcpml.empty()) {
-                std::fprintf(stdout, "Copper: %zu PML shell(s), %llu cell(s) total\n", shellCount,
-                             static_cast<unsigned long long>(pmlCellTotal));
-            } else {
-                std::fprintf(stdout, "Copper: Z-only CPML on %u z-plane(s), %llu cell(s) total\n",
-                             zcpml.layerCount(), static_cast<unsigned long long>(pmlCellTotal));
-            }
+            timer.mark("buildCPML");
+            std::fprintf(stdout, "Copper: CPML layers x/y/z %u/%u/%u, %llu cell(s) total\n",
+                         cpml.axes[0].layerCount(), cpml.axes[1].layerCount(), cpml.axes[2].layerCount(),
+                         static_cast<unsigned long long>(pmlCellTotal));
         }
         const CopperExcitation& excitation = newOp.excitation();
         if (excitation.voltageCells.empty() && excitation.currentCells.empty()) {
@@ -273,9 +267,10 @@ CopperFDTDRunResult runFDTDPortImpl(ContinuousStructure& csx, const CopperFDTDPo
         // inject NaN into the field on literally the very first applyLumpedRLC() call, matching an
         // immediate-onset NaN.
         std::fprintf(stderr,
-                     "Copper: setup -- %zu PML shell(s) + %u Z-only CPML plane(s) (%llu cell(s)), %zu voltage/%zu "
+                     "Copper: setup -- CPML layers x/y/z %u/%u/%u (%llu cell(s)), %zu voltage/%zu "
                      "current excitation cell(s), %zu lumped RLC cell(s)\n",
-                     shellCount, zcpml.layerCount(), static_cast<unsigned long long>(pmlCellTotal),
+                     cpml.axes[0].layerCount(), cpml.axes[1].layerCount(), cpml.axes[2].layerCount(),
+                     static_cast<unsigned long long>(pmlCellTotal),
                      excitation.voltageCells.size(),
                      excitation.currentCells.size(), lumpedRLC.size());
         for (std::size_t i = 0; i < lumpedRLC.size(); ++i) {
@@ -289,7 +284,7 @@ CopperFDTDRunResult runFDTDPortImpl(ContinuousStructure& csx, const CopperFDTDPo
                          i, cell.axis, cell.x, cell.y, cell.z, cell.vvd, cell.vv2, cell.vj1, cell.vj2, cell.ib0,
                          cell.b1, cell.b2, allFinite ? "" : "  <-- NON-FINITE");
         }
-        CopperEngine engine(grid, excitation, cpmlShells, backend, domainMask, zcpml);
+        CopperEngine engine(grid, excitation, cpml, backend, domainMask);
         if (!onProgress) {
             timer.mark(backend == CopperEngine::Backend::CPU ? "CopperEngine construction (CPU coefficient upload)"
                                                               : "CopperEngine construction (GPU buffer upload)");
@@ -441,6 +436,15 @@ CopperFDTDRunResult runFDTDPortImpl(ContinuousStructure& csx, const CopperFDTDPo
         // vDSP sum-of-squares calls) that computing it more often would just be wasted work, not
         // more useful information.
         constexpr double endCriteria = 1e-6;
+        // EXPERIMENT (COPPER_END_CHECK_STEPS=N): check the criterion every N steps instead, so where
+        // a run stops doesn't depend on how fast the machine happens to be going -- a board whose
+        // decay beats around -60 dB otherwise stops wherever a 4 s tick happens to land, which moves
+        // its S-parameters at the ~-70 dB level from run to run.
+        std::uint32_t endCheckSteps = 0;
+        if (const char* env = std::getenv("COPPER_END_CHECK_STEPS")) {
+            endCheckSteps = static_cast<std::uint32_t>(std::max(0, std::atoi(env)));
+        }
+        double checkedMaxEnergy = 0.0; // its own peak, so the 4 s ticks can't influence it
         double maxEnergy = 0.0;
         double energyChange = 1.0; // matches RunFDTD()'s own `double change=1;` initial value
         bool endCriteriaReached = false;
@@ -455,7 +459,15 @@ CopperFDTDRunResult runFDTDPortImpl(ContinuousStructure& csx, const CopperFDTDPo
         // cells exist preserves CopperEngine's single-command-buffer fast path
         // for ordinary boards.
         CopperEngine::MidStepCorrection applyLumpedRLC;
-        if (!lumpedRLC.empty()) {
+        // The engine applies the elements itself -- on the GPU for the Metal backend, so a step no
+        // longer stops halfway for the CPU (see CopperEngine::setLumpedRLC). EXPERIMENT
+        // (COPPER_CPU_LUMPED=1): the original CPU correction below, for comparison.
+        const char* cpuLumpedEnv = std::getenv("COPPER_CPU_LUMPED");
+        const bool cpuLumped = cpuLumpedEnv != nullptr && std::string(cpuLumpedEnv) == "1";
+        if (!lumpedRLC.empty() && !cpuLumped) {
+            engine.setLumpedRLC(lumpedRLC);
+        } else if (!lumpedRLC.empty()) {
+            engine.declareMidStepCorrectionCells(lumpedRLC);
             applyLumpedRLC = [&]() {
                 for (std::size_t i = 0; i < lumpedRLC.size(); ++i) {
                     const CopperLumpedRLCCell& cell = lumpedRLC[i];
@@ -526,6 +538,16 @@ CopperFDTDRunResult runFDTDPortImpl(ContinuousStructure& csx, const CopperFDTDPo
                     }
                 }
 
+                if (endCheckSteps != 0 && globalTimestep % endCheckSteps == 0) {
+                    const double energy = engine.estimateEnergy();
+                    checkedMaxEnergy = std::max(checkedMaxEnergy, energy);
+                    if (checkedMaxEnergy > 0.0 && energy / checkedMaxEnergy <= endCriteria) {
+                        endCriteriaReached = true;
+                        std::fprintf(stderr, "Copper: end check: %.2f dB down at step %u, stopping\n",
+                                     -10.0 * std::log10(energy / checkedMaxEnergy), globalTimestep);
+                    }
+                }
+
                 const auto now = std::chrono::steady_clock::now();
                 const double sinceLastPrint = std::chrono::duration<double>(now - lastPrint).count();
                 if (sinceLastPrint > 4.0 || globalTimestep == steps) {
@@ -577,7 +599,7 @@ CopperFDTDRunResult runFDTDPortImpl(ContinuousStructure& csx, const CopperFDTDPo
                     lastPrint = now;
                     lastPrintStep = globalTimestep;
 
-                    if (energyChange <= endCriteria) {
+                    if (energyChange <= endCriteria && endCheckSteps == 0) {
                         endCriteriaReached = true;
                     }
                 }
@@ -702,11 +724,11 @@ std::string dumpEarlyFrames(ContinuousStructure& csx, const CopperFDTDPortConfig
         const CopperYeeGrid& grid = newOp.grid();
         std::fprintf(stdout, "Copper dumpEarlyFrames: grid %ux%ux%u\n", grid.dims.nx, grid.dims.ny, grid.dims.nz);
 
-        std::vector<CopperCPMLShell> cpmlShells = buildCPMLShells(newOp, cpmlAlphaMax, pmlDepthCells);
+        const CopperCPML cpml = buildCPML(newOp, cpmlAlphaMax, pmlDepthCells);
         const CopperExcitation& excitation = newOp.excitation();
         std::fprintf(stdout, "Copper dumpEarlyFrames: %zu voltage excitation cell(s), %zu current\n",
                      excitation.voltageCells.size(), excitation.currentCells.size());
-        CopperEngine engine(grid, excitation, cpmlShells);
+        CopperEngine engine(grid, excitation, cpml);
 
         // Crop box: the excitation cells' own bounding box, expanded by marginCells in every
         // direction, clamped to the grid -- small enough to write/analyze quickly while still
@@ -887,9 +909,9 @@ std::string dumpDetailedTrace(ContinuousStructure& csx, const CopperFDTDPortConf
     try {
         CopperOperator newOp(csx, copperOperatorConfig(portConfig));
         const CopperYeeGrid& grid = newOp.grid();
-        std::vector<CopperCPMLShell> cpmlShells = buildCPMLShells(newOp, cpmlAlphaMax, pmlDepthCells);
+        const CopperCPML cpml = buildCPML(newOp, cpmlAlphaMax, pmlDepthCells);
         const CopperExcitation& excitation = newOp.excitation();
-        CopperEngine engine(grid, excitation, cpmlShells);
+        CopperEngine engine(grid, excitation, cpml);
 
         std::uint32_t x0 = grid.dims.nx, x1 = 0, y0 = grid.dims.ny, y1 = 0, z0 = grid.dims.nz, z1 = 0;
         bool anyExcitationCell = false;

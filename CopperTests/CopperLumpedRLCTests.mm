@@ -287,6 +287,7 @@ static void runWithLumpedRLCCorrection(copper::CopperEngine& engine,
             engine.writeFieldCell(field, cell.x, cell.y, cell.z, static_cast<float>(vdn0));
         }
     };
+    engine.declareMidStepCorrectionCells(lumpedRLC);
     engine.runWithProbeSampling(
         steps, [](std::uint32_t) { return true; }, applyLumpedRLC);
 }
@@ -316,7 +317,7 @@ static void runWithLumpedRLCCorrection(copper::CopperEngine& engine,
     const double expected = 1.0 / (1.0 + dT / (2.0 * 50.0 * cd));
     XCTAssertEqualWithAccuracy(control.readFieldCell(copper::CopperEngine::Field::Ez, cell.x, cell.y, cell.z), 1.0F, 1e-6F);
     XCTAssertEqualWithAccuracy(damped.readFieldCell(copper::CopperEngine::Field::Ez, cell.x, cell.y, cell.z), expected,
-                               1e-5 * expected);
+                               static_cast<double>(fieldParityTolerance(1e-5F)) * expected);
     XCTAssertLessThan(damped.estimateEnergy(), control.estimateEnergy());
     delete csx;
 }
@@ -341,6 +342,43 @@ static void runWithLumpedRLCCorrection(copper::CopperEngine& engine,
     const FieldDiff diff = diffFields(metal, cpu);
     XCTAssertGreaterThan(diff.maxAbsValue, 0.0F);
     XCTAssertLessThanOrEqual(diff.maxAbsDiff, 1e-4F * std::max(diff.maxAbsValue, 1.0F));
+    delete csx;
+}
+
+/// CopperEngine::setLumpedRLC applies the same SERIES ADE correction inside the engine -- on the GPU
+/// for Metal -- that CopperFDTDRunner used to apply from the CPU between the E and H updates. With R,
+/// L and C all present, so every history term matters: the CPU backend must reproduce the callback
+/// exactly (same double arithmetic, same point in the step), and Metal (float state, any field
+/// storage the suite runs with) to the usual backend-parity tolerance.
+- (void)testEngineLumpedRLCMatchesMidStepCorrection {
+    ContinuousStructure* csx = buildSeriesLumpedRLCFixture(50.0, 2e-9, 1e-12);
+    copper::CopperOperator op(*csx, allPecConfig(10));
+    const std::vector<copper::CopperLumpedRLCCell> lumpedRLC = copper::discoverLumpedRLC(*csx, op.grid(), op);
+    XCTAssertEqual(lumpedRLC.size(), static_cast<std::size_t>(1));
+    constexpr std::uint32_t steps = 30;
+
+    copper::CopperEngine callback(op.grid(), {}, {}, copper::CopperEngine::Backend::CPU);
+    copper::CopperEngine cpu(op.grid(), {}, {}, copper::CopperEngine::Backend::CPU);
+    copper::CopperEngine metal(op.grid(), {}, {}, copper::CopperEngine::Backend::Metal);
+    for (copper::CopperEngine* engine : {&callback, &cpu, &metal}) {
+        engine->writeFieldCell(copper::CopperEngine::Field::Ez, 5, 5, 0, 1.0F);
+    }
+    runWithLumpedRLCCorrection(callback, lumpedRLC, steps);
+    for (copper::CopperEngine* engine : {&cpu, &metal}) {
+        engine->setLumpedRLC(lumpedRLC);
+        engine->runWithProbeSampling(steps, [](std::uint32_t) { return true; });
+    }
+
+    const FieldDiff exact = diffFields(cpu, callback);
+    XCTAssertGreaterThan(exact.maxAbsValue, 0.0F);
+    XCTAssertEqual(exact.maxAbsDiff, 0.0F, @"CPU engine-side correction differs from the mid-step callback");
+    const FieldDiff gpu = diffFields(metal, callback);
+    XCTAssertLessThanOrEqual(gpu.maxAbsDiff, fieldParityTolerance(1e-4F) * std::max(gpu.maxAbsValue, 1.0F));
+    // And the correction must actually be doing something here.
+    copper::CopperEngine undamped(op.grid(), {}, {}, copper::CopperEngine::Backend::CPU);
+    undamped.writeFieldCell(copper::CopperEngine::Field::Ez, 5, 5, 0, 1.0F);
+    undamped.run(steps);
+    XCTAssertGreaterThan(diffFields(undamped, callback).maxAbsDiff, 1e-3F);
     delete csx;
 }
 

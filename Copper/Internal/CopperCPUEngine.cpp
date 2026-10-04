@@ -1,5 +1,5 @@
 // Backend::CPU -- a from-scratch CPU port of CopperFDTD.metal's own kernels (update_e_interior,
-// update_h_interior, cpml_correct_e/h, apply_excitation_e/h), not a port of
+// update_h_interior and their CPML, apply_excitation_e/h), not a port of
 // openEMS's own Engine: every formula below is transcribed directly from that .metal file (see its
 // own top comment for where each one in turn came from), cyclically-permuted-per-axis and all, so
 // there is exactly one place (that file) documenting the physics/openEMS correspondence, and this
@@ -17,7 +17,7 @@
 // whole row (fixed y,z) is always contiguous, and every one of update_e_interior/update_h_interior's
 // six per-component curl formulas turns out to need at most one *within-row* neighbor shift (the
 // other neighbor read is always an entirely different, equally contiguous row) -- see
-// shiftRowRightClampFirst()'s own comment. PML/CPML/excitation are comparatively tiny (a thin shell
+// shiftRowRightClampFirst()'s own comment. CPML and excitation are comparatively small (thin slabs
 // or a handful of excited cells against a whole-grid update), so they stay plain per-cell scalar
 // loops -- correctness-critical, intricate index math that isn't worth the added risk for a small
 // fraction of total runtime.
@@ -89,8 +89,7 @@ void shiftRowRightClampFirst(const float* row, float* shifted, std::size_t n) {
 class CPUEngineImpl final : public EngineBackend {
 public:
     CPUEngineImpl(const CopperYeeGrid& grid, const CopperExcitation& excitation,
-                  const std::vector<CopperCPMLShell>& cpmlShells, const CopperDomainMask& domainMask,
-                  const CopperZCPML& zcpml);
+                  const CopperCPML& cpml, const CopperDomainMask& domainMask);
 
     void run(std::uint32_t steps) override;
     void runWithProbeSampling(std::uint32_t steps, const CopperEngine::ProbeSampler& sampler,
@@ -101,23 +100,31 @@ public:
                          float value) override;
     double estimateEnergy() const override;
     const CopperGridDims& dims() const override { return _dims; }
+    void setLumpedRLC(const std::vector<CopperLumpedRLCCell>& cells) override {
+        _lumpedRLC = cells;
+        _lumpedState.assign(cells.size(), {});
+    }
 
 private:
+    // SERIES lumped RLC elements this engine corrects itself (CopperEngine::setLumpedRLC), with each
+    // one's last three vdn and jn -- in double, like CopperFDTDRunner's CPU correction always was.
+    struct LumpedRLCState {
+        double vdn[3] = {0.0, 0.0, 0.0};
+        double jn[3] = {0.0, 0.0, 0.0};
+    };
+    std::vector<CopperLumpedRLCCell> _lumpedRLC;
+    std::vector<LumpedRLCState> _lumpedState;
+    void applyLumpedRLC();
+
     CopperGridDims _dims;
     std::vector<float> _eField[3];
     std::vector<float> _hField[3];
     std::vector<float> _vv[3], _vi[3], _ii[3], _iv[3];
 
-    // Mutable copies -- CopperCPMLShell's own psiE0/psiE1/psiH0/psiH1 fields *are* this run's
-    // auxiliary convolution state (zero-initialized by buildCPMLShells()), mutated in place below,
-    // same as CopperEngine.mm's own zero-uploaded psi buffers.
-    std::vector<CopperCPMLShell> _cpmlShells;
-
-    // An irregular domain's Z-only CPML (see CopperZCPML) and its d/dz-driven psi for Ex, Ey, Hx,
-    // Hy, nx*ny per graded plane. Applied as its own pass after the interior update, rather than
-    // folded into it as on the GPU -- same arithmetic per cell either way.
-    CopperZCPML _zcpml;
-    std::vector<float> _zcpmlPsi[4];
+    // The CPML (see CopperCPML) and its psi: [E/H side][grading axis][term], laid out exactly as
+    // the Metal backend's -- term 0 is component (w+1)%3's, term 1 component (w+2)%3's.
+    CopperCPML _cpml;
+    std::vector<float> _cpmlPsi[2][3][2];
 
     std::vector<CopperExcitationCell> _voltageCells;
     std::vector<CopperExcitationCell> _currentCells;
@@ -137,10 +144,7 @@ private:
     void runIterationPhase(IterationPhase phase);
     void updateEInterior();
     void updateHInterior();
-    void cpmlCorrectE();
-    void cpmlCorrectH();
-    void zcpmlCorrectE();
-    void zcpmlCorrectH();
+    void applyCPML(int side);
     void applyExcitationE();
     void applyExcitationH();
 
@@ -153,11 +157,9 @@ private:
 };
 
 CPUEngineImpl::CPUEngineImpl(const CopperYeeGrid& grid, const CopperExcitation& excitation,
-                              const std::vector<CopperCPMLShell>& cpmlShells,
-                              const CopperDomainMask& domainMask, const CopperZCPML& zcpml)
+                              const CopperCPML& cpml, const CopperDomainMask& domainMask)
     : _dims(grid.dims),
-      _cpmlShells(cpmlShells),
-      _zcpml(zcpml),
+      _cpml(cpml),
       _voltageCells(excitation.voltageCells),
       _currentCells(excitation.currentCells),
       _voltageSignal(excitation.voltageSignal),
@@ -190,9 +192,10 @@ CPUEngineImpl::CPUEngineImpl(const CopperYeeGrid& grid, const CopperExcitation& 
     float* const iv[3] = {_iv[0].data(), _iv[1].data(), _iv[2].data()};
     applyRingAbsorber(domainMask, grid.timestepSeconds, _dims, vv, vi, ii, iv);
 
-    if (!_zcpml.empty()) {
-        const std::size_t psiCount = static_cast<std::size_t>(_dims.nx) * _dims.ny * _zcpml.layerCount();
-        for (auto& psi : _zcpmlPsi) psi.assign(psiCount, 0.0F);
+    for (auto& side : _cpmlPsi) {
+        for (int axis = 0; axis < 3; ++axis) {
+            for (auto& term : side[axis]) term.assign(_cpml.psiCount(_dims, axis), 0.0F);
+        }
     }
 
     _scratch0.assign(_dims.nx, 0.0F);
@@ -259,144 +262,69 @@ void CPUEngineImpl::updateHInterior() {
     }
 }
 
-void CPUEngineImpl::cpmlCorrectE() {
-    for (CopperCPMLShell& shell : _cpmlShells) {
-        for (std::uint32_t lz = 0; lz < shell.dims.nz; ++lz) {
-            for (std::uint32_t ly = 0; ly < shell.dims.ny; ++ly) {
-                for (std::uint32_t lx = 0; lx < shell.dims.nx; ++lx) {
-                    const std::uint32_t x = lx + shell.startX, y = ly + shell.startY, z = lz + shell.startZ;
-                    const std::uint32_t sx = (x != 0) ? 1 : 0, sy = (y != 0) ? 1 : 0, sz = (z != 0) ? 1 : 0;
-                    const std::size_t localIdx = copperGridIndex(shell.dims, lx, ly, lz);
-                    const std::size_t globalIdx = index(x, y, z);
-
-                    // Ex: grading axes y (nP), z (nPP) -- same two terms as update_e_interior's own.
-                    {
-                        const float hzDiff = _hField[2][index(x, y, z)] - _hField[2][index(x, y - sy, z)];
-                        const float hyDiff = _hField[1][index(x, y, z)] - _hField[1][index(x, y, z - sz)];
-                        float& psi0 = shell.psiE0[0][localIdx];
-                        float& psi1 = shell.psiE1[0][localIdx];
-                        psi0 = shell.bE[1][localIdx] * psi0 + shell.cE[1][localIdx] * hzDiff;
-                        psi1 = shell.bE[2][localIdx] * psi1 + shell.cE[2][localIdx] * hyDiff;
-                        _eField[0][globalIdx] += _vi[0][globalIdx] * (psi0 - psi1);
-                    }
-                    // Ey: grading axes z (nP), x (nPP).
-                    {
-                        const float hxDiff = _hField[0][index(x, y, z)] - _hField[0][index(x, y, z - sz)];
-                        const float hzDiff = _hField[2][index(x, y, z)] - _hField[2][index(x - sx, y, z)];
-                        float& psi0 = shell.psiE0[1][localIdx];
-                        float& psi1 = shell.psiE1[1][localIdx];
-                        psi0 = shell.bE[2][localIdx] * psi0 + shell.cE[2][localIdx] * hxDiff;
-                        psi1 = shell.bE[0][localIdx] * psi1 + shell.cE[0][localIdx] * hzDiff;
-                        _eField[1][globalIdx] += _vi[1][globalIdx] * (psi0 - psi1);
-                    }
-                    // Ez: grading axes x (nP), y (nPP).
-                    {
-                        const float hyDiff = _hField[1][index(x, y, z)] - _hField[1][index(x - sx, y, z)];
-                        const float hxDiff = _hField[0][index(x, y, z)] - _hField[0][index(x, y - sy, z)];
-                        float& psi0 = shell.psiE0[2][localIdx];
-                        float& psi1 = shell.psiE1[2][localIdx];
-                        psi0 = shell.bE[0][localIdx] * psi0 + shell.cE[0][localIdx] * hyDiff;
-                        psi1 = shell.bE[1][localIdx] * psi1 + shell.cE[1][localIdx] * hxDiff;
-                        _eField[2][globalIdx] += _vi[2][globalIdx] * (psi0 - psi1);
-                    }
+// CopperFDTD.metal's cpmlTerms, as a pass after the interior update rather than folded into it --
+// the same arithmetic per cell either way: each component's curl term gains psi0 - psi1, summed
+// over the graded axes in order x, y, z. On the H side only update_h_interior's (nx-1, ny-1, nz-1)
+// cells have an H to correct. External nodes of an irregular domain have zeroed coefficients here,
+// so they stay at zero.
+void CPUEngineImpl::applyCPML(int side) {
+    if (_cpml.empty()) return;
+    const bool h = side == 1;
+    const std::uint32_t nx = _dims.nx, ny = _dims.ny, nz = _dims.nz;
+    const std::uint32_t end[3] = {h ? nx - 1 : nx, h ? ny - 1 : ny, h ? nz - 1 : nz};
+    std::vector<float>* const field = h ? _hField : _eField;
+    const std::vector<float>* const in = h ? _eField : _hField;
+    const std::vector<float>* const coefficient = h ? _iv : _vi;
+    const std::size_t plane = static_cast<std::size_t>(nx) * ny;
+    for (std::uint32_t z = 0; z < end[2]; ++z) {
+        for (std::uint32_t y = 0; y < end[1]; ++y) {
+            for (std::uint32_t x = 0; x < end[0]; ++x) {
+                const std::uint32_t layer[3] = {_cpml.axes[0].layerOf[x], _cpml.axes[1].layerOf[y],
+                                                _cpml.axes[2].layerOf[z]};
+                if (layer[0] == CopperCPML::kNoLayer && layer[1] == CopperCPML::kNoLayer &&
+                    layer[2] == CopperCPML::kNoLayer) {
+                    continue;
                 }
-            }
-        }
-    }
-}
-
-void CPUEngineImpl::cpmlCorrectH() {
-    for (CopperCPMLShell& shell : _cpmlShells) {
-        for (std::uint32_t lz = 0; lz < shell.dims.nz; ++lz) {
-            for (std::uint32_t ly = 0; ly < shell.dims.ny; ++ly) {
-                for (std::uint32_t lx = 0; lx < shell.dims.nx; ++lx) {
-                    const std::uint32_t x = lx + shell.startX, y = ly + shell.startY, z = lz + shell.startZ;
-                    // Only cells satisfying update_h_interior's own (nx-1,ny-1,nz-1) dispatch bound
-                    // have a meaningful H value to correct -- guard identically to cpml_correct_h.
-                    if (x + 1 >= _dims.nx || y + 1 >= _dims.ny || z + 1 >= _dims.nz) {
-                        continue;
-                    }
-                    const std::size_t localIdx = copperGridIndex(shell.dims, lx, ly, lz);
-                    const std::size_t globalIdx = index(x, y, z);
-
-                    // Hx: grading axes y (nP), z (nPP).
-                    {
-                        const float ezDiff = _eField[2][index(x, y, z)] - _eField[2][index(x, y + 1, z)];
-                        const float eyDiff = _eField[1][index(x, y, z)] - _eField[1][index(x, y, z + 1)];
-                        float& psi0 = shell.psiH0[0][localIdx];
-                        float& psi1 = shell.psiH1[0][localIdx];
-                        psi0 = shell.bH[1][localIdx] * psi0 + shell.cH[1][localIdx] * ezDiff;
-                        psi1 = shell.bH[2][localIdx] * psi1 + shell.cH[2][localIdx] * eyDiff;
-                        _hField[0][globalIdx] += _iv[0][globalIdx] * (psi0 - psi1);
-                    }
-                    // Hy: grading axes z (nP), x (nPP).
-                    {
-                        const float exDiff = _eField[0][index(x, y, z)] - _eField[0][index(x, y, z + 1)];
-                        const float ezDiff = _eField[2][index(x, y, z)] - _eField[2][index(x + 1, y, z)];
-                        float& psi0 = shell.psiH0[1][localIdx];
-                        float& psi1 = shell.psiH1[1][localIdx];
-                        psi0 = shell.bH[2][localIdx] * psi0 + shell.cH[2][localIdx] * exDiff;
-                        psi1 = shell.bH[0][localIdx] * psi1 + shell.cH[0][localIdx] * ezDiff;
-                        _hField[1][globalIdx] += _iv[1][globalIdx] * (psi0 - psi1);
-                    }
-                    // Hz: grading axes x (nP), y (nPP).
-                    {
-                        const float eyDiff = _eField[1][index(x, y, z)] - _eField[1][index(x + 1, y, z)];
-                        const float exDiff = _eField[0][index(x, y, z)] - _eField[0][index(x, y + 1, z)];
-                        float& psi0 = shell.psiH0[2][localIdx];
-                        float& psi1 = shell.psiH1[2][localIdx];
-                        psi0 = shell.bH[0][localIdx] * psi0 + shell.cH[0][localIdx] * eyDiff;
-                        psi1 = shell.bH[1][localIdx] * psi1 + shell.cH[1][localIdx] * exDiff;
-                        _hField[2][globalIdx] += _iv[2][globalIdx] * (psi0 - psi1);
-                    }
+                const std::size_t g = index(x, y, z);
+                // Each component's two curl differences as the update forms them: first (added),
+                // second (subtracted). E reads the H below; H the E above.
+                float t0[3], t1[3];
+                if (h) {
+                    const std::size_t dx = 1, dy = nx, dz = plane;
+                    t0[0] = in[2][g] - in[2][g + dy];
+                    t0[1] = in[0][g] - in[0][g + dz];
+                    t0[2] = in[1][g] - in[1][g + dx];
+                    t1[0] = in[1][g] - in[1][g + dz];
+                    t1[1] = in[2][g] - in[2][g + dx];
+                    t1[2] = in[0][g] - in[0][g + dy];
+                } else {
+                    const std::size_t dx = x != 0 ? 1 : 0, dy = y != 0 ? nx : 0, dz = z != 0 ? plane : 0;
+                    t0[0] = in[2][g] - in[2][g - dy];
+                    t0[1] = in[0][g] - in[0][g - dz];
+                    t0[2] = in[1][g] - in[1][g - dx];
+                    t1[0] = in[1][g] - in[1][g - dz];
+                    t1[1] = in[2][g] - in[2][g - dx];
+                    t1[2] = in[0][g] - in[0][g - dy];
                 }
-            }
-        }
-    }
-}
-
-// CopperFDTD.metal's updateE<true>/updateH<true> Z-only CPML terms (see CopperZCPML), over every node
-// of each graded plane -- external nodes have zeroed coefficients here, so they stay at zero.
-void CPUEngineImpl::zcpmlCorrectE() {
-    if (_zcpml.empty()) return;
-    const std::size_t nx = _dims.nx, nxny = nx * _dims.ny;
-    for (std::uint32_t z = 0; z < _dims.nz; ++z) {
-        const std::uint32_t layer = _zcpml.layerOfZ[z];
-        if (layer == CopperZCPML::kNoLayer) continue;
-        const float b = _zcpml.bE[layer], c = _zcpml.cE[layer];
-        const std::size_t dz = z != 0 ? nxny : 0;
-        for (std::uint32_t y = 0; y < _dims.ny; ++y) {
-            for (std::uint32_t x = 0; x < _dims.nx; ++x) {
-                const std::size_t g = index(x, y, z);
-                const std::size_t p = x + nx * (y + static_cast<std::size_t>(_dims.ny) * layer);
-                const float psiEx = b * _zcpmlPsi[0][p] + c * (_hField[1][g] - _hField[1][g - dz]);
-                const float psiEy = b * _zcpmlPsi[1][p] + c * (_hField[0][g] - _hField[0][g - dz]);
-                _zcpmlPsi[0][p] = psiEx;
-                _zcpmlPsi[1][p] = psiEy;
-                _eField[0][g] += _vi[0][g] * (0.0F - psiEx);
-                _eField[1][g] += _vi[1][g] * psiEy;
-            }
-        }
-    }
-}
-
-void CPUEngineImpl::zcpmlCorrectH() {
-    if (_zcpml.empty()) return;
-    const std::size_t nx = _dims.nx, nxny = nx * _dims.ny;
-    for (std::uint32_t z = 0; z + 1 < _dims.nz; ++z) {
-        const std::uint32_t layer = _zcpml.layerOfZ[z];
-        if (layer == CopperZCPML::kNoLayer) continue;
-        const float b = _zcpml.bH[layer], c = _zcpml.cH[layer];
-        for (std::uint32_t y = 0; y + 1 < _dims.ny; ++y) {
-            for (std::uint32_t x = 0; x + 1 < _dims.nx; ++x) {
-                const std::size_t g = index(x, y, z);
-                const std::size_t p = x + nx * (y + static_cast<std::size_t>(_dims.ny) * layer);
-                const float psiHx = b * _zcpmlPsi[2][p] + c * (_eField[1][g] - _eField[1][g + nxny]);
-                const float psiHy = b * _zcpmlPsi[3][p] + c * (_eField[0][g] - _eField[0][g + nxny]);
-                _zcpmlPsi[2][p] = psiHx;
-                _zcpmlPsi[3][p] = psiHy;
-                _hField[0][g] += _iv[0][g] * (0.0F - psiHx);
-                _hField[1][g] += _iv[1][g] * psiHy;
+                float sum[3] = {0.0F, 0.0F, 0.0F};
+                for (int w = 0; w < 3; ++w) {
+                    if (layer[w] == CopperCPML::kNoLayer) continue;
+                    const CopperCPML::Axis& axis = _cpml.axes[w];
+                    const float b = h ? axis.bH[layer[w]] : axis.bE[layer[w]];
+                    const float c = h ? axis.cH[layer[w]] : axis.cE[layer[w]];
+                    const std::size_t layers = axis.layerCount();
+                    const std::size_t p = w == 0   ? layer[w] + layers * (y + static_cast<std::size_t>(ny) * z)
+                                          : w == 1 ? x + nx * (layer[w] + layers * z)
+                                                   : x + nx * (y + static_cast<std::size_t>(ny) * layer[w]);
+                    const int a = (w + 1) % 3, bb = (w + 2) % 3;
+                    float& psiA = _cpmlPsi[side][w][0][p];
+                    float& psiB = _cpmlPsi[side][w][1][p];
+                    psiA = b * psiA + c * t1[a];
+                    psiB = b * psiB + c * t0[bb];
+                    sum[a] -= psiA;
+                    sum[bb] += psiB;
+                }
+                for (int n = 0; n < 3; ++n) field[n][g] += coefficient[n][g] * sum[n];
             }
         }
     }
@@ -446,23 +374,43 @@ void CPUEngineImpl::applyExcitationH() {
     }
 }
 
+// Engine_Ext_LumpedRLC::Apply2VoltagesImpl's SERIES branch, as CopperFDTDRunner applied it.
+void CPUEngineImpl::applyLumpedRLC() {
+    for (std::size_t i = 0; i < _lumpedRLC.size(); ++i) {
+        const CopperLumpedRLCCell& cell = _lumpedRLC[i];
+        LumpedRLCState& state = _lumpedState[i];
+        state.vdn[2] = state.vdn[1];
+        state.vdn[1] = state.vdn[0];
+        state.jn[2] = state.jn[1];
+        state.jn[1] = state.jn[0];
+        float& field = _eField[cell.axis][index(cell.x, cell.y, cell.z)];
+        const double vdn0 = static_cast<double>(cell.vvd) *
+                            (static_cast<double>(field) + static_cast<double>(cell.vv2) * state.vdn[2] +
+                             static_cast<double>(cell.vj1) * state.jn[1] + static_cast<double>(cell.vj2) * state.jn[2]);
+        state.jn[0] = static_cast<double>(cell.ib0) * (vdn0 - state.vdn[2]) -
+                      static_cast<double>(cell.b1) * static_cast<double>(cell.ib0) * state.jn[1] -
+                      static_cast<double>(cell.b2) * static_cast<double>(cell.ib0) * state.jn[2];
+        state.vdn[0] = vdn0;
+        field = static_cast<float>(vdn0);
+    }
+}
+
 void CPUEngineImpl::runIterationPhase(IterationPhase phase) {
     const bool doVoltage = phase != IterationPhase::Current;
     const bool doCurrent = phase != IterationPhase::Voltage;
 
-    // Voltage (E) update: update_e_interior -> cpml_correct_e -> apply_excitation_e.
+    // Voltage (E) update: update_e_interior and its CPML -> apply_excitation_e -> lumped RLC.
     if (doVoltage) {
         updateEInterior();
-        cpmlCorrectE();
-        zcpmlCorrectE();
+        applyCPML(0);
         applyExcitationE();
+        applyLumpedRLC();
     }
 
-    // Current (H) update: update_h_interior -> cpml_correct_h -> apply_excitation_h.
+    // Current (H) update: update_h_interior and its CPML -> apply_excitation_h.
     if (doCurrent) {
         updateHInterior();
-        cpmlCorrectH();
-        zcpmlCorrectH();
+        applyCPML(1);
         applyExcitationH();
         ++_currentTimestep;
     }
@@ -544,10 +492,9 @@ double CPUEngineImpl::estimateEnergy() const {
 
 std::unique_ptr<EngineBackend> makeCPUEngineBackend(const CopperYeeGrid& grid,
                                                      const CopperExcitation& excitation,
-                                                     const std::vector<CopperCPMLShell>& cpmlShells,
-                                                     const CopperDomainMask& domainMask,
-                                                     const CopperZCPML& zcpml) {
-    return std::make_unique<CPUEngineImpl>(grid, excitation, cpmlShells, domainMask, zcpml);
+                                                     const CopperCPML& cpml,
+                                                     const CopperDomainMask& domainMask) {
+    return std::make_unique<CPUEngineImpl>(grid, excitation, cpml, domainMask);
 }
 
 } // namespace copper

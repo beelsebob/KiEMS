@@ -123,7 +123,7 @@ FieldComparison compareFields(const copper::CopperEngine& a, const copper::Coppe
     const FieldComparison comparison = compareFields(metal, cpu);
     NSLog(@"graded mesh, 60 steps: max |field| %g, Metal vs CPU %g", comparison.maxValue, comparison.maxDifference);
     XCTAssertGreaterThan(comparison.maxValue, 0.0F);
-    XCTAssertLessThanOrEqual(comparison.maxDifference, 1e-5F * comparison.maxValue);
+    XCTAssertLessThanOrEqual(comparison.maxDifference, fieldParityTolerance(1e-5F) * comparison.maxValue);
 }
 
 /// The table folds the irregular domain's ring absorber in cell by cell (CopperRingAbsorber); the
@@ -158,7 +158,7 @@ FieldComparison compareFields(const copper::CopperEngine& a, const copper::Coppe
     const FieldComparison ringEffect = compareFields(metal, unabsorbed);
     NSLog(@"ring absorber, 30 steps: max |field| %g, Metal vs CPU %g, vs no absorber %g", comparison.maxValue,
           comparison.maxDifference, ringEffect.maxDifference);
-    XCTAssertLessThanOrEqual(comparison.maxDifference, 1e-5F * comparison.maxValue);
+    XCTAssertLessThanOrEqual(comparison.maxDifference, fieldParityTolerance(1e-5F) * comparison.maxValue);
     XCTAssertGreaterThan(ringEffect.maxDifference, 1e-2F * comparison.maxValue, @"the ring had no visible effect");
 }
 
