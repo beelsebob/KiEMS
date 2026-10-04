@@ -7,17 +7,6 @@
 	objects = {
 
 /* Begin PBXAggregateTarget section */
-		E71870C603134ADA6EEEA950 /* HDF5 */ = {
-			isa = PBXAggregateTarget;
-			buildConfigurationList = 9250B0C181758E24075EC5AC /* Build configuration list for PBXAggregateTarget "HDF5" */;
-			buildPhases = (
-				A1CABB0ACBF6B549B0D6ED9C /* Build vendor/hdf5 */,
-			);
-			dependencies = (
-			);
-			name = HDF5;
-			productName = HDF5;
-		};
 /* End PBXAggregateTarget section */
 
 /* Begin PBXBuildFile section */
@@ -62,10 +51,8 @@
 		7A76B8DB5C0FDE31D6F72BB1 /* CSPrimUserDefined.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A25590547D328A76A372C1BC /* CSPrimUserDefined.cpp */; };
 		7E57CB0000000000000000C5 /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B8F4508947040AF3A200E11 /* libCSXCAD.dylib */; };
 		828DBB24BCE54FE076A3D616 /* CSPrimPolygon.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 30A0506109278583137803EB /* CSPrimPolygon.cpp */; };
-		846A32C3BB81E3C29B621792 /* libhdf5.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 30877432D1026706D7E805DA /* libhdf5.dylib */; };
 		8958C50381BAEB4BAD69FC88 /* CSBackgroundMaterial.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E71F417BE3BD7729F8FEFB2A /* CSBackgroundMaterial.cpp */; };
 		8979779CA20D12908A2A7A0E /* Copper.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71AD3CD6302FAAD5006D5847 /* Copper.framework */; };
-		8B10C2000B105C2000000001 /* libblosc2.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 8B10C2000B105C2000000002 /* libblosc2.a */; };
 		95774DCF0FD168F325B94432 /* CSPropExcitation.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 4FF84FE99AC0D432168071A2 /* CSPropExcitation.cpp */; };
 		95D69C1BA0DEEF1883C61841 /* CSPrimBox.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C139A80CEF80445CE007CF3F /* CSPrimBox.cpp */; };
 		980D7708FC6E8DCF73829C69 /* CSPropLumpedElement.cpp in Sources */ = {isa = PBXBuildFile; fileRef = B6C786F74AABEF635C528E85 /* CSPropLumpedElement.cpp */; };
@@ -89,7 +76,6 @@
 		C0A71A000000000000000001 /* libCopperUtils.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 71B4EE8E304224C5002796EC /* libCopperUtils.a */; };
 		C0A71A000000000000000017 /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B8F4508947040AF3A200E11 /* libCSXCAD.dylib */; };
 		C0FFEE0000000000000002 /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B8F4508947040AF3A200E11 /* libCSXCAD.dylib */; };
-		C0FFEE0000000000000003 /* libhdf5.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 30877432D1026706D7E805DA /* libhdf5.dylib */; };
 		C0FFEE0000000000000005 /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B8F4508947040AF3A200E11 /* libCSXCAD.dylib */; };
 		C0FFEE0000000000000006 /* Copper.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71AD3CD6302FAAD5006D5847 /* Copper.framework */; };
 		C1FE7C82D3B6D6DF1E6CAFAC /* CSPrimSphericalShell.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 4CCA7271B4E816E2DE044E5C /* CSPrimSphericalShell.cpp */; };
@@ -107,6 +93,12 @@
 		F8763B10C08160DB7FC51D4C /* CSPropConductingSheet.cpp in Sources */ = {isa = PBXBuildFile; fileRef = DA441A58C5946D25FA484EEE /* CSPropConductingSheet.cpp */; };
 		FC1671EFEBFEF5FCCCA74E90 /* RememberRemember.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = DEC747CBEC864D957296A740 /* RememberRemember.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		FFCF4BE80D907ADEDD013454 /* CSPropUnknown.cpp in Sources */ = {isa = PBXBuildFile; fileRef = FCFBB6854442AF9145607687 /* CSPropUnknown.cpp */; };
+		7A110000000000000000001E /* tinyxml.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 7A110000000000000000000A /* tinyxml.cpp */; };
+		7A110000000000000000001F /* tinyxmlparser.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 7A110000000000000000000B /* tinyxmlparser.cpp */; };
+		7A1100000000000000000020 /* tinyxmlerror.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 7A110000000000000000000C /* tinyxmlerror.cpp */; };
+		7A1100000000000000000021 /* tinystr.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 7A110000000000000000000D /* tinystr.cpp */; };
+		7A120000000000000000001E /* fparser.cc in Sources */ = {isa = PBXBuildFile; fileRef = 7A120000000000000000000A /* fparser.cc */; };
+		7A120000000000000000001F /* fpoptimizer.cc in Sources */ = {isa = PBXBuildFile; fileRef = 7A120000000000000000000B /* fpoptimizer.cc */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -193,13 +185,6 @@
 			proxyType = 1;
 			remoteGlobalIDString = 71B4EE8D304224C5002796EC;
 			remoteInfo = CopperUtils;
-		};
-		73C8EB5BB682575EC87A171A /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 71AD228A30263515006D5847 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = E71870C603134ADA6EEEA950;
-			remoteInfo = HDF5;
 		};
 		748C85D85BC5D0AE4750DF0C /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -342,7 +327,6 @@
 		26BECA8A0D515EF0EB787386 /* CSPropLorentzMaterial.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropLorentzMaterial.h; sourceTree = "<group>"; };
 		27FC500F5EC82E42F046FEF3 /* libkiems_tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = libkiems_tests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		2E0A6B0B01BDA7784504DBD7 /* CSPrimRotPoly.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimRotPoly.cpp; sourceTree = "<group>"; };
-		30877432D1026706D7E805DA /* libhdf5.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = libhdf5.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
 		30A0506109278583137803EB /* CSPrimPolygon.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimPolygon.cpp; sourceTree = "<group>"; };
 		33049C004A0AD9DE5FF7DB67 /* CSPropResBox.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropResBox.cpp; sourceTree = "<group>"; };
 		335167B1A5FB2AF84C42F74A /* CSPropAbsorbingBC.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropAbsorbingBC.cpp; sourceTree = "<group>"; };
@@ -382,7 +366,6 @@
 		7A9D6B5C429B30F4A76B69E9 /* CSPrimPolygon.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimPolygon.h; sourceTree = "<group>"; };
 		7D20DA97F11E5FD1E45B1BEC /* CSPropDumpBox.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropDumpBox.h; sourceTree = "<group>"; };
 		801882DFF924DC3D075A3E2A /* ParameterCoord.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = ParameterCoord.cpp; sourceTree = "<group>"; };
-		8B10C2000B105C2000000002 /* libblosc2.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libblosc2.a; sourceTree = BUILT_PRODUCTS_DIR; };
 		8BAEFA9E1EC092E0D890A14C /* CSPrimPoint.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimPoint.cpp; sourceTree = "<group>"; };
 		903517FF02E224D68957B03E /* CSPropMetal.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropMetal.h; sourceTree = "<group>"; };
 		91339221556288FDC08080CD /* CSPropExcitation.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropExcitation.h; sourceTree = "<group>"; };
@@ -429,6 +412,16 @@
 		F9A1657931A824D0FB61FEA6 /* CSPrimMultiBox.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimMultiBox.h; sourceTree = "<group>"; };
 		FCFBB6854442AF9145607687 /* CSPropUnknown.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropUnknown.cpp; sourceTree = "<group>"; };
 		FDE3476E04DBF2031C2CCF48 /* ParameterObjects.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = ParameterObjects.h; sourceTree = "<group>"; };
+		7A110000000000000000000A /* tinyxml.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = tinyxml.cpp; sourceTree = "<group>"; };
+		7A110000000000000000000B /* tinyxmlparser.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = tinyxmlparser.cpp; sourceTree = "<group>"; };
+		7A110000000000000000000C /* tinyxmlerror.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = tinyxmlerror.cpp; sourceTree = "<group>"; };
+		7A110000000000000000000D /* tinystr.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = tinystr.cpp; sourceTree = "<group>"; };
+		7A110000000000000000000E /* tinyxml.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = tinyxml.h; sourceTree = "<group>"; };
+		7A110000000000000000000F /* tinystr.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = tinystr.h; sourceTree = "<group>"; };
+		7A120000000000000000000A /* fparser.cc */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = fparser.cc; sourceTree = "<group>"; };
+		7A120000000000000000000B /* fpoptimizer.cc */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = fpoptimizer.cc; sourceTree = "<group>"; };
+		7A120000000000000000000C /* fparser.hh */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.h; path = fparser.hh; sourceTree = "<group>"; };
+		7A120000000000000000000D /* fpconfig.hh */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.h; path = fpconfig.hh; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -599,8 +592,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				846A32C3BB81E3C29B621792 /* libhdf5.dylib in Frameworks */,
-				8B10C2000B105C2000000001 /* libblosc2.a in Frameworks */,
 				71B40FE83042E24F002796EC /* Accelerate.framework in Frameworks */,
 				71B40FE63042E223002796EC /* Metal.framework in Frameworks */,
 				71B40FE43042E1F3002796EC /* libCopperUtils.a in Frameworks */,
@@ -614,7 +605,6 @@
 			files = (
 				71AD3CE1302FAAD5006D5847 /* Copper.framework in Frameworks */,
 				C0FFEE0000000000000002 /* libCSXCAD.dylib in Frameworks */,
-				C0FFEE0000000000000003 /* libhdf5.dylib in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -673,6 +663,8 @@
 				77AE1A0D84F974CC1EDDD9F6 /* Frameworks */,
 				E331D08A3BF5F110095DBF0C /* copper_fdtd_worker */,
 				ECADA86A6A99C5289CA01658 /* CSXCAD */,
+				7A1100000000000000000001 /* tinyxml */,
+				7A1200000000000000000001 /* fparser */,
 				71BD2E653044E2D900663022 /* Recovered References */,
 			);
 			sourceTree = "<group>";
@@ -699,8 +691,6 @@
 		71BD2E653044E2D900663022 /* Recovered References */ = {
 			isa = PBXGroup;
 			children = (
-				30877432D1026706D7E805DA /* libhdf5.dylib */,
-				8B10C2000B105C2000000002 /* libblosc2.a */,
 			);
 			name = "Recovered References";
 			sourceTree = "<group>";
@@ -823,6 +813,32 @@
 			);
 			name = CSXCAD;
 			path = submodules/CSXCAD/src;
+			sourceTree = "<group>";
+		};
+		7A1100000000000000000001 /* tinyxml */ = {
+			isa = PBXGroup;
+			children = (
+				7A110000000000000000000A /* tinyxml.cpp */,
+				7A110000000000000000000B /* tinyxmlparser.cpp */,
+				7A110000000000000000000C /* tinyxmlerror.cpp */,
+				7A110000000000000000000D /* tinystr.cpp */,
+				7A110000000000000000000E /* tinyxml.h */,
+				7A110000000000000000000F /* tinystr.h */,
+			);
+			name = tinyxml;
+			path = submodules/tinyxml;
+			sourceTree = "<group>";
+		};
+		7A1200000000000000000001 /* fparser */ = {
+			isa = PBXGroup;
+			children = (
+				7A120000000000000000000A /* fparser.cc */,
+				7A120000000000000000000B /* fpoptimizer.cc */,
+				7A120000000000000000000C /* fparser.hh */,
+				7A120000000000000000000D /* fpconfig.hh */,
+			);
+			name = fparser;
+			path = submodules/fparser;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -1008,7 +1024,6 @@
 			);
 			dependencies = (
 				00D38236B762AE5D5D6823F0 /* PBXTargetDependency */,
-				C826A6FCE48478DCB74F2134 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				71AD3CD7302FAAD5006D5847 /* Copper */,
@@ -1169,7 +1184,6 @@
 				71AD3CDF302FAAD5006D5847 /* CopperTests */,
 				3B7712DA527497624F2DFB43 /* copper_fdtd_worker */,
 				917B3FABD7921813B7A8BF98 /* CSXCAD */,
-				E71870C603134ADA6EEEA950 /* HDF5 */,
 				71B4EE8D304224C5002796EC /* CopperUtils */,
 				8D5AE14D1127587CA08C54F7 /* libkiems_tests */,
 			);
@@ -1201,28 +1215,6 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
-		A1CABB0ACBF6B549B0D6ED9C /* Build vendor/hdf5 */ = {
-			isa = PBXShellScriptBuildPhase;
-			alwaysOutOfDate = 1;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputFileListPaths = (
-			);
-			inputPaths = (
-			);
-			name = "Build vendor/hdf5";
-			outputFileListPaths = (
-			);
-			outputPaths = (
-				"$(BUILT_PRODUCTS_DIR)/libhdf5.dylib",
-				"$(BUILT_PRODUCTS_DIR)/libhdf5_hl.dylib",
-				"$(BUILT_PRODUCTS_DIR)/libblosc2.a",
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "set -e\n\"$SRCROOT/Scripts/build_hdf5.sh\"\n";
-		};
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -1311,6 +1303,12 @@
 				508397439B5850BD443922F8 /* CSPrimLinPoly.cpp in Sources */,
 				9B20606B726FBDE39620FC66 /* CSPrimMultiBox.cpp in Sources */,
 				0A4F8D836CCEAB4E92E50750 /* CSPrimPoint.cpp in Sources */,
+				7A120000000000000000001E /* fparser.cc in Sources */,
+				7A120000000000000000001F /* fpoptimizer.cc in Sources */,
+				7A110000000000000000001E /* tinyxml.cpp in Sources */,
+				7A110000000000000000001F /* tinyxmlparser.cpp in Sources */,
+				7A1100000000000000000020 /* tinyxmlerror.cpp in Sources */,
+				7A1100000000000000000021 /* tinystr.cpp in Sources */,
 				828DBB24BCE54FE076A3D616 /* CSPrimPolygon.cpp in Sources */,
 				6E968C6C0FD2A336AFC5F4B3 /* CSPrimPolyhedron.cpp in Sources */,
 				551DBC88F190FAAEE5F0F4C6 /* CSPrimPolyhedronReader.cpp in Sources */,
@@ -1474,12 +1472,6 @@
 			target = 917B3FABD7921813B7A8BF98 /* CSXCAD */;
 			targetProxy = B8F896C59FEA2EF0C5CB5610 /* PBXContainerItemProxy */;
 		};
-		C826A6FCE48478DCB74F2134 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			name = HDF5;
-			target = E71870C603134ADA6EEEA950 /* HDF5 */;
-			targetProxy = 73C8EB5BB682575EC87A171A /* PBXContainerItemProxy */;
-		};
 		E454C46B412251B0E98F9587 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			name = CSXCAD;
@@ -1500,14 +1492,6 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
-		1399001CAAB5D03AD37A9A17 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ENABLE_USER_SCRIPT_SANDBOXING = NO;
-				PRODUCT_NAME = HDF5;
-			};
-			name = Debug;
-		};
 		20964BB945CB5768EF92486D /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -1890,7 +1874,6 @@
 				SYSTEM_HEADER_SEARCH_PATHS = (
 					"$(HOMEBREW_PREFIX)/include",
 					"$(SRCROOT)/submodules/CSXCAD/src",
-					"$(SRCROOT)/vendor",
 				);
 				WARNING_CFLAGS = (
 					"$(inherited)",
@@ -1983,7 +1966,6 @@
 				SYSTEM_HEADER_SEARCH_PATHS = (
 					"$(HOMEBREW_PREFIX)/include",
 					"$(SRCROOT)/submodules/CSXCAD/src",
-					"$(SRCROOT)/vendor",
 				);
 				WARNING_CFLAGS = (
 					"$(inherited)",
@@ -2081,6 +2063,8 @@
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lgeos_c",
+					"-lhdf5",
+					"-lblosc2",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.tomdavie.Copper;
 				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
@@ -2090,8 +2074,6 @@
 				SYSTEM_HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/submodules/CSXCAD/src",
-					"$(BUILT_PRODUCTS_DIR)/hdf5-local-prefix/include",
-					"$(BUILT_PRODUCTS_DIR)/blosc2-local-prefix/include",
 				);
 				VERSIONING_SYSTEM = "apple-generic";
 				VERSION_INFO_PREFIX = "";
@@ -2125,6 +2107,8 @@
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lgeos_c",
+					"-lhdf5",
+					"-lblosc2",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.tomdavie.Copper;
 				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
@@ -2134,8 +2118,6 @@
 				SYSTEM_HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/submodules/CSXCAD/src",
-					"$(BUILT_PRODUCTS_DIR)/hdf5-local-prefix/include",
-					"$(BUILT_PRODUCTS_DIR)/blosc2-local-prefix/include",
 				);
 				VERSIONING_SYSTEM = "apple-generic";
 				VERSION_INFO_PREFIX = "";
@@ -2156,11 +2138,14 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
 				SWIFT_EMIT_LOC_STRINGS = NO;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lhdf5",
+					"-lblosc2",
+				);
 				SYSTEM_HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/submodules/CSXCAD/src",
-					"$(BUILT_PRODUCTS_DIR)/hdf5-local-prefix/include",
-					"$(BUILT_PRODUCTS_DIR)/blosc2-local-prefix/include",
 				);
 			};
 			name = Debug;
@@ -2179,11 +2164,14 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
 				SWIFT_EMIT_LOC_STRINGS = NO;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lhdf5",
+					"-lblosc2",
+				);
 				SYSTEM_HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/submodules/CSXCAD/src",
-					"$(BUILT_PRODUCTS_DIR)/hdf5-local-prefix/include",
-					"$(BUILT_PRODUCTS_DIR)/blosc2-local-prefix/include",
 				);
 			};
 			name = Release;
@@ -2532,7 +2520,8 @@
 				);
 				GCC_TREAT_WARNINGS_AS_ERRORS = NO;
 				HEADER_SEARCH_PATHS = (
-					"$(OPENEMS_INSTALL_ROOT)/include",
+					"$(SRCROOT)/submodules/tinyxml",
+					"$(SRCROOT)/submodules/fparser",
 					"$(HOMEBREW_PREFIX)/include",
 					"$(HOMEBREW_PREFIX)/include/vtk-9.6",
 				);
@@ -2542,7 +2531,6 @@
 					"@loader_path",
 				);
 				LIBRARY_SEARCH_PATHS = (
-					"$(OPENEMS_INSTALL_ROOT)/lib",
 					"$(HOMEBREW_PREFIX)/opt/hdf5/lib",
 					"$(HOMEBREW_PREFIX)/opt/gmp/lib",
 					"$(HOMEBREW_PREFIX)/opt/mpfr/lib",
@@ -2554,8 +2542,6 @@
 					"-frounding-math",
 				);
 				OTHER_LDFLAGS = (
-					"-lfparser",
-					"-ltinyxml",
 					"-lhdf5",
 					"-lhdf5_hl",
 					"-lgmp",
@@ -2621,14 +2607,6 @@
 			};
 			name = Release;
 		};
-		F0DB0CEBD31AAD1C559F1161 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ENABLE_USER_SCRIPT_SANDBOXING = NO;
-				PRODUCT_NAME = HDF5;
-			};
-			name = Release;
-		};
 		FAE19E40AD8BF110541D31FE /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -2647,7 +2625,8 @@
 				);
 				GCC_TREAT_WARNINGS_AS_ERRORS = NO;
 				HEADER_SEARCH_PATHS = (
-					"$(OPENEMS_INSTALL_ROOT)/include",
+					"$(SRCROOT)/submodules/tinyxml",
+					"$(SRCROOT)/submodules/fparser",
 					"$(HOMEBREW_PREFIX)/include",
 					"$(HOMEBREW_PREFIX)/include/vtk-9.6",
 				);
@@ -2657,7 +2636,6 @@
 					"@loader_path",
 				);
 				LIBRARY_SEARCH_PATHS = (
-					"$(OPENEMS_INSTALL_ROOT)/lib",
 					"$(HOMEBREW_PREFIX)/opt/hdf5/lib",
 					"$(HOMEBREW_PREFIX)/opt/gmp/lib",
 					"$(HOMEBREW_PREFIX)/opt/mpfr/lib",
@@ -2669,8 +2647,6 @@
 					"-frounding-math",
 				);
 				OTHER_LDFLAGS = (
-					"-lfparser",
-					"-ltinyxml",
 					"-lhdf5",
 					"-lhdf5_hl",
 					"-lgmp",
@@ -2789,15 +2765,6 @@
 			buildConfigurations = (
 				FAE19E40AD8BF110541D31FE /* Release */,
 				E8F2CC8C444E342D1757FF48 /* Debug */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		9250B0C181758E24075EC5AC /* Build configuration list for PBXAggregateTarget "HDF5" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				F0DB0CEBD31AAD1C559F1161 /* Release */,
-				1399001CAAB5D03AD37A9A17 /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

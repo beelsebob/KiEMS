@@ -1,5 +1,4 @@
 build/
-/vendor/
 xcuserdata/
 __pycache__/
 *.pyc
