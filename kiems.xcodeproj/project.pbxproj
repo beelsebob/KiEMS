@@ -25,7 +25,6 @@
 		08091C43255C7E607DB3203F /* liblibkiems.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 922BA8FA4CD5D8901DCAC9DA /* liblibkiems.a */; };
 		0A4F8D836CCEAB4E92E50750 /* CSPrimPoint.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 8BAEFA9E1EC092E0D890A14C /* CSPrimPoint.cpp */; };
 		0EB3189D8E8C0E15ECDFCF07 /* CSPrimCylindricalShell.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C092FF8B6A375F76FC193A6E /* CSPrimCylindricalShell.cpp */; };
-		10DDAA48B5EFB9E602CA51F7 /* liblibkiems.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 922BA8FA4CD5D8901DCAC9DA /* liblibkiems.a */; };
 		129F2601A59B1AD3E6FA08D6 /* CSFunctionParser.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 54E688D3F9B73BD698459772 /* CSFunctionParser.cpp */; };
 		274621ADB58BCF83FF1AE33F /* CSUseful.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 4197F5CF683313F51CB45776 /* CSUseful.cpp */; };
 		2FBF45CFAE9FD71F5566E5AA /* kiems_fdtd_worker in Embed Helper Tools */ = {isa = PBXBuildFile; fileRef = 1730AB8B76054706EB2AB0BA /* kiems_fdtd_worker */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
@@ -44,7 +43,6 @@
 		5FEE70EE235A62413F9E6A97 /* Copper.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71AD3CD6302FAAD5006D5847 /* Copper.framework */; };
 		601D00000000000000000001 /* liblibkicad.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */; };
 		601D00000000000000000002 /* liblibkicad.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */; };
-		601D00000000000000000003 /* liblibkicad.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */; };
 		601D00000000000000000004 /* liblibkicad.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */; };
 		601D00000000000000000005 /* liblibkicad.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */; };
 		601D00000000000000000006 /* liblibkicad.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */; };
@@ -66,7 +64,6 @@
 		7E57CB0000000000000000C5 /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B8F4508947040AF3A200E11 /* libCSXCAD.dylib */; };
 		828DBB24BCE54FE076A3D616 /* CSPrimPolygon.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 30A0506109278583137803EB /* CSPrimPolygon.cpp */; };
 		846A32C3BB81E3C29B621792 /* libhdf5.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 30877432D1026706D7E805DA /* libhdf5.dylib */; };
-		888CB706001C0A6703D7A727 /* liblibkicad.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */; };
 		8958C50381BAEB4BAD69FC88 /* CSBackgroundMaterial.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E71F417BE3BD7729F8FEFB2A /* CSBackgroundMaterial.cpp */; };
 		8979779CA20D12908A2A7A0E /* Copper.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71AD3CD6302FAAD5006D5847 /* Copper.framework */; };
 		8B10C2000B105C2000000001 /* libblosc2.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 8B10C2000B105C2000000002 /* libblosc2.a */; };
@@ -127,13 +124,6 @@
 			remoteGlobalIDString = 71AD3CD5302FAAD5006D5847;
 			remoteInfo = Copper;
 		};
-		2A075E9DC0149148EA251C93 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 71AD228A30263515006D5847 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = B0B651E8085482933DC2AFFE;
-			remoteInfo = libkicad;
-		};
 		2B6AC32E5A944169FDB85409 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 71AD228A30263515006D5847 /* Project object */;
@@ -149,13 +139,6 @@
 			remoteInfo = Copper;
 		};
 		303AD32ECC634AA5F44FE1BB /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 71AD228A30263515006D5847 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 917B3FABD7921813B7A8BF98;
-			remoteInfo = CSXCAD;
-		};
-		3250708244CB3AA5A33DE2B6 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 71AD228A30263515006D5847 /* Project object */;
 			proxyType = 1;
@@ -238,20 +221,6 @@
 			proxyType = 1;
 			remoteGlobalIDString = B0B651E8085482933DC2AFFE;
 			remoteInfo = libkicad;
-		};
-		7F0606D12D7446556C7E5509 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 71AD228A30263515006D5847 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 0E08621C93A1CC737D3F6A93;
-			remoteInfo = libkiems;
-		};
-		A782DEBD122590F0E29B10BE /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 71AD228A30263515006D5847 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 917B3FABD7921813B7A8BF98;
-			remoteInfo = CSXCAD;
 		};
 		B8F896C59FEA2EF0C5CB5610 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -445,9 +414,7 @@
 		C139A80CEF80445CE007CF3F /* CSPrimBox.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimBox.cpp; sourceTree = "<group>"; };
 		C259DFC8925FEF6254736BAF /* CSPrimMultiBox.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimMultiBox.cpp; sourceTree = "<group>"; };
 		C4226023679CEE1592511C1C /* CSPropDebyeMaterial.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropDebyeMaterial.cpp; sourceTree = "<group>"; };
-		C6D729745136FAA65AEC601F /* libkicad_smoketest */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = libkicad_smoketest; sourceTree = BUILT_PRODUCTS_DIR; };
 		C940B300A12AD0F6894E3F31 /* CSBackgroundMaterial.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSBackgroundMaterial.h; sourceTree = "<group>"; };
-		CAE9E934278E88A4B6FDB4F0 /* libkiems_smoketest */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = libkiems_smoketest; sourceTree = BUILT_PRODUCTS_DIR; };
 		CE532C213E2D6E98AA310B22 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
 		D60EAE79927D1544B382EBB3 /* CSPrimCurve.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimCurve.h; sourceTree = "<group>"; };
 		DA441A58C5946D25FA484EEE /* CSPropConductingSheet.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropConductingSheet.cpp; sourceTree = "<group>"; };
@@ -498,16 +465,6 @@
 		006F3A1386AFF2AD46CD89E4 /* libkiems */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = libkiems;
-			sourceTree = "<group>";
-		};
-		0BA7820838B85822C655B32A /* libkicad_smoketest */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = libkicad_smoketest;
-			sourceTree = "<group>";
-		};
-		1CE9917EFF9195A3FF4FC1AA /* libkiems_smoketest */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = libkiems_smoketest;
 			sourceTree = "<group>";
 		};
 		1E051C9DFB9D9A4CF7CB1120 /* RememberRemember */ = {
@@ -626,24 +583,6 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		6B100B101B97A1E2DFE83EFA /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				888CB706001C0A6703D7A727 /* liblibkicad.a in Frameworks */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		6C6A64E387A7D31EB2A99F34 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				10DDAA48B5EFB9E602CA51F7 /* liblibkiems.a in Frameworks */,
-				601D00000000000000000003 /* liblibkicad.a in Frameworks */,
-				ACCE1E0000000000000003 /* Accelerate.framework in Frameworks */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		71AD228F30263515006D5847 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -724,11 +663,9 @@
 				71AD229430263516006D5847 /* kiems-cli */,
 				8290469707C87811FFCE548F /* kiems_fdtd_worker */,
 				006F3A1386AFF2AD46CD89E4 /* libkiems */,
-				1CE9917EFF9195A3FF4FC1AA /* libkiems_smoketest */,
 				87EBBDF2469E60AF87C97EB2 /* libkiems_tests */,
 				429F16897495224E3C8CB5A0 /* libkicad */,
 				9D2EF3F131A05169F6A8F5B8 /* libkicad_api */,
-				0BA7820838B85822C655B32A /* libkicad_smoketest */,
 				71AD3CD7302FAAD5006D5847 /* Copper */,
 				71AD3CE6302FAAD5006D5847 /* CopperTests */,
 				71B4EE8F304224C5002796EC /* CopperUtils */,
@@ -746,9 +683,7 @@
 				5653046AD79D4C9071AF237F /* KiEMS.app */,
 				71AD229230263516006D5847 /* kiems */,
 				A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */,
-				C6D729745136FAA65AEC601F /* libkicad_smoketest */,
 				922BA8FA4CD5D8901DCAC9DA /* liblibkiems.a */,
-				CAE9E934278E88A4B6FDB4F0 /* libkiems_smoketest */,
 				1730AB8B76054706EB2AB0BA /* kiems_fdtd_worker */,
 				DEC747CBEC864D957296A740 /* RememberRemember.framework */,
 				71AD3CD6302FAAD5006D5847 /* Copper.framework */,
@@ -946,27 +881,6 @@
 			productReference = DEC747CBEC864D957296A740 /* RememberRemember.framework */;
 			productType = "com.apple.product-type.framework";
 		};
-		0D27BC0AB714B88FE14FFB28 /* libkicad_smoketest */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = E96D43EDF887036033933493 /* Build configuration list for PBXNativeTarget "libkicad_smoketest" */;
-			buildPhases = (
-				23C3702A6642F13886B1BF43 /* Sources */,
-				6B100B101B97A1E2DFE83EFA /* Frameworks */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-				7B143B2514242142CF40DD14 /* PBXTargetDependency */,
-				6ECADCE2F5737E51C0EC6277 /* PBXTargetDependency */,
-			);
-			fileSystemSynchronizedGroups = (
-				0BA7820838B85822C655B32A /* libkicad_smoketest */,
-			);
-			name = libkicad_smoketest;
-			productName = libkicad_smoketest;
-			productReference = C6D729745136FAA65AEC601F /* libkicad_smoketest */;
-			productType = "com.apple.product-type.tool";
-		};
 		0E08621C93A1CC737D3F6A93 /* libkiems */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 34A1F94838F1003CDA9ED1F2 /* Build configuration list for PBXNativeTarget "libkiems" */;
@@ -1056,27 +970,6 @@
 			name = kiems_fdtd_worker;
 			productName = kiems_fdtd_worker;
 			productReference = 1730AB8B76054706EB2AB0BA /* kiems_fdtd_worker */;
-			productType = "com.apple.product-type.tool";
-		};
-		5BC0C98C152C9B66E02544CD /* libkiems_smoketest */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = A1979A925EE6A25050650435 /* Build configuration list for PBXNativeTarget "libkiems_smoketest" */;
-			buildPhases = (
-				43F05313B402BB6A5924A70C /* Sources */,
-				6C6A64E387A7D31EB2A99F34 /* Frameworks */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-				FD8F50719794D9B81C996635 /* PBXTargetDependency */,
-				549320B3B0900CE17BC3FE68 /* PBXTargetDependency */,
-			);
-			fileSystemSynchronizedGroups = (
-				1CE9917EFF9195A3FF4FC1AA /* libkiems_smoketest */,
-			);
-			name = libkiems_smoketest;
-			productName = libkiems_smoketest;
-			productReference = CAE9E934278E88A4B6FDB4F0 /* libkiems_smoketest */;
 			productType = "com.apple.product-type.tool";
 		};
 		71AD229130263515006D5847 /* kiems-cli */ = {
@@ -1268,9 +1161,7 @@
 			targets = (
 				71AD229130263515006D5847 /* kiems-cli */,
 				B0B651E8085482933DC2AFFE /* libkicad */,
-				0D27BC0AB714B88FE14FFB28 /* libkicad_smoketest */,
 				0E08621C93A1CC737D3F6A93 /* libkiems */,
-				5BC0C98C152C9B66E02544CD /* libkiems_smoketest */,
 				5034717F4A638C8CC653DE57 /* kiems_fdtd_worker */,
 				2971163407AC90FC988D853B /* KiEMS */,
 				07086D1AD104CA5BBA5AF140 /* RememberRemember */,
@@ -1342,13 +1233,6 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		23C3702A6642F13886B1BF43 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		24C0C7D84B42BCB562805074 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -1357,13 +1241,6 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		40070DE6B51561CC79C58E52 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		43F05313B402BB6A5924A70C /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -1513,12 +1390,6 @@
 			target = 917B3FABD7921813B7A8BF98 /* CSXCAD */;
 			targetProxy = F3408D4F5D7B73F098E7D0C2 /* PBXContainerItemProxy */;
 		};
-		549320B3B0900CE17BC3FE68 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			name = CSXCAD;
-			target = 917B3FABD7921813B7A8BF98 /* CSXCAD */;
-			targetProxy = A782DEBD122590F0E29B10BE /* PBXContainerItemProxy */;
-		};
 		585312645C254E539E00095D /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			name = RememberRemember;
@@ -1537,12 +1408,6 @@
 			target = 917B3FABD7921813B7A8BF98 /* CSXCAD */;
 			targetProxy = 748C85D85BC5D0AE4750DF0C /* PBXContainerItemProxy */;
 		};
-		6ECADCE2F5737E51C0EC6277 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			name = CSXCAD;
-			target = 917B3FABD7921813B7A8BF98 /* CSXCAD */;
-			targetProxy = 3250708244CB3AA5A33DE2B6 /* PBXContainerItemProxy */;
-		};
 		71AD3CE3302FAAD5006D5847 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 71AD3CD5302FAAD5006D5847 /* Copper */;
@@ -1557,11 +1422,6 @@
 			isa = PBXTargetDependency;
 			target = 71B4EE8D304224C5002796EC /* CopperUtils */;
 			targetProxy = 71B4EE9C304224FD002796EC /* PBXContainerItemProxy */;
-		};
-		7B143B2514242142CF40DD14 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = B0B651E8085482933DC2AFFE /* libkicad */;
-			targetProxy = 2A075E9DC0149148EA251C93 /* PBXContainerItemProxy */;
 		};
 		7E57CB0000000000000000C6 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
@@ -1636,11 +1496,6 @@
 			isa = PBXTargetDependency;
 			target = 5034717F4A638C8CC653DE57 /* kiems_fdtd_worker */;
 			targetProxy = 1540871D4E58EBEB434F4E6A /* PBXContainerItemProxy */;
-		};
-		FD8F50719794D9B81C996635 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = 0E08621C93A1CC737D3F6A93 /* libkiems */;
-			targetProxy = 7F0606D12D7446556C7E5509 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -1765,50 +1620,6 @@
 				SWIFT_VERSION = 5.0;
 				VERSIONING_SYSTEM = "apple-generic";
 				VERSION_INFO_PREFIX = "";
-			};
-			name = Release;
-		};
-		5F377DF0AD36807A9154C726 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			baseConfigurationReference = 601D10000000000000000001 /* libkicad/KiCadLink.xcconfig */;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				HEADER_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(SRCROOT)/libkiems",
-				);
-				LIBRARY_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(BUILT_PRODUCTS_DIR)",
-				);
-				OTHER_LDFLAGS = (
-					"$(inherited)",
-					"-lgeos_c",
-					"-lmatplot",
-				);
-				PRODUCT_NAME = "$(TARGET_NAME)";
-			};
-			name = Debug;
-		};
-		62807348053ECB7AA6437231 /* Release */ = {
-			isa = XCBuildConfiguration;
-			baseConfigurationReference = 601D10000000000000000001 /* libkicad/KiCadLink.xcconfig */;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				HEADER_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(SRCROOT)/libkiems",
-				);
-				LIBRARY_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(BUILT_PRODUCTS_DIR)",
-				);
-				OTHER_LDFLAGS = (
-					"$(inherited)",
-					"-lgeos_c",
-					"-lmatplot",
-				);
-				PRODUCT_NAME = "$(TARGET_NAME)";
 			};
 			name = Release;
 		};
@@ -2623,439 +2434,6 @@
 			};
 			name = Release;
 		};
-		B0289571CC81A8F7D6745CC9 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CLANG_CXX_LANGUAGE_STANDARD = "c++23";
-				CLANG_WARN_DOCUMENTATION_COMMENTS = NO;
-				CLANG_WARN_FLOAT_CONVERSION = NO;
-				CLANG_WARN_IMPLICIT_SIGN_CONVERSION = NO;
-				CLANG_WARN_RANGE_LOOP_ANALYSIS = NO;
-				CLANG_WARN_SUSPICIOUS_IMPLICIT_CONVERSION = NO;
-				CLANG_WARN_UNGUARDED_AVAILABILITY = NO;
-				CODE_SIGN_STYLE = Automatic;
-				GCC_PREPROCESSOR_DEFINITIONS = (
-					BOOST_ATOMIC_DYN_LINK,
-					BOOST_ATOMIC_NO_LIB,
-					BOOST_CHARCONV_DYN_LINK,
-					BOOST_CHARCONV_NO_LIB,
-					BOOST_CHRONO_DYN_LINK,
-					BOOST_CHRONO_NO_LIB,
-					BOOST_CONTAINER_DYN_LINK,
-					BOOST_CONTAINER_NO_LIB,
-					BOOST_DATE_TIME_DYN_LINK,
-					BOOST_DATE_TIME_NO_LIB,
-					BOOST_LOCALE_DYN_LINK,
-					BOOST_LOCALE_NO_LIB,
-					BOOST_THREAD_DYN_LINK,
-					BOOST_THREAD_NO_LIB,
-					"BS_THREAD_POOL_NATIVE_EXTENSIONS=1",
-					GLM_FORCE_CTOR_INIT,
-					"GL_SILENCE_DEPRECATION=1",
-					HAVE_STDINT_H,
-					"JSON_HAS_FILESYSTEM=0",
-					"KIAPI_IMPORTEXPORT=APIIMPORT",
-					KICAD_BUILD_ARCH_ARM,
-					"KICAD_CONFIG_DIR=kicad",
-					KICAD_SIGNAL_INTEGRITY,
-					KICAD_UPDATE_CHECK,
-					NANODBC_ENABLE_UNICODE,
-					PCBNEW,
-					PROTOBUF_USE_DLLS,
-					USINGZ,
-					WXUSINGDLL,
-					"_FILE_OFFSET_BITS=64",
-					__WXMAC__,
-					__WXOSX_COCOA__,
-					__WXOSX__,
-					"wxDEBUG_LEVEL=0",
-					NDEBUG,
-				);
-				GCC_TREAT_WARNINGS_AS_ERRORS = YES;
-				GCC_WARN_64_TO_32_BIT_CONVERSION = NO;
-				GCC_WARN_ABOUT_MISSING_PROTOTYPES = NO;
-				GCC_WARN_PEDANTIC = NO;
-				GCC_WARN_SHADOW = NO;
-				GCC_WARN_UNINITIALIZED_AUTOS = NO;
-				HEADER_SEARCH_PATHS = (
-					"$(KICAD_SOURCE_ROOT)/include",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/.",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/./dialogs",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/./autorouter",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/./generators",
-					"$(KICAD_SOURCE_ROOT)/3d-viewer",
-					"$(KICAD_SOURCE_ROOT)/3d-viewer/dialogs",
-					"$(KICAD_SOURCE_ROOT)/common",
-					"$(KICAD_SOURCE_ROOT)/common/dialogs",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/./exporters",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/./importers",
-					"$(KICAD_SOURCE_ROOT)/utils/idftools",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/./specctra_import_export",
-					"$(KICAD_SOURCE_ROOT)/build",
-					"$(KICAD_SOURCE_ROOT)/build/pcbnew",
-					"$(KICAD_SOURCE_ROOT)/common/.",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/argparse/include",
-					"$(KICAD_SOURCE_ROOT)/build/api/./cpp",
-					"$(KICAD_SOURCE_ROOT)/build/api/./cpp/api",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/pegtl",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/magic_enum/magic_enum",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/libcontext",
-					"$(KICAD_SOURCE_ROOT)/libs/kimath/include",
-					"$(KICAD_SOURCE_ROOT)/libs/core/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/clipper2/Clipper2Lib/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/rtree",
-					"$(KICAD_SOURCE_ROOT)/libs/kinng/include",
-					"$(KICAD_SOURCE_ROOT)/libs/kiplatform/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/nlohmann_json",
-					"$(KICAD_SOURCE_ROOT)/libs/snap/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/dynamic_bitset",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/libpopcnt",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/expected/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/picosha2",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/json_schema_validator",
-					"$(KICAD_SOURCE_ROOT)/build/common",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/fast_float/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/fmt/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/rapidcsv",
-					"$(KICAD_SOURCE_ROOT)/libs/sexpr/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/glad/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/thread-pool",
-					"$(KICAD_SOURCE_ROOT)/build/include/gal/shaders",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/nanosvg",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/dxflib_qcad",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/tinyspline_lib",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/compoundfilereader",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/rectpack2d",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/gzip-hpp",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/nanoflann",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/planegcs",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/pcb_io/altium",
-					"$(HOMEBREW_PREFIX)/include/wx-3.2",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/3dxware_sdk/inc",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/3dxware_sdk/inc",
-				);
-				LIBRARY_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(BUILT_PRODUCTS_DIR)",
-				);
-				OTHER_CPLUSPLUSFLAGS = (
-					"$(inherited)",
-					"-fstandalone-debug",
-					"-Wall",
-					"-Wsuggest-override",
-					"-Winconsistent-missing-override",
-					"-Werror=vla",
-					"-Wimplicit-fallthrough",
-					"-Werror=return-type",
-					"-Wshadow",
-					"-Wsign-compare",
-					"-Wmissing-field-initializers",
-					"-Wempty-body",
-					"-Wreorder",
-					"-Wmismatched-tags",
-					"-Wpessimizing-move",
-					"-Wredundant-move",
-					"-Wno-psabi",
-					"-fPIC",
-					"-fvisibility=hidden",
-					"-fvisibility-inlines-hidden",
-					"-ftrivial-auto-var-init=zero",
-					"-include",
-					"$(KICAD_SOURCE_ROOT)/api/../include/import_export.h",
-				);
-				OTHER_LDFLAGS = (
-					"-Wl,-undefined,dynamic_lookup",
-					"$(KICAD_SOURCE_ROOT)/build/pcbnew/CMakeFiles/pcbnew_kiface_objects.dir/api/api_handler_pcb.cpp.o",
-					"$(KICAD_SOURCE_ROOT)/build/pcbnew/CMakeFiles/pcbnew_kiface_objects.dir/api/api_handler_board.cpp.o",
-					"$(KICAD_SOURCE_ROOT)/build/pcbnew/CMakeFiles/pcbnew_kiface_objects.dir/api/headless_pcb_context.cpp.o",
-					"$(KICAD_SOURCE_ROOT)/build/pcbnew/CMakeFiles/pcbnew_kiface_objects.dir/api/pcb_context.cpp.o",
-					"$(KICAD_SOURCE_ROOT)/build/common/libpcbcommon.a",
-					"$(KICAD_SOURCE_ROOT)/build/libs/kiplatform/libkiplatform.a",
-					"$(KICAD_SOURCE_ROOT)/build/common/libcommon.a",
-					"$(KICAD_SOURCE_ROOT)/build/libs/core/libcore.a",
-					"-L$(HOMEBREW_PREFIX)/lib",
-					"-framework",
-					IOKit,
-					"-framework",
-					Carbon,
-					"-framework",
-					Cocoa,
-					"-framework",
-					QuartzCore,
-					"-framework",
-					AudioToolbox,
-					"-framework",
-					System,
-					"-framework",
-					OpenGL,
-					"-lwx_osx_cocoau_gl-3.2",
-					"-lwx_osx_cocoau_aui-3.2",
-					"-lwx_osx_cocoau_html-3.2",
-					"-lwx_osx_cocoau_core-3.2",
-					"-lwx_baseu_net-3.2",
-					"-lwx_baseu-3.2",
-					"-lwx_osx_cocoau_propgrid-3.2",
-					"-lwx_baseu_xml-3.2",
-					"-lwx_osx_cocoau_stc-3.2",
-					"-lwx_osx_cocoau_richtext-3.2",
-					"-lwx_osx_cocoau_webview-3.2",
-					"$(KICAD_SOURCE_ROOT)/build/thirdparty/planegcs/libplanegcs.a",
-					"$(SDKROOT)/usr/lib/libz.tbd",
-					"$(HOMEBREW_PREFIX)/lib/libTKBinL.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKBin.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKBinTObj.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKBinXCAF.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKBool.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKBO.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKBRep.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKCAF.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKCDF.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKernel.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKFeat.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKFillet.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKG2d.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKG3d.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKGeomAlgo.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKGeomBase.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKHLR.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKLCAF.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKMath.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKMesh.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKOffset.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKPrim.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKRWMesh.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKService.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKShHealing.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKTObj.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKTopAlgo.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKV3d.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKXCAF.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKXMesh.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKXmlL.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKXml.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKXmlTObj.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKXmlXCAF.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKXSBase.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKDEIGES.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKDEGLTF.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKDESTEP.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKDESTL.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKDEVRML.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKDEPLY.dylib",
-					"$(KICAD_SOURCE_ROOT)/build/kicad/KiCad.app/Contents/Frameworks/libkigal.dylib",
-					"$(KICAD_SOURCE_ROOT)/build/kicad/KiCad.app/Contents/Frameworks/libkicommon.dylib",
-					"$(KICAD_SOURCE_ROOT)/build/kicad/KiCad.app/Contents/Frameworks/libkiapi.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libprotobuf.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_internal_check_op.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_die_if_null.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_internal_conditions.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_internal_message.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_internal_nullguard.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_examine_stack.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_internal_format.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_internal_structured_proto.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_internal_log_sink_set.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_sink.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_entry.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_internal_proto.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_flags_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_flags_marshalling.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_flags_reflection.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_flags_config.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_flags_program_name.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_flags_private_handle_accessor.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_flags_commandlineflag.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_flags_commandlineflag_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_initialize.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_internal_globals.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_globals.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_vlog_config_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_internal_fnmatch.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_raw_hash_set.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_hashtablez_sampler.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_random_distributions.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_random_seed_sequences.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_random_internal_entropy_pool.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_random_internal_randen.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_random_internal_randen_hwaes.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_random_internal_randen_hwaes_impl.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_random_internal_randen_slow.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_random_internal_platform.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_random_internal_seed_material.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_random_seed_gen_exception.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_statusor.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_status.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_cord.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_cordz_info.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_cord_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_cordz_functions.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_exponential_biased.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_cordz_handle.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_crc_cord_state.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_crc32c.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_crc_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_crc_cpu_detect.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_leak_check.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_strerror.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_str_format_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_synchronization.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_stacktrace.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_borrowed_fixup_buffer.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_hash.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_city.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_symbolize.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_debugging_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_demangle_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_demangle_rust.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_decode_rust_punycode.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_utf8_for_code_point.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_graphcycles_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_kernel_timeout_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_malloc_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_tracing_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_time.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_civil_time.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_time_zone.dylib",
-					"-Wl,-framework,CoreFoundation",
-					"$(HOMEBREW_PREFIX)/lib/libutf8_validity.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_strings.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_int128.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_strings_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_base.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_spinlock_wait.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_throw_delegate.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_raw_logging_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_severity.dylib",
-					"$(KICAD_SOURCE_ROOT)/build/thirdparty/json_schema_validator/libnlohmann_json_schema_validator.a",
-					"$(SDKROOT)/usr/lib/libcurl.tbd",
-					"$(KICAD_SOURCE_ROOT)/build/libs/sexpr/libsexpr.a",
-					"$(KICAD_SOURCE_ROOT)/build/thirdparty/glad/libglad.a",
-					"$(HOMEBREW_PREFIX)/lib/libzstd.dylib",
-					"$(HOMEBREW_PREFIX)/opt/libgit2/lib/libgit2.dylib",
-					"$(HOMEBREW_PREFIX)/opt/cairo/lib/libcairo.dylib",
-					"$(HOMEBREW_PREFIX)/opt/pixman/lib/libpixman-1.dylib",
-					"$(KICAD_SOURCE_ROOT)/build/libs/kinng/libkinng.a",
-					"$(HOMEBREW_PREFIX)/lib/libnng.dylib",
-					"$(KICAD_SOURCE_ROOT)/build/thirdparty/fmt/libfmt.a",
-					"$(HOMEBREW_PREFIX)/lib/libfreetype.dylib",
-					"$(HOMEBREW_PREFIX)/opt/harfbuzz/lib/libharfbuzz.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libfontconfig.dylib",
-					"$(KICAD_SOURCE_ROOT)/build/thirdparty/libcontext/liblibcontext.a",
-					"$(KICAD_SOURCE_ROOT)/build/libs/snap/libsnap.a",
-					"$(KICAD_SOURCE_ROOT)/build/thirdparty/nanosvg/libnanosvg.a",
-					"$(KICAD_SOURCE_ROOT)/build/thirdparty/dxflib_qcad/libdxflib_qcad.a",
-					"$(KICAD_SOURCE_ROOT)/build/thirdparty/tinyspline_lib/libtinyspline_lib.a",
-					"$(KICAD_SOURCE_ROOT)/build/thirdparty/nanodbc/libnanodbc.a",
-					"-lodbc",
-					"-L$(HOMEBREW_PREFIX)/opt/unixodbc/lib",
-					"$(HOMEBREW_PREFIX)/lib/libboost_locale.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libboost_charconv.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libboost_thread.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libboost_atomic.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libboost_chrono.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libboost_container.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libboost_date_time.dylib",
-					"$(KICAD_SOURCE_ROOT)/build/thirdparty/delaunator/libdelaunator.a",
-					"$(KICAD_SOURCE_ROOT)/build/thirdparty/zint/libzint.a",
-					"$(KICAD_SOURCE_ROOT)/build/libs/kimath/libkimath.a",
-					"$(KICAD_SOURCE_ROOT)/build/thirdparty/clipper2/libclipper2.a",
-					"-lm",
-					"-framework",
-					AppKit,
-					"-framework",
-					CoreData,
-					"-framework",
-					Foundation,
-					"-framework",
-					PDFKit,
-					"-framework",
-					WebKit,
-					"-framework",
-					CFNetwork,
-					"-framework",
-					CoreFoundation,
-					"-framework",
-					Security,
-					"$(KICAD_SOURCE_ROOT)/build/thirdparty/3dxware_sdk/libTDxNavlib.a",
-					"-Wl,-rpath,$(KICAD_SOURCE_ROOT)/build/kicad/KiCad.app/Contents/Frameworks",
-					"-Wl,-rpath,$(HOMEBREW_PREFIX)/opt/libgit2/lib",
-					"-Wl,-rpath,$(HOMEBREW_PREFIX)/opt/cairo/lib",
-					"-Wl,-rpath,$(HOMEBREW_PREFIX)/opt/pixman/lib",
-					"-Wl,-rpath,$(HOMEBREW_PREFIX)/opt/harfbuzz/lib",
-					"-Wl,-rpath,$(HOMEBREW_PREFIX)/opt/unixodbc/lib",
-				);
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SKIP_INSTALL = YES;
-				SYSTEM_HEADER_SEARCH_PATHS = (
-					"$(HOMEBREW_PREFIX)/include",
-					"$(HOMEBREW_PREFIX)/include/cairo",
-					"$(HOMEBREW_PREFIX)/include/pixman-1",
-					/Library/Frameworks/Mono.framework/Headers,
-					"$(HOMEBREW_PREFIX)/include/freetype2",
-					"$(HOMEBREW_PREFIX)/opt/harfbuzz/include/harfbuzz",
-					"$(HOMEBREW_PREFIX)/opt/opencascade/include/opencascade",
-					"$(HOMEBREW_PREFIX)/lib/wx/include/osx_cocoa-unicode-3.2",
-					"$(HOMEBREW_PREFIX)/include/wx-3.2",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/nanodbc",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/eigen",
-					"$(KICAD_SOURCE_ROOT)/include",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/.",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/./dialogs",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/./autorouter",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/./generators",
-					"$(KICAD_SOURCE_ROOT)/3d-viewer",
-					"$(KICAD_SOURCE_ROOT)/3d-viewer/dialogs",
-					"$(KICAD_SOURCE_ROOT)/common",
-					"$(KICAD_SOURCE_ROOT)/common/dialogs",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/./exporters",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/./importers",
-					"$(KICAD_SOURCE_ROOT)/utils/idftools",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/./specctra_import_export",
-					"$(KICAD_SOURCE_ROOT)/build",
-					"$(KICAD_SOURCE_ROOT)/build/pcbnew",
-					"$(KICAD_SOURCE_ROOT)/common/.",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/argparse/include",
-					"$(KICAD_SOURCE_ROOT)/build/api/./cpp",
-					"$(KICAD_SOURCE_ROOT)/build/api/./cpp/api",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/pegtl",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/magic_enum/magic_enum",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/libcontext",
-					"$(KICAD_SOURCE_ROOT)/libs/kimath/include",
-					"$(KICAD_SOURCE_ROOT)/libs/core/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/clipper2/Clipper2Lib/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/rtree",
-					"$(KICAD_SOURCE_ROOT)/libs/kinng/include",
-					"$(KICAD_SOURCE_ROOT)/libs/kiplatform/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/nlohmann_json",
-					"$(KICAD_SOURCE_ROOT)/libs/snap/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/dynamic_bitset",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/libpopcnt",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/expected/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/picosha2",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/json_schema_validator",
-					"$(KICAD_SOURCE_ROOT)/build/common",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/fast_float/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/fmt/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/rapidcsv",
-					"$(KICAD_SOURCE_ROOT)/libs/sexpr/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/glad/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/thread-pool",
-					"$(KICAD_SOURCE_ROOT)/build/include/gal/shaders",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/nanosvg",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/dxflib_qcad",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/tinyspline_lib",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/compoundfilereader",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/rectpack2d",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/gzip-hpp",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/nanoflann",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/planegcs",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/pcb_io/altium",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/3dxware_sdk/inc",
-					"$(inherited)",
-				);
-			};
-			name = Debug;
-		};
 		C674A4B6897CD58CA339D0D9 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 601D10000000000000000001 /* libkicad/KiCadLink.xcconfig */;
@@ -3243,439 +2621,6 @@
 			};
 			name = Release;
 		};
-		F066C43374702408CFB59B5D /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CLANG_CXX_LANGUAGE_STANDARD = "c++23";
-				CLANG_WARN_DOCUMENTATION_COMMENTS = NO;
-				CLANG_WARN_FLOAT_CONVERSION = NO;
-				CLANG_WARN_IMPLICIT_SIGN_CONVERSION = NO;
-				CLANG_WARN_RANGE_LOOP_ANALYSIS = NO;
-				CLANG_WARN_SUSPICIOUS_IMPLICIT_CONVERSION = NO;
-				CLANG_WARN_UNGUARDED_AVAILABILITY = NO;
-				CODE_SIGN_STYLE = Automatic;
-				GCC_PREPROCESSOR_DEFINITIONS = (
-					BOOST_ATOMIC_DYN_LINK,
-					BOOST_ATOMIC_NO_LIB,
-					BOOST_CHARCONV_DYN_LINK,
-					BOOST_CHARCONV_NO_LIB,
-					BOOST_CHRONO_DYN_LINK,
-					BOOST_CHRONO_NO_LIB,
-					BOOST_CONTAINER_DYN_LINK,
-					BOOST_CONTAINER_NO_LIB,
-					BOOST_DATE_TIME_DYN_LINK,
-					BOOST_DATE_TIME_NO_LIB,
-					BOOST_LOCALE_DYN_LINK,
-					BOOST_LOCALE_NO_LIB,
-					BOOST_THREAD_DYN_LINK,
-					BOOST_THREAD_NO_LIB,
-					"BS_THREAD_POOL_NATIVE_EXTENSIONS=1",
-					GLM_FORCE_CTOR_INIT,
-					"GL_SILENCE_DEPRECATION=1",
-					HAVE_STDINT_H,
-					"JSON_HAS_FILESYSTEM=0",
-					"KIAPI_IMPORTEXPORT=APIIMPORT",
-					KICAD_BUILD_ARCH_ARM,
-					"KICAD_CONFIG_DIR=kicad",
-					KICAD_SIGNAL_INTEGRITY,
-					KICAD_UPDATE_CHECK,
-					NANODBC_ENABLE_UNICODE,
-					PCBNEW,
-					PROTOBUF_USE_DLLS,
-					USINGZ,
-					WXUSINGDLL,
-					"_FILE_OFFSET_BITS=64",
-					__WXMAC__,
-					__WXOSX_COCOA__,
-					__WXOSX__,
-					"wxDEBUG_LEVEL=0",
-					NDEBUG,
-				);
-				GCC_TREAT_WARNINGS_AS_ERRORS = YES;
-				GCC_WARN_64_TO_32_BIT_CONVERSION = NO;
-				GCC_WARN_ABOUT_MISSING_PROTOTYPES = NO;
-				GCC_WARN_PEDANTIC = NO;
-				GCC_WARN_SHADOW = NO;
-				GCC_WARN_UNINITIALIZED_AUTOS = NO;
-				HEADER_SEARCH_PATHS = (
-					"$(KICAD_SOURCE_ROOT)/include",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/.",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/./dialogs",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/./autorouter",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/./generators",
-					"$(KICAD_SOURCE_ROOT)/3d-viewer",
-					"$(KICAD_SOURCE_ROOT)/3d-viewer/dialogs",
-					"$(KICAD_SOURCE_ROOT)/common",
-					"$(KICAD_SOURCE_ROOT)/common/dialogs",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/./exporters",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/./importers",
-					"$(KICAD_SOURCE_ROOT)/utils/idftools",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/./specctra_import_export",
-					"$(KICAD_SOURCE_ROOT)/build",
-					"$(KICAD_SOURCE_ROOT)/build/pcbnew",
-					"$(KICAD_SOURCE_ROOT)/common/.",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/argparse/include",
-					"$(KICAD_SOURCE_ROOT)/build/api/./cpp",
-					"$(KICAD_SOURCE_ROOT)/build/api/./cpp/api",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/pegtl",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/magic_enum/magic_enum",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/libcontext",
-					"$(KICAD_SOURCE_ROOT)/libs/kimath/include",
-					"$(KICAD_SOURCE_ROOT)/libs/core/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/clipper2/Clipper2Lib/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/rtree",
-					"$(KICAD_SOURCE_ROOT)/libs/kinng/include",
-					"$(KICAD_SOURCE_ROOT)/libs/kiplatform/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/nlohmann_json",
-					"$(KICAD_SOURCE_ROOT)/libs/snap/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/dynamic_bitset",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/libpopcnt",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/expected/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/picosha2",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/json_schema_validator",
-					"$(KICAD_SOURCE_ROOT)/build/common",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/fast_float/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/fmt/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/rapidcsv",
-					"$(KICAD_SOURCE_ROOT)/libs/sexpr/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/glad/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/thread-pool",
-					"$(KICAD_SOURCE_ROOT)/build/include/gal/shaders",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/nanosvg",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/dxflib_qcad",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/tinyspline_lib",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/compoundfilereader",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/rectpack2d",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/gzip-hpp",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/nanoflann",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/planegcs",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/pcb_io/altium",
-					"$(HOMEBREW_PREFIX)/include/wx-3.2",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/3dxware_sdk/inc",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/3dxware_sdk/inc",
-				);
-				LIBRARY_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(BUILT_PRODUCTS_DIR)",
-				);
-				OTHER_CPLUSPLUSFLAGS = (
-					"$(inherited)",
-					"-fstandalone-debug",
-					"-Wall",
-					"-Wsuggest-override",
-					"-Winconsistent-missing-override",
-					"-Werror=vla",
-					"-Wimplicit-fallthrough",
-					"-Werror=return-type",
-					"-Wshadow",
-					"-Wsign-compare",
-					"-Wmissing-field-initializers",
-					"-Wempty-body",
-					"-Wreorder",
-					"-Wmismatched-tags",
-					"-Wpessimizing-move",
-					"-Wredundant-move",
-					"-Wno-psabi",
-					"-fPIC",
-					"-fvisibility=hidden",
-					"-fvisibility-inlines-hidden",
-					"-ftrivial-auto-var-init=zero",
-					"-include",
-					"$(KICAD_SOURCE_ROOT)/api/../include/import_export.h",
-				);
-				OTHER_LDFLAGS = (
-					"-Wl,-undefined,dynamic_lookup",
-					"$(KICAD_SOURCE_ROOT)/build/pcbnew/CMakeFiles/pcbnew_kiface_objects.dir/api/api_handler_pcb.cpp.o",
-					"$(KICAD_SOURCE_ROOT)/build/pcbnew/CMakeFiles/pcbnew_kiface_objects.dir/api/api_handler_board.cpp.o",
-					"$(KICAD_SOURCE_ROOT)/build/pcbnew/CMakeFiles/pcbnew_kiface_objects.dir/api/headless_pcb_context.cpp.o",
-					"$(KICAD_SOURCE_ROOT)/build/pcbnew/CMakeFiles/pcbnew_kiface_objects.dir/api/pcb_context.cpp.o",
-					"$(KICAD_SOURCE_ROOT)/build/common/libpcbcommon.a",
-					"$(KICAD_SOURCE_ROOT)/build/libs/kiplatform/libkiplatform.a",
-					"$(KICAD_SOURCE_ROOT)/build/common/libcommon.a",
-					"$(KICAD_SOURCE_ROOT)/build/libs/core/libcore.a",
-					"-L$(HOMEBREW_PREFIX)/lib",
-					"-framework",
-					IOKit,
-					"-framework",
-					Carbon,
-					"-framework",
-					Cocoa,
-					"-framework",
-					QuartzCore,
-					"-framework",
-					AudioToolbox,
-					"-framework",
-					System,
-					"-framework",
-					OpenGL,
-					"-lwx_osx_cocoau_gl-3.2",
-					"-lwx_osx_cocoau_aui-3.2",
-					"-lwx_osx_cocoau_html-3.2",
-					"-lwx_osx_cocoau_core-3.2",
-					"-lwx_baseu_net-3.2",
-					"-lwx_baseu-3.2",
-					"-lwx_osx_cocoau_propgrid-3.2",
-					"-lwx_baseu_xml-3.2",
-					"-lwx_osx_cocoau_stc-3.2",
-					"-lwx_osx_cocoau_richtext-3.2",
-					"-lwx_osx_cocoau_webview-3.2",
-					"$(KICAD_SOURCE_ROOT)/build/thirdparty/planegcs/libplanegcs.a",
-					"$(SDKROOT)/usr/lib/libz.tbd",
-					"$(HOMEBREW_PREFIX)/lib/libTKBinL.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKBin.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKBinTObj.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKBinXCAF.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKBool.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKBO.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKBRep.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKCAF.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKCDF.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKernel.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKFeat.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKFillet.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKG2d.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKG3d.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKGeomAlgo.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKGeomBase.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKHLR.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKLCAF.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKMath.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKMesh.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKOffset.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKPrim.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKRWMesh.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKService.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKShHealing.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKTObj.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKTopAlgo.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKV3d.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKXCAF.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKXMesh.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKXmlL.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKXml.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKXmlTObj.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKXmlXCAF.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKXSBase.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKDEIGES.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKDEGLTF.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKDESTEP.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKDESTL.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKDEVRML.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libTKDEPLY.dylib",
-					"$(KICAD_SOURCE_ROOT)/build/kicad/KiCad.app/Contents/Frameworks/libkigal.dylib",
-					"$(KICAD_SOURCE_ROOT)/build/kicad/KiCad.app/Contents/Frameworks/libkicommon.dylib",
-					"$(KICAD_SOURCE_ROOT)/build/kicad/KiCad.app/Contents/Frameworks/libkiapi.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libprotobuf.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_internal_check_op.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_die_if_null.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_internal_conditions.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_internal_message.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_internal_nullguard.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_examine_stack.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_internal_format.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_internal_structured_proto.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_internal_log_sink_set.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_sink.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_entry.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_internal_proto.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_flags_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_flags_marshalling.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_flags_reflection.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_flags_config.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_flags_program_name.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_flags_private_handle_accessor.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_flags_commandlineflag.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_flags_commandlineflag_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_initialize.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_internal_globals.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_globals.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_vlog_config_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_internal_fnmatch.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_raw_hash_set.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_hashtablez_sampler.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_random_distributions.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_random_seed_sequences.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_random_internal_entropy_pool.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_random_internal_randen.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_random_internal_randen_hwaes.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_random_internal_randen_hwaes_impl.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_random_internal_randen_slow.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_random_internal_platform.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_random_internal_seed_material.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_random_seed_gen_exception.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_statusor.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_status.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_cord.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_cordz_info.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_cord_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_cordz_functions.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_exponential_biased.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_cordz_handle.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_crc_cord_state.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_crc32c.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_crc_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_crc_cpu_detect.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_leak_check.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_strerror.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_str_format_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_synchronization.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_stacktrace.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_borrowed_fixup_buffer.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_hash.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_city.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_symbolize.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_debugging_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_demangle_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_demangle_rust.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_decode_rust_punycode.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_utf8_for_code_point.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_graphcycles_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_kernel_timeout_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_malloc_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_tracing_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_time.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_civil_time.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_time_zone.dylib",
-					"-Wl,-framework,CoreFoundation",
-					"$(HOMEBREW_PREFIX)/lib/libutf8_validity.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_strings.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_int128.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_strings_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_base.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_spinlock_wait.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_throw_delegate.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_raw_logging_internal.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libabsl_log_severity.dylib",
-					"$(KICAD_SOURCE_ROOT)/build/thirdparty/json_schema_validator/libnlohmann_json_schema_validator.a",
-					"$(SDKROOT)/usr/lib/libcurl.tbd",
-					"$(KICAD_SOURCE_ROOT)/build/libs/sexpr/libsexpr.a",
-					"$(KICAD_SOURCE_ROOT)/build/thirdparty/glad/libglad.a",
-					"$(HOMEBREW_PREFIX)/lib/libzstd.dylib",
-					"$(HOMEBREW_PREFIX)/opt/libgit2/lib/libgit2.dylib",
-					"$(HOMEBREW_PREFIX)/opt/cairo/lib/libcairo.dylib",
-					"$(HOMEBREW_PREFIX)/opt/pixman/lib/libpixman-1.dylib",
-					"$(KICAD_SOURCE_ROOT)/build/libs/kinng/libkinng.a",
-					"$(HOMEBREW_PREFIX)/lib/libnng.dylib",
-					"$(KICAD_SOURCE_ROOT)/build/thirdparty/fmt/libfmt.a",
-					"$(HOMEBREW_PREFIX)/lib/libfreetype.dylib",
-					"$(HOMEBREW_PREFIX)/opt/harfbuzz/lib/libharfbuzz.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libfontconfig.dylib",
-					"$(KICAD_SOURCE_ROOT)/build/thirdparty/libcontext/liblibcontext.a",
-					"$(KICAD_SOURCE_ROOT)/build/libs/snap/libsnap.a",
-					"$(KICAD_SOURCE_ROOT)/build/thirdparty/nanosvg/libnanosvg.a",
-					"$(KICAD_SOURCE_ROOT)/build/thirdparty/dxflib_qcad/libdxflib_qcad.a",
-					"$(KICAD_SOURCE_ROOT)/build/thirdparty/tinyspline_lib/libtinyspline_lib.a",
-					"$(KICAD_SOURCE_ROOT)/build/thirdparty/nanodbc/libnanodbc.a",
-					"-lodbc",
-					"-L$(HOMEBREW_PREFIX)/opt/unixodbc/lib",
-					"$(HOMEBREW_PREFIX)/lib/libboost_locale.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libboost_charconv.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libboost_thread.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libboost_atomic.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libboost_chrono.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libboost_container.dylib",
-					"$(HOMEBREW_PREFIX)/lib/libboost_date_time.dylib",
-					"$(KICAD_SOURCE_ROOT)/build/thirdparty/delaunator/libdelaunator.a",
-					"$(KICAD_SOURCE_ROOT)/build/thirdparty/zint/libzint.a",
-					"$(KICAD_SOURCE_ROOT)/build/libs/kimath/libkimath.a",
-					"$(KICAD_SOURCE_ROOT)/build/thirdparty/clipper2/libclipper2.a",
-					"-lm",
-					"-framework",
-					AppKit,
-					"-framework",
-					CoreData,
-					"-framework",
-					Foundation,
-					"-framework",
-					PDFKit,
-					"-framework",
-					WebKit,
-					"-framework",
-					CFNetwork,
-					"-framework",
-					CoreFoundation,
-					"-framework",
-					Security,
-					"$(KICAD_SOURCE_ROOT)/build/thirdparty/3dxware_sdk/libTDxNavlib.a",
-					"-Wl,-rpath,$(KICAD_SOURCE_ROOT)/build/kicad/KiCad.app/Contents/Frameworks",
-					"-Wl,-rpath,$(HOMEBREW_PREFIX)/opt/libgit2/lib",
-					"-Wl,-rpath,$(HOMEBREW_PREFIX)/opt/cairo/lib",
-					"-Wl,-rpath,$(HOMEBREW_PREFIX)/opt/pixman/lib",
-					"-Wl,-rpath,$(HOMEBREW_PREFIX)/opt/harfbuzz/lib",
-					"-Wl,-rpath,$(HOMEBREW_PREFIX)/opt/unixodbc/lib",
-				);
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SKIP_INSTALL = YES;
-				SYSTEM_HEADER_SEARCH_PATHS = (
-					"$(HOMEBREW_PREFIX)/include",
-					"$(HOMEBREW_PREFIX)/include/cairo",
-					"$(HOMEBREW_PREFIX)/include/pixman-1",
-					/Library/Frameworks/Mono.framework/Headers,
-					"$(HOMEBREW_PREFIX)/include/freetype2",
-					"$(HOMEBREW_PREFIX)/opt/harfbuzz/include/harfbuzz",
-					"$(HOMEBREW_PREFIX)/opt/opencascade/include/opencascade",
-					"$(HOMEBREW_PREFIX)/lib/wx/include/osx_cocoa-unicode-3.2",
-					"$(HOMEBREW_PREFIX)/include/wx-3.2",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/nanodbc",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/eigen",
-					"$(KICAD_SOURCE_ROOT)/include",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/.",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/./dialogs",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/./autorouter",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/./generators",
-					"$(KICAD_SOURCE_ROOT)/3d-viewer",
-					"$(KICAD_SOURCE_ROOT)/3d-viewer/dialogs",
-					"$(KICAD_SOURCE_ROOT)/common",
-					"$(KICAD_SOURCE_ROOT)/common/dialogs",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/./exporters",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/./importers",
-					"$(KICAD_SOURCE_ROOT)/utils/idftools",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/./specctra_import_export",
-					"$(KICAD_SOURCE_ROOT)/build",
-					"$(KICAD_SOURCE_ROOT)/build/pcbnew",
-					"$(KICAD_SOURCE_ROOT)/common/.",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/argparse/include",
-					"$(KICAD_SOURCE_ROOT)/build/api/./cpp",
-					"$(KICAD_SOURCE_ROOT)/build/api/./cpp/api",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/pegtl",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/magic_enum/magic_enum",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/libcontext",
-					"$(KICAD_SOURCE_ROOT)/libs/kimath/include",
-					"$(KICAD_SOURCE_ROOT)/libs/core/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/clipper2/Clipper2Lib/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/rtree",
-					"$(KICAD_SOURCE_ROOT)/libs/kinng/include",
-					"$(KICAD_SOURCE_ROOT)/libs/kiplatform/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/nlohmann_json",
-					"$(KICAD_SOURCE_ROOT)/libs/snap/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/dynamic_bitset",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/libpopcnt",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/expected/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/picosha2",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/json_schema_validator",
-					"$(KICAD_SOURCE_ROOT)/build/common",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/fast_float/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/fmt/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/rapidcsv",
-					"$(KICAD_SOURCE_ROOT)/libs/sexpr/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/glad/include",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/thread-pool",
-					"$(KICAD_SOURCE_ROOT)/build/include/gal/shaders",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/nanosvg",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/dxflib_qcad",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/tinyspline_lib",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/compoundfilereader",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/rectpack2d",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/gzip-hpp",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/nanoflann",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/planegcs",
-					"$(KICAD_SOURCE_ROOT)/pcbnew/pcb_io/altium",
-					"$(KICAD_SOURCE_ROOT)/thirdparty/3dxware_sdk/inc",
-					"$(inherited)",
-				);
-			};
-			name = Release;
-		};
 		F0DB0CEBD31AAD1C559F1161 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -3857,15 +2802,6 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		A1979A925EE6A25050650435 /* Build configuration list for PBXNativeTarget "libkiems_smoketest" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				5F377DF0AD36807A9154C726 /* Debug */,
-				62807348053ECB7AA6437231 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
 		A7A05BDB98C84DE3CA4A2188 /* Build configuration list for PBXNativeTarget "RememberRemember" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -3889,15 +2825,6 @@
 			buildConfigurations = (
 				267D1CBD028BDD9E5178D2D5 /* Release */,
 				6B1740D988F76B333D388E17 /* Debug */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		E96D43EDF887036033933493 /* Build configuration list for PBXNativeTarget "libkicad_smoketest" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				B0289571CC81A8F7D6745CC9 /* Debug */,
-				F066C43374702408CFB59B5D /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

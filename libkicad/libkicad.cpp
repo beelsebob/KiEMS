@@ -586,7 +586,7 @@ RawPadCountsResult countPadsRaw(BoardState& state) {
     getItems.add_types(kiapi::common::types::KOT_PCB_PAD);
 
     kiapi::common::ApiRequest request;
-    request.mutable_header()->set_client_name("libkicad-smoketest");
+    request.mutable_header()->set_client_name("libkicad");
     bool packed = request.mutable_message()->PackFrom(getItems);
     if (!packed) {
         return _fail("Failed to pack GetItems into request");

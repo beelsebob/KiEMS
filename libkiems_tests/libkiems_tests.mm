@@ -10,6 +10,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include <unistd.h>
+
 #include <nlohmann/json.hpp>
 
 #include "kiems/board_slicing.hpp"
@@ -21,9 +23,11 @@
 #include "kiems/net_name.hpp"
 #include "kiems/paths_config.hpp"
 #include "kiems/port_resolution.hpp"
+#include "kiems/postprocess.hpp"
 #include "kiems/ports.hpp"
 #include "kiems/via_stitching.hpp"
 #include "../libkicad/libkicad.hpp"
+#include "logging.hpp"
 #include "polygon_geometry.hpp"
 
 namespace {
@@ -768,7 +772,7 @@ double triangulateLastCallArea(const std::vector<TriangulateCall>& sequence) {
     };
 
     // Both selectors above are NetSelectorKind::Net/GroundSelectorKind::Net -- resolved by naming
-    // the net directly, no libkicad_smoketest subprocess needed (see resolveInvolvedNetNames()/
+    // the net directly, no board lookup needed (see resolveInvolvedNetNames()/
     // resolveGroundNetNames()), so a file-less Board, which never loads, is fine here.
     const libkicad::Board board(*_runtime, "", "");
     auto classified = kiems::classifyCopperForSimulation(sim, geometry, board);
@@ -2171,6 +2175,328 @@ double triangulateLastCallArea(const std::vector<TriangulateCall>& sequence) {
     // boundary, so neither can become the simulation's global minimum cell/timestep constraint.
     XCTAssertGreaterThanOrEqual(rebuilt[3] - rebuilt[2], 0.1);
     XCTAssertGreaterThanOrEqual(rebuilt[5] - rebuilt[4], 0.1);
+}
+
+// A minimal but from_json-round-trippable config: SimulationConfig::from_json requires a
+// non-empty involved_nets and a ground_net, so both are set here.
+static kiems::EMSConfig makeSyntheticConfig() {
+    kiems::EMSConfig config;
+    config.setMaxSteps(12345);
+    config.setPixelSize(7);
+    config.via().setPlatingThickness(42);
+    config.via().setFillingEpsilon(3.5);
+    config.grid().setMax(600);
+
+    kiems::SimulationConfig sim;
+    sim.setName("synthetic_sim");
+    sim.setViaEdgeDistance(350);
+    sim.setViaSpacing(550);
+    sim.setEyeBitRate(5e9);
+    sim.groundNet().setKind(kiems::GroundSelectorKind::Net);
+    sim.groundNet().setNet("GND");
+
+    kiems::InvolvedNetConfig net;
+    net.setKind(kiems::NetSelectorKind::Net);
+    net.setNet("USB_DP");
+    net.setImpedance(45);
+    net.setLength(1200);
+    net.setHullPadding(2500);
+    net.setProbeImpedance(true);
+    net.setPinProbed("U8", "4", true);
+    net.setPinProbed("U8", "5", false);
+    sim.involvedNets().push_back(net);
+
+    kiems::ExcitationConfig excitation;
+    excitation.setFootprint("U8");
+    excitation.setPin("4");
+    excitation.setStartTime(1e-9);
+    excitation.setDuration(5e-9);
+    excitation.setIsMain(true);
+    excitation.setPhaseDegrees(90);
+    sim.excitations().push_back(excitation);
+
+    config.simulations().push_back(std::move(sim));
+    return config;
+}
+
+- (void)testSimGeometryDirIncludesTheSimulationName {
+    const std::string dir = kiems::constants::simGeometryDir("named_sim").string();
+    XCTAssertNotEqual(dir.find("named_sim"), std::string::npos);
+}
+
+- (void)testConfigParseOfMissingFileFailsWithAMessage {
+    const auto result = kiems::EMSConfig::parse("/nonexistent/libkiems_tests/simulation.json", false);
+    XCTAssertFalse(result.has_value());
+    if (!result.has_value()) {
+        XCTAssertFalse(result.error().empty());
+    }
+}
+
+- (void)testConfigSaveParseRoundTrip {
+    const kiems::EMSConfig original = makeSyntheticConfig();
+    const std::filesystem::path path = std::filesystem::temp_directory_path() /
+                                       ("libkiems_tests_roundtrip_" + std::to_string(::getpid()) + ".json");
+    const auto saved = original.save(path);
+    XCTAssertTrue(saved.has_value());
+    auto reparsed = kiems::EMSConfig::parse(path, false);
+    std::filesystem::remove(path);
+    XCTAssertTrue(reparsed.has_value());
+    if (!reparsed.has_value()) {
+        return;
+    }
+
+    XCTAssertEqual(reparsed->maxSteps(), 12345);
+    // Unscaled on disk: save()/parse() must not apply the simulation-unit multiplier.
+    XCTAssertEqual(reparsed->via().platingThickness(), 42);
+    XCTAssertEqual(reparsed->simulations().size(), static_cast<std::size_t>(1));
+    if (reparsed->simulations().size() != 1) {
+        return;
+    }
+    const kiems::SimulationConfig& sim = reparsed->simulations().front();
+    XCTAssertEqual(sim.eyeBitRate(), 5e9);
+    XCTAssertEqual(sim.involvedNets().size(), static_cast<std::size_t>(1));
+    if (sim.involvedNets().size() == 1) {
+        const kiems::InvolvedNetConfig& net = sim.involvedNets().front();
+        XCTAssertTrue(net.net() == std::optional<std::string>("USB_DP"));
+        XCTAssertEqual(net.hullPadding(), 2500);
+        XCTAssertTrue(net.hasExplicitPinSelections());
+        XCTAssertTrue(net.probeImpedance());
+        XCTAssertTrue(net.probedPinAbsorbs("U8", "4") == std::optional<bool>(true));
+        XCTAssertTrue(net.probedPinAbsorbs("U8", "5") == std::optional<bool>(false));
+        XCTAssertFalse(net.probedPinAbsorbs("U8", "99").has_value());
+    }
+    XCTAssertEqual(sim.excitations().size(), static_cast<std::size_t>(1));
+    if (sim.excitations().size() == 1) {
+        XCTAssertTrue(sim.excitations().front().isMain());
+    }
+}
+
+// InvolvedNetConfig's legacy-vs-explicit pin-selection mode switch (see its own doc comment).
+- (void)testInvolvedNetPinSelectionSwitchesPermanentlyToExplicitMode {
+    kiems::InvolvedNetConfig net;
+    net.setKind(kiems::NetSelectorKind::Net);
+    net.setNet("TEST_NET");
+
+    // Fresh entry: legacy mode, where excludedPins() governs instead of probedPinAbsorbs().
+    XCTAssertFalse(net.hasExplicitPinSelections());
+    XCTAssertFalse(net.probedPinAbsorbs("U1", "1").has_value());
+    net.excludedPins().push_back(kiems::ExcludedPin{"U1", "2"});
+    XCTAssertTrue(net.isPinExcluded("U1", "2"));
+    XCTAssertFalse(net.isPinExcluded("U1", "1"));
+
+    // The first explicit edit flips the net into strict opt-in mode: untouched pins stop being probed.
+    net.setPinProbed("U1", "1", true);
+    XCTAssertTrue(net.hasExplicitPinSelections());
+    XCTAssertTrue(net.probedPinAbsorbs("U1", "1") == std::optional<bool>(true));
+    XCTAssertFalse(net.probedPinAbsorbs("U1", "3").has_value());
+
+    // Un-probing still counts as an explicit edit and never reverts the mode.
+    net.setPinProbed("U1", "1", std::nullopt);
+    XCTAssertTrue(net.hasExplicitPinSelections());
+    XCTAssertFalse(net.probedPinAbsorbs("U1", "1").has_value());
+}
+
+- (void)testScaledToSimulationUnitsReturnsAScaledCopy {
+    const kiems::EMSConfig original = makeSyntheticConfig();
+    kiems::EMSConfig scaled = original.scaledToSimulationUnits();
+
+    XCTAssertEqual(original.simulations().front().involvedNets().front().hullPadding(), 2500);
+    XCTAssertEqual(scaled.simulations().front().involvedNets().front().hullPadding(),
+                   2500.0 * kiems::constants::unitMultiplier);
+    XCTAssertEqual(scaled.grid().max(), 600.0 * kiems::constants::unitMultiplier);
+    // fillingEpsilon is dimensionless and must never be scaled.
+    XCTAssertEqual(scaled.via().fillingEpsilon(), 3.5);
+
+    kiems::PortConfig port;
+    port.setWidth(200);
+    port.setLength(1000);
+    scaled.simulations().front().ports().push_back(port);
+    const kiems::EMSConfig scaledAgain = scaled.scaledToSimulationUnits();
+    XCTAssertEqual(scaledAgain.simulations().front().ports().front().width(),
+                   200.0 * kiems::constants::unitMultiplier);
+}
+
+// The raw numeric accessors the results GUI drives directly, fed hand-built S-parameters through
+// setSParam() rather than a real FDTD run.
+- (void)testPostprocessorRawAccessors {
+    kiems::SimulationConfig sim;
+    sim.setName("postprocess_sim");
+    for (int i = 0; i < 4; ++i) {
+        kiems::PortConfig port;
+        port.setName("P" + std::to_string(i));
+        port.setImpedance(50);
+        port.setExcite(true);
+        sim.ports().push_back(port);
+    }
+    // resolvedIndex is normally set by port_resolution.cpp; setting it directly is enough here.
+    kiems::DifferentialPairConfig pair;
+    pair.positiveExcitation().setResolvedIndex(0);
+    pair.negativeExcitation().setResolvedIndex(1);
+    pair.positiveProbe().setResolvedIndex(2);
+    pair.negativeProbe().setResolvedIndex(3);
+    sim.diffPairs().push_back(pair);
+
+    const std::vector<double> freqs = {1e9, 2e9, 3e9};
+    kiems::Postprocessor post(freqs, sim);
+    for (int out = 0; out < 4; ++out) {
+        for (int in = 0; in < 4; ++in) {
+            std::vector<std::complex<double>> s(freqs.size());
+            for (std::size_t f = 0; f < freqs.size(); ++f) {
+                const double fd = static_cast<double>(f);
+                s[f] = (out == in) ? std::complex<double>(0.1 + 0.01 * fd, 0.02 * fd)
+                                   : std::complex<double>(0.01 * (out + 1), -0.01 * (in + 1));
+            }
+            post.setSParam(out, in, s);
+        }
+    }
+    post.processData();
+
+    XCTAssertTrue(post.frequencies() == freqs);
+    const auto delay = post.getDelay(0, 0);
+    XCTAssertTrue(delay.has_value() && delay->size() == freqs.size());
+    XCTAssertFalse(post.getDelay(0, 99).has_value());
+
+    // Empty data means an absent/disabled probe, not a valid (but sample-less) curve.
+    post.addProbeData(0, 0, {}, {});
+    XCTAssertFalse(post.getProbeVoltage(0, 0).has_value());
+    XCTAssertFalse(post.getProbeCurrent(0, 0).has_value());
+
+    const auto sdd = post.getDiffPairSdd(0);
+    XCTAssertTrue(sdd.has_value() && sdd->sdd11Db.has_value() && sdd->sdd21Db.has_value());
+    XCTAssertFalse(post.getDiffPairSdd(1).has_value());
+    if (sdd.has_value() && sdd->sdd11Db.has_value() && sdd->sdd21Db.has_value()) {
+        XCTAssertEqual(sdd->sdd11Db->size(), freqs.size());
+        XCTAssertEqual(sdd->sdd21Db->size(), freqs.size());
+        // Cross-check SDD11 against the mixed-mode formula computed independently.
+        const std::complex<double> gamma = 0.5 * (post.getSParam(0, 0)->front() - post.getSParam(1, 0)->front() -
+                                                  post.getSParam(0, 1)->front() + post.getSParam(1, 1)->front());
+        XCTAssertEqualWithAccuracy(sdd->sdd11Db->front(), 20 * std::log10(std::abs(gamma)), 1e-9);
+    }
+
+    const auto diffZ = post.getDiffPairImpedance(0);
+    XCTAssertTrue(diffZ.has_value());
+    if (diffZ.has_value()) {
+        XCTAssertEqual(diffZ->magnitudeOhm.size(), freqs.size());
+        XCTAssertEqual(diffZ->angleDeg.size(), freqs.size());
+        XCTAssertFalse(std::isnan(diffZ->magnitudeOhm.front()));
+        XCTAssertFalse(std::isnan(diffZ->angleDeg.front()));
+    }
+}
+
+// The stream-building log temporary must accept heterogeneous values and emit at end of statement.
+- (void)testLoggingStreamsCompileAndRun {
+    Cu::setLogLevel(Cu::LogLevel::Error);
+    Cu::logInfo() << "suppressed at Error level " << 1;
+    const int actual = 5;
+    CU_ASSERT(actual == 5) << "x was " << actual << " when it should have been 5";
+}
+
+// A two-pad, one-track board written to a temp directory, so the libkicad Board queries can be
+// exercised end-to-end without depending on a board checked in elsewhere.
+- (void)testLibkicadBoardQueriesOnAMinimalBoard {
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                      ("libkiems_tests_board_" + std::to_string(::getpid()));
+    std::filesystem::create_directories(dir);
+    const std::filesystem::path projectPath = dir / "fixture.kicad_pro";
+    const std::filesystem::path boardPath = dir / "fixture.kicad_pcb";
+    std::ofstream(projectPath) << R"({
+  "meta": {"filename": "fixture.kicad_pro", "version": 1},
+  "net_settings": {
+    "classes": [
+      {"name": "Default", "clearance": 0.2, "track_width": 0.25, "via_diameter": 0.6, "via_drill": 0.3},
+      {"name": "HS", "clearance": 0.2, "track_width": 0.2, "via_diameter": 0.6, "via_drill": 0.3}
+    ],
+    "meta": {"version": 3},
+    "netclass_patterns": [{"netclass": "HS", "pattern": "SIG"}]
+  }
+})";
+    std::ofstream(boardPath) << R"((kicad_pcb (version 20240108) (generator "libkiems_tests")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "SIG")
+  (net 2 "GND")
+  (footprint "fixture:R_0603" (layer "F.Cu") (at 10 10)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd rect (at -0.8 0) (size 0.8 0.9) (layers "F.Cu") (net 1 "SIG"))
+    (pad "2" smd rect (at 0.8 0) (size 0.8 0.9) (layers "F.Cu") (net 2 "GND"))
+  )
+  (segment (start 9.2 10) (end 5 10) (width 0.2) (layer "F.Cu") (net 1))
+  (gr_rect (start 0 0) (end 20 20) (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts"))
+)
+)";
+
+    const libkicad::Board board(*_runtime, projectPath.string(), boardPath.string());
+
+    const auto counts = board.countPads();
+    XCTAssertTrue(counts.has_value(), @"%s", counts ? "" : counts.error().c_str());
+    if (counts.has_value()) {
+        XCTAssertEqual(counts->footprintCount, 1);
+        XCTAssertEqual(counts->padCount, 2);
+        XCTAssertEqual(counts->trackCount, 1);
+        XCTAssertEqual(counts->zoneCount, 0);
+    }
+
+    const auto stackup = board.stackup();
+    XCTAssertTrue(stackup.has_value() && !stackup->empty());
+
+    const auto nets = board.allNets();
+    XCTAssertTrue(nets.has_value());
+    if (nets.has_value()) {
+        XCTAssertTrue(std::find(nets->begin(), nets->end(), "SIG") != nets->end());
+        XCTAssertTrue(std::find(nets->begin(), nets->end(), "GND") != nets->end());
+    }
+
+    const auto classes = board.netClasses();
+    XCTAssertTrue(classes.has_value());
+    if (classes.has_value()) {
+        XCTAssertTrue(std::find(classes->begin(), classes->end(), "HS") != classes->end());
+    }
+
+    const auto footprints = board.footprints();
+    XCTAssertTrue(footprints.has_value());
+    if (footprints.has_value()) {
+        XCTAssertEqual(footprints->size(), static_cast<std::size_t>(1));
+        if (footprints->size() == 1) {
+            XCTAssertTrue(footprints->front().reference == "R1");
+            XCTAssertTrue(footprints->front().value == "10k");
+            XCTAssertEqual(footprints->front().pins.size(), static_cast<std::size_t>(2));
+        }
+    }
+
+    const auto net = board.netForFootprintPin("R1", "1");
+    XCTAssertTrue(net.has_value() && *net == "SIG");
+    XCTAssertFalse(board.netForFootprintPin("R1", "99").has_value());
+
+    const auto members = board.netsInNetClass("HS");
+    XCTAssertTrue(members.has_value());
+    if (members.has_value()) {
+        XCTAssertTrue(std::find(members->begin(), members->end(), "SIG") != members->end());
+        XCTAssertTrue(std::find(members->begin(), members->end(), "GND") == members->end());
+    }
+
+    const auto pads = board.padsOnNet("SIG");
+    XCTAssertTrue(pads.has_value());
+    if (pads.has_value()) {
+        XCTAssertEqual(pads->size(), static_cast<std::size_t>(1));
+        if (pads->size() == 1) {
+            XCTAssertTrue(pads->front().footprintRef == "R1");
+            XCTAssertTrue(pads->front().padNumber == "1");
+            XCTAssertEqualWithAccuracy(pads->front().xMm, 9.2, 1e-6);
+            // libkicad reports Y-up coordinates, so KiCad's y=10 comes back negated.
+            XCTAssertEqualWithAccuracy(pads->front().yMm, -10.0, 1e-6);
+            XCTAssertTrue(pads->front().copperLayerName == "F.Cu");
+        }
+    }
+
+    std::filesystem::remove_all(dir);
 }
 
 @end

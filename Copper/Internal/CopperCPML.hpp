@@ -121,7 +121,7 @@ enum class CopperCPMLFaces { All, ZOnly };
 /// caller must *not* have passed to openEMS's own Set_BC_PML() (see this header's own top comment
 /// for why); the geometry here is computed directly from it and `op`'s own line counts, with no
 /// Operator_Ext_UPML extension involved at all. 0 returns an empty CPML (a caller with no PML on
-/// this run -- e.g. a MUR-only smoketest -- can pass 0 rather than special-casing the call away), as
+/// this run -- e.g. a MUR-only test -- can pass 0 rather than special-casing the call away), as
 /// does a grid too thin along a graded axis to hold both of its slabs.
 CopperCPML buildCPML(CopperOperator& op, double alphaMax, std::uint32_t pmlDepthCells,
                      CopperCPMLFaces faces = CopperCPMLFaces::All);

@@ -101,7 +101,7 @@ std::mutex& blosc2FilterMutex() {
 // mutex above makes that structurally impossible now) from ones not yet considered, e.g. this specific
 // chunk's own byte count genuinely exceeding a hard limit somewhere in the int32-sized Blosc2/HDF5
 // filter-callback API (BLOSC2_MAX_OVERHEAD, cd_values, etc. are all int32_t under the hood) -- a real
-// board's mesh is enormously larger than the smoketest's synthetic 3x2x2 grid, so a size-class failure
+// board's mesh is enormously larger than the unit tests' synthetic 3x2x2 grid, so a size-class failure
 // that only manifests on real data would never show up there. Prior fixes were shipped on plausible-
 // but-ultimately-wrong theories with no actual evidence from a failing run; this doesn't repeat that.
 size_t filterBlosc2Body(unsigned int flags, size_t inputBytes, size_t* bufferBytes, void** buffer) {

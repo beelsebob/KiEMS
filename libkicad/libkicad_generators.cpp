@@ -10,7 +10,7 @@
 // GetPluralName/GetCommitMessage) is entirely interactive-editing plumbing that a headless
 // GetItems query never touches; this placeholder exists purely so parsing a board that contains
 // one doesn't throw. Its actual meander geometry is not reconstructed -- board content this
-// smoketest cares about (pads, footprints, zones) isn't stored on the generator itself.
+// libkicad cares about (pads, footprints, zones) isn't stored on the generator itself.
 #include "libkicad_generators.hpp"
 
 #pragma clang diagnostic push

@@ -1,6 +1,6 @@
 // Link-time stubs for the slice of KiCad's GUI/tool-framework surface that api_handler_pcb.cpp,
 // api_handler_board.cpp, and pcb_context.cpp reference from handler methods and sibling classes
-// this smoketest never exercises (RefillZones, netlist import, selection, the 3D viewer, ...).
+// libkicad never exercises (RefillZones, netlist import, selection, the 3D viewer, ...).
 // Those object files mix headless-safe code with GUI-only code in the same translation unit, so
 // linking the parts needed (HEADLESS_PCB_CONTEXT + API_HANDLER_PCB::Handle(GetItems)) pulls in
 // symbol references from the parts that aren't. None of the bodies below are ever reached by the
@@ -49,7 +49,7 @@ namespace {
 // members -- which needs T complete. noexcept tells it that path is unreachable, so it doesn't
 // try. None of these bodies are ever reached from the GetItems path.
 [[noreturn]] void _notImplemented(const char* what) noexcept {
-    std::fprintf(stderr, "libkicad stub: %s is not implemented in the headless smoketest\n", what);
+    std::fprintf(stderr, "libkicad stub: %s is not implemented in headless libkicad\n", what);
     std::abort();
 }
 
@@ -109,7 +109,7 @@ void LoadNetlistFootprints(BOARD*, NETLIST&, REPORTER&) {
 // real key function. Defining it here makes the linker treat this TU as authoritative for the
 // class's vtable/typeinfo -- and unlike a lazily-bound function call, a vtable is data that dyld
 // resolves eagerly at process load, so every non-pure virtual override needs a real symbol here,
-// not just the ones this smoketest happens to reference (same reasoning applies further down for
+// not just the ones libkicad happens to reference (same reasoning applies further down for
 // TRACK_BALL and EDA_3D_VIEWER_FRAME).
 //
 // Its m_priv member is a pimpl (unique_ptr<PRIV>) whose real definition lives only in
@@ -178,7 +178,7 @@ void S3D_CACHE::CleanCacheDir(int) {}
 // PCB_BASE_FRAME::SetDisplayOptions/GetPcbNewSettings and FOOTPRINT_LIBRARY_ADAPTER) end up in
 // the link regardless of anything here -- something else in pcbcommon.a needs them -- so they
 // aren't stubbed (that would just be a duplicate-symbol clash). -Wl,-undefined,dynamic_lookup on
-// the smoketest target covers the plain function calls those pull in that are never reached at
+// the linking targets cover the plain function calls those pull in that are never reached at
 // runtime (e.g. PCB_IO_MGR's foreign-format importers), but not typeinfo/vtable data symbols --
 // PCB_BASE_FRAME::Get3DViewerFrame()'s dynamic_cast<EDA_3D_VIEWER_FRAME*> needs that class's
 // vtable defined for real, same as PCB_SELECTION_TOOL above.

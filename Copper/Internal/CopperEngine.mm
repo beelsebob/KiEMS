@@ -339,7 +339,7 @@ private:
     // GPU (that's what makes the batching work), so a single shared MTLBuffer mutated by CPU-side
     // memcpy between encodeIterationPhase calls would have every dispatch see only the *last*
     // iteration's values once the GPU finally runs (this was a real, confirmed bug in an earlier
-    // version of this code -- Phase 4a's smoketest caught it). setBytes: instead copies the given
+    // version of this code). setBytes: instead copies the given
     // bytes into the command buffer's own storage immediately at encode time, so each dispatch
     // keeps its own snapshot regardless of what a later encodeIterationPhase call does to the local
     // variable afterwards.

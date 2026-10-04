@@ -27,7 +27,7 @@ struct CopperLumpedRLCCell;
 /// `excitation` cells) never dispatches the excitation kernels at all -- the fields just stay at
 /// their seeded/zero initial condition, which is what Phase 2/3's own verification fixtures rely on.
 ///
-/// Pure-C++ public interface (pimpl) so plain C++ callers (e.g. Copper_smoketest) don't need to
+/// Pure-C++ public interface (pimpl) so plain C++ callers (e.g. CopperFDTDRunner.cpp) don't need to
 /// become Objective-C++ themselves just to use this -- CopperEngine.mm holds the only Metal/
 /// Objective-C API usage (the Backend::Metal implementation); CopperCPUEngine.cpp is plain C++
 /// (the Backend::CPU implementation); CopperEngine.cpp itself just forwards to whichever one the

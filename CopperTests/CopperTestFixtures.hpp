@@ -1,5 +1,5 @@
 // Shared CSX fixture builders + small cross-check helpers for CopperTests. Deliberately independent
-// of kiems/libkiems (Copper_smoketest's own design choice, kept here too -- see its file comment):
+// of kiems/libkiems:
 // these build synthetic CSXCAD structures directly, so CopperTests never depends on anything outside
 // Copper itself plus CSXCAD.
 //

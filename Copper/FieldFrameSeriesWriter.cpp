@@ -240,7 +240,7 @@ std::expected<FieldFrameSeriesWriter, std::string> FieldFrameSeriesWriter::creat
     // Copper.framework doesn't link libkiems, so kiems's own Cu::logInfo isn't reachable
     // here. One line per series (only at create() time, not per-frame), giving the grid size and
     // per-frame/per-chunk byte counts that actually determine whether the size clamp above engages --
-    // the real board sizes that trigger it are much larger than the smoketest's tiny synthetic grid,
+    // the real board sizes that trigger it are much larger than the unit tests' tiny synthetic grids,
     // so this is the only way to see the true numbers from a real run's own console output.
     std::fprintf(stdout,
                  "Copper: field frame-series %s: grid=%ux%ux%u, frame=%llu bytes/component, "
