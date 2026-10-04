@@ -51,6 +51,8 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
     private let edgeTerminationScroll = NSScrollView()
     private let addEdgeTerminationButton = NSButton()
     private let removeEdgeTerminationButton = NSButton()
+    private let editEdgeTerminationButton = NSButton()
+    private let edgeTerminationEmptyLabel = NSTextField(labelWithString: "No Nets")
     private var edgeTerminatedNetRows: [String] = []
     private let maxStepsField = NSTextField(string: "")
     // The FDTD grid's own base target cell size -- document-level (EMSConfig), not per-simulation,
@@ -74,6 +76,9 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
     private let frequencyStartField = NSTextField(string: "")
     private let frequencyStopField = NSTextField(string: "")
     private let eyeBitRateField = NSTextField(string: "")
+    private let eyeDrawCountField = NSTextField(string: "")
+    private let sharedClockCheckbox = NSButton(checkboxWithTitle: "Adversarial Signals Share a Clock",
+                                               target: nil, action: nil)
 
     // Length fields each get their own formatter instance -- the displayed/accepted unit is
     // per-instance state (see MicrometerValueFormatter), so sharing one across fields would make
@@ -101,6 +106,18 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
         formatter.maximumFractionDigits = 0 // Timesteps are a plain integer count, never fractional.
+        return formatter
+    }()
+
+    /// Draws are split across 8 independently randomized replicates (see kiems::EyeNoiseOptions),
+    /// so fewer than 8 isn't meaningful. The cap keeps the results preview (built on the main
+    /// thread) responsive: 1024 draws cost roughly a third of a second per eye.
+    private let eyeDrawCountFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.maximumFractionDigits = 0
+        formatter.minimum = 8
+        formatter.maximum = 1024
         return formatter
     }()
 
@@ -156,6 +173,20 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
         return row
     }
 
+    /// Like labeled(), but with the title above the control rather than beside it, and the control
+    /// spanning the panel's full width -- for lists, which are too cramped next to a label column.
+    private func stacked(_ title: String, _ control: NSView) -> NSStackView {
+        let label = NSTextField(labelWithString: title)
+        label.font = Self.formFont
+        label.textColor = .labelColor
+        let column = NSStackView(views: [label, control])
+        column.orientation = .vertical
+        column.alignment = .leading
+        column.spacing = 4
+        control.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
+        return column
+    }
+
     private func section(_ title: String, views: [NSView]) -> NSStackView {
         let separator = NSBox()
         separator.boxType = .separator
@@ -177,6 +208,10 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
     }
 
     private func buildUI() {
+        sharedClockCheckbox.target = self
+        sharedClockCheckbox.action = #selector(sharedClockToggled)
+        sharedClockCheckbox.controlSize = .small
+        sharedClockCheckbox.font = Self.formFont
         differentialPairCheckbox.target = self
         differentialPairCheckbox.action = #selector(differentialPairToggled)
         differentialPairCheckbox.controlSize = .small
@@ -196,13 +231,14 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
         frequencyStartField.formatter = frequencyStartFormatter
         frequencyStopField.formatter = frequencyStopFormatter
         eyeBitRateField.formatter = eyeBitRateFormatter
+        eyeDrawCountField.formatter = eyeDrawCountFormatter
         maxStepsField.formatter = maxStepsFormatter
         gridDensityField.formatter = gridDensityFormatter
         absorbingBoundaryField.formatter = absorbingBoundaryFormatter
 
         for field in [viaEdgeDistanceField, viaSpacingField, platingThicknessField,
                       fillingEpsilonField, frequencyStartField, frequencyStopField, maxStepsField,
-                      gridDensityField, absorbingBoundaryField, eyeBitRateField] {
+                      gridDensityField, absorbingBoundaryField, eyeBitRateField, eyeDrawCountField] {
             field.controlSize = .small
             field.font = Self.formFont
             field.alignment = .right
@@ -236,7 +272,7 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
         let networksSection = section("Networks", views: [
                 labeled("", differentialPairCheckbox),
                 labeled("Ground Net:", groundNameComboBox),
-                labeled("Edge Terminated Nets:", buildEdgeTerminationTable()),
+                stacked("Edge Terminated Nets:", buildEdgeTerminationTable()),
             ])
         let geometrySection = section("Geometry", views: [
                 labeled("Stitching Inset:", viaEdgeDistanceField),
@@ -252,6 +288,8 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
                 labeled("Sim Real Time:", simulationRealTimeValueLabel),
                 labeled("Frequency Range:", frequencyRange),
                 labeled("Digital Bitrate:", eyeBitRateField),
+                labeled("Adversarial Draws:", eyeDrawCountField),
+                labeled("", sharedClockCheckbox),
             ])
         let topLevelViews = [nameRow, networksSection, geometrySection, resolutionSection]
         let stack = NSStackView(views: topLevelViews)
@@ -275,48 +313,121 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
         ])
     }
 
+    /// Laid out like Xcode's Target Membership list: one bordered box holding the list (with a
+    /// "No Nets" placeholder while it's empty) and, under a hairline, a bar of borderless
+    /// add/remove/edit buttons separated by short vertical dividers.
     private func buildEdgeTerminationTable() -> NSView {
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("net"))
         column.resizingMask = .autoresizingMask
         edgeTerminationTable.addTableColumn(column)
         edgeTerminationTable.headerView = nil
-        edgeTerminationTable.rowHeight = 22
-        edgeTerminationTable.intercellSpacing = NSSize(width: 0, height: 2)
+        edgeTerminationTable.rowHeight = 24
+        edgeTerminationTable.intercellSpacing = NSSize(width: 0, height: 0)
         edgeTerminationTable.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
-        edgeTerminationTable.usesAlternatingRowBackgroundColors = true
+        // .plain and no backgrounds, as in SimulationListViewController: the box's own fill shows
+        // through, rather than an opaque table fighting the glass panel this sits in.
+        edgeTerminationTable.style = .plain
+        edgeTerminationTable.backgroundColor = .clear
         edgeTerminationTable.dataSource = self
         edgeTerminationTable.delegate = self
 
         edgeTerminationScroll.documentView = edgeTerminationTable
         edgeTerminationScroll.hasVerticalScroller = true
         edgeTerminationScroll.autohidesScrollers = true
-        edgeTerminationScroll.borderType = .bezelBorder
-        edgeTerminationScroll.heightAnchor.constraint(equalToConstant: 76).isActive = true
+        edgeTerminationScroll.borderType = .noBorder
+        edgeTerminationScroll.drawsBackground = false
+        edgeTerminationScroll.contentView.drawsBackground = false
+        edgeTerminationScroll.automaticallyAdjustsContentInsets = false
+        edgeTerminationScroll.contentInsets = NSEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
+        edgeTerminationScroll.translatesAutoresizingMaskIntoConstraints = false
+
+        edgeTerminationEmptyLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
+        edgeTerminationEmptyLabel.textColor = .secondaryLabelColor
+        edgeTerminationEmptyLabel.translatesAutoresizingMaskIntoConstraints = false
 
         for (button, symbol, description, action) in [
             (addEdgeTerminationButton, "plus", "Add edge-terminated net", #selector(addEdgeTerminatedNet)),
             (removeEdgeTerminationButton, "minus", "Remove edge-terminated net", #selector(removeEdgeTerminatedNet)),
+            (editEdgeTerminationButton, "pencil", "Edit edge-terminated net", #selector(editEdgeTerminatedNet)),
         ] {
-            button.bezelStyle = .circular
-            button.isBordered = true
+            button.isBordered = false
             button.imagePosition = .imageOnly
-            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)
-            button.controlSize = .small
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)?
+                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10, weight: .bold))
+            button.contentTintColor = .secondaryLabelColor
             button.target = self
             button.action = action
             button.widthAnchor.constraint(equalToConstant: 20).isActive = true
-            button.heightAnchor.constraint(equalToConstant: 20).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 18).isActive = true
         }
-        let buttonRow = NSStackView(views: [addEdgeTerminationButton, removeEdgeTerminationButton])
-        buttonRow.orientation = .horizontal
-        buttonRow.spacing = 4
+        func divider() -> NSView {
+            let line = NSBox()
+            line.boxType = .separator
+            line.heightAnchor.constraint(equalToConstant: 10).isActive = true
+            return line
+        }
+        let buttonBar = NSStackView(views: [addEdgeTerminationButton, divider(),
+                                            removeEdgeTerminationButton, divider(),
+                                            editEdgeTerminationButton])
+        buttonBar.orientation = .horizontal
+        buttonBar.alignment = .centerY
+        buttonBar.spacing = 2
+        buttonBar.edgeInsets = NSEdgeInsets(top: 0, left: 4, bottom: 0, right: 4)
+        buttonBar.translatesAutoresizingMaskIntoConstraints = false
 
-        let container = NSStackView(views: [edgeTerminationScroll, buttonRow])
-        container.orientation = .vertical
-        container.alignment = .leading
-        container.spacing = 4
-        edgeTerminationScroll.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
-        return container
+        let barSeparator = NSBox()
+        barSeparator.boxType = .separator
+        barSeparator.translatesAutoresizingMaskIntoConstraints = false
+
+        // Drawn by hand: an NSBox(.custom) border didn't show up at all inside the glass panel.
+        let box = ListBoxView()
+        box.translatesAutoresizingMaskIntoConstraints = false
+        // Everything inside sits one point in from each edge (see the constraints below) so
+        // nothing (selection highlight, separator) can overdraw the border.
+        let content = NSView()
+        content.translatesAutoresizingMaskIntoConstraints = false
+        box.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.topAnchor.constraint(equalTo: box.topAnchor, constant: 1),
+            content.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 1),
+            content.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -1),
+            content.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -1),
+        ])
+        for view in [edgeTerminationScroll, edgeTerminationEmptyLabel, barSeparator, buttonBar] {
+            content.addSubview(view)
+        }
+        NSLayoutConstraint.activate([
+            edgeTerminationScroll.topAnchor.constraint(equalTo: content.topAnchor),
+            edgeTerminationScroll.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            edgeTerminationScroll.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            edgeTerminationScroll.heightAnchor.constraint(equalToConstant: 76),
+            edgeTerminationEmptyLabel.centerXAnchor.constraint(equalTo: edgeTerminationScroll.centerXAnchor),
+            edgeTerminationEmptyLabel.centerYAnchor.constraint(equalTo: edgeTerminationScroll.centerYAnchor),
+            barSeparator.topAnchor.constraint(equalTo: edgeTerminationScroll.bottomAnchor),
+            barSeparator.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            barSeparator.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            buttonBar.topAnchor.constraint(equalTo: barSeparator.bottomAnchor),
+            buttonBar.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            buttonBar.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            buttonBar.heightAnchor.constraint(equalToConstant: 20),
+        ])
+        return box
+    }
+
+    /// The placeholder shows only while the list is empty; remove/edit act on the selected row, so
+    /// (as in Xcode) they're only enabled while there is one.
+    private func updateEdgeTerminationControls() {
+        let enabled = selectedSimulation != nil
+        let hasSelection = enabled && edgeTerminatedNetRows.indices.contains(edgeTerminationTable.selectedRow)
+        edgeTerminationEmptyLabel.isHidden = !edgeTerminatedNetRows.isEmpty
+        edgeTerminationEmptyLabel.textColor = enabled ? .secondaryLabelColor : .tertiaryLabelColor
+        addEdgeTerminationButton.isEnabled = enabled
+        removeEdgeTerminationButton.isEnabled = hasSelection
+        editEdgeTerminationButton.isEnabled = hasSelection
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        updateEdgeTerminationControls()
     }
 
     private static let plainNumberFormatter: NumberFormatter = {
@@ -376,12 +487,15 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
             viaEdgeDistanceField.stringValue = ""
             viaSpacingField.stringValue = ""
             eyeBitRateField.stringValue = ""
+            eyeDrawCountField.stringValue = ""
+            sharedClockCheckbox.state = .off
             differentialPairCheckbox.state = .off
             groundNameComboBox.entries = []
             groundNameComboBox.stringValue = ""
             edgeTerminatedNetRows = []
             edgeTerminationTable.reloadData()
             setPerSimulationFieldsEnabled(false)
+            updateEdgeTerminationControls()
             return
         }
         setPerSimulationFieldsEnabled(true)
@@ -391,8 +505,11 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
         viaEdgeDistanceField.doubleValue = sim.viaEdgeDistance
         viaSpacingField.doubleValue = sim.viaSpacing
         eyeBitRateField.doubleValue = sim.eyeBitRate
+        eyeDrawCountField.integerValue = sim.eyeDrawCount
+        sharedClockCheckbox.state = sim.adversarialSharedClock ? .on : .off
         edgeTerminatedNetRows = sim.edgeTerminatedNets
         edgeTerminationTable.reloadData()
+        updateEdgeTerminationControls()
 
         refreshNetLists()
 
@@ -417,8 +534,8 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
 
     private func setPerSimulationFieldsEnabled(_ enabled: Bool) {
         for control in [nameField, differentialPairCheckbox, groundNameComboBox,
-                         viaEdgeDistanceField, viaSpacingField, eyeBitRateField, edgeTerminationTable,
-                         addEdgeTerminationButton, removeEdgeTerminationButton] as [NSControl] {
+                         viaEdgeDistanceField, viaSpacingField, eyeBitRateField, eyeDrawCountField,
+                         sharedClockCheckbox, edgeTerminationTable] as [NSControl] {
             control.isEnabled = enabled
         }
     }
@@ -459,6 +576,16 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
     /// doesn't itself move any port, but it does change what resolveSimulationPorts() populates
     /// diffPairs() with, which downstream Results/Field Viewer state depends on, so any cache from
     /// before the edit is just as stale.
+    /// Eye post-analysis only, like the bit rate -- no FDTD data goes stale.
+    @objc private func sharedClockToggled() {
+        guard let sim = selectedSimulation else { return }
+        sim.adversarialSharedClock = sharedClockCheckbox.state == .on
+        document?.updateChangeCount(.changeDone)
+        if let selectedIndex {
+            onResultsParametersChanged?(selectedIndex)
+        }
+    }
+
     @objc private func differentialPairToggled() {
         guard let sim = selectedSimulation else { return }
         sim.isDifferentialPair = differentialPairCheckbox.state == .on
@@ -528,7 +655,16 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
             guard let self, let comboBox else { return }
             edgeTerminatedNetChanged(comboBox, name: name)
         }
-        return comboBox
+        // Inset from the box's edges rather than filling the row, as Xcode's lists are.
+        let cell = NSTableCellView()
+        comboBox.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(comboBox)
+        NSLayoutConstraint.activate([
+            comboBox.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
+            comboBox.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
+            comboBox.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+        ])
+        return cell
     }
 
     /// Accepts a picked menu item, or typed text naming a real net; anything else reverts the row.
@@ -548,6 +684,7 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
                     edgeTerminatedNetRows.remove(at: row)
                     commitEdgeTerminatedNets(to: sim)
                     edgeTerminationTable.reloadData()
+                    updateEdgeTerminationControls()
                 }
             } else {
                 comboBox.stringValue = edgeTerminatedNetRows[row]
@@ -568,17 +705,28 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
         let row = edgeTerminatedNetRows.count - 1
         edgeTerminationTable.scrollRowToVisible(row)
         edgeTerminationTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-        (edgeTerminationTable.view(atColumn: 0, row: row, makeIfNecessary: true) as? NetNameComboBox)?
-            .beginEditing()
+        updateEdgeTerminationControls()
+        beginEditingEdgeTerminatedNet(row: row)
     }
 
     @objc private func removeEdgeTerminatedNet() {
-        guard let sim = selectedSimulation, !edgeTerminatedNetRows.isEmpty else { return }
         let selected = edgeTerminationTable.selectedRow
-        edgeTerminatedNetRows.remove(at: edgeTerminatedNetRows.indices.contains(selected)
-                                         ? selected : edgeTerminatedNetRows.count - 1)
+        guard let sim = selectedSimulation, edgeTerminatedNetRows.indices.contains(selected) else { return }
+        edgeTerminatedNetRows.remove(at: selected)
         commitEdgeTerminatedNets(to: sim)
         edgeTerminationTable.reloadData()
+        updateEdgeTerminationControls()
+    }
+
+    @objc private func editEdgeTerminatedNet() {
+        let selected = edgeTerminationTable.selectedRow
+        guard selectedSimulation != nil, edgeTerminatedNetRows.indices.contains(selected) else { return }
+        beginEditingEdgeTerminatedNet(row: selected)
+    }
+
+    private func beginEditingEdgeTerminatedNet(row: Int) {
+        let cell = edgeTerminationTable.view(atColumn: 0, row: row, makeIfNecessary: true)
+        (cell?.subviews.first as? NetNameComboBox)?.beginEditing()
     }
 
     /// Edge terminations are part of the sliced geometry (SlicedBoard::edgeTerminationLoops), so
@@ -606,6 +754,9 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
             affectsGeometry = true
         case eyeBitRateField:
             selectedSimulation?.eyeBitRate = sender.doubleValue
+            affectsResults = true
+        case eyeDrawCountField:
+            selectedSimulation?.eyeDrawCount = sender.integerValue
             affectsResults = true
         case platingThicknessField: document.config.viaPlatingThickness = sender.doubleValue
         case fillingEpsilonField: document.config.viaFillingEpsilon = sender.doubleValue
@@ -676,5 +827,36 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
             return String(format: "%.3g", seconds / prefix.factor) + " \(prefix.symbol)s"
         }
         return String(format: "%.3g", seconds) + " s"
+    }
+}
+
+/// The bordered, pale-filled box behind SimulationPropertiesViewController's edge-terminated nets
+/// list, modelled on Xcode's inspector lists (Target Membership).
+private final class ListBoxView: NSView {
+    // Explicit translucent colours rather than system ones: inside the vibrant glass panel,
+    // tertiaryLabelColor/separatorColor resolve to opaque greys meant for vibrancy blending, which
+    // land at the same shade as this fill and vanish. Both are lighter than the panel in either
+    // appearance (quaternarySystemFill is a black wash in light mode, which reads as darker), with
+    // the border clearly stronger than the fill.
+    private static let fillColor = dynamicColor(dark: NSColor(white: 1, alpha: 0.1),
+                                                light: NSColor(white: 1, alpha: 0.6))
+    private static let borderColor = dynamicColor(dark: NSColor(white: 1, alpha: 0.3),
+                                                  light: NSColor(white: 0, alpha: 0.2))
+
+    private static func dynamicColor(dark: NSColor, light: NSColor) -> NSColor {
+        NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
+        }
+    }
+
+    override var isOpaque: Bool { false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        Self.fillColor.setFill()
+        bounds.fill()
+        Self.borderColor.setStroke()
+        let border = NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5))
+        border.lineWidth = 1
+        border.stroke()
     }
 }

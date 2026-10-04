@@ -264,6 +264,11 @@ final class SourceListViewController: NSViewController {
     private let excitationTypePopUp = NSPopUpButton()
     private let startTimeField = NSTextField(string: "")
     private let durationField = NSTextField(string: "")
+    /// Adversarial only: Continuous (item 0) or Limited (item 1) -- see
+    /// EMSExcitationBridge.hasContinuousDuration. durationField is then shown only for Limited.
+    private let durationModePopUp = NSPopUpButton()
+    private var durationModeRow: NSView!
+    private var durationRow: NSStackView!
     private let phaseField = NSTextField(string: "")
     private let frequencyField = NSTextField(string: "")
     private let amplitudeField = NSTextField(string: "")
@@ -570,6 +575,9 @@ final class SourceListViewController: NSViewController {
         excitationTypePopUp.addItems(withTitles: ["Primary", "Adversarial"])
         excitationTypePopUp.target = self
         excitationTypePopUp.action = #selector(excitationTypeChanged)
+        durationModePopUp.addItems(withTitles: ["Continuous", "Limited"])
+        durationModePopUp.target = self
+        durationModePopUp.action = #selector(durationModeChanged)
 
         startTimeField.formatter = startTimeFormatter
         durationField.formatter = durationFormatter
@@ -593,11 +601,14 @@ final class SourceListViewController: NSViewController {
         // excitation.amplitude().value_or(1.0) for main excitations.
         let amplitudeRow = labeled("Relative Amplitude:", amplitudeField)
         frequencyOnlyRows = [frequencyRow]
+        durationModeRow = labeled("Duration:", durationModePopUp)
+        durationRow = labeled("Duration:", durationField)
 
         excitationFieldsContainer = NSStackView(views: [
             labeled("Type:", excitationTypePopUp),
             labeled("Start time:", startTimeField),
-            labeled("Duration:", durationField),
+            durationModeRow,
+            durationRow,
             labeled("Phase:", phaseField),
             frequencyRow,
             amplitudeRow,
@@ -1439,6 +1450,12 @@ final class SourceListViewController: NSViewController {
         for row in frequencyOnlyRows {
             row.isHidden = excitation.isMain
         }
+        // A main excitation's duration is its pulse window; an adversarial one's is chosen by the
+        // Duration popup, with the time field directly beneath it (unlabelled) only when Limited.
+        durationModePopUp.selectItem(at: excitation.hasContinuousDuration ? 0 : 1)
+        durationModeRow.isHidden = excitation.isMain
+        durationRow.isHidden = !excitation.isMain && excitation.hasContinuousDuration
+        (durationRow.arrangedSubviews.first as? NSTextField)?.stringValue = excitation.isMain ? "Duration:" : ""
     }
 
     private func setDetailFieldsHidden(_ hidden: Bool) {
@@ -1743,6 +1760,7 @@ final class SourceListViewController: NSViewController {
     private func configureDifferentialComplement(_ partner: EMSExcitationBridge,
                                                   from source: EMSExcitationBridge) {
         partner.isMain = source.isMain
+        partner.hasContinuousDuration = source.hasContinuousDuration
         partner.startTime = source.startTime
         partner.duration = source.duration
         partner.frequency = source.frequency
@@ -2047,8 +2065,12 @@ final class SourceListViewController: NSViewController {
 
     @objc private func excitationTypeChanged() {
         guard let node = selectedNode, let excitation = matchingExcitation(for: node) else { return }
+        let wasMain = excitation.isMain
         excitation.isMain = excitationTypePopUp.indexOfSelectedItem == 0
         if !excitation.isMain {
+            if wasMain {
+                excitation.hasContinuousDuration = true
+            }
             // Frequency and amplitude are required for a non-main excitation. Populate sensible
             // values when revealing those controls so a newly-created (main-by-default) source
             // remains valid even if the document is saved before either field is edited.
@@ -2069,6 +2091,19 @@ final class SourceListViewController: NSViewController {
         populateExcitationFields(from: excitation)
         outlineView.reloadItem(node)
         onInvolvedNetsChanged?()
+    }
+
+    @objc private func durationModeChanged() {
+        guard let node = selectedNode, let excitation = matchingExcitation(for: node) else { return }
+        excitation.hasContinuousDuration = durationModePopUp.indexOfSelectedItem == 0
+        if case .pin(_, let pin) = node.kind,
+           let partner = differentialPairPartnerPin(footprintReference: excitation.footprintReference,
+                                                     netName: pin.netName),
+           matchingEntry(for: node)?.simulateAsDifferentialPair == true {
+            synchronizeDifferentialExcitations(netName: pin.netName, partnerName: partner.netName)
+        }
+        document?.updateChangeCount(.changeDone)
+        populateExcitationFields(from: excitation)
     }
 
     @objc private func excitationFieldChanged(_ sender: NSTextField) {

@@ -21,7 +21,6 @@
 /* End PBXAggregateTarget section */
 
 /* Begin PBXBuildFile section */
-		C5B0B1EC0000000000000003 /* CSObject.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C5B0B1EC0000000000000001 /* CSObject.cpp */; };
 		08091C43255C7E607DB3203F /* liblibkiems.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 922BA8FA4CD5D8901DCAC9DA /* liblibkiems.a */; };
 		0A4F8D836CCEAB4E92E50750 /* CSPrimPoint.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 8BAEFA9E1EC092E0D890A14C /* CSPrimPoint.cpp */; };
 		0EB3189D8E8C0E15ECDFCF07 /* CSPrimCylindricalShell.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C092FF8B6A375F76FC193A6E /* CSPrimCylindricalShell.cpp */; };
@@ -94,6 +93,7 @@
 		C0FFEE0000000000000005 /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B8F4508947040AF3A200E11 /* libCSXCAD.dylib */; };
 		C0FFEE0000000000000006 /* Copper.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71AD3CD6302FAAD5006D5847 /* Copper.framework */; };
 		C1FE7C82D3B6D6DF1E6CAFAC /* CSPrimSphericalShell.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 4CCA7271B4E816E2DE044E5C /* CSPrimSphericalShell.cpp */; };
+		C5B0B1EC0000000000000003 /* CSObject.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C5B0B1EC0000000000000001 /* CSObject.cpp */; };
 		D1A3596A45AFCC1D666CCAD9 /* CSPrimSphere.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A4ABB3E67FA995DFC15350A7 /* CSPrimSphere.cpp */; };
 		D1B97BD0204C249DCB935BE0 /* ParameterCoord.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 801882DFF924DC3D075A3E2A /* ParameterCoord.cpp */; };
 		D7029AAE6D897E2CEFA449EA /* CSPropProbeBox.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 9AF572E25404972E098B5061 /* CSPropProbeBox.cpp */; };
@@ -323,8 +323,6 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		C5B0B1EC0000000000000001 /* CSObject.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = CSObject.cpp; sourceTree = "<group>"; };
-		C5B0B1EC0000000000000002 /* CSObject.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CSObject.h; sourceTree = "<group>"; };
 		041AB224FEAA3879BCE70995 /* ParameterCoord.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = ParameterCoord.h; sourceTree = "<group>"; };
 		041FC8C8C4A04AC1ACFCC824 /* CSSpatialIndex.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSSpatialIndex.cpp; sourceTree = "<group>"; };
 		099AD36F929C43F1AEBF30DB /* CSPropDumpBox.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropDumpBox.cpp; sourceTree = "<group>"; };
@@ -414,6 +412,8 @@
 		C139A80CEF80445CE007CF3F /* CSPrimBox.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimBox.cpp; sourceTree = "<group>"; };
 		C259DFC8925FEF6254736BAF /* CSPrimMultiBox.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPrimMultiBox.cpp; sourceTree = "<group>"; };
 		C4226023679CEE1592511C1C /* CSPropDebyeMaterial.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropDebyeMaterial.cpp; sourceTree = "<group>"; };
+		C5B0B1EC0000000000000001 /* CSObject.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = CSObject.cpp; sourceTree = "<group>"; };
+		C5B0B1EC0000000000000002 /* CSObject.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CSObject.h; sourceTree = "<group>"; };
 		C940B300A12AD0F6894E3F31 /* CSBackgroundMaterial.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSBackgroundMaterial.h; sourceTree = "<group>"; };
 		CE532C213E2D6E98AA310B22 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
 		D60EAE79927D1544B382EBB3 /* CSPrimCurve.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimCurve.h; sourceTree = "<group>"; };
@@ -1824,10 +1824,6 @@
 				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
 				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
 				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
-				WARNING_CFLAGS = (
-					"$(inherited)",
-					"-Wno-documentation-deprecated-sync",
-				);
 				CLANG_WARN_EMPTY_BODY = YES;
 				CLANG_WARN_ENUM_CONVERSION = YES;
 				CLANG_WARN_FLOAT_CONVERSION = YES_ERROR;
@@ -1896,6 +1892,10 @@
 					"$(SRCROOT)/submodules/CSXCAD/src",
 					"$(SRCROOT)/vendor",
 				);
+				WARNING_CFLAGS = (
+					"$(inherited)",
+					"-Wno-documentation-deprecated-sync",
+				);
 			};
 			name = Debug;
 		};
@@ -1920,10 +1920,6 @@
 				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
 				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
 				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
-				WARNING_CFLAGS = (
-					"$(inherited)",
-					"-Wno-documentation-deprecated-sync",
-				);
 				CLANG_WARN_EMPTY_BODY = YES;
 				CLANG_WARN_ENUM_CONVERSION = YES;
 				CLANG_WARN_FLOAT_CONVERSION = YES_ERROR;
@@ -1988,6 +1984,10 @@
 					"$(HOMEBREW_PREFIX)/include",
 					"$(SRCROOT)/submodules/CSXCAD/src",
 					"$(SRCROOT)/vendor",
+				);
+				WARNING_CFLAGS = (
+					"$(inherited)",
+					"-Wno-documentation-deprecated-sync",
 				);
 			};
 			name = Release;

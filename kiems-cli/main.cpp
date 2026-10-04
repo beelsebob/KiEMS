@@ -368,7 +368,9 @@ void saveAndRenderResults(const PostprocessResult& results, const Arguments& arg
             const std::vector<double> frequencies =
                 linspace(results.config().frequency().start(), results.config().frequency().stop(),
                          constants::frequencySampleCount);
-            ExcitationPostprocessor excPost(simConfig, *post, frequencies, results.config().frequency());
+            ExcitationPostprocessor excPost(
+                simConfig, *post, frequencies, results.config().frequency(),
+                ExcitationPostprocessor::loadRunDurations(args.input() / simConfig.name(), simConfig));
             excPost.run();
             excPost.saveToFile(excDir);
             excPost.renderPlots(excDir, args.transparent());

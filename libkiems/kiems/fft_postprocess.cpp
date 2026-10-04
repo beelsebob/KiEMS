@@ -184,6 +184,22 @@ TimeWaveform synthesizeToneBurst(double frequencyHz, double amplitude, double ph
     return result;
 }
 
+TimeWaveform synthesizeContinuousTone(double frequencyHz, double amplitude, double phaseDegrees, double startTime,
+                                        double dt, std::size_t sampleCount) {
+    TimeWaveform result;
+    result.dt = dt;
+    result.samples.assign(sampleCount, 0.0);
+    const double phaseRadians = phaseDegrees * std::numbers::pi / 180.0;
+    for (std::size_t n = 0; n < sampleCount; ++n) {
+        const double t = static_cast<double>(n) * dt;
+        if (t < startTime) {
+            continue;
+        }
+        result.samples[n] = amplitude * std::sin(2.0 * std::numbers::pi * frequencyHz * (t - startTime) + phaseRadians);
+    }
+    return result;
+}
+
 TimeWaveform superpose(const std::vector<TimeWaveform>& waveforms) {
     TimeWaveform result;
     if (waveforms.empty()) {

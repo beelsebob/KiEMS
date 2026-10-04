@@ -16,7 +16,7 @@ private final class DisclosureGraphView: NSStackView {
     private let titleLabel: NSTextField
     private let graph: NSView
 
-    init(title: String, graph: NSView) {
+    init(title: String, graph: NSView, expanded: Bool = true) {
         disclosureButton = NSButton(title: "", target: nil, action: nil)
         titleLabel = NSTextField(labelWithString: title)
         self.graph = graph
@@ -29,7 +29,8 @@ private final class DisclosureGraphView: NSStackView {
 
         disclosureButton.setButtonType(.onOff)
         disclosureButton.bezelStyle = .disclosure
-        disclosureButton.state = .on
+        disclosureButton.state = expanded ? .on : .off
+        graph.isHidden = !expanded
         disclosureButton.target = self
         disclosureButton.action = #selector(toggleGraph)
         disclosureButton.translatesAutoresizingMaskIntoConstraints = false
@@ -139,6 +140,9 @@ final class SimulationResultsViewController: NSViewController {
     private var currentIndex: Int?
     private var availableCategories: [ResultsCategory] = []
     private var selectedCategory: ResultsCategory = .sParameters
+    /// Whether eye diagrams show adversarial noise (where any reaches them) -- the user's last choice,
+    /// carried over as the eyes are rebuilt.
+    private var showsAdversarialEyes = true
 
     /// Fired with every EMSPipelineProgress this VC's own in-flight ensureStage: call reports (both
     /// .geometry-phase, on the way to the FDTD run, and .simulation-phase, for the run itself), so
@@ -293,11 +297,14 @@ final class SimulationResultsViewController: NSViewController {
                                         fromStage: .results)
     }
 
-    /// Eye rate affects only PRBS post-analysis. Keep the completed FDTD/S-parameter cache and
-    /// rebuild the lightweight results preview at the new unit interval.
-    func eyeBitRateChanged(forSimulationIndex index: Int, bitRate: Double) {
+    /// Eye settings (bit rate, adversarial-noise draws, shared clock) affect only PRBS post-analysis.
+    /// Keep the completed FDTD/S-parameter cache and rebuild the lightweight results preview.
+    func eyeSettingsChanged(forSimulationIndex index: Int) {
         guard let document, index < document.config.simulations.count else { return }
-        document.pipeline(forSimulationNamed: document.config.simulations[index].name).updateEyeBitRate(bitRate)
+        let simulation = document.config.simulations[index]
+        document.pipeline(forSimulationNamed: simulation.name)
+            .updateEyeBitRate(simulation.eyeBitRate, drawCount: simulation.eyeDrawCount,
+                              sharedClock: simulation.adversarialSharedClock)
         if currentIndex == index {
             refreshDisplay()
         }
@@ -778,12 +785,15 @@ final class SimulationResultsViewController: NSViewController {
             // Differential eyes first; stable within each group.
             let eyes = preview.eyeDiagrams.filter(\.isDifferential) + preview.eyeDiagrams.filter { !$0.isDifferential }
             return eyes.map { eye in
-                let chart = EyeDiagramView()
-                chart.setData(timeUI: eye.timeUI.map(\.doubleValue),
-                              traces: eye.traces.map { $0.map(\.doubleValue) })
+                let eyeView = AdversarialEyeView(eye: eye, showsAdversarial: showsAdversarialEyes) { [weak self] shows in
+                    self?.showsAdversarialEyes = shows
+                }
                 let kind = eye.isDifferential ? "Differential received signal" : "Received signal"
                 let rate = String(format: "%.4g Gb/s", eye.bitRateGbps)
-                return makeSection(title: "\(eye.name) — \(kind), \(rate)", graphs: [("Eye Diagram", chart)])
+                // Collapsed: it only matters when judging whether more draws are needed.
+                let convergence = eyeView.makeConvergenceChart().map { [("Adversarial Draw Convergence", $0)] } ?? []
+                return makeSection(title: "\(eye.name) — \(kind), \(rate)", graphs: [("Eye Diagram", eyeView)],
+                                   collapsedGraphs: convergence)
             }
 
         case .impedance:
@@ -897,7 +907,8 @@ final class SimulationResultsViewController: NSViewController {
         }
     }
 
-    private func makeSection(title: String, graphs: [(title: String, view: NSView)]) -> NSView {
+    private func makeSection(title: String, graphs: [(title: String, view: NSView)],
+                             collapsedGraphs: [(title: String, view: NSView)] = []) -> NSView {
         // Result headings frequently embed a net name inside surrounding context ("Net: …",
         // "Excited Port: …", differential-pair labels, and eye/probe descriptions). Route the
         // complete heading through the shared net-name renderer so KiCad sub/superscript,
@@ -905,7 +916,8 @@ final class SimulationResultsViewController: NSViewController {
         let header = NetNameView()
         header.configure(name: title, font: .systemFont(ofSize: 13, weight: .semibold))
 
-        let disclosureGraphs: [NSView] = graphs.map { DisclosureGraphView(title: $0.title, graph: $0.view) }
+        let disclosureGraphs: [NSView] = graphs.map { DisclosureGraphView(title: $0.title, graph: $0.view) } +
+            collapsedGraphs.map { DisclosureGraphView(title: $0.title, graph: $0.view, expanded: false) }
         let rows: [NSView] = [header] + disclosureGraphs
         let sectionStack = NSStackView(views: rows)
         sectionStack.translatesAutoresizingMaskIntoConstraints = false

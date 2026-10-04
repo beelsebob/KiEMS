@@ -372,9 +372,8 @@ final class DocumentWindowController: NSWindowController {
                 simulationListVC?.setInvalid(forSimulationIndex: index, kind: .fieldPostProcessing)
             }
         }
-        propertiesVC.onResultsParametersChanged = { [weak simulationResultsVC, weak self] index in
-            guard let simulations = self?.ownerDocument.config.simulations, index < simulations.count else { return }
-            simulationResultsVC?.eyeBitRateChanged(forSimulationIndex: index, bitRate: simulations[index].eyeBitRate)
+        propertiesVC.onResultsParametersChanged = { [weak simulationResultsVC] index in
+            simulationResultsVC?.eyeSettingsChanged(forSimulationIndex: index)
         }
         // See GeometryViewController.onRunStateChanged's doc comment -- the spinner next to a
         // simulation's "Geometry" row has no other way to know a background pipeline run started/

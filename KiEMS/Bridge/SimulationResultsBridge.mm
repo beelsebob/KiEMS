@@ -14,6 +14,7 @@
 #include "kiems/config.hpp"
 #include "kiems/postprocess.hpp"
 #include "kiems/eye_diagram.hpp"
+#include "kiems/excitation_postprocess.hpp"
 
 using kiems::Postprocessor;
 using kiems::SimulationConfig;
@@ -237,19 +238,54 @@ private:
 }
 @end
 
+@implementation EMSResultsEyeNoise
+- (instancetype)initWithEye:(const kiems::EyeDiagramData&)eye aggressorCount:(NSInteger)aggressorCount {
+    self = [super init];
+    if (self) {
+        NSMutableArray<NSArray<NSNumber*>*>* traces = [NSMutableArray arrayWithCapacity:eye.noisyTraces.size()];
+        for (const std::vector<double>& trace : eye.noisyTraces) {
+            [traces addObject:toNSArray(trace)];
+        }
+        _traces = [traces copy];
+        _heightV = eye.noisyOpening->heightV;
+        _widthUI = eye.noisyOpening->widthUI;
+        _lowestHeightV = eye.noise->lowest.heightV;
+        _highestHeightV = eye.noise->highest.heightV;
+        _lowestWidthUI = eye.noise->lowest.widthUI;
+        _highestWidthUI = eye.noise->highest.widthUI;
+        _drawCount = static_cast<NSInteger>(eye.noise->drawCount);
+        _replicateCount = static_cast<NSInteger>(eye.noise->replicateCount);
+        _aggressorCount = aggressorCount;
+        _convergenceDraws = toNSArray(eye.noise->convergenceDraws);
+        _convergenceHeightV = toNSArray(eye.noise->convergenceHeightV);
+        _convergenceHeightLowestV = toNSArray(eye.noise->convergenceHeightLowestV);
+        _convergenceHeightHighestV = toNSArray(eye.noise->convergenceHeightHighestV);
+    }
+    return self;
+}
+@end
+
 @implementation EMSResultsEyeDiagram
 - (instancetype)initWithName:(NSString*)name
-                  bitRateGbps:(double)bitRateGbps
                  differential:(BOOL)differential
-                       timeUI:(NSArray<NSNumber*>*)timeUI
-                        traces:(NSArray<NSArray<NSNumber*>*>*)traces {
+                          eye:(const kiems::EyeDiagramData&)eye
+               aggressorCount:(NSInteger)aggressorCount {
     self = [super init];
     if (self) {
         _name = [name copy];
-        _bitRateGbps = bitRateGbps;
+        _bitRateGbps = eye.bitRate * 1e-9;
         _differential = differential;
-        _timeUI = [timeUI copy];
+        _timeUI = toNSArray(eye.timeUI);
+        NSMutableArray<NSArray<NSNumber*>*>* traces = [NSMutableArray arrayWithCapacity:eye.traces.size()];
+        for (const std::vector<double>& trace : eye.traces) {
+            [traces addObject:toNSArray(trace)];
+        }
         _traces = [traces copy];
+        _heightV = eye.opening.heightV;
+        _widthUI = eye.opening.widthUI;
+        if (eye.noise.has_value() && eye.noisyOpening.has_value()) {
+            _noise = [[EMSResultsEyeNoise alloc] initWithEye:eye aggressorCount:aggressorCount];
+        }
     }
     return self;
 }
@@ -309,7 +345,8 @@ private:
 @end
 
 EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const SimulationConfig& simConfig,
-                                       const Frequency& frequency) {
+                                       const Frequency& frequency,
+                                       const std::map<std::int32_t, double>& runDurations) {
     const auto portCount = static_cast<std::int32_t>(simConfig.ports().size());
 
     NSArray<NSNumber*>* freqsGHz = toNSArray(postprocessor.frequencies(), 1e-9);
@@ -569,23 +606,60 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
     const double eyeBitRate = simConfig.eyeBitRate() > 0 ? simConfig.eyeBitRate() : frequency.stop();
     std::set<std::int32_t> differentialPorts;
 
-    const auto appendEye = [&](NSString* name, bool differential,
-                               const std::vector<std::complex<double>>& transfer) {
-        const auto eye = kiems::computeEyeDiagram(postprocessor.frequencies(), transfer, eyeBitRate);
+    kiems::EyeNoiseOptions noiseOptions;
+    noiseOptions.drawCount = simConfig.eyeDrawCount();
+    noiseOptions.sharedClock = simConfig.adversarialSharedClock();
+
+    // `inputs` are the eye's own driven ports, never treated as aggressors on it. The received
+    // quantity is the voltage at `positiveOutput`, minus `negativeOutput`'s for a differential eye,
+    // so an aggressor's transfer to it is S(positiveOutput, a) - S(negativeOutput, a).
+    const auto appendEye = [&](NSString* name, bool differential, const std::vector<std::complex<double>>& transfer,
+                               const std::set<std::int32_t>& inputs, std::int32_t positiveOutput,
+                               std::optional<std::int32_t> negativeOutput) {
+        std::vector<kiems::EyeAggressor> aggressors;
+        for (const ExcitationConfig& excitation : simConfig.excitations()) {
+            if (excitation.isMain() || !excitation.drivenPortIndex().has_value() ||
+                inputs.contains(*excitation.drivenPortIndex()) || !excitation.frequency().has_value() ||
+                !excitation.amplitude().has_value()) {
+                continue;
+            }
+            const std::int32_t port = *excitation.drivenPortIndex();
+            auto aggressorTransfer = postprocessor.getSParam(positiveOutput, port);
+            if (!aggressorTransfer.has_value() || aggressorTransfer->size() != postprocessor.frequencies().size()) {
+                continue;
+            }
+            if (negativeOutput.has_value()) {
+                const auto negative = postprocessor.getSParam(*negativeOutput, port);
+                if (!negative.has_value() || negative->size() != aggressorTransfer->size()) {
+                    continue;
+                }
+                for (std::size_t f = 0; f < aggressorTransfer->size(); ++f) {
+                    (*aggressorTransfer)[f] -= (*negative)[f];
+                }
+            }
+            kiems::EyeAggressor aggressor;
+            aggressor.transferFunction = std::move(*aggressorTransfer);
+            aggressor.frequencyHz = *excitation.frequency();
+            aggressor.amplitude = *excitation.amplitude();
+            aggressor.phaseDegrees = excitation.phaseDegrees();
+            aggressor.startTime = excitation.startTime();
+            aggressor.continuous = excitation.durationMode() == kiems::ExcitationDurationMode::Continuous;
+            aggressor.duration = excitation.duration();
+            aggressor.ringDown = std::max(0.0, kiems::excitationRecordEnd(excitation, simConfig, runDurations,
+                                                                          frequency) -
+                                                   (excitation.startTime() + excitation.duration()));
+            aggressors.push_back(std::move(aggressor));
+        }
+
+        const auto eye = kiems::computeEyeDiagram(postprocessor.frequencies(), transfer, eyeBitRate, aggressors,
+                                                  noiseOptions);
         if (!eye.has_value()) {
             return;
         }
-        NSMutableArray<NSArray<NSNumber*>*>* eyeTraces =
-            [NSMutableArray arrayWithCapacity:eye->traces.size()];
-        for (const std::vector<double>& trace : eye->traces) {
-            [eyeTraces addObject:toNSArray(trace)];
-        }
-        [eyeDiagrams addObject:[[EMSResultsEyeDiagram alloc]
-            initWithName:name
-             bitRateGbps:eye->bitRate * 1e-9
-            differential:differential ? YES : NO
-                  timeUI:toNSArray(eye->timeUI)
-                   traces:eyeTraces]];
+        [eyeDiagrams addObject:[[EMSResultsEyeDiagram alloc] initWithName:name
+                                                             differential:differential ? YES : NO
+                                                                      eye:*eye
+                                                           aggressorCount:static_cast<NSInteger>(aggressors.size())]];
     };
 
     // Mixed-mode first. All four constituent ports are suppressed from the single-ended loop
@@ -622,7 +696,7 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
         }
         const std::string displayName = pair.displayName();
         NSString* name = @(displayName.c_str());
-        appendEye(name, true, hdd);
+        appendEye(name, true, hdd, {sp, sn}, ep, en);
     }
 
     std::set<std::int32_t> mainInputs;
@@ -647,7 +721,7 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
             }
             NSString* name = [NSString stringWithFormat:@"%@ — from %s", responseLabel(outputPort),
                                                        simConfig.ports()[static_cast<std::size_t>(input)].name().c_str()];
-            appendEye(name, false, *transfer);
+            appendEye(name, false, *transfer, {input}, output, std::nullopt);
         }
     }
 

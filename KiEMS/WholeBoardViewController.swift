@@ -61,6 +61,12 @@ final class WholeBoardViewController: NSViewController {
     private let phaseField = NSTextField(string: "")
     private let relativeAmplitudeField = NSTextField(string: "")
     private let frequencyField = NSTextField(string: "")
+    /// Adversarial only: Continuous (item 0) or Limited (item 1) -- see
+    /// EMSExcitationBridge.hasContinuousDuration. durationField below it is shown only for Limited.
+    private let durationModePopUp = NSPopUpButton()
+    private let durationField = NSTextField(string: "")
+    private let durationFormatter = UnitSuffixValueFormatter(
+        displaySuffix: "s", acceptedSuffixes: ["seconds", "second", "secs", "sec", "s"], autoSelectsSIPrefix: true)
     private let phaseFormatter = PhaseValueFormatter()
     private let frequencyFormatter = UnitSuffixValueFormatter(
         displaySuffix: "Hz", acceptedSuffixes: ["hertz", "hz"], autoSelectsSIPrefix: true)
@@ -69,6 +75,8 @@ final class WholeBoardViewController: NSViewController {
         displaySuffix: "Ω", acceptedSuffixes: ["ohms", "ohm", "Ω"])
     private let excitationControls = NSStackView()
     private var frequencyRow: NSStackView!
+    private var durationModeRow: NSStackView!
+    private var durationRow: NSStackView!
     private var pinImpedanceRow: NSStackView!
     private let probedCheckbox = NSButton(checkboxWithTitle: "Probed", target: nil, action: nil)
     private let absorbingCheckbox = NSButton(checkboxWithTitle: "Absorbing", target: nil, action: nil)
@@ -201,8 +209,9 @@ final class WholeBoardViewController: NSViewController {
         }
         phaseField.formatter = phaseFormatter
         frequencyField.formatter = frequencyFormatter
+        durationField.formatter = durationFormatter
         relativeAmplitudeField.formatter = Self.numberFormatter
-        for field in [phaseField, relativeAmplitudeField, frequencyField] {
+        for field in [phaseField, relativeAmplitudeField, frequencyField, durationField] {
             field.controlSize = .small
             field.font = Self.formFont
             field.alignment = .right
@@ -223,6 +232,14 @@ final class WholeBoardViewController: NSViewController {
         excitationTypePopUp.target = self
         excitationTypePopUp.action = #selector(excitationTypeChanged)
         frequencyRow = excitationValueRow(title: "Frequency:", field: frequencyField)
+        durationModePopUp.addItems(withTitles: ["Continuous", "Limited"])
+        durationModePopUp.controlSize = .small
+        durationModePopUp.font = Self.formFont
+        durationModePopUp.target = self
+        durationModePopUp.action = #selector(durationModeChanged)
+        durationModeRow = excitationValueRow(title: "Duration:", field: durationModePopUp)
+        // No label of its own: it sits directly beneath, and belongs to, the Duration popup.
+        durationRow = excitationValueRow(title: "", field: durationField)
         let phaseRow = excitationValueRow(title: "Phase:", field: phaseField)
         let relativeAmplitudeRow = excitationValueRow(title: "Relative Amplitude:", field: relativeAmplitudeField)
         configureControlStack(excitationControls, views: [
@@ -230,6 +247,8 @@ final class WholeBoardViewController: NSViewController {
             phaseRow,
             relativeAmplitudeRow,
             frequencyRow,
+            durationModeRow,
+            durationRow,
         ])
         // Everything beneath Excited is a subordinate part of that choice. The 16pt inset makes
         // that hierarchy visible while leaving enough room for the same 92pt-label/90pt-field
@@ -341,6 +360,7 @@ final class WholeBoardViewController: NSViewController {
             phaseRow.widthAnchor.constraint(equalTo: infoStack.widthAnchor, constant: -16),
             relativeAmplitudeRow.widthAnchor.constraint(equalTo: infoStack.widthAnchor, constant: -16),
             frequencyRow.widthAnchor.constraint(equalTo: infoStack.widthAnchor, constant: -16),
+            durationRow.widthAnchor.constraint(equalTo: infoStack.widthAnchor, constant: -16),
             pinImpedanceRow.widthAnchor.constraint(equalTo: infoStack.widthAnchor),
 
             // Below infoStack's own bottom, not infoPanel's top directly -- infoStack's "Info"/
@@ -398,6 +418,19 @@ final class WholeBoardViewController: NSViewController {
         row.distribution = .fill
         row.spacing = 6
         return row
+    }
+
+    private func populateExcitationControls(from excitation: EMSExcitationBridge) {
+        excitationTypePopUp.isEnabled = true
+        excitationTypePopUp.selectItem(at: excitation.isMain ? 0 : 1)
+        phaseField.doubleValue = excitation.phaseDegrees
+        relativeAmplitudeField.objectValue = excitation.amplitude ?? NSNumber(value: 1)
+        frequencyField.objectValue = excitation.frequency ?? NSNumber(value: document?.config.frequencyStart ?? 0)
+        durationModePopUp.selectItem(at: excitation.hasContinuousDuration ? 0 : 1)
+        durationField.doubleValue = excitation.duration
+        frequencyRow.isHidden = excitation.isMain
+        durationModeRow.isHidden = excitation.isMain
+        durationRow.isHidden = excitation.isMain || excitation.hasContinuousDuration
     }
 
     private var selectedSimulation: EMSSimulationBridge? {
@@ -673,6 +706,7 @@ final class WholeBoardViewController: NSViewController {
     /// superposed by ExcitationPostprocessor.
     private func configureDifferentialComplement(_ partner: EMSExcitationBridge, from source: EMSExcitationBridge) {
         partner.isMain = source.isMain
+        partner.hasContinuousDuration = source.hasContinuousDuration
         partner.startTime = source.startTime
         partner.duration = source.duration
         partner.frequency = source.frequency
@@ -887,12 +921,7 @@ final class WholeBoardViewController: NSViewController {
                 excitedCheckbox.state = .on
                 absorbingCheckbox.state = .on
                 excitationControls.isHidden = false
-                excitationTypePopUp.isEnabled = true
-                excitationTypePopUp.selectItem(at: excitation.isMain ? 0 : 1)
-                phaseField.doubleValue = excitation.phaseDegrees
-                relativeAmplitudeField.objectValue = excitation.amplitude ?? NSNumber(value: 1)
-                frequencyField.objectValue = excitation.frequency ?? NSNumber(value: document?.config.frequencyStart ?? 0)
-                frequencyRow.isHidden = excitation.isMain
+                populateExcitationControls(from: excitation)
             }
 
         case let .pin(reference, number):
@@ -923,12 +952,7 @@ final class WholeBoardViewController: NSViewController {
                 // Probe/Absorbing entry.
                 absorbingCheckbox.state = .on
                 excitationControls.isHidden = false
-                excitationTypePopUp.isEnabled = true
-                excitationTypePopUp.selectItem(at: excitation.isMain ? 0 : 1)
-                phaseField.doubleValue = excitation.phaseDegrees
-                relativeAmplitudeField.objectValue = excitation.amplitude ?? NSNumber(value: 1)
-                frequencyField.objectValue = excitation.frequency ?? NSNumber(value: document?.config.frequencyStart ?? 0)
-                frequencyRow.isHidden = excitation.isMain
+                populateExcitationControls(from: excitation)
             }
             guard !netName.isEmpty, let entry = involvedNet(named: netName, in: simulation)
             else { return }
@@ -1467,8 +1491,10 @@ final class WholeBoardViewController: NSViewController {
         if case let .hullCutPort(identifier)? = selection?.kind,
            let simulation = selectedSimulation,
            let excitation = hullCutExcitation(identifier: identifier, in: simulation) {
+            let wasMain = excitation.isMain
             excitation.isMain = excitationTypePopUp.indexOfSelectedItem == 0
             if !excitation.isMain {
+                if wasMain { excitation.hasContinuousDuration = true }
                 if excitation.frequency == nil || excitation.frequency?.doubleValue == 0 {
                     excitation.frequency = NSNumber(value: document?.config.frequencyStart ?? 0)
                 }
@@ -1481,8 +1507,12 @@ final class WholeBoardViewController: NSViewController {
               let simulation = selectedSimulation,
               let excitation = excitation(reference: reference, pin: number, in: simulation)
         else { return }
+        let wasMain = excitation.isMain
         excitation.isMain = excitationTypePopUp.indexOfSelectedItem == 0
         if !excitation.isMain {
+            if wasMain {
+                excitation.hasContinuousDuration = true
+            }
             if excitation.frequency == nil || excitation.frequency?.doubleValue == 0 {
                 excitation.frequency = NSNumber(value: document?.config.frequencyStart ?? 0)
             }
@@ -1490,6 +1520,24 @@ final class WholeBoardViewController: NSViewController {
                 excitation.amplitude = NSNumber(value: 1)
             }
         }
+        synchronizeDifferentialExcitation(from: excitation, reference: reference, pin: number)
+        configurationChanged()
+    }
+
+    @objc private func durationModeChanged() {
+        let continuous = durationModePopUp.indexOfSelectedItem == 0
+        if case let .hullCutPort(identifier)? = selection?.kind,
+           let simulation = selectedSimulation,
+           let excitation = hullCutExcitation(identifier: identifier, in: simulation) {
+            excitation.hasContinuousDuration = continuous
+            configurationChanged()
+            return
+        }
+        guard case let .pin(reference, number)? = selection?.kind,
+              let simulation = selectedSimulation,
+              let excitation = excitation(reference: reference, pin: number, in: simulation)
+        else { return }
+        excitation.hasContinuousDuration = continuous
         synchronizeDifferentialExcitation(from: excitation, reference: reference, pin: number)
         configurationChanged()
     }
@@ -1502,6 +1550,7 @@ final class WholeBoardViewController: NSViewController {
             case phaseField: excitation.phaseDegrees = sender.doubleValue
             case relativeAmplitudeField: excitation.amplitude = NSNumber(value: sender.doubleValue)
             case frequencyField: excitation.frequency = NSNumber(value: sender.doubleValue)
+            case durationField: excitation.duration = sender.doubleValue
             default: return
             }
             configurationChanged()
@@ -1518,6 +1567,8 @@ final class WholeBoardViewController: NSViewController {
             excitation.amplitude = NSNumber(value: sender.doubleValue)
         case frequencyField:
             excitation.frequency = NSNumber(value: sender.doubleValue)
+        case durationField:
+            excitation.duration = sender.doubleValue
         default:
             return
         }

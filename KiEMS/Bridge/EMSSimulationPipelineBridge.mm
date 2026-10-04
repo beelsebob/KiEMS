@@ -18,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "kiems/excitation_postprocess.hpp"
 #include "kiems/config.hpp"
 #include "kiems/constants.hpp"
 #include "kiems/importer.hpp"
@@ -965,14 +966,22 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
         return nil;
     }
     if (!_resultsPreviewCache) {
-        _resultsPreviewCache = buildResultsPreview(*_postprocessor, *_simConfig, _scaledConfig->frequency());
+        // Read once per preview build, not per eye: each is one small probe file per excited port.
+        const std::map<std::int32_t, double> runDurations =
+            _paths.has_value() ? kiems::ExcitationPostprocessor::loadRunDurations(
+                                     _paths->simulationDir / _simulationName, *_simConfig)
+                               : std::map<std::int32_t, double>{};
+        _resultsPreviewCache =
+            buildResultsPreview(*_postprocessor, *_simConfig, _scaledConfig->frequency(), runDurations);
     }
     return _resultsPreviewCache;
 }
 
-- (void)updateEyeBitRate:(double)bitRate {
+- (void)updateEyeBitRate:(double)bitRate drawCount:(NSInteger)drawCount sharedClock:(BOOL)sharedClock {
     if (_simConfig != nullptr) {
         _simConfig->setEyeBitRate(bitRate);
+        _simConfig->setEyeDrawCount(static_cast<std::size_t>(std::max<NSInteger>(drawCount, 1)));
+        _simConfig->setAdversarialSharedClock(sharedClock);
     }
     _resultsPreviewCache = nil;
 }

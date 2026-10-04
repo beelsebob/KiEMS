@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <numbers>
+#include <optional>
+#include <sstream>
 
 #include <matplot/matplot.h>
 
@@ -37,9 +40,87 @@ void _saveFigure(const matplot::figure_handle& fig, const std::filesystem::path&
 
 } // namespace
 
+double primaryRunDuration(const SimulationConfig& simConfig, const std::map<std::int32_t, double>& runDurations) {
+    double longest = 0;
+    for (const auto& excitation : simConfig.excitations()) {
+        if (!excitation.isMain() || !excitation.drivenPortIndex().has_value()) {
+            continue;
+        }
+        if (const auto it = runDurations.find(*excitation.drivenPortIndex()); it != runDurations.end()) {
+            longest = std::max(longest, it->second);
+        }
+    }
+    return longest;
+}
+
+double excitationRecordEnd(const ExcitationConfig& excitation, const SimulationConfig& simConfig,
+                           const std::map<std::int32_t, double>& runDurations, const Frequency& frequency) {
+    const double primary = primaryRunDuration(simConfig, runDurations);
+    // Margin past a configured end when no FDTD run length is known, to see its decay/response.
+    const double configuredEnd = 1.2 * (excitation.startTime() + excitation.duration());
+    if (excitation.isMain() || excitation.durationMode() == ExcitationDurationMode::Continuous) {
+        return primary > 0 ? primary : configuredEnd;
+    }
+    // Limited: the tone's end plus however long this port's own FDTD run took to decay once its
+    // own (Gaussian) excitation stopped -- the same structure ringing down from the same port --
+    // capped at the primary run's length.
+    const auto run = excitation.drivenPortIndex().has_value() ? runDurations.find(*excitation.drivenPortIndex())
+                                                               : runDurations.end();
+    if (run == runDurations.end()) {
+        return primary > 0 ? std::min(primary, configuredEnd) : configuredEnd;
+    }
+    const double fc = (frequency.stop() - frequency.start()) / 2.0;
+    const double pulseLength = fc > 0 ? 9.0 / (std::numbers::pi * fc) : 0.0; // CalcGaussianPulsExcitation's
+    const double decay = std::max(0.0, run->second - pulseLength);
+    const double end = excitation.startTime() + excitation.duration() + decay;
+    return primary > 0 ? std::min(primary, end) : end;
+}
+
 ExcitationPostprocessor::ExcitationPostprocessor(const SimulationConfig& simConfig, const Postprocessor& sParams,
-                                                   std::vector<double> frequencies, const Frequency& frequency)
-    : _simConfig(simConfig), _sParams(sParams), _frequencies(std::move(frequencies)), _frequency(frequency) {}
+                                                   std::vector<double> frequencies, const Frequency& frequency,
+                                                   std::map<std::int32_t, double> runDurations)
+    : _simConfig(simConfig),
+      _sParams(sParams),
+      _frequencies(std::move(frequencies)),
+      _frequency(frequency),
+      _runDurations(std::move(runDurations)) {}
+
+std::map<std::int32_t, double> ExcitationPostprocessor::loadRunDurations(const std::filesystem::path& simulationDir,
+                                                                          const SimulationConfig& simConfig) {
+    std::map<std::int32_t, double> durations;
+    for (std::size_t index = 0; index < simConfig.ports().size(); ++index) {
+        if (!simConfig.ports()[index].excite()) {
+            continue;
+        }
+        const std::filesystem::path runDir = simulationDir / std::to_string(index);
+        std::error_code error;
+        for (const auto& entry : std::filesystem::directory_iterator(runDir, error)) {
+            // Every port's voltage probe ("<prefix>port_ut_<n>[suffix]", see Port::_label) spans the
+            // whole run, so any one of them gives its length.
+            if (!entry.is_regular_file() || entry.path().filename().string().find("port_ut_") == std::string::npos) {
+                continue;
+            }
+            std::ifstream file(entry.path());
+            std::string line;
+            std::optional<double> lastTime;
+            while (std::getline(file, line)) {
+                if (line.empty() || line[0] == '%') {
+                    continue;
+                }
+                std::istringstream iss(line);
+                double t = 0;
+                if (iss >> t) {
+                    lastTime = t;
+                }
+            }
+            if (lastTime.has_value()) {
+                durations[static_cast<std::int32_t>(index)] = *lastTime;
+                break;
+            }
+        }
+    }
+    return durations;
+}
 
 double ExcitationPostprocessor::_pickDt() const {
     // 8x oversampling above the highest analysis frequency -- comfortably past Nyquist, giving
@@ -48,22 +129,17 @@ double ExcitationPostprocessor::_pickDt() const {
     return stopFreq > 0 ? 1.0 / (8.0 * stopFreq) : 1e-12;
 }
 
-std::size_t ExcitationPostprocessor::_pickSampleCount(double dt) const {
-    double latestEnd = 0;
-    for (const auto& excitation : _simConfig.excitations()) {
-        latestEnd = std::max(latestEnd, excitation.startTime() + excitation.duration());
-    }
-    latestEnd *= 1.2; // margin past the last excitation's own end, to see its full decay/response
-    return static_cast<std::size_t>(std::ceil(latestEnd / dt)) + 1;
-}
-
 void ExcitationPostprocessor::run() {
     if (_simConfig.excitations().empty()) {
         return;
     }
 
     _dt = _pickDt();
-    const std::size_t sampleCount = _pickSampleCount(_dt);
+    double latestEnd = 0;
+    for (const auto& excitation : _simConfig.excitations()) {
+        latestEnd = std::max(latestEnd, excitationRecordEnd(excitation, _simConfig, _runDurations, _frequency));
+    }
+    const std::size_t sampleCount = static_cast<std::size_t>(std::ceil(latestEnd / _dt)) + 1;
     const std::size_t portCount = _simConfig.ports().size();
     _responses.assign(portCount, TimeWaveform{_dt, std::vector<double>(sampleCount, 0.0)});
 
@@ -85,6 +161,9 @@ void ExcitationPostprocessor::run() {
                     ? synthesizeMainStimulus(_frequency, excitation.startTime(), excitation.duration(),
                                               excitation.phaseDegrees(), _dt, sampleCount,
                                               excitation.amplitude().value_or(1.0))
+                : excitation.durationMode() == ExcitationDurationMode::Continuous
+                    ? synthesizeContinuousTone(*excitation.frequency(), *excitation.amplitude(),
+                                                excitation.phaseDegrees(), excitation.startTime(), _dt, sampleCount)
                     : synthesizeToneBurst(*excitation.frequency(), *excitation.amplitude(), excitation.phaseDegrees(),
                                            excitation.startTime(), excitation.duration(), _dt, sampleCount);
 
@@ -100,7 +179,12 @@ void ExcitationPostprocessor::run() {
                 productSpectrum[k] = stimulusSpectrum[k] * (*transferFn)[k];
             }
 
-            contributions.push_back(inverseTransform(_frequencies, productSpectrum, _dt, sampleCount));
+            TimeWaveform contribution = inverseTransform(_frequencies, productSpectrum, _dt, sampleCount);
+            const auto recordedSamples =
+                std::min(sampleCount, static_cast<std::size_t>(std::ceil(excitationRecordEnd(excitation, _simConfig, _runDurations, _frequency) / _dt)) + 1);
+            std::fill(contribution.samples.begin() + static_cast<std::ptrdiff_t>(recordedSamples),
+                      contribution.samples.end(), 0.0);
+            contributions.push_back(std::move(contribution));
         }
 
         if (!contributions.empty()) {

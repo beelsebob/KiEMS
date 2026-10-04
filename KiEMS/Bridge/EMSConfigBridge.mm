@@ -6,6 +6,7 @@
 
 using kiems::EMSConfig;
 using kiems::ExcitationConfig;
+using kiems::ExcitationDurationMode;
 using kiems::GroundSelectorKind;
 using kiems::HullCutPortConfig;
 using kiems::InvolvedNetConfig;
@@ -373,6 +374,13 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
     self.cxxExcitation.setIsMain(value);
 }
 
+- (BOOL)hasContinuousDuration {
+    return self.cxxExcitation.durationMode() == ExcitationDurationMode::Continuous;
+}
+- (void)setHasContinuousDuration:(BOOL)value {
+    self.cxxExcitation.setDurationMode(value ? ExcitationDurationMode::Continuous : ExcitationDurationMode::Limited);
+}
+
 - (double)startTime {
     return self.cxxExcitation.startTime();
 }
@@ -495,6 +503,20 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
 }
 - (void)setEyeBitRate:(double)value {
     self.cxxSim.setEyeBitRate(value);
+}
+
+- (NSInteger)eyeDrawCount {
+    return static_cast<NSInteger>(self.cxxSim.eyeDrawCount());
+}
+- (void)setEyeDrawCount:(NSInteger)value {
+    self.cxxSim.setEyeDrawCount(static_cast<std::size_t>(std::max<NSInteger>(value, 1)));
+}
+
+- (BOOL)adversarialSharedClock {
+    return self.cxxSim.adversarialSharedClock() ? YES : NO;
+}
+- (void)setAdversarialSharedClock:(BOOL)value {
+    self.cxxSim.setAdversarialSharedClock(value);
 }
 
 - (BOOL)isDifferentialPair {

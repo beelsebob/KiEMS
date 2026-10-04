@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <vector>
 
 #include "config.hpp"
@@ -15,10 +16,31 @@
 
 namespace kiems {
 
+/// The longest main excitation's own FDTD run (seconds) among `runDurations` (see
+/// ExcitationPostprocessor::loadRunDurations()); 0 if none is known.
+double primaryRunDuration(const SimulationConfig& simConfig, const std::map<std::int32_t, double>& runDurations);
+
+/// When an excitation's response stops being recorded, on the excitations' shared timeline. A main
+/// or Continuous excitation lasts the primary run. A Limited one lasts its tone plus however long
+/// its own port's FDTD run took to ring down after its Gaussian pulse, capped at the primary run.
+/// Without run lengths, falls back to 1.2x its configured startTime()+duration().
+double excitationRecordEnd(const ExcitationConfig& excitation, const SimulationConfig& simConfig,
+                           const std::map<std::int32_t, double>& runDurations, const Frequency& frequency);
+
 class ExcitationPostprocessor {
 public:
+    /// `runDurations` is each excited port's own FDTD run length in seconds (see
+    /// loadRunDurations()) -- what sizes non-main excitations' tones and record windows. A port
+    /// missing from it falls back to the excitation's own configured startTime()+duration().
     ExcitationPostprocessor(const SimulationConfig& simConfig, const Postprocessor& sParams,
-                             std::vector<double> frequencies, const Frequency& frequency);
+                             std::vector<double> frequencies, const Frequency& frequency,
+                             std::map<std::int32_t, double> runDurations = {});
+
+    /// Reads each excited port's FDTD run length (its last recorded probe sample's time) back from
+    /// `simulationDir`/<port index>/, where Simulation::getPortParameters() also reads them. Ports
+    /// with no readable probe file are simply absent.
+    static std::map<std::int32_t, double> loadRunDurations(const std::filesystem::path& simulationDir,
+                                                            const SimulationConfig& simConfig);
 
     /// Synthesizes+propagates+superposes every excitation's contribution to every port in
     /// simConfig.ports(). No-op if the simulation has no excitations configured.
@@ -35,12 +57,12 @@ public:
 
 private:
     double _pickDt() const;
-    std::size_t _pickSampleCount(double dt) const;
 
     const SimulationConfig& _simConfig;
     const Postprocessor& _sParams;
     std::vector<double> _frequencies;
     const Frequency& _frequency;
+    std::map<std::int32_t, double> _runDurations;
     double _dt = 0;
     std::vector<TimeWaveform> _responses; // indexed like _simConfig.ports(); empty until run()
 };

@@ -157,6 +157,9 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 @property (nonatomic, copy, nullable) NSString *hullCutPortID;
 
 @property (nonatomic) BOOL isMain;
+/// Only meaningful while !isMain: YES runs the tone for the longest main excitation's whole FDTD
+/// run; NO (Limited) runs it for `duration`. See kiems::ExcitationDurationMode.
+@property (nonatomic) BOOL hasContinuousDuration;
 @property (nonatomic) double startTime;
 @property (nonatomic) double duration;
 @property (nonatomic) double phaseDegrees;
@@ -198,6 +201,10 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 /// Serial data rate used for eye-diagram synthesis. Existing configurations without an explicit
 /// value read as the document's frequency stop; assigning it persists a per-simulation override.
 @property (nonatomic) double eyeBitRate;
+/// Transmission times the eye samples adversarial noise at. See kiems::EyeNoiseOptions::drawCount.
+@property (nonatomic) NSInteger eyeDrawCount;
+/// Whether the adversarial sources share a clock. See kiems::EyeNoiseOptions::sharedClock.
+@property (nonatomic) BOOL adversarialSharedClock;
 
 /// Whether this simulation is fundamentally about a differential pair -- see
 /// kiems::SimulationConfig::isDifferentialPair()'s own doc comment for exactly what toggling this

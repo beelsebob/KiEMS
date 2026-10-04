@@ -666,6 +666,15 @@ private:
 void to_json(nlohmann::json& j, const GroundNetConfig& p);
 void from_json(const nlohmann::json& j, GroundNetConfig& p);
 
+/// How long a non-main (adversarial) excitation's tone runs. Continuous runs it for as long as the
+/// longest main excitation's own FDTD run; Limited runs it for ExcitationConfig::duration() and
+/// then records only until it has decayed (or that same main-run limit, whichever is sooner). See
+/// ExcitationPostprocessor::run().
+enum class ExcitationDurationMode {
+    Continuous,
+    Limited,
+};
+
 /// One entry in a SimulationConfig's excitations list. It identifies either an ordinary pad by
 /// footprint/pin or an authored hull-cut port by id. The resolved port index is derived for the
 /// FDTD run and is never persisted.
@@ -674,6 +683,8 @@ public:
     double startTime() const { return _startTime; }
     double duration() const { return _duration; }
     bool isMain() const { return _isMain; }
+    /// Only meaningful for a non-main excitation; duration() is its length iff Limited.
+    ExcitationDurationMode durationMode() const { return _durationMode; }
     const std::optional<double>& frequency() const { return _frequency; } // required iff !isMain()
     const std::optional<double>& amplitude() const { return _amplitude; } // required iff !isMain()
     double phaseDegrees() const { return _phaseDegrees; }
@@ -688,6 +699,7 @@ public:
     void setStartTime(double value) { _startTime = value; }
     void setDuration(double value) { _duration = value; }
     void setIsMain(bool value) { _isMain = value; }
+    void setDurationMode(ExcitationDurationMode value) { _durationMode = value; }
     void setFrequency(std::optional<double> value) { _frequency = value; }
     void setAmplitude(std::optional<double> value) { _amplitude = value; }
     void setPhaseDegrees(double value) { _phaseDegrees = value; }
@@ -702,6 +714,8 @@ private:
     double _startTime = 0;
     double _duration = 0;
     bool _isMain = false;
+    // Limited by default so documents written before this setting existed keep their duration.
+    ExcitationDurationMode _durationMode = ExcitationDurationMode::Limited;
     std::optional<double> _frequency;
     std::optional<double> _amplitude;
     double _phaseDegrees = 0;
@@ -1120,6 +1134,15 @@ public:
     double eyeBitRate() const { return _eyeBitRate; }
     void setEyeBitRate(double value) { _eyeBitRate = value; }
 
+    /// How many transmission times the eye samples adversarial noise at (see
+    /// EyeNoiseOptions::drawCount). Only affects eyes with adversarial excitations.
+    std::size_t eyeDrawCount() const { return _eyeDrawCount; }
+    void setEyeDrawCount(std::size_t value) { _eyeDrawCount = value; }
+
+    /// Whether the adversarial sources share a clock (see EyeNoiseOptions::sharedClock).
+    bool adversarialSharedClock() const { return _adversarialSharedClock; }
+    void setAdversarialSharedClock(bool value) { _adversarialSharedClock = value; }
+
     /// Whether this simulation is fundamentally about a differential pair -- gates
     /// resolveSimulationPorts()'s own reciprocal-net-pair auto-detection (which populates
     /// diffPairs() from involvedNets() entries carrying a differentialPairPartner/
@@ -1189,6 +1212,8 @@ private:
     double _viaEdgeDistance = 1500;
     double _viaSpacing = 1500;
     double _eyeBitRate = 0;
+    std::size_t _eyeDrawCount = 64;
+    bool _adversarialSharedClock = false;
     bool _isDifferentialPair = false;
     std::vector<std::string> _edgeTerminatedNets;
     std::vector<ExcitationConfig> _excitations;

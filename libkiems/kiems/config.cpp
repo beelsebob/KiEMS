@@ -324,6 +324,9 @@ void to_json(nlohmann::json& j, const ExcitationConfig& p) {
     if (p._amplitude.has_value()) {
         j["amplitude"] = *p._amplitude;
     }
+    if (!p._isMain) {
+        j["duration_mode"] = p._durationMode == ExcitationDurationMode::Continuous ? "continuous" : "limited";
+    }
 }
 
 void from_json(const nlohmann::json& j, ExcitationConfig& p) {
@@ -338,6 +341,14 @@ void from_json(const nlohmann::json& j, ExcitationConfig& p) {
         p._duration = def._duration;
     }
     p._phaseDegrees = j.value("phase", def._phaseDegrees);
+    const std::string durationMode = j.value("duration_mode", std::string("limited"));
+    if (durationMode == "continuous") {
+        p._durationMode = ExcitationDurationMode::Continuous;
+    } else if (durationMode == "limited") {
+        p._durationMode = ExcitationDurationMode::Limited;
+    } else {
+        throw std::runtime_error("Unknown excitation duration_mode \"" + durationMode + "\"");
+    }
     if (j.contains("hull_cut_port")) {
         p._hullCutPortID = j.at("hull_cut_port").get<std::string>();
         p._footprint.clear();
@@ -644,6 +655,14 @@ void to_json(nlohmann::json& j, const SimulationConfig& p) {
     if (p._eyeBitRate > 0) {
         j["eye_bit_rate"] = p._eyeBitRate;
     }
+    // Written only when changed, so existing documents' saved text (and pipeline caches keyed on
+    // it) stay as they were.
+    if (p._eyeDrawCount != SimulationConfig()._eyeDrawCount) {
+        j["eye_draw_count"] = p._eyeDrawCount;
+    }
+    if (p._adversarialSharedClock) {
+        j["adversarial_shared_clock"] = true;
+    }
     if (p._isDifferentialPair) {
         j["is_differential_pair"] = true;
     }
@@ -677,6 +696,8 @@ void from_json(const nlohmann::json& j, SimulationConfig& p) {
     p._viaEdgeDistance = j.value("via_edge_distance", def._viaEdgeDistance);
     p._viaSpacing = j.value("via_spacing", def._viaSpacing);
     p._eyeBitRate = j.value("eye_bit_rate", def._eyeBitRate);
+    p._eyeDrawCount = j.value("eye_draw_count", def._eyeDrawCount);
+    p._adversarialSharedClock = j.value("adversarial_shared_clock", def._adversarialSharedClock);
     p._isDifferentialPair = j.value("is_differential_pair", def._isDifferentialPair);
     p._edgeTerminatedNets = j.value("edge_terminated_nets", std::vector<std::string>{});
     p._excitations = j.value("excitations", std::vector<ExcitationConfig>{});

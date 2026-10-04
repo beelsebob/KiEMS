@@ -4,6 +4,8 @@
 #include <array>
 #include <cmath>
 #include <complex>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <optional>
 #include <string>
@@ -17,6 +19,7 @@
 #include "kiems/board_slicing.hpp"
 #include "kiems/component_value.hpp"
 #include "kiems/config.hpp"
+#include "kiems/excitation_postprocess.hpp"
 #include "kiems/eye_diagram.hpp"
 #include "kiems/fft_postprocess.hpp"
 #include "kiems/grid_gen.hpp"
@@ -650,6 +653,105 @@ double triangulateLastCallArea(const std::vector<TriangulateCall>& sequence) {
     XCTAssertTrue(json.get<kiems::NetName>().raw() == escaped.raw());
 }
 
+- (void)testExcitationDurationModeRoundTripsAndDefaultsToLimited {
+    kiems::ExcitationConfig excitation;
+    excitation.setFootprint("U1");
+    excitation.setPin("1");
+    excitation.setFrequency(1e9);
+    excitation.setAmplitude(1.0);
+    excitation.setDurationMode(kiems::ExcitationDurationMode::Continuous);
+    nlohmann::json json = excitation;
+    XCTAssertTrue(json.at("duration_mode") == "continuous");
+    XCTAssertTrue(json.get<kiems::ExcitationConfig>().durationMode() == kiems::ExcitationDurationMode::Continuous);
+
+    // Documents written before duration_mode existed keep their configured (Limited) duration.
+    json.erase("duration_mode");
+    XCTAssertTrue(json.get<kiems::ExcitationConfig>().durationMode() == kiems::ExcitationDurationMode::Limited);
+}
+
+- (void)testAdversarialRecordWindowFollowsPrimaryRunAndDecay {
+    kiems::Frequency frequency;
+    frequency.setStart(1e9);
+    frequency.setStop(3e9); // fc = 1GHz, so the FDTD Gaussian pulse lasts 9/(pi*1GHz) ~= 2.86ns
+    const double pulseLength = 9.0 / (M_PI * 1e9);
+    std::vector<double> frequencies;
+    for (int i = 0; i <= 200; ++i) {
+        frequencies.push_back(1e9 + 2e9 * i / 200.0);
+    }
+
+    kiems::SimulationConfig sim;
+    for (int i = 0; i < 3; ++i) {
+        kiems::PortConfig port;
+        port.setExcite(i < 2);
+        port.setAbsorbSignal(true);
+        sim.ports().push_back(port);
+    }
+    kiems::ExcitationConfig primary;
+    primary.setIsMain(true);
+    primary.setDuration(5e-9);
+    primary.setDrivenPortIndex(0);
+    kiems::ExcitationConfig adversarial;
+    adversarial.setFrequency(2e9);
+    adversarial.setAmplitude(1.0);
+    adversarial.setDuration(4e-9);
+    adversarial.setDrivenPortIndex(1);
+    sim.excitations() = {primary, adversarial};
+
+    kiems::Postprocessor sParams(frequencies, sim);
+    for (int out = 0; out < 3; ++out) {
+        for (int in = 0; in < 2; ++in) {
+            sParams.setSParam(out, in, std::vector<std::complex<double>>(frequencies.size(), out == 2 && in == 1 ? 1.0 : 0.0));
+        }
+    }
+    // The primary port's run lasted 20ns; the adversarial port's rang down for 3ns after its pulse.
+    const std::map<std::int32_t, double> runs = {{0, 20e-9}, {1, pulseLength + 3e-9}};
+    const auto peakBetween = [](const kiems::TimeWaveform& wave, double from, double to) {
+        double peak = 0;
+        for (std::size_t n = 0; n < wave.samples.size(); ++n) {
+            const double t = static_cast<double>(n) * wave.dt;
+            if (t >= from && t <= to) peak = std::max(peak, std::abs(wave.samples[n]));
+        }
+        return peak;
+    };
+
+    {
+        sim.excitations()[1].setDurationMode(kiems::ExcitationDurationMode::Limited);
+        kiems::ExcitationPostprocessor post(sim, sParams, frequencies, frequency, runs);
+        post.run();
+        const kiems::TimeWaveform& response = post.responseFor(2);
+        // Recorded for the whole primary run, but the Limited tone's contribution stops at 4+3ns.
+        XCTAssertGreaterThanOrEqual(static_cast<double>(response.samples.size() - 1) * response.dt, 20e-9 - response.dt);
+        XCTAssertGreaterThan(peakBetween(response, 1e-9, 3e-9), 0.1);
+        XCTAssertEqual(peakBetween(response, 7.1e-9, 20e-9), 0.0);
+    }
+    {
+        sim.excitations()[1].setDurationMode(kiems::ExcitationDurationMode::Continuous);
+        kiems::ExcitationPostprocessor post(sim, sParams, frequencies, frequency, runs);
+        post.run();
+        // A Continuous tone runs for the primary's whole 20ns run.
+        XCTAssertGreaterThan(peakBetween(post.responseFor(2), 15e-9, 19e-9), 0.5);
+    }
+}
+
+- (void)testRunDurationsAreReadFromEachExcitedPortsProbeFiles {
+    kiems::SimulationConfig sim;
+    sim.setName("sim");
+    for (int i = 0; i < 2; ++i) {
+        kiems::PortConfig port;
+        port.setExcite(i == 1);
+        sim.ports().push_back(port);
+    }
+    const std::filesystem::path dir =
+        std::filesystem::temp_directory_path() / ("kiems-run-durations-" + std::to_string(arc4random()));
+    std::filesystem::create_directories(dir / "1");
+    std::ofstream(dir / "1" / "port_ut_1") << "% time\tvalue\n0\t0\n1e-9\t0.5\n2.5e-9\t0.1\n";
+
+    const auto durations = kiems::ExcitationPostprocessor::loadRunDurations(dir, sim);
+    std::filesystem::remove_all(dir);
+    XCTAssertEqual(durations.size(), static_cast<std::size_t>(1));
+    XCTAssertEqualWithAccuracy(durations.at(1), 2.5e-9, 1e-21);
+}
+
 - (void)testWaveformSynthesis {
     const auto tone = kiems::synthesizeToneBurst(1e9, 2.0, 0.0, 1e-9, 4e-9, 0.25e-9, 32);
     XCTAssertEqual(tone.samples.size(), static_cast<std::size_t>(32));
@@ -751,6 +853,153 @@ double triangulateLastCallArea(const std::vector<TriangulateCall>& sequence) {
         innerOpening = std::max(innerOpening, 0.5 * (lowestOne - highestZero));
     }
     XCTAssertGreaterThan(innerOpening, 0.9);
+}
+
+// The delayed 1-10 GHz channel above, plus helpers for aggressors coupling flatly into it.
+static std::vector<double> eyeTestFrequencies() {
+    std::vector<double> frequencies(1001);
+    for (std::size_t index = 0; index < frequencies.size(); ++index) {
+        frequencies[index] = 1e9 + static_cast<double>(index) * 9e9 / static_cast<double>(frequencies.size() - 1);
+    }
+    return frequencies;
+}
+
+static std::vector<std::complex<double>> eyeTestChannel(const std::vector<double>& frequencies) {
+    std::vector<std::complex<double>> transfer(frequencies.size());
+    for (std::size_t index = 0; index < frequencies.size(); ++index) {
+        transfer[index] = std::polar(1.0, -2.0 * M_PI * frequencies[index] * 150e-12);
+    }
+    return transfer;
+}
+
+static kiems::EyeAggressor eyeTestTone(const std::vector<double>& frequencies, double frequencyHz, double amplitude,
+                                       double phaseDegrees = 0) {
+    kiems::EyeAggressor aggressor;
+    aggressor.transferFunction.assign(frequencies.size(), {1.0, 0.0});
+    aggressor.frequencyHz = frequencyHz;
+    aggressor.amplitude = amplitude;
+    aggressor.phaseDegrees = phaseDegrees;
+    return aggressor;
+}
+
+- (void)testEyeOpeningWithoutAggressorsHasNoNoise {
+    const auto frequencies = eyeTestFrequencies();
+    const auto eye = kiems::computeEyeDiagram(frequencies, eyeTestChannel(frequencies), 5e9);
+    XCTAssertTrue(eye.has_value());
+    if (!eye.has_value()) return;
+    XCTAssertGreaterThan(eye->opening.heightV, 1.8);
+    XCTAssertGreaterThan(eye->opening.widthUI, 0.8);
+    XCTAssertLessThanOrEqual(eye->opening.widthUI, 1.0);
+    XCTAssertFalse(eye->noise.has_value());
+    XCTAssertFalse(eye->noisyOpening.has_value());
+    XCTAssertTrue(eye->noisyTraces.empty());
+}
+
+- (void)testContinuousAggressorClosesEyeByTwiceItsAmplitude {
+    const auto frequencies = eyeTestFrequencies();
+    const auto channel = eyeTestChannel(frequencies);
+    const std::vector<kiems::EyeAggressor> aggressors = {eyeTestTone(frequencies, 1.37e9, 0.2)};
+    const auto eye = kiems::computeEyeDiagram(frequencies, channel, 5e9, aggressors);
+    const auto again = kiems::computeEyeDiagram(frequencies, channel, 5e9, aggressors);
+    XCTAssertTrue(eye.has_value() && eye->noise.has_value() && eye->noisyOpening.has_value());
+    if (!eye.has_value() || !eye->noise.has_value() || !eye->noisyOpening.has_value()) return;
+
+    // Over enough draws some "1" and some "0" each meet a tone peak against them: 2 x 0.2 closure.
+    const double closure = eye->opening.heightV - eye->noisyOpening->heightV;
+    XCTAssertGreaterThan(closure, 0.37);
+    XCTAssertLessThan(closure, 0.41);
+    XCTAssertLessThan(eye->noisyOpening->widthUI, eye->opening.widthUI);
+
+    // Seeded: the same inputs give the same eye.
+    XCTAssertTrue(again->noisyTraces == eye->noisyTraces);
+    XCTAssertEqual(again->noisyOpening->heightV, eye->noisyOpening->heightV);
+
+    const kiems::EyeNoiseStatistics& noise = *eye->noise;
+    XCTAssertEqual(noise.drawCount, static_cast<std::size_t>(64));
+    XCTAssertEqual(noise.replicateCount, static_cast<std::size_t>(8));
+    // The combined worst case is at least as bad as every replicate's own.
+    XCTAssertLessThanOrEqual(eye->noisyOpening->heightV, noise.lowest.heightV);
+    XCTAssertLessThanOrEqual(noise.lowest.heightV, noise.highest.heightV);
+    XCTAssertEqual(noise.convergenceDraws.back(), 64.0);
+    XCTAssertEqual(noise.convergenceHeightV.back(), eye->noisyOpening->heightV);
+    XCTAssertEqual(noise.convergenceHeightV.size(), noise.convergenceDraws.size());
+    XCTAssertEqual(noise.convergenceHeightLowestV.size(), noise.convergenceDraws.size());
+    XCTAssertEqual(noise.convergenceHeightHighestV.size(), noise.convergenceDraws.size());
+    XCTAssertFalse(eye->noisyTraces.empty());
+}
+
+- (void)testAggressorsAtOneFrequencyStayCoherent {
+    // Equal and opposite tones at one frequency (a differential aggressor's two legs coupling
+    // equally) must cancel: they share a phase draw rather than each getting their own.
+    const auto frequencies = eyeTestFrequencies();
+    const std::vector<kiems::EyeAggressor> aggressors = {eyeTestTone(frequencies, 1.37e9, 0.2, 0),
+                                                         eyeTestTone(frequencies, 1.37e9, 0.2, 180)};
+    const auto eye = kiems::computeEyeDiagram(frequencies, eyeTestChannel(frequencies), 5e9, aggressors);
+    XCTAssertTrue(eye.has_value() && eye->noisyOpening.has_value());
+    if (!eye.has_value() || !eye->noisyOpening.has_value()) return;
+    XCTAssertEqualWithAccuracy(eye->noisyOpening->heightV, eye->opening.heightV, 1e-6);
+}
+
+- (void)testSharedClockKeepsTonesFromAligningFreely {
+    // 1 GHz and 1.5 GHz tones locked to one clock can never peak together (their peaks would need
+    // 1 + 12k = 8m), so they close the eye less than free-running tones, which eventually do.
+    const auto frequencies = eyeTestFrequencies();
+    const auto channel = eyeTestChannel(frequencies);
+    const std::vector<kiems::EyeAggressor> aggressors = {eyeTestTone(frequencies, 1e9, 0.2),
+                                                         eyeTestTone(frequencies, 1.5e9, 0.2)};
+    kiems::EyeNoiseOptions freeRunning;
+    freeRunning.drawCount = 512;
+    kiems::EyeNoiseOptions shared = freeRunning;
+    shared.sharedClock = true;
+    const auto freeEye = kiems::computeEyeDiagram(frequencies, channel, 5e9, aggressors, freeRunning);
+    const auto sharedEye = kiems::computeEyeDiagram(frequencies, channel, 5e9, aggressors, shared);
+    XCTAssertTrue(freeEye.has_value() && freeEye->noisyOpening.has_value());
+    XCTAssertTrue(sharedEye.has_value() && sharedEye->noisyOpening.has_value());
+    if (!freeEye.has_value() || !sharedEye.has_value() || !freeEye->noisyOpening.has_value() ||
+        !sharedEye->noisyOpening.has_value()) {
+        return;
+    }
+    XCTAssertLessThan(freeEye->opening.heightV - freeEye->noisyOpening->heightV, 0.81);
+    XCTAssertGreaterThan(freeEye->opening.heightV - freeEye->noisyOpening->heightV, 0.7);
+    XCTAssertGreaterThan(sharedEye->noisyOpening->heightV, freeEye->noisyOpening->heightV + 0.02);
+}
+
+- (void)testMoreDrawsNarrowTheReplicateSpread {
+    const auto frequencies = eyeTestFrequencies();
+    const auto channel = eyeTestChannel(frequencies);
+    const std::vector<kiems::EyeAggressor> aggressors = {eyeTestTone(frequencies, 1.37e9, 0.2),
+                                                         eyeTestTone(frequencies, 2.11e9, 0.15)};
+    const auto spreadWith = [&](std::size_t draws) {
+        kiems::EyeNoiseOptions options;
+        options.drawCount = draws;
+        const auto eye = kiems::computeEyeDiagram(frequencies, channel, 5e9, aggressors, options);
+        return eye->noise->highest.heightV - eye->noise->lowest.heightV;
+    };
+    const double few = spreadWith(16);
+    const double many = spreadWith(1024);
+    XCTAssertLessThan(many, few);
+    XCTAssertLessThan(many, 0.02);
+}
+
+- (void)testLimitedBurstAddsItsRingingOnlyWhileOnTheWire {
+    const auto frequencies = eyeTestFrequencies();
+    kiems::EyeAggressor burst = eyeTestTone(frequencies, 1.37e9, 0.3);
+    burst.continuous = false;
+    burst.startTime = 5e-9;
+    burst.duration = 2e-9;
+    const auto eye = kiems::computeEyeDiagram(frequencies, eyeTestChannel(frequencies), 5e9, {burst});
+    XCTAssertTrue(eye.has_value() && eye->noisyOpening.has_value());
+    if (!eye.has_value() || !eye->noisyOpening.has_value()) return;
+    // The Hann-windowed burst peaks near its full 0.3 amplitude, against both a "1" and a "0".
+    const double closure = eye->opening.heightV - eye->noisyOpening->heightV;
+    XCTAssertGreaterThan(closure, 0.4);
+    XCTAssertLessThan(closure, 0.65);
+    // Most bits of most draws never meet the 2ns burst: plenty of noisy traces match clean ones.
+    std::size_t untouched = 0;
+    for (const auto& trace : eye->noisyTraces) {
+        untouched += std::find(eye->traces.begin(), eye->traces.end(), trace) != eye->traces.end() ? 1 : 0;
+    }
+    XCTAssertGreaterThan(untouched, eye->noisyTraces.size() / 2);
 }
 
 - (void)testClassifyCopperForSimulationSplitsByNetInclusion {

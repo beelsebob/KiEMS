@@ -58,6 +58,12 @@ TimeWaveform synthesizeMainStimulus(const Frequency& freq, double startTime, dou
 TimeWaveform synthesizeToneBurst(double frequencyHz, double amplitude, double phaseDegrees, double startTime,
                                    double duration, double dt, std::size_t sampleCount);
 
+/// Synthesizes a Continuous non-main excitation's stimulus: an unwindowed sinusoid at
+/// `frequencyHz`/`phaseDegrees`, amplitude-scaled like synthesizeToneBurst, from `startTime` to the
+/// end of the timeline -- it never stops, so it has no window to fade it out.
+TimeWaveform synthesizeContinuousTone(double frequencyHz, double amplitude, double phaseDegrees, double startTime,
+                                        double dt, std::size_t sampleCount);
+
 /// Sums multiple time waveforms sample-by-sample. All inputs must share dt and sample count.
 TimeWaveform superpose(const std::vector<TimeWaveform>& waveforms);
 

@@ -144,9 +144,10 @@ typedef void (^EMSPipelineProgressHandler)(EMSPipelineProgress *progress);
 /// A renderable results preview -- nil unless hasStage:EMSPipelineStageResults is true.
 - (nullable EMSResultsPreview *)resultsPreview;
 
-/// Updates the analysis-only eye rate in an already-prepared simulation snapshot and drops only
-/// the renderable preview cache. The expensive FDTD/Postprocessor data remains valid.
-- (void)updateEyeBitRate:(double)bitRate;
+/// Updates the analysis-only eye settings (bit rate, adversarial-noise draw count and shared
+/// clock) in an already-prepared simulation snapshot and drops only the renderable preview cache.
+/// The expensive FDTD/Postprocessor data remains valid.
+- (void)updateEyeBitRate:(double)bitRate drawCount:(NSInteger)drawCount sharedClock:(BOOL)sharedClock;
 
 /// One renderable field/energy series for every excitation completed by the Results stage, in port
 /// execution order. The array contains lightweight metadata/lazy frame handles; field grids remain

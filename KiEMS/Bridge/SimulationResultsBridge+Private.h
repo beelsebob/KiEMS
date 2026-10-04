@@ -6,6 +6,9 @@
 // can't see at all.
 #import "SimulationResultsBridge.h"
 
+#include <cstdint>
+#include <map>
+
 #include "kiems/config.hpp"
 #include "kiems/postprocess.hpp"
 
@@ -17,8 +20,13 @@ NS_ASSUME_NONNULL_BEGIN
 /// inline after running the whole pipeline itself; factored out so a caller that already has a
 /// Postprocessor (e.g. EMSSimulationPipelineBridge, which caches one per simulation across
 /// Geometry/Results tab switches) doesn't need to re-run anything just to render it.
+///
+/// `runDurations` is each excited port's FDTD run length (see
+/// kiems::ExcitationPostprocessor::loadRunDurations()) -- it sets how long Limited adversarial
+/// bursts ring down in the eye diagrams.
 EMSResultsPreview* buildResultsPreview(kiems::Postprocessor& postprocessor,
                                         const kiems::SimulationConfig& simConfig,
-                                        const kiems::Frequency& frequency);
+                                        const kiems::Frequency& frequency,
+                                        const std::map<std::int32_t, double>& runDurations);
 
 NS_ASSUME_NONNULL_END

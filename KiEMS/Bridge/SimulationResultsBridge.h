@@ -113,6 +113,29 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, readonly) NSArray<NSNumber *> *delayNs;
 @end
 
+/// An eye's adversarial noise: the same eye with every adversarial excitation's noise added at
+/// sampled transmission times (see kiems::computeEyeDiagram). `traces` is a representative subset
+/// of the draws; the openings cover every draw. The lowest/highest openings are the spread between
+/// independently randomized replicates of the draws -- how far a different set of draws could
+/// move the result. The convergence arrays trace the combined eye height (and that spread) against
+/// the number of draws taken so far.
+@interface EMSResultsEyeNoise : NSObject
+@property (nonatomic, copy, readonly) NSArray<NSArray<NSNumber *> *> *traces;
+@property (nonatomic, readonly) double heightV;
+@property (nonatomic, readonly) double widthUI;
+@property (nonatomic, readonly) double lowestHeightV;
+@property (nonatomic, readonly) double highestHeightV;
+@property (nonatomic, readonly) double lowestWidthUI;
+@property (nonatomic, readonly) double highestWidthUI;
+@property (nonatomic, readonly) NSInteger drawCount;
+@property (nonatomic, readonly) NSInteger replicateCount;
+@property (nonatomic, readonly) NSInteger aggressorCount;
+@property (nonatomic, copy, readonly) NSArray<NSNumber *> *convergenceDraws;
+@property (nonatomic, copy, readonly) NSArray<NSNumber *> *convergenceHeightV;
+@property (nonatomic, copy, readonly) NSArray<NSNumber *> *convergenceHeightLowestV;
+@property (nonatomic, copy, readonly) NSArray<NSNumber *> *convergenceHeightHighestV;
+@end
+
 /// One received PRBS7 eye. `timeUI` is the common -0.5...1.5 unit-interval axis and each nested
 /// traces array is one received two-UI segment. Differential eyes contain the mixed-mode received
 /// voltage (P minus N), never separate per-leg traces.
@@ -122,6 +145,11 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly, getter=isDifferential) BOOL differential;
 @property (nonatomic, copy, readonly) NSArray<NSNumber *> *timeUI;
 @property (nonatomic, copy, readonly) NSArray<NSArray<NSNumber *> *> *traces;
+/// The noise-free eye's worst-case opening (see kiems::EyeOpening).
+@property (nonatomic, readonly) double heightV;
+@property (nonatomic, readonly) double widthUI;
+/// Nil when the simulation has no adversarial excitation reaching this eye.
+@property (nonatomic, readonly, nullable) EMSResultsEyeNoise *noise;
 @end
 
 /// A renderable snapshot of one simulation's post-processed results -- everything a results view
