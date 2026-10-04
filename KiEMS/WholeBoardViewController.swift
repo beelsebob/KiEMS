@@ -295,6 +295,9 @@ final class WholeBoardViewController: NSViewController {
         propertiesViewController.view.translatesAutoresizingMaskIntoConstraints = false
         infoPanel.addSubview(propertiesViewController.view)
 
+        boardView.contextMenuForSelection = { [weak self] selection in
+            self?.contextMenu(for: selection)
+        }
         boardView.onSelectionChanged = { [weak self] selection in
             guard let self else { return }
             self.selection = selection
@@ -799,7 +802,7 @@ final class WholeBoardViewController: NSViewController {
                 } else {
                     componentValueLabel.isHidden = true
                 }
-            case .net, .pin, .hullCutPort:
+            case .net, .pin, .hullCutPort, .connectedNets:
                 break // unreachable -- isComponentSelection is only true for .component
             }
             return
@@ -846,6 +849,14 @@ final class WholeBoardViewController: NSViewController {
         case .net:
             pinHeading.isHidden = true
             pinSeparator.isHidden = true
+            pinControls.isHidden = true
+            componentValueLabel.isHidden = true
+
+        case let .connectedNets(members):
+            // The net details below still describe the net the group was grown from.
+            pinHeading.isHidden = false
+            pinHeading.stringValue = members.count == 1 ? "1 connected net" : "\(members.count) connected nets"
+            pinSeparator.isHidden = false
             pinControls.isHidden = true
             componentValueLabel.isHidden = true
 
@@ -1645,6 +1656,169 @@ final class WholeBoardViewController: NSViewController {
         configurationChanged()
     }
 
+    // MARK: - Board context menu
+
+    /// The board's right-click menu for a picked net or pin. Its items mirror the Info panel's
+    /// checkboxes -- reading their already-resolved state and driving their own action methods --
+    /// so the menu can never disagree with the panel or skip its differential-pair mirroring.
+    /// `selection` is always the current one: GeometryView picks before asking for the menu.
+    private func contextMenu(for selection: GeometrySelection) -> NSMenu? {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        switch selection.kind {
+        case .net, .connectedNets:
+            addNetSimulationItems(to: menu)
+        case .pin, .hullCutPort:
+            addPinItems(to: menu)
+        case .component:
+            return nil
+        }
+        addSharedItems(to: menu, netName: selection.netName ?? "")
+        return menu
+    }
+
+    private func addSharedItems(to menu: NSMenu, netName: String) {
+        menu.addItem(.separator())
+        addNetGeometryItems(to: menu, netName: netName)
+        menu.addItem(.separator())
+        menu.addItem(ClosureMenuItem(title: "Select Connected Nets", key: "u", enabled: !netName.isEmpty) {
+            [weak self] in self?.selectConnectedNets(from: netName)
+        })
+    }
+
+    private func addNetSimulationItems(to menu: NSMenu) {
+        let included = includedCheckbox.state == .on
+        menu.addItem(ClosureMenuItem(title: included ? "Remove from Simulation" : "Include in Simulation",
+                                     key: "s", modifiers: [.command, .option], enabled: includedCheckbox.isEnabled) {
+            [weak self] in self?.toggle(self?.includedCheckbox, #selector(WholeBoardViewController.includedToggled))
+        })
+        let impedance = ClosureMenuItem(title: "Impedance Probed", enabled: impedanceProbedCheckbox.isEnabled) {
+            [weak self] in
+            self?.toggle(self?.impedanceProbedCheckbox, #selector(WholeBoardViewController.impedanceProbedToggled))
+        }
+        impedance.state = impedanceProbedCheckbox.state
+        menu.addItem(impedance)
+    }
+
+    private func addPinItems(to menu: NSMenu) {
+        let excited = excitedCheckbox.state == .on
+        menu.addItem(ClosureMenuItem(title: excited ? "Don't Excite" : "Excite", key: "e",
+                                     enabled: excitedCheckbox.isEnabled) {
+            [weak self] in self?.toggle(self?.excitedCheckbox, #selector(WholeBoardViewController.excitedToggled))
+        })
+        let isMain = mainExcitationCheckbox.state == .on
+        menu.addItem(ClosureMenuItem(title: isMain ? "Make Secondary Excitation" : "Make Main Excitation",
+                                     enabled: excited && mainExcitationCheckbox.isEnabled) {
+            [weak self] in
+            self?.toggle(self?.mainExcitationCheckbox, #selector(WholeBoardViewController.mainExcitationToggled))
+        })
+        menu.addItem(ClosureMenuItem(title: probedCheckbox.state == .on ? "Don't Probe" : "Probe",
+                                     key: "p", shift: true, enabled: probedCheckbox.isEnabled) {
+            [weak self] in self?.toggle(self?.probedCheckbox, #selector(WholeBoardViewController.probedToggled))
+        })
+        menu.addItem(ClosureMenuItem(title: absorbingCheckbox.state == .on ? "Remove Absorption" : "Add Absorption",
+                                     key: "a", shift: true, enabled: absorbingCheckbox.isEnabled) {
+            [weak self] in self?.toggle(self?.absorbingCheckbox, #selector(WholeBoardViewController.absorbingToggled))
+        })
+    }
+
+    private func addNetGeometryItems(to menu: NSMenu, netName: String) {
+        let simulation = selectedSimulation
+        let canEdit = simulation != nil && !netName.isEmpty
+        let contributes = simulatedCheckbox.state == .on
+        menu.addItem(ClosureMenuItem(title: contributes ? "Don't Contribute to Hull" : "Contribute to Hull",
+                                     key: "h", shift: true, enabled: canEdit) {
+            [weak self] in self?.setContributesToHull(!contributes, netName: netName)
+        })
+        let isGround = simulation.map { $0.groundNetKind == .net && $0.groundNetName == netName } ?? false
+        let ground = ClosureMenuItem(title: "Make Ground", key: "g", enabled: canEdit && !isGround) {
+            [weak self] in self?.makeGround(netName: netName)
+        }
+        ground.state = isGround ? .on : .off
+        menu.addItem(ground)
+        let terminated = simulation?.edgeTerminatedNets.contains(netName) ?? false
+        menu.addItem(ClosureMenuItem(title: terminated ? "Remove Edge Termination" : "Add Edge Termination",
+                                     key: "e", shift: true, enabled: canEdit) {
+            [weak self] in self?.setEdgeTerminated(!terminated, netName: netName)
+        })
+    }
+
+    /// Flips a checkbox and runs its action, exactly as clicking it in the Info panel would.
+    private func toggle(_ checkbox: NSButton?, _ action: Selector) {
+        guard let checkbox else { return }
+        checkbox.state = checkbox.state == .on ? .off : .on
+        perform(action)
+    }
+
+    /// Unlike simulatedToggled(), also works on a net not yet in the simulation: contributing to
+    /// the hull implies inclusion, so the menu includes it rather than offering a disabled item.
+    private func setContributesToHull(_ contributes: Bool, netName: String) {
+        guard let simulation = selectedSimulation, !netName.isEmpty else { return }
+        if contributes {
+            includeNet(named: netName, in: simulation)
+        } else if let entry = involvedNet(named: netName, in: simulation) {
+            entry.inclusionLevel = .geometryOnly
+        } else {
+            return
+        }
+        configurationChanged()
+    }
+
+    private func makeGround(netName: String) {
+        guard let simulation = selectedSimulation, !netName.isEmpty else { return }
+        simulation.groundNetKind = .net
+        simulation.groundNetName = netName
+        propertiesViewController.simulationEditedElsewhere()
+        configurationChanged()
+    }
+
+    private func setEdgeTerminated(_ terminated: Bool, netName: String) {
+        guard let simulation = selectedSimulation, !netName.isEmpty else { return }
+        var nets = simulation.edgeTerminatedNets
+        if terminated {
+            guard !nets.contains(netName) else { return }
+            nets.append(netName)
+        } else {
+            nets.removeAll { $0 == netName }
+        }
+        simulation.edgeTerminatedNets = nets
+        propertiesViewController.simulationEditedElsewhere()
+        configurationChanged()
+    }
+
+    /// Selects `netName` plus every net reachable from it through 2-terminal passives (R/L/C),
+    /// the same bridges the simulation turns into lumped components. Ground nets are not walked
+    /// through -- nearly every shunt part lands there, so crossing it would select most of the
+    /// board -- unless the walk starts on ground.
+    private func selectConnectedNets(from netName: String) {
+        guard !netName.isEmpty else { return }
+        var groundNets = Set<String>()
+        if let simulation = selectedSimulation, let groundName = simulation.groundNetName, !groundName.isEmpty {
+            if simulation.groundNetKind == .net {
+                groundNets.insert(groundName)
+            } else if simulation.groundNetKind == .netClass {
+                groundNets.formUnion(netsByNetClass[groundName] ?? [])
+            }
+        }
+        var neighbours: [String: Set<String>] = [:]
+        for footprint in allFootprints where footprint.pins.count == 2 && isPassive(reference: footprint.reference) {
+            let first = footprint.pins[0].netName
+            let second = footprint.pins[1].netName
+            guard !first.isEmpty, !second.isEmpty, first != second else { continue }
+            neighbours[first, default: []].insert(second)
+            neighbours[second, default: []].insert(first)
+        }
+        var reached: Set<String> = [netName]
+        var frontier = [netName]
+        while let net = frontier.popLast() {
+            if net != netName && groundNets.contains(net) { continue }
+            for next in neighbours[net] ?? [] where reached.insert(next).inserted {
+                frontier.append(next)
+            }
+        }
+        boardView.selectNets(NetNameFormatting.sortedForDisplay(Array(reached)), origin: netName)
+    }
+
     func setSelectedSimulationIndex(_ index: Int?) {
         selectedSimulationIndex = index
         updateConfigurationControls()
@@ -1744,5 +1918,28 @@ final class WholeBoardViewController: NSViewController {
         resolvingActivityNetClasses.removeAll()
         selectedNetClassName = nil
         isLoadingSelectedNetClass = false
+    }
+}
+
+/// A context-menu item that runs a closure, so each item can capture the net/pin it was built for.
+private final class ClosureMenuItem: NSMenuItem {
+    private let handler: () -> Void
+
+    init(title: String, key: String = "", shift: Bool = false, modifiers: NSEvent.ModifierFlags? = nil,
+         enabled: Bool, handler: @escaping () -> Void) {
+        self.handler = handler
+        super.init(title: title, action: #selector(run), keyEquivalent: key)
+        target = self
+        keyEquivalentModifierMask = modifiers ?? (shift ? [.command, .shift] : [.command])
+        isEnabled = enabled
+    }
+
+    @available(*, unavailable)
+    required init(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    @objc private func run() {
+        handler()
     }
 }

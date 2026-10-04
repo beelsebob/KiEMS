@@ -340,6 +340,16 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
         reload()
     }
 
+    /// Called after another view (the board's context menu) changes this simulation's ground net or
+    /// edge-terminated nets directly: re-shows those fields and invalidates its geometry, exactly
+    /// as an edit made here would.
+    func simulationEditedElsewhere() {
+        reload()
+        if let selectedIndex {
+            onGeometryParametersChanged?(selectedIndex)
+        }
+    }
+
     /// Called by SimulationListViewController (via DocumentWindowController) after a rename
     /// performed directly in the source list -- if this panel happens to be showing that same
     /// simulation right now, its own name field would otherwise go stale. Deliberately just the one

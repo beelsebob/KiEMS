@@ -95,6 +95,9 @@ struct GeometrySelection: Equatable {
         case pin(reference: String, number: String)
         case component(reference: String)
         case hullCutPort(identifier: String)
+        /// A whole group of nets (see GeometryView.selectNets(_:origin:)); `netName` is the net
+        /// the group was grown from, which the Info panel and context menu keep acting on.
+        case connectedNets([String])
     }
 
     let kind: Kind
@@ -246,6 +249,10 @@ final class GeometryView: MTKView, MTKViewDelegate {
     /// private pick identifiers. Pin selections report their connected net; trace selections
     /// report the selected net directly, as do zone fills; background reports nil.
     var onSelectionChanged: ((GeometrySelection?) -> Void)?
+    /// Supplies the context menu for the current selection, after a right-click (without a pan
+    /// drag) has picked it. The same menu also answers key equivalents while the board is first
+    /// responder, so its items' shortcuts work without the menu being open.
+    var contextMenuForSelection: ((GeometrySelection) -> NSMenu?)?
     /// Called when a placeholder layer is made visible, allowing the owner to move that layer to
     /// the front of its serial generation queue.
     var onLayerNeedsGeometry: ((String) -> Void)?
@@ -472,6 +479,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
         case zone(String?)
         case component(String)
         case hullCutPort(identifier: String, net: String)
+        case nets(origin: String, members: [String])
 
         var netName: String? {
             switch self {
@@ -480,6 +488,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
             case let .zone(net): return net
             case .component: return nil
             case let .hullCutPort(_, net): return net
+            case let .nets(origin, _): return origin
             }
         }
 
@@ -488,7 +497,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
         var hasPickPriority: Bool {
             switch self {
             case .pin, .component, .hullCutPort: return true
-            case .net, .zone: return false
+            case .net, .zone, .nets: return false
             }
         }
     }
@@ -505,21 +514,24 @@ final class GeometryView: MTKView, MTKViewDelegate {
     private var selectedTarget: PickTarget? {
         didSet {
             rebuildHighlightBuffer()
-            let selection: GeometrySelection?
-            switch selectedTarget {
-            case let .pin(reference, number, net):
-                selection = GeometrySelection(kind: .pin(reference: reference, number: number), netName: net)
-            case let .net(net):
-                selection = GeometrySelection(kind: .net, netName: net)
-            case let .component(reference):
-                selection = GeometrySelection(kind: .component(reference: reference), netName: nil)
-            case let .hullCutPort(identifier, net):
-                selection = GeometrySelection(kind: .hullCutPort(identifier: identifier), netName: net)
-            case .zone, nil:
-                selection = nil
-            }
-            onSelectionChanged?(selection)
+            onSelectionChanged?(currentSelection)
             needsDisplay = true
+        }
+    }
+    private var currentSelection: GeometrySelection? {
+        switch selectedTarget {
+        case let .pin(reference, number, net):
+            return GeometrySelection(kind: .pin(reference: reference, number: number), netName: net)
+        case let .net(net):
+            return GeometrySelection(kind: .net, netName: net)
+        case let .component(reference):
+            return GeometrySelection(kind: .component(reference: reference), netName: nil)
+        case let .hullCutPort(identifier, net):
+            return GeometrySelection(kind: .hullCutPort(identifier: identifier), netName: net)
+        case let .nets(origin, members):
+            return GeometrySelection(kind: .connectedNets(members), netName: origin)
+        case .zone, nil:
+            return nil
         }
     }
     private var highlightPositionBuffer: MTLBuffer?
@@ -593,6 +605,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
     private var lastDragPoint: CGPoint?
     private var mouseDownPoint: CGPoint?
     private var lastPanDragPoint: CGPoint?
+    private var rightMouseDownPoint: CGPoint?
 
     private let legendStack = NSStackView()
 
@@ -1352,6 +1365,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
     /// drag pans instead (see rightMouseDragged(_:)), shifting the orbit target itself rather than
     /// orbiting around it.
     override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
         lastDragPoint = point
         mouseDownPoint = point
@@ -1535,7 +1549,10 @@ final class GeometryView: MTKView, MTKViewDelegate {
     /// cursor at drag start stays under the cursor throughout the drag (a "grab and drag" feel,
     /// matching Photoshop's hand tool/Google Maps -- not a fixed, zoom-independent speed).
     override func rightMouseDown(with event: NSEvent) {
-        lastPanDragPoint = convert(event.locationInWindow, from: nil)
+        window?.makeFirstResponder(self)
+        let point = convert(event.locationInWindow, from: nil)
+        lastPanDragPoint = point
+        rightMouseDownPoint = point
     }
 
     override func rightMouseDragged(with event: NSEvent) {
@@ -1553,8 +1570,34 @@ final class GeometryView: MTKView, MTKViewDelegate {
         needsDisplay = true
     }
 
+    /// A right-click that did not pan picks whatever is under the cursor, then offers that
+    /// selection's context menu (if the owner supplies one for it).
     override func rightMouseUp(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let wasClick = rightMouseDownPoint.map { hypot(point.x - $0.x, point.y - $0.y) <= 3 } ?? false
         lastPanDragPoint = nil
+        rightMouseDownPoint = nil
+        guard wasClick else { return }
+        pick(at: point)
+        if let selection = currentSelection, let menu = contextMenuForSelection?(selection) {
+            NSMenu.popUpContextMenu(menu, with: event, for: self)
+        }
+    }
+
+    /// Context-menu shortcuts apply to the board selection without opening the menu. Only while
+    /// the board itself is first responder, so typing in the Info panel's fields is unaffected.
+    /// Windows offer key equivalents to their views before the main menu, so these shortcuts must
+    /// avoid the app's own (cmd-H, cmd-shift-S, ...).
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard window?.firstResponder === self, let selection = currentSelection,
+              let menu = contextMenuForSelection?(selection)
+        else { return super.performKeyEquivalent(with: event) }
+        return menu.performKeyEquivalent(with: event) || super.performKeyEquivalent(with: event)
+    }
+
+    /// Selects (and highlights) every net in `nets`, reporting `origin` as the selection's net.
+    func selectNets(_ nets: [String], origin: String) {
+        selectedTarget = .nets(origin: origin, members: nets)
     }
 
     override func scrollWheel(with event: NSEvent) {
@@ -2298,6 +2341,12 @@ final class GeometryView: MTKView, MTKViewDelegate {
             positions = pickPositionsByTarget[selectedTarget] ?? []
         case let .net(selectedNet):
             for (target, targetPositions) in pickPositionsByTarget where target.netName == selectedNet {
+                positions.append(contentsOf: targetPositions)
+            }
+        case let .nets(_, members):
+            let memberSet = Set(members)
+            for (target, targetPositions) in pickPositionsByTarget {
+                guard let net = target.netName, memberSet.contains(net) else { continue }
                 positions.append(contentsOf: targetPositions)
             }
         case .zone:
