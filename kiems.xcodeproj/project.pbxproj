@@ -6,9 +6,6 @@
 	objectVersion = 77;
 	objects = {
 
-/* Begin PBXAggregateTarget section */
-/* End PBXAggregateTarget section */
-
 /* Begin PBXBuildFile section */
 		08091C43255C7E607DB3203F /* liblibkiems.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 922BA8FA4CD5D8901DCAC9DA /* liblibkiems.a */; };
 		0A4F8D836CCEAB4E92E50750 /* CSPrimPoint.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 8BAEFA9E1EC092E0D890A14C /* CSPrimPoint.cpp */; };
@@ -48,6 +45,12 @@
 		71B40FEA3042E2B5002796EC /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B8F4508947040AF3A200E11 /* libCSXCAD.dylib */; };
 		71B4EE9B304224FD002796EC /* libCopperUtils.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 71B4EE8E304224C5002796EC /* libCopperUtils.a */; };
 		7927928D62C83DD9538C10AF /* CSPrimWire.cpp in Sources */ = {isa = PBXBuildFile; fileRef = DFB34E1830D6A43D7D93419D /* CSPrimWire.cpp */; };
+		7A110000000000000000001E /* tinyxml.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 7A110000000000000000000A /* tinyxml.cpp */; };
+		7A110000000000000000001F /* tinyxmlparser.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 7A110000000000000000000B /* tinyxmlparser.cpp */; };
+		7A1100000000000000000020 /* tinyxmlerror.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 7A110000000000000000000C /* tinyxmlerror.cpp */; };
+		7A1100000000000000000021 /* tinystr.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 7A110000000000000000000D /* tinystr.cpp */; };
+		7A120000000000000000001E /* fparser.cc in Sources */ = {isa = PBXBuildFile; fileRef = 7A120000000000000000000A /* fparser.cc */; };
+		7A120000000000000000001F /* fpoptimizer.cc in Sources */ = {isa = PBXBuildFile; fileRef = 7A120000000000000000000B /* fpoptimizer.cc */; };
 		7A76B8DB5C0FDE31D6F72BB1 /* CSPrimUserDefined.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A25590547D328A76A372C1BC /* CSPrimUserDefined.cpp */; };
 		7E57CB0000000000000000C5 /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B8F4508947040AF3A200E11 /* libCSXCAD.dylib */; };
 		828DBB24BCE54FE076A3D616 /* CSPrimPolygon.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 30A0506109278583137803EB /* CSPrimPolygon.cpp */; };
@@ -64,7 +67,6 @@
 		A3D47B497AA3BE4FD9D35D2B /* CSTransform.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F4C290FF15D9A8C440B0E624 /* CSTransform.cpp */; };
 		ACCE1E0000000000000001 /* Accelerate.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71B40FE73042E24F002796EC /* Accelerate.framework */; };
 		ACCE1E0000000000000002 /* Accelerate.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71B40FE73042E24F002796EC /* Accelerate.framework */; };
-		ACCE1E0000000000000003 /* Accelerate.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71B40FE73042E24F002796EC /* Accelerate.framework */; };
 		ACCE1E0000000000000004 /* Accelerate.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71B40FE73042E24F002796EC /* Accelerate.framework */; };
 		ACCE1E0000000000000005 /* Accelerate.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71B40FE73042E24F002796EC /* Accelerate.framework */; };
 		ACCE1E0000000000000006 /* Accelerate.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71B40FE73042E24F002796EC /* Accelerate.framework */; };
@@ -93,12 +95,6 @@
 		F8763B10C08160DB7FC51D4C /* CSPropConductingSheet.cpp in Sources */ = {isa = PBXBuildFile; fileRef = DA441A58C5946D25FA484EEE /* CSPropConductingSheet.cpp */; };
 		FC1671EFEBFEF5FCCCA74E90 /* RememberRemember.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = DEC747CBEC864D957296A740 /* RememberRemember.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		FFCF4BE80D907ADEDD013454 /* CSPropUnknown.cpp in Sources */ = {isa = PBXBuildFile; fileRef = FCFBB6854442AF9145607687 /* CSPropUnknown.cpp */; };
-		7A110000000000000000001E /* tinyxml.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 7A110000000000000000000A /* tinyxml.cpp */; };
-		7A110000000000000000001F /* tinyxmlparser.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 7A110000000000000000000B /* tinyxmlparser.cpp */; };
-		7A1100000000000000000020 /* tinyxmlerror.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 7A110000000000000000000C /* tinyxmlerror.cpp */; };
-		7A1100000000000000000021 /* tinystr.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 7A110000000000000000000D /* tinystr.cpp */; };
-		7A120000000000000000001E /* fparser.cc in Sources */ = {isa = PBXBuildFile; fileRef = 7A120000000000000000000A /* fparser.cc */; };
-		7A120000000000000000001F /* fpoptimizer.cc in Sources */ = {isa = PBXBuildFile; fileRef = 7A120000000000000000000B /* fpoptimizer.cc */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -363,6 +359,16 @@
 		71B4EE8E304224C5002796EC /* libCopperUtils.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libCopperUtils.a; sourceTree = BUILT_PRODUCTS_DIR; };
 		75CCDDE91C9BDCBDD295551F /* CSPrimLinPoly.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimLinPoly.h; sourceTree = "<group>"; };
 		765CAE4AC6ACCB6AC9F626BC /* CSPrimPolyhedron.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimPolyhedron.h; sourceTree = "<group>"; };
+		7A110000000000000000000A /* tinyxml.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = tinyxml.cpp; sourceTree = "<group>"; };
+		7A110000000000000000000B /* tinyxmlparser.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = tinyxmlparser.cpp; sourceTree = "<group>"; };
+		7A110000000000000000000C /* tinyxmlerror.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = tinyxmlerror.cpp; sourceTree = "<group>"; };
+		7A110000000000000000000D /* tinystr.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = tinystr.cpp; sourceTree = "<group>"; };
+		7A110000000000000000000E /* tinyxml.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = tinyxml.h; sourceTree = "<group>"; };
+		7A110000000000000000000F /* tinystr.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = tinystr.h; sourceTree = "<group>"; };
+		7A120000000000000000000A /* fparser.cc */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = fparser.cc; sourceTree = "<group>"; };
+		7A120000000000000000000B /* fpoptimizer.cc */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = fpoptimizer.cc; sourceTree = "<group>"; };
+		7A120000000000000000000C /* fparser.hh */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.h; path = fparser.hh; sourceTree = "<group>"; };
+		7A120000000000000000000D /* fpconfig.hh */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.h; path = fpconfig.hh; sourceTree = "<group>"; };
 		7A9D6B5C429B30F4A76B69E9 /* CSPrimPolygon.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimPolygon.h; sourceTree = "<group>"; };
 		7D20DA97F11E5FD1E45B1BEC /* CSPropDumpBox.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPropDumpBox.h; sourceTree = "<group>"; };
 		801882DFF924DC3D075A3E2A /* ParameterCoord.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = ParameterCoord.cpp; sourceTree = "<group>"; };
@@ -412,16 +418,6 @@
 		F9A1657931A824D0FB61FEA6 /* CSPrimMultiBox.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = CSPrimMultiBox.h; sourceTree = "<group>"; };
 		FCFBB6854442AF9145607687 /* CSPropUnknown.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = CSPropUnknown.cpp; sourceTree = "<group>"; };
 		FDE3476E04DBF2031C2CCF48 /* ParameterObjects.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = ParameterObjects.h; sourceTree = "<group>"; };
-		7A110000000000000000000A /* tinyxml.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = tinyxml.cpp; sourceTree = "<group>"; };
-		7A110000000000000000000B /* tinyxmlparser.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = tinyxmlparser.cpp; sourceTree = "<group>"; };
-		7A110000000000000000000C /* tinyxmlerror.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = tinyxmlerror.cpp; sourceTree = "<group>"; };
-		7A110000000000000000000D /* tinystr.cpp */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = tinystr.cpp; sourceTree = "<group>"; };
-		7A110000000000000000000E /* tinyxml.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = tinyxml.h; sourceTree = "<group>"; };
-		7A110000000000000000000F /* tinystr.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = tinystr.h; sourceTree = "<group>"; };
-		7A120000000000000000000A /* fparser.cc */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = fparser.cc; sourceTree = "<group>"; };
-		7A120000000000000000000B /* fpoptimizer.cc */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.cpp; path = fpoptimizer.cc; sourceTree = "<group>"; };
-		7A120000000000000000000C /* fparser.hh */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.h; path = fparser.hh; sourceTree = "<group>"; };
-		7A120000000000000000000D /* fpconfig.hh */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.h; path = fpconfig.hh; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -705,6 +701,32 @@
 			name = Frameworks;
 			sourceTree = "<group>";
 		};
+		7A1100000000000000000001 /* tinyxml */ = {
+			isa = PBXGroup;
+			children = (
+				7A110000000000000000000A /* tinyxml.cpp */,
+				7A110000000000000000000B /* tinyxmlparser.cpp */,
+				7A110000000000000000000C /* tinyxmlerror.cpp */,
+				7A110000000000000000000D /* tinystr.cpp */,
+				7A110000000000000000000E /* tinyxml.h */,
+				7A110000000000000000000F /* tinystr.h */,
+			);
+			name = tinyxml;
+			path = submodules/tinyxml;
+			sourceTree = "<group>";
+		};
+		7A1200000000000000000001 /* fparser */ = {
+			isa = PBXGroup;
+			children = (
+				7A120000000000000000000A /* fparser.cc */,
+				7A120000000000000000000B /* fpoptimizer.cc */,
+				7A120000000000000000000C /* fparser.hh */,
+				7A120000000000000000000D /* fpconfig.hh */,
+			);
+			name = fparser;
+			path = submodules/fparser;
+			sourceTree = "<group>";
+		};
 		9D2EF3F131A05169F6A8F5B8 /* libkicad_api */ = {
 			isa = PBXGroup;
 			children = (
@@ -813,32 +835,6 @@
 			);
 			name = CSXCAD;
 			path = submodules/CSXCAD/src;
-			sourceTree = "<group>";
-		};
-		7A1100000000000000000001 /* tinyxml */ = {
-			isa = PBXGroup;
-			children = (
-				7A110000000000000000000A /* tinyxml.cpp */,
-				7A110000000000000000000B /* tinyxmlparser.cpp */,
-				7A110000000000000000000C /* tinyxmlerror.cpp */,
-				7A110000000000000000000D /* tinystr.cpp */,
-				7A110000000000000000000E /* tinyxml.h */,
-				7A110000000000000000000F /* tinystr.h */,
-			);
-			name = tinyxml;
-			path = submodules/tinyxml;
-			sourceTree = "<group>";
-		};
-		7A1200000000000000000001 /* fparser */ = {
-			isa = PBXGroup;
-			children = (
-				7A120000000000000000000A /* fparser.cc */,
-				7A120000000000000000000B /* fpoptimizer.cc */,
-				7A120000000000000000000C /* fparser.hh */,
-				7A120000000000000000000D /* fpconfig.hh */,
-			);
-			name = fparser;
-			path = submodules/fparser;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -1213,9 +1209,6 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
-
-/* Begin PBXShellScriptBuildPhase section */
-/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		0A4BFFE015AA0DAC88C73F59 /* Sources */ = {
@@ -2134,15 +2127,15 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/Copper";
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.tomdavie.CopperTests;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				STRING_CATALOG_GENERATE_SYMBOLS = NO;
-				SWIFT_EMIT_LOC_STRINGS = NO;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lhdf5",
 					"-lblosc2",
 				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.tomdavie.CopperTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_EMIT_LOC_STRINGS = NO;
 				SYSTEM_HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/submodules/CSXCAD/src",
@@ -2160,15 +2153,15 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/Copper";
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.tomdavie.CopperTests;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				STRING_CATALOG_GENERATE_SYMBOLS = NO;
-				SWIFT_EMIT_LOC_STRINGS = NO;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lhdf5",
 					"-lblosc2",
 				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.tomdavie.CopperTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_EMIT_LOC_STRINGS = NO;
 				SYSTEM_HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/submodules/CSXCAD/src",
