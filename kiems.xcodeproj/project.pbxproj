@@ -456,7 +456,7 @@
 			path = libkiems;
 			sourceTree = "<group>";
 		};
-		1E051C9DFB9D9A4CF7CB1120 /* RememberRemember */ = {
+		1E051C9DFB9D9A4CF7CB1120 /* submodules/RememberRemember */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = submodules/RememberRemember;
 			sourceTree = "<group>";
@@ -644,7 +644,7 @@
 			children = (
 				601D10000000000000000000 /* libkicad/BuildPaths.xcconfig */,
 				601D10000000000000000001 /* libkicad/KiCadLink.xcconfig */,
-				1E051C9DFB9D9A4CF7CB1120 /* RememberRemember */,
+				1E051C9DFB9D9A4CF7CB1120 /* submodules/RememberRemember */,
 				B7D891E5D67D73D341733A71 /* KiEMS */,
 				71AD229430263516006D5847 /* kiems-cli */,
 				8290469707C87811FFCE548F /* kiems_fdtd_worker */,
@@ -886,7 +886,7 @@
 				C60105A162FBA5BFFAF43ADC /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				1E051C9DFB9D9A4CF7CB1120 /* RememberRemember */,
+				1E051C9DFB9D9A4CF7CB1120 /* submodules/RememberRemember */,
 			);
 			name = RememberRemember;
 			productName = RememberRemember;
