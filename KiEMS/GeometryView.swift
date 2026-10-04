@@ -244,7 +244,7 @@ struct BoardActivityHighlight: Equatable {
 final class GeometryView: MTKView, MTKViewDelegate {
     /// Whole-board consumers can present selection details without knowing about the renderer's
     /// private pick identifiers. Pin selections report their connected net; trace selections
-    /// report the selected net directly; zones/background report nil because they are not selected.
+    /// report the selected net directly, as do zone fills; background reports nil.
     var onSelectionChanged: ((GeometrySelection?) -> Void)?
     /// Called when a placeholder layer is made visible, allowing the owner to move that layer to
     /// the front of its serial generation queue.
@@ -1468,10 +1468,14 @@ final class GeometryView: MTKView, MTKViewDelegate {
             selectedTarget = nil
             return
         }
-        // Zones deliberately participate in the ID frame so they cannot be mistaken for a trace,
-        // but this screen only permits selecting a physical pin or a net reached through a trace.
-        if case .zone = picked {
-            selectedTarget = nil
+        // Clicking a zone fill selects its net, exactly as clicking one of the net's traces does.
+        // Unconnected (no-net) pours have nothing to select.
+        if case let .zone(net) = picked {
+            if let net, !net.isEmpty {
+                selectedTarget = .net(net)
+            } else {
+                selectedTarget = nil
+            }
         } else {
             selectedTarget = picked
         }
