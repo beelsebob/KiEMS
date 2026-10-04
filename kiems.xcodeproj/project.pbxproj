@@ -458,7 +458,7 @@
 		};
 		1E051C9DFB9D9A4CF7CB1120 /* RememberRemember */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = RememberRemember;
+			path = submodules/RememberRemember;
 			sourceTree = "<group>";
 		};
 		429F16897495224E3C8CB5A0 /* libkicad */ = {

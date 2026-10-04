@@ -11,3 +11,6 @@
 	path = submodules/kicad
 	url = https://gitlab.com/kicad/code/kicad.git
 	shallow = true
+[submodule "submodules/RememberRemember"]
+	path = submodules/RememberRemember
+	url = git@github.com:beelsebob/RememberRemember.git
