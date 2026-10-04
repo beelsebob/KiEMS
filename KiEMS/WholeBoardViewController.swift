@@ -1677,6 +1677,25 @@ final class WholeBoardViewController: NSViewController {
         return menu
     }
 
+    /// Fills the menu bar's Item menu with the pin context menu's items. Items that don't apply to
+    /// the current selection (or with no selection, or the board not showing) stay, disabled.
+    func populateItemMenu(_ menu: NSMenu) {
+        menu.autoenablesItems = false
+        let isShowing = isViewLoaded && !view.isHiddenOrHasHiddenAncestor && view.window != nil
+        let isNetOrPin: Bool
+        switch selection?.kind {
+        case .net?, .connectedNets?, .pin?, .hullCutPort?: isNetOrPin = true
+        case .component?, nil: isNetOrPin = false
+        }
+        addPinItems(to: menu)
+        addSharedItems(to: menu, netName: selection?.netName ?? "")
+        if !isShowing || !isNetOrPin {
+            for item in menu.items {
+                item.isEnabled = false
+            }
+        }
+    }
+
     private func addSharedItems(to menu: NSMenu, netName: String) {
         menu.addItem(.separator())
         addNetGeometryItems(to: menu, netName: netName)

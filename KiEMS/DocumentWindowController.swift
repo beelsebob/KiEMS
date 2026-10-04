@@ -22,6 +22,11 @@ final class DocumentWindowController: NSWindowController {
     private var simulationListViewController: SimulationListViewController?
     private var propertiesViewController: SimulationPropertiesViewController?
     private var wholeBoardViewController: WholeBoardViewController?
+
+    /// See WholeBoardViewController.populateItemMenu(_:) -- called by AppDelegate's Item menu.
+    func populateItemMenu(_ menu: NSMenu) {
+        wholeBoardViewController?.populateItemMenu(menu)
+    }
     private var sourceListViewController: SourceListViewController?
     private var geometryViewController: GeometryViewController?
     private var simulationResultsViewController: SimulationResultsViewController?

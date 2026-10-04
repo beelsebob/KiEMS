@@ -7,6 +7,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // for the app's whole lifetime -- see JobsWindowController's own doc comment for why it's owned
     // here rather than by any one Document/DocumentWindowController.
     private var jobsWindowController: JobsWindowController?
+    /// Rebuilt before every display/key-equivalent lookup from the front document's board
+    /// selection -- see menuNeedsUpdate(_:).
+    private let itemMenu = NSMenu(title: "Item")
 
     /// KiCad's runtime, created in main.swift before anything can query a board. Every Document's
     /// boards and pipelines hold it too.
@@ -119,6 +122,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
 
+        let itemMenuItem = NSMenuItem()
+        mainMenu.addItem(itemMenuItem)
+        itemMenu.delegate = self
+        itemMenuItem.submenu = itemMenu
+
         let windowMenuItem = NSMenuItem()
         mainMenu.addItem(windowMenuItem)
         let windowMenu = NSMenu(title: "Window")
@@ -155,8 +163,17 @@ extension AppDelegate: NSMenuDelegate {
     /// Rebuilds the "Open Recent" submenu right before it's shown, from
     /// NSDocumentController.recentDocumentURLs -- see buildMainMenu()'s own doc comment on why this
     /// has to be done by hand rather than relying on AppKit to do it automatically.
+    ///
+    /// The Item menu is rebuilt the same way, from the frontmost document window's board selection.
+    /// Without menuHasKeyEquivalent(_:for:target:action:), AppKit also calls this before matching a
+    /// key equivalent, so the items' shortcuts always act on the current selection.
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
+        if menu === itemMenu {
+            let controller = NSApp.mainWindow?.windowController as? DocumentWindowController
+            controller?.populateItemMenu(menu)
+            return
+        }
         let recentURLs = NSDocumentController.shared.recentDocumentURLs
         if recentURLs.isEmpty {
             let emptyItem = NSMenuItem(title: "No Recent Documents", action: nil, keyEquivalent: "")
