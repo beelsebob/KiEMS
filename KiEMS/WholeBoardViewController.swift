@@ -1688,21 +1688,33 @@ final class WholeBoardViewController: NSViewController {
         case .component?, nil: isNetOrPin = false
         }
         addPinItems(to: menu)
-        addSharedItems(to: menu, netName: selection?.netName ?? "")
+        let deselectAllItem = addSharedItems(to: menu, netName: selection?.netName ?? "")
         if !isShowing || !isNetOrPin {
             for item in menu.items {
                 item.isEnabled = false
             }
         }
+        // Escape belongs to a text field being edited (to cancel the edit), and the menu bar sees
+        // key equivalents before the first responder does, so only claim it outside text editing.
+        let isEditingText = view.window?.firstResponder is NSText
+        deselectAllItem.isEnabled = isShowing && selection != nil && !isEditingText
     }
 
-    private func addSharedItems(to menu: NSMenu, netName: String) {
+    /// Returns the Deselect All item, whose enabling the Item menu decides separately.
+    @discardableResult
+    private func addSharedItems(to menu: NSMenu, netName: String) -> NSMenuItem {
         menu.addItem(.separator())
         addNetGeometryItems(to: menu, netName: netName)
         menu.addItem(.separator())
         menu.addItem(ClosureMenuItem(title: "Select Connected Nets", key: "u", enabled: !netName.isEmpty) {
             [weak self] in self?.selectConnectedNets(from: netName)
         })
+        menu.addItem(.separator())
+        let deselect = ClosureMenuItem(title: "Deselect All", key: "\u{1b}", modifiers: [], enabled: true) {
+            [weak self] in self?.boardView.deselectAll()
+        }
+        menu.addItem(deselect)
+        return deselect
     }
 
     private func addNetSimulationItems(to menu: NSMenu) {

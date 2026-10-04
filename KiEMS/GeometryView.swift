@@ -1595,6 +1595,15 @@ final class GeometryView: MTKView, MTKViewDelegate {
         return menu.performKeyEquivalent(with: event) || super.performKeyEquivalent(with: event)
     }
 
+    func deselectAll() {
+        selectedTarget = nil
+    }
+
+    /// Escape clears the board selection.
+    override func cancelOperation(_ sender: Any?) {
+        deselectAll()
+    }
+
     /// Selects (and highlights) every net in `nets`, reporting `origin` as the selection's net.
     func selectNets(_ nets: [String], origin: String) {
         selectedTarget = .nets(origin: origin, members: nets)
