@@ -1079,9 +1079,9 @@
 			productReference = CAE9E934278E88A4B6FDB4F0 /* libkiems_smoketest */;
 			productType = "com.apple.product-type.tool";
 		};
-		71AD229130263515006D5847 /* kiems */ = {
+		71AD229130263515006D5847 /* kiems-cli */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 71AD229930263516006D5847 /* Build configuration list for PBXNativeTarget "kiems" */;
+			buildConfigurationList = 71AD229930263516006D5847 /* Build configuration list for PBXNativeTarget "kiems-cli" */;
 			buildPhases = (
 				71AD228E30263515006D5847 /* Sources */,
 				71AD228F30263515006D5847 /* Frameworks */,
@@ -1097,7 +1097,7 @@
 			fileSystemSynchronizedGroups = (
 				71AD229430263516006D5847 /* kiems-cli */,
 			);
-			name = kiems;
+			name = "kiems-cli";
 			productName = kiems;
 			productReference = 71AD229230263516006D5847 /* kiems */;
 			productType = "com.apple.product-type.tool";
@@ -1266,7 +1266,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				71AD229130263515006D5847 /* kiems */,
+				71AD229130263515006D5847 /* kiems-cli */,
 				B0B651E8085482933DC2AFFE /* libkicad */,
 				0D27BC0AB714B88FE14FFB28 /* libkicad_smoketest */,
 				0E08621C93A1CC737D3F6A93 /* libkiems */,
@@ -2204,7 +2204,7 @@
 					"-lgeos_c",
 					"-lmatplot",
 				);
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = kiems;
 				SYSTEM_HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)",
@@ -2235,7 +2235,7 @@
 					"-lgeos_c",
 					"-lmatplot",
 				);
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = kiems;
 				SYSTEM_HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)",
@@ -3803,7 +3803,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		71AD229930263516006D5847 /* Build configuration list for PBXNativeTarget "kiems" */ = {
+		71AD229930263516006D5847 /* Build configuration list for PBXNativeTarget "kiems-cli" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				71AD229A30263516006D5847 /* Debug */,

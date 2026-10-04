@@ -17,7 +17,7 @@
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "71AD229130263515006D5847"
                BuildableName = "kiems"
-               BlueprintName = "kiems"
+               BlueprintName = "kiems-cli"
                ReferencedContainer = "container:kiems.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
@@ -48,7 +48,7 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "71AD229130263515006D5847"
             BuildableName = "kiems"
-            BlueprintName = "kiems"
+            BlueprintName = "kiems-cli"
             ReferencedContainer = "container:kiems.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
@@ -95,7 +95,7 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "71AD229130263515006D5847"
             BuildableName = "kiems"
-            BlueprintName = "kiems"
+            BlueprintName = "kiems-cli"
             ReferencedContainer = "container:kiems.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
