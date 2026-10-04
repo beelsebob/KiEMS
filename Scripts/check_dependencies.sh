@@ -71,7 +71,7 @@ confirm() {
   if [ "$ASSUME_YES" -eq 1 ]; then return 0; fi
   local reply
   # No controlling terminal (Xcode build phase, CI): never prompt, treat as "no".
-  { printf '%s [y/N] ' "$1" > /dev/tty; } 2> /dev/null || { echo "  (no terminal; rerun with --yes to install)"; return 1; }
+  { printf '%s [y/N] ' "$1" > /dev/tty; } 2> /dev/null || { echo "  (no terminal to ask; rerun in a terminal, or with --yes)"; return 1; }
   read -r reply < /dev/tty || return 1
   case "$reply" in [yY]|[yY][eE][sS]) return 0 ;; *) return 1 ;; esac
 }
@@ -174,40 +174,74 @@ if [ -n "$MISSING" ]; then
 fi
 
 # --- Git submodules -------------------------------------------------------------------------------
+# Uninitialised submodules are errors. One checked out at a different commit from the one this
+# repository records (typically after a pull) is a warning, since it may be deliberate work in
+# progress inside the submodule; either way, offer to update them.
 echo; echo "${BOLD}Git submodules${RESET}"
 EMPTY_SUBMODULES=""
-for path in $SUBMODULES; do
-  if [ -n "$(ls -A "$REPO_ROOT/$path" 2>/dev/null)" ]; then
-    ok "$path"
-  else
-    fail "$path is not checked out"
-    EMPTY_SUBMODULES="$EMPTY_SUBMODULES $path"
-  fi
-done
-if [ -n "$EMPTY_SUBMODULES" ] && confirm "Run 'git submodule update --init${EMPTY_SUBMODULES}'?"; then
+STALE_SUBMODULES=""
+check_submodules() {
+  EMPTY_SUBMODULES=""; STALE_SUBMODULES=""
+  local path line state recorded actual
+  for path in $SUBMODULES; do
+    line="$(git -C "$REPO_ROOT" submodule status -- "$path" 2>/dev/null)"
+    state="${line:0:1}"
+    recorded="$(git -C "$REPO_ROOT" ls-tree HEAD "$path" | awk '{ print substr($3, 1, 10) }')"
+    if [ "$state" = "-" ] || [ -z "$(ls -A "$REPO_ROOT/$path" 2>/dev/null)" ]; then
+      fail "$path is not checked out"
+      EMPTY_SUBMODULES="$EMPTY_SUBMODULES $path"
+    elif [ "$state" = "+" ] || [ "$state" = "U" ]; then
+      actual="$(git -C "$REPO_ROOT/$path" rev-parse --short=10 HEAD 2>/dev/null)"
+      warn "$path is at $actual, the repository expects $recorded"
+      STALE_SUBMODULES="$STALE_SUBMODULES $path"
+    else
+      ok "$path ($recorded)"
+    fi
+  done
+}
+check_submodules
+OUTDATED_SUBMODULES="$EMPTY_SUBMODULES$STALE_SUBMODULES"
+if [ -n "$OUTDATED_SUBMODULES" ] && \
+   confirm "Run 'git submodule update --init${OUTDATED_SUBMODULES}'?"; then
   # shellcheck disable=SC2086
-  git -C "$REPO_ROOT" submodule update --init $EMPTY_SUBMODULES && EMPTY_SUBMODULES=""
+  git -C "$REPO_ROOT" submodule update --init $OUTDATED_SUBMODULES
+  check_submodules
 fi
+[ -n "$STALE_SUBMODULES" ] && WARNINGS=$((WARNINGS + $(echo $STALE_SUBMODULES | wc -w)))
 
 # --- KiCad build ---------------------------------------------------------------------------------
 # libkicad links pieces of the KiCad submodule built by Scripts/build_kicad.sh (too slow to run from
-# Xcode). This only checks the build exists; it can't tell whether it is current with the submodule.
+# Xcode), which records the submodule commit it built; a build from another commit is out of date.
 echo; echo "${BOLD}KiCad build${RESET}"
 KICAD_BUILD="$REPO_ROOT/build/kicad"
 KICAD_PRODUCTS="common/libcommon.a common/libpcbcommon.a kicad/KiCad.app/Contents/Frameworks/libkicommon.dylib
   kicad/KiCad.app/Contents/Frameworks/libkigal.dylib kicad/KiCad.app/Contents/Frameworks/libkiapi.dylib"
+KICAD_PROBLEM=""
 kicad_built() {
-  for product in $KICAD_PRODUCTS; do [ -e "$KICAD_BUILD/$product" ] || return 1; done
+  local product built current
+  for product in $KICAD_PRODUCTS; do
+    [ -e "$KICAD_BUILD/$product" ] || { KICAD_PROBLEM="build/kicad is missing or incomplete"; return 1; }
+  done
+  built="$(cat "$KICAD_BUILD/.built-commit" 2>/dev/null)"
+  current="$(git -C "$REPO_ROOT/submodules/kicad" rev-parse HEAD 2>/dev/null)"
+  if [ "$built" != "$current" ]; then
+    if [ -z "$built" ]; then
+      KICAD_PROBLEM="build/kicad doesn't record which KiCad commit it was built from"
+    else
+      KICAD_PROBLEM="build/kicad was built from ${built:0:10}, submodules/kicad is at ${current:0:10}"
+    fi
+    return 1
+  fi
 }
 KICAD_MISSING=""
 if kicad_built; then
   ok "build/kicad"
 elif [ -n "$MISSING" ] || [ -n "$EMPTY_SUBMODULES" ]; then
-  fail "build/kicad is missing; fix the errors above, then run Scripts/build_kicad.sh"
+  fail "$KICAD_PROBLEM; fix the errors above, then run Scripts/build_kicad.sh"
   KICAD_MISSING=" build/kicad"
 else
-  fail "build/kicad is missing or incomplete"
-  if confirm "Run Scripts/build_kicad.sh now (a full build takes a long time)?" && \
+  fail "$KICAD_PROBLEM"
+  if confirm "Run Scripts/build_kicad.sh now?" && \
      "$REPO_ROOT/Scripts/build_kicad.sh" && kicad_built; then
     ok "build/kicad"
   else

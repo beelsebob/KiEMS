@@ -5,7 +5,7 @@
 #
 # Usage: Scripts/build_kicad.sh
 #
-# Not run from Xcode: a from-scratch build takes a long time. Rerun it after the submodule moves.
+# Not run from Xcode. Rerun it after the submodule moves; check_dependencies.sh notices when it has.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -56,5 +56,8 @@ cmake --build "$BUILD_DIR" --target \
   "$PCBNEW_API_OBJECTS/api_handler_board.cpp.o" \
   "$PCBNEW_API_OBJECTS/headless_pcb_context.cpp.o" \
   "$PCBNEW_API_OBJECTS/pcb_context.cpp.o"
+
+# Lets check_dependencies.sh notice when the submodule has moved on since this build.
+git -C "$SOURCE_DIR" rev-parse HEAD > "$BUILD_DIR/.built-commit"
 
 echo "Built KiCad libraries in $BUILD_DIR"
