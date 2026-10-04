@@ -86,9 +86,21 @@ if [ -z "$BREW" ]; then
 fi
 BREW_PREFIX="$("$BREW" --prefix)"
 ok "$BREW (prefix $BREW_PREFIX)"
-if [ "$BREW_PREFIX" != "/opt/homebrew" ]; then
-  warn "the Xcode project defaults HOMEBREW_PREFIX to /opt/homebrew; set"
-  echo "           HOMEBREW_PREFIX = $BREW_PREFIX in libkicad/BuildPaths.local.xcconfig"
+
+# The Xcode project reads HOMEBREW_PREFIX from libkicad/BuildPaths.xcconfig (default /opt/homebrew),
+# overridable by the untracked BuildPaths.local.xcconfig. Point it at this machine's Homebrew.
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+LOCAL_XCCONFIG="$REPO_ROOT/libkicad/BuildPaths.local.xcconfig"
+DEFAULT_PREFIX="$(sed -n 's/^HOMEBREW_PREFIX *= *//p' "$REPO_ROOT/libkicad/BuildPaths.xcconfig")"
+CONFIGURED_PREFIX="$(sed -n 's/^HOMEBREW_PREFIX *= *//p' "$LOCAL_XCCONFIG" 2>/dev/null | tail -1)"
+if [ -n "$CONFIGURED_PREFIX" ]; then
+  if [ "$CONFIGURED_PREFIX" != "$BREW_PREFIX" ]; then
+    sed -i '' "s|^HOMEBREW_PREFIX *=.*|HOMEBREW_PREFIX = $BREW_PREFIX|" "$LOCAL_XCCONFIG"
+    ok "HOMEBREW_PREFIX updated from $CONFIGURED_PREFIX to $BREW_PREFIX in ${LOCAL_XCCONFIG#"$REPO_ROOT"/}"
+  fi
+elif [ "$BREW_PREFIX" != "$DEFAULT_PREFIX" ]; then
+  echo "HOMEBREW_PREFIX = $BREW_PREFIX" >> "$LOCAL_XCCONFIG"
+  ok "HOMEBREW_PREFIX set to $BREW_PREFIX in ${LOCAL_XCCONFIG#"$REPO_ROOT"/}"
 fi
 
 # The version of the keg $BREW_PREFIX/opt/<formula> points at -- i.e. the one the build links.
@@ -150,7 +162,6 @@ fi
 
 # --- Git submodules -------------------------------------------------------------------------------
 echo; echo "${BOLD}Git submodules${RESET}"
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 EMPTY_SUBMODULES=""
 for path in $SUBMODULES; do
   if [ -n "$(ls -A "$REPO_ROOT/$path" 2>/dev/null)" ]; then
