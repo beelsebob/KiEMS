@@ -8,4 +8,7 @@ KICAD_BUILD_ROOT = $(KICAD_SOURCE_ROOT)/build
 KICAD_FRAMEWORK_ROOT = $(KICAD_BUILD_ROOT)/kicad/KiCad.app/Contents/Frameworks
 HOMEBREW_PREFIX = /opt/homebrew
 
+// Fails every compile with an #error until Scripts/check_dependencies.sh has passed on this machine.
+OTHER_CFLAGS = $(inherited) -include $(SRCROOT)/libkicad/DependencyCheck.h
+
 #include? "BuildPaths.local.xcconfig"
