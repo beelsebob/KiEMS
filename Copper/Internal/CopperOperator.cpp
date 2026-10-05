@@ -17,43 +17,6 @@
 
 namespace copper {
 
-namespace {
-
-// Ported from Operator::AverageMatQuarterCell's own file-local MaterialValueFromCache -- resolves a
-// cached column-paint winner (or the background material, if nothing painted this exact
-// corner/tap) into one of the 4 weighted material quantities.
-double materialValueFromCache(CSPropMaterial* mat, int matType, int axis, const double coord[3], double bgEpsR,
-                               double bgKappa, double bgMueR, double bgSigma) {
-    if (mat != nullptr) {
-        switch (matType) {
-        case 0:
-            return mat->GetEpsilonWeighted(axis, coord);
-        case 1:
-            return mat->GetKappaWeighted(axis, coord);
-        case 2:
-            return mat->GetMueWeighted(axis, coord);
-        case 3:
-            return mat->GetSigmaWeighted(axis, coord);
-        default:
-            return 0.0;
-        }
-    }
-    switch (matType) {
-    case 0:
-        return bgEpsR;
-    case 1:
-        return bgKappa;
-    case 2:
-        return bgMueR;
-    case 3:
-        return bgSigma;
-    default:
-        return 0.0;
-    }
-}
-
-} // namespace
-
 // ---- polygon scanline rasterization -- see this file's own header's top comment for why this
 // exists at all (CSPrimitives::IsInside() called once per grid point was the dominant cost of
 // CopperOperator's construction on a real board). Reproduces CSPrimPolygon::IsInside()'s own
@@ -99,27 +62,37 @@ bool CopperOperator::tryBuildPolygonRasterShape(CSPrimitives* prim, PolygonRaste
 
 void CopperOperator::rasterizePolygonRow(const PolygonRasterShape& shape, double rowCoord,
                                            const std::vector<double>& sortedColCoords, std::vector<bool>& outInside) {
+    PolygonRasterScratch scratch;
+    std::vector<std::uint8_t> byteInside;
+    byteInside.resize(sortedColCoords.size());
+    rasterizePolygonRowBytes(shape, rowCoord, std::span<const double>(sortedColCoords), std::span<std::uint8_t>(byteInside), scratch);
+    outInside.assign(byteInside.size(), false);
+    for (std::size_t i = 0; i < byteInside.size(); ++i) {
+        outInside[i] = byteInside[i] != 0;
+    }
+}
+
+void CopperOperator::rasterizePolygonRowBytes(const PolygonRasterShape& shape, double rowCoord,
+                                                std::span<const double> sortedColCoords,
+                                                std::span<std::uint8_t> outInside,
+                                                PolygonRasterScratch& scratch) {
     const std::size_t nc = sortedColCoords.size();
-    outInside.assign(nc, false);
     const std::size_t np = shape.x.size();
     if (np < 2 || nc == 0) {
+        std::fill(outInside.begin(), outInside.end(), 0);
         return;
     }
 
-    // Winding-number contribution of every edge that crosses this row, expressed as a difference
-    // array over sortedColCoords' indices (see below for why every edge's affected region is always
-    // a prefix of the sorted column list) -- summed via one prefix-sum pass at the end instead of
-    // per-point winding accumulation.
-    std::vector<int> delta(nc + 1, 0);
+    // Winding-number contributions, expressed as sparse difference events over column indices.
+    // Reusing the event vectors avoids clearing full-width scratch arrays for every polygon row.
+    scratch.windingEvents.clear();
     int wnBaseline = 0;
 
     // On-cartesian-edge overrides -- CSPrimitives::IsInside()'s own two special cases for a query
     // point sitting exactly on an axis-aligned edge (a horizontal edge contributes nothing to the
     // crossing count at all, since it never satisfies `startover != endover`; a vertical edge only
-    // ever matters for the single column exactly at its own x). Collected once per edge here (independent
-    // of which column is being evaluated) and applied per column below.
-    std::vector<std::pair<double, double>> forcedOpenIntervals; // (lo, hi), strictly-between
-    std::vector<double> forcedExactColumns;
+    // ever matters for columns exactly at its own x). These use a second sparse event list.
+    scratch.forcedEvents.clear();
 
     double x1 = shape.x[np - 1];
     double y1 = shape.y[np - 1];
@@ -129,10 +102,30 @@ void CopperOperator::rasterizePolygonRow(const PolygonRasterShape& shape, double
         const double y2 = shape.y[i];
 
         if ((x2 == x1) && (((rowCoord < y1) && (rowCoord > y2)) || ((rowCoord > y1) && (rowCoord < y2)))) {
-            forcedExactColumns.push_back(x1);
+            const auto first = std::lower_bound(sortedColCoords.begin(), sortedColCoords.end(), x1);
+            const auto last = std::upper_bound(first, sortedColCoords.end(), x1);
+            const std::size_t start = static_cast<std::size_t>(first - sortedColCoords.begin());
+            const std::size_t stopEx = static_cast<std::size_t>(last - sortedColCoords.begin());
+            if (start < nc) {
+                scratch.forcedEvents.emplace_back(start, 1);
+            }
+            if (stopEx < nc) {
+                scratch.forcedEvents.emplace_back(stopEx, -1);
+            }
         }
         if ((y2 == y1) && (y1 == rowCoord) && (x1 != x2)) {
-            forcedOpenIntervals.emplace_back(std::min(x1, x2), std::max(x1, x2));
+            const double loEdge = std::min(x1, x2);
+            const double hiEdge = std::max(x1, x2);
+            const auto first = std::upper_bound(sortedColCoords.begin(), sortedColCoords.end(), loEdge);
+            const auto last = std::lower_bound(first, sortedColCoords.end(), hiEdge);
+            const std::size_t start = static_cast<std::size_t>(first - sortedColCoords.begin());
+            const std::size_t stopEx = static_cast<std::size_t>(last - sortedColCoords.begin());
+            if (start < nc) {
+                scratch.forcedEvents.emplace_back(start, 1);
+            }
+            if (stopEx < nc) {
+                scratch.forcedEvents.emplace_back(stopEx, -1);
+            }
         }
 
         const bool endover = (y2 >= rowCoord);
@@ -154,7 +147,7 @@ void CopperOperator::rasterizePolygonRow(const PolygonRasterShape& shape, double
                 }
                 wnBaseline += 1;
                 if (lo < nc) {
-                    delta[lo] -= 1;
+                    scratch.windingEvents.emplace_back(lo, -1);
                 }
             } else {
                 // y2 < y1: condAt(x) is false for a prefix, true after -- find the first index
@@ -169,7 +162,7 @@ void CopperOperator::rasterizePolygonRow(const PolygonRasterShape& shape, double
                 }
                 wnBaseline -= 1;
                 if (lo < nc) {
-                    delta[lo] += 1;
+                    scratch.windingEvents.emplace_back(lo, 1);
                 }
             }
         }
@@ -179,28 +172,24 @@ void CopperOperator::rasterizePolygonRow(const PolygonRasterShape& shape, double
         y1 = y2;
     }
 
+    std::sort(scratch.windingEvents.begin(), scratch.windingEvents.end());
+    std::sort(scratch.forcedEvents.begin(), scratch.forcedEvents.end());
     int wn = wnBaseline;
+    int forced = 0;
+    std::size_t windingEvent = 0;
+    std::size_t forcedEvent = 0;
     for (std::size_t i = 0; i < nc; ++i) {
-        wn += delta[i];
+        while (windingEvent < scratch.windingEvents.size() && scratch.windingEvents[windingEvent].first == i) {
+            wn += scratch.windingEvents[windingEvent++].second;
+        }
+        while (forcedEvent < scratch.forcedEvents.size() && scratch.forcedEvents[forcedEvent].first == i) {
+            forced += scratch.forcedEvents[forcedEvent++].second;
+        }
         bool inside = (wn != 0);
-        const double xv = sortedColCoords[i];
-        if (!inside) {
-            for (const auto& interval : forcedOpenIntervals) {
-                if (xv > interval.first && xv < interval.second) {
-                    inside = true;
-                    break;
-                }
-            }
+        if (!inside && forced != 0) {
+            inside = true;
         }
-        if (!inside) {
-            for (double fx : forcedExactColumns) {
-                if (xv == fx) {
-                    inside = true;
-                    break;
-                }
-            }
-        }
-        outInside[i] = inside;
+        outInside[i] = inside ? 1U : 0U;
     }
 }
 

@@ -46,7 +46,9 @@
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <span>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <ContinuousStructure.h>
@@ -163,6 +165,14 @@ public:
     double gridDeltaMetres() const { return _gridDeltaMetres; }
 
 private:
+    struct PolygonRasterScratch {
+        std::vector<std::pair<std::size_t, int>> windingEvents;
+        std::vector<std::pair<std::size_t, int>> forcedEvents;
+    };
+    static void rasterizePolygonRowBytes(const PolygonRasterShape& shape, double rowCoord,
+                                         std::span<const double> sortedColCoords, std::span<std::uint8_t> outInside,
+                                         PolygonRasterScratch& scratch);
+
     // -- mesh --
     unsigned int numLines(int axis) const { return static_cast<unsigned int>(_rawLines[axis].size()); }
     double discDelta(int axis, int pos, bool dualMesh) const; // ported from Operator::GetDiscDelta (unsigned pos there;
