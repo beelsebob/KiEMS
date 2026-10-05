@@ -2,6 +2,7 @@ import Cocoa
 import MetalKit
 import MetalPerformanceShaders
 import QuartzCore
+import os
 
 /// Serial, reprioritisable layer tessellation. Keeping only one KiCad extraction in flight bounds
 /// peak memory; a newly checked layer jumps ahead of background pre-generation work.
@@ -16,15 +17,23 @@ final class BoardLayerGeometryLoader {
     private var cancelled = false
     private var didDrain = false
     private let onDrained: (() -> Void)?
+    private let signposter = OSSignposter(subsystem: "com.kiems", category: "BoardLoad")
+    /// Layers this loader never generates because another source supplies them.
+    private let excluded: (String) -> Bool
 
+    /// `excluding` names layers whose geometry comes from elsewhere (the whole-board copper build),
+    /// so neither background generation nor a visibility request loads them here. `onDrained` runs
+    /// at most once.
     init(board: KicadBoardBridge, preview: EMSGeometryPreview, view: GeometryView,
          initiallyVisible: [String], generateAll: Bool = true,
+         excluding: @escaping (String) -> Bool = { _ in false },
          onDrained: (() -> Void)? = nil) {
         self.load = { try? board.layerPreviewNamed($0) }
         self.onDrained = onDrained
+        self.excluded = excluding
         self.preview = preview
         self.view = view
-        let names = preview.layers.filter { !$0.geometryGenerated }.map(\.name)
+        let names = preview.layers.filter { !$0.geometryGenerated && !excluding($0.name) }.map(\.name)
         let first = initiallyVisible.filter(names.contains)
         self.pending = first + (generateAll ? names.filter { !first.contains($0) } : [])
         view.onLayerNeedsGeometry = { [weak self] name in self?.prioritise(name) }
@@ -34,6 +43,7 @@ final class BoardLayerGeometryLoader {
          initiallyVisible: [String] = []) {
         self.load = { try? pipeline.geometryLayerNamed($0) }
         self.onDrained = nil
+        self.excluded = { _ in false }
         self.preview = preview
         self.view = view
         let names = preview.layers.filter { !$0.geometryGenerated }.map(\.name)
@@ -48,7 +58,7 @@ final class BoardLayerGeometryLoader {
     }
     func prioritise(_ name: String) {
         queue.async { [weak self] in
-            guard let self, !generated.contains(name) else { return }
+            guard let self, !generated.contains(name), !excluded(name) else { return }
             pending.removeAll { $0 == name }
             pending.insert(name, at: 0)
             runNext()
@@ -64,7 +74,6 @@ final class BoardLayerGeometryLoader {
             }
             return
         }
-        didDrain = false
         running = true
         let name = pending.removeFirst()
         if preview?.layers.first(where: { $0.name == name })?.geometryGenerated == true {
@@ -73,7 +82,9 @@ final class BoardLayerGeometryLoader {
             runNext()
             return
         }
+        let signpost = signposter.beginInterval("Layer geometry", id: signposter.makeSignpostID(), "\(name)")
         let loaded = load(name)
+        signposter.endInterval("Layer geometry", signpost)
         if loaded != nil { generated.insert(name) }
         DispatchQueue.main.async { [weak self] in
             guard let self, !cancelled, let loaded, let preview else { return }
@@ -181,7 +192,7 @@ struct BoardActivityHighlight: Equatable {
     /// included nets. Only the latter should mute every net on the board.
     var hasSelectedSimulation = false
 
-    /// Everything rebuildBoardBuffers() reads: copper/component muting, the hull seed copper, and
+    /// Everything boardActivityChanged() reads: copper/component muting, the hull seed groups, and
     /// the hull-cut pick discs (by position, not role).
     struct BoardInputs: Equatable {
         var includedNets: Set<String>
@@ -218,7 +229,7 @@ struct BoardActivityHighlight: Equatable {
 /// Renders an EMSGeometryPreview -- the sliced board geometry the geometry pipeline step just
 /// built for one simulation -- as a real, opaque 3D board (copper layers spread across the board's
 /// own real Z thickness, same approach as FieldView's own board-reference render -- see
-/// rebuildBoardBuffers()'s own doc comment): each layer filled in its own fully opaque color; vias
+/// BoardGeometry): each layer filled in its own fully opaque color; vias
 /// (both real board ones and board-slicing's own synthetic stitching vias) as an annular ring in
 /// the top layer's color, a gold stroke, and a black hole -- matching how KiCad's own PCB editor
 /// renders a drilled hole as genuinely empty, not another highlighted color; resolved ports as blue
@@ -259,6 +270,9 @@ final class GeometryView: MTKView, MTKViewDelegate {
 
     var preview: EMSGeometryPreview? {
         didSet {
+            // The old board's geometry must not be resolved against the new preview's layers
+            // while the visibility resets below fire.
+            boardGeometry = nil
             selectedGridLayerIndex = nil
             selectedTarget = nil
             // Layer names come from KiCad rather than a fixed app-side list. The simulation
@@ -279,7 +293,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
             hideTopSolderMask = preview?.layers.contains(where: { $0.name == "F.Mask" }) == true
             hideBottomSolderMask = preview?.layers.contains(where: { $0.name == "B.Mask" }) == true
             hideComponents = false
-            rebuildBoardBuffers()
+            boardActivityChanged()
+            requestBoardGeometry()
             rebuildGridBuffers()
             hasFitCamera = false
             rebuildLegend()
@@ -290,7 +305,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
     /// A layer object was filled in-place, or a detailed preview was merged into the current
     /// catalog. Visibility is deliberately untouched.
     func refreshLoadedGeometry() {
-        rebuildBoardBuffers()
+        requestBoardGeometry()
         rebuildGridBuffers()
         rebuildLegend()
         needsDisplay = true
@@ -304,7 +319,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
     /// Set by WholeBoardViewController whenever the selected simulation (or its involved-nets/
     /// excitations) changes -- nil (or an all-empty value) means no simulation is selected, or none
     /// of its nets are included, so nothing here flashes at all. Drives both the excited-pin red
-    /// markers (rebuilt alongside the rest of the board -- see rebuildBoardBuffers()) and the
+    /// markers (see rebuildMarkerBuffers()) and the
     /// translucent flashing/ripple overlay (rebuildActivityBuffers()); also starts/stops this view's
     /// own continuous redraw (see updateAnimationState()), since animating anything at all needs a
     /// real per-frame draw loop, unlike every other static-until-interacted-with state here.
@@ -315,7 +330,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
             // the board, and re-running the flow-graph search, is reserved for edits that change
             // their own inputs.
             if activity?.boardInputs != oldValue?.boardInputs {
-                rebuildBoardBuffers() // Also rebuilds the activity and marker buffers.
+                boardActivityChanged() // Also rebuilds the activity and marker buffers.
             } else {
                 if activity?.flowInputs != oldValue?.flowInputs {
                     rebuildActivityBuffers()
@@ -349,30 +364,27 @@ final class GeometryView: MTKView, MTKViewDelegate {
     /// previous one's.
     private var hiddenLayerIndices: Set<Int> = [] {
         didSet {
-            rebuildBoardBuffers()
-            needsDisplay = true
+            guard hiddenLayerIndices != oldValue else { return }
+            boardVisibilityChanged()
         }
     }
     private var hideTopSolderMask = false {
         didSet {
-            rebuildBoardBuffers()
-            needsDisplay = true
+            guard hideTopSolderMask != oldValue else { return }
+            boardVisibilityChanged()
         }
     }
-    /// STEP-model visibility, controlled by the Components row in the legend. Component triangles
-    /// share the opaque board buffers with pads/tracks rather than having a separate draw call, so
-    /// changing this requires rebuilding those buffers.
+    /// STEP-model visibility, controlled by the Components row in the legend.
     private var hideComponents = false {
         didSet {
             guard hideComponents != oldValue else { return }
-            rebuildBoardBuffers()
-            needsDisplay = true
+            boardVisibilityChanged()
         }
     }
     private var hideBottomSolderMask = false {
         didSet {
-            rebuildBoardBuffers()
-            needsDisplay = true
+            guard hideBottomSolderMask != oldValue else { return }
+            boardVisibilityChanged()
         }
     }
 
@@ -415,20 +427,25 @@ final class GeometryView: MTKView, MTKViewDelegate {
     private var highlightDepthStencilState: MTLDepthStencilState!
     private var pickingDepthStencilState: MTLDepthStencilState!
 
-    // MARK: - Board geometry (layers + vias + ports, one combined opaque triangle buffer)
+    // MARK: - Board geometry (layers, vias, components, zones and mask -- see BoardGeometry)
 
-    private var boardPositionBuffer: MTLBuffer?
-    private var boardColorBuffer: MTLBuffer?
-    private var boardNormalBuffer: MTLBuffer?
-    // Per-vertex region/muting disposition (-1 = involved copper that is always inside the cutout
-    // at its own footprint, 0 = follow the region texture, 1 = muted for a net-exclusion or
-    // uninvolved-component reason), parallel to boardColorBuffer. Kept separate from baked-in color
-    // so geometry_pbr_fragment can combine it with the per-pixel "outside the hull" test before
-    // applying mutedSimulationColor's dim once, rather than baking the dim in twice (see
-    // updateRegionHighlight(commandBuffer:)'s own doc comment and this feature's origin: the user
-    // explicitly asked for exactly this combined behavior, not compounding dims).
-    private var boardMuteFlagBuffer: MTLBuffer?
-    private var boardVertexCount = 0
+    /// Built once per preview revision, off the main thread, independent of layer visibility and
+    /// the selected simulation. nil until the first build lands.
+    private let loadSignposter = OSSignposter(subsystem: "com.kiems", category: "BoardLoad")
+    private var pendingPresentationTiming: OSSignpostIntervalState?
+    private var boardGeometry: BoardGeometry?
+    private var boardGeometryBuilder: BoardGeometryBuilder?
+    /// Counts requestBoardGeometry() calls and applied builds, so whenBoardGeometryCurrent can
+    /// tell when the latest request has landed.
+    private var requestedBoardGeometryRevision = 0
+    private var appliedBoardGeometryRevision = 0
+    private var boardGeometryCurrentHandlers: [() -> Void] = []
+    /// One SIMD2<Float> per boardGeometry.muteKeys entry -- see updateMuteTable().
+    private var muteTableBuffer: MTLBuffer?
+    /// Z of markers/outline drawn just above the topmost layer -- see requestBoardGeometry().
+    private var markerZ: Float = 0
+    private var boardOpaquePipelineState: MTLRenderPipelineState!
+    private var boardTranslucentPipelineState: MTLRenderPipelineState!
 
     // Port/probe/excitation and planned-via dots -- see rebuildMarkerBuffers(). Same vertex layout
     // as the board buffers, drawn with the same opaque pipeline straight after them.
@@ -438,22 +455,14 @@ final class GeometryView: MTKView, MTKViewDelegate {
     private var markerMuteFlagBuffer: MTLBuffer?
     private var markerVertexCount = 0
 
-    // Filled copper zones are translucent and drawn before opaque tracks/pads, so the latter stay
-    // crisp where they occupy the same physical copper plane.
-    private var zonePositionBuffer: MTLBuffer?
-    private var zoneColorBuffer: MTLBuffer?
-    private var zoneNormalBuffer: MTLBuffer?
-    private var zoneMuteFlagBuffer: MTLBuffer?
-    private var zoneVertexCount = 0
-
     // MARK: - Simulation region highlight (exact board-space Euclidean distance transform).
 
     private var regionSeedPipelineState: MTLRenderPipelineState!
     private var regionDistanceTransform: MPSImageEuclideanDistanceTransform!
     private struct RegionSeedGroup {
         let paddingMicrometers: Double
-        let positionBuffer: MTLBuffer
-        let vertexCount: Int
+        /// Ranges of boardGeometry.seedBuffer: the seeds of every net with this padding.
+        let ranges: [Range<Int>]
     }
     // One group per distinct padding value. Each is distance-transformed independently and then
     // combined into the final union mask, so a 0mm net does not inherit another net's 5mm halo.
@@ -473,44 +482,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
     // just to satisfy that.
     private var regionDummyTexture: MTLTexture?
 
-    private enum PickTarget: Hashable {
-        case pin(reference: String, number: String, net: String?)
-        case net(String)
-        case zone(String?)
-        case component(String)
-        case hullCutPort(identifier: String, net: String)
-        case nets(origin: String, members: [String])
+    private typealias PickTarget = BoardPickTarget
 
-        var netName: String? {
-            switch self {
-            case let .pin(_, _, net): return net
-            case let .net(net): return net
-            case let .zone(net): return net
-            case .component: return nil
-            case let .hullCutPort(_, net): return net
-            case let .nets(origin, _): return origin
-            }
-        }
-
-        /// Pins are submitted after every other pick target in their own depth-biased draw. This
-        /// makes a pad win over a nominally coplanar trace without disabling the depth test.
-        var hasPickPriority: Bool {
-            switch self {
-            case .pin, .component, .hullCutPort: return true
-            case .net, .zone, .nets: return false
-            }
-        }
-    }
-
-    private var pickingPositionBuffer: MTLBuffer?
-    private var pickingIdentifierBuffer: MTLBuffer?
-    private var pickingVertexCount = 0
-    /// First pin vertex in the combined picking buffers. Non-pins are drawn first with ordinary
-    /// depth, then pins with a small toward-camera bias so nominally coplanar pads beat
-    /// traces without relying on their interpolated depths being bit-for-bit identical.
-    private var pickingPriorityVertexStart = 0
-    private var pickTargetsByIdentifier: [UInt32: PickTarget] = [:]
-    private var pickPositionsByTarget: [PickTarget: [Position3]] = [:]
     private var selectedTarget: PickTarget? {
         didSet {
             rebuildHighlightBuffer()
@@ -547,18 +520,6 @@ final class GeometryView: MTKView, MTKViewDelegate {
     private var activityColorBuffer: MTLBuffer?
     private var activityDistanceBuffer: MTLBuffer?
     private var activityVertexCount = 0
-
-    // MARK: - Solder mask (translucent, drawn in its own pass after every opaque draw above)
-
-    private var maskPositionBuffer: MTLBuffer?
-    private var maskColorBuffer: MTLBuffer?
-    private var maskNormalBuffer: MTLBuffer?
-    private var maskMuteFlagBuffer: MTLBuffer?
-    private var maskVertexCount = 0
-
-    private var outlinePositionBuffer: MTLBuffer?
-    private var outlineColorBuffer: MTLBuffer?
-    private var outlineVertexCount = 0
 
     private var crossPositionBuffer: MTLBuffer?
     private var crossColorBuffer: MTLBuffer?
@@ -628,6 +589,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
     private static let sampleCount = 4
 
     private func commonInit() {
+        let setupTiming = loadSignposter.beginInterval("Geometry view and pipelines", id: loadSignposter.makeSignpostID())
+        defer { loadSignposter.endInterval("Geometry view and pipelines", setupTiming) }
         delegate = self
         isPaused = true
         enableSetNeedsDisplay = true
@@ -663,6 +626,12 @@ final class GeometryView: MTKView, MTKViewDelegate {
 
             translucentPipelineState = Self.makePBRPipelineState(device: device, pixelFormat: colorPixelFormat,
                                                                    translucent: true)
+            boardOpaquePipelineState = Self.makePBRPipelineState(
+                device: device, pixelFormat: colorPixelFormat, translucent: false,
+                vertexFunctionName: "geometry_board_pbr_vertex")
+            boardTranslucentPipelineState = Self.makePBRPipelineState(
+                device: device, pixelFormat: colorPixelFormat, translucent: true,
+                vertexFunctionName: "geometry_board_pbr_vertex")
             let translucentDepthDescriptor = MTLDepthStencilDescriptor()
             translucentDepthDescriptor.depthCompareFunction = .lessEqual
             translucentDepthDescriptor.isDepthWriteEnabled = false
@@ -746,9 +715,11 @@ final class GeometryView: MTKView, MTKViewDelegate {
     }
 
     private static func makePBRPipelineState(device: MTLDevice, pixelFormat: MTLPixelFormat,
-                                              translucent: Bool) -> MTLRenderPipelineState? {
+                                              translucent: Bool,
+                                              vertexFunctionName: String = "geometry_pbr_vertex")
+        -> MTLRenderPipelineState? {
         guard let library = device.makeDefaultLibrary(),
-              let vertexFunction = library.makeFunction(name: "geometry_pbr_vertex"),
+              let vertexFunction = library.makeFunction(name: vertexFunctionName),
               let fragmentFunction = library.makeFunction(name: "geometry_pbr_fragment") else { return nil }
         let descriptor = MTLRenderPipelineDescriptor()
         descriptor.vertexFunction = vertexFunction
@@ -920,13 +891,11 @@ final class GeometryView: MTKView, MTKViewDelegate {
         // Real depth test/write for opaque board geometry (see depthStencilState's own doc comment)
         // -- draw order below doesn't affect its correctness. The diagnostic grid switches to its
         // own depth-free overlay state immediately before it is drawn.
-        if boardVertexCount > 0, let positions = boardPositionBuffer, let colors = boardColorBuffer,
-           let normals = boardNormalBuffer, let muteFlags = boardMuteFlagBuffer {
-            encoder.setVertexBuffer(positions, offset: 0, index: 0)
-            encoder.setVertexBuffer(colors, offset: 0, index: 1)
-            encoder.setVertexBuffer(normals, offset: 0, index: 2)
-            encoder.setVertexBuffer(muteFlags, offset: 0, index: 4)
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: boardVertexCount)
+        if let geometry = boardGeometry, let buffers = geometry.opaque, let muteTableBuffer,
+           let boardOpaquePipelineState {
+            encoder.setRenderPipelineState(boardOpaquePipelineState)
+            drawBoard(buffers, ranges: geometry.opaqueRanges, muteTable: muteTableBuffer, encoder: encoder)
+            encoder.setRenderPipelineState(opaquePipelineState)
         }
         if markerVertexCount > 0, let positions = markerPositionBuffer, let colors = markerColorBuffer,
            let normals = markerNormalBuffer, let muteFlags = markerMuteFlagBuffer {
@@ -939,23 +908,19 @@ final class GeometryView: MTKView, MTKViewDelegate {
         // Pours are also stored back-to-front. Draw them over the completed opaque stack so an
         // upper-layer pour correctly blends over lower copper; their tiny rearward Z offset (set
         // while building the buffers) keeps same-layer tracks and pads crisp on top.
-        if zoneVertexCount > 0, let positions = zonePositionBuffer, let colors = zoneColorBuffer,
-           let normals = zoneNormalBuffer, let muteFlags = zoneMuteFlagBuffer,
-           let translucentPipelineState, let translucentDepthStencilState {
-            encoder.setRenderPipelineState(translucentPipelineState)
+        if let geometry = boardGeometry, let buffers = geometry.zone, let muteTableBuffer,
+           let boardTranslucentPipelineState, let translucentDepthStencilState {
+            encoder.setRenderPipelineState(boardTranslucentPipelineState)
             encoder.setDepthStencilState(translucentDepthStencilState)
-            encoder.setVertexBuffer(positions, offset: 0, index: 0)
-            encoder.setVertexBuffer(colors, offset: 0, index: 1)
-            encoder.setVertexBuffer(normals, offset: 0, index: 2)
-            encoder.setVertexBuffer(muteFlags, offset: 0, index: 4)
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: zoneVertexCount)
+            drawBoard(buffers, ranges: geometry.zoneRanges, muteTable: muteTableBuffer, encoder: encoder)
         }
         encoder.setRenderPipelineState(unlitPipelineState)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<FieldUniformsGPU>.stride, index: 2)
-        if outlineVertexCount > 1, let positions = outlinePositionBuffer, let colors = outlineColorBuffer {
+        if let geometry = boardGeometry, geometry.outlineVertexCount > 1,
+           let positions = geometry.outlineBuffer, let colors = geometry.outlineColorBuffer {
             encoder.setVertexBuffer(positions, offset: 0, index: 0)
             encoder.setVertexBuffer(colors, offset: 0, index: 1)
-            encoder.drawPrimitives(type: .lineStrip, vertexStart: 0, vertexCount: outlineVertexCount)
+            encoder.drawPrimitives(type: .lineStrip, vertexStart: 0, vertexCount: geometry.outlineVertexCount)
         }
         // Each cross is two independent 2-vertex segments (see appendCross()) -- .line, not
         // .lineStrip, draws vertex pairs (0,1), (2,3), ... as disconnected segments rather than
@@ -978,18 +943,13 @@ final class GeometryView: MTKView, MTKViewDelegate {
         // Solder mask, translucent, drawn last -- see translucentPipelineState's own doc comment.
         // Depth-tested against everything opaque drawn above (so it's correctly hidden when viewed
         // from the board's own far side), just with its own separately-blended pipeline state.
-        if maskVertexCount > 0, let positions = maskPositionBuffer, let colors = maskColorBuffer,
-           let normals = maskNormalBuffer, let muteFlags = maskMuteFlagBuffer,
-           let translucentPipelineState, let translucentDepthStencilState {
-            encoder.setRenderPipelineState(translucentPipelineState)
+        if let geometry = boardGeometry, let buffers = geometry.mask, let muteTableBuffer,
+           let boardTranslucentPipelineState, let translucentDepthStencilState {
+            encoder.setRenderPipelineState(boardTranslucentPipelineState)
             encoder.setDepthStencilState(translucentDepthStencilState)
-            encoder.setVertexBuffer(positions, offset: 0, index: 0)
-            encoder.setVertexBuffer(colors, offset: 0, index: 1)
-            encoder.setVertexBuffer(normals, offset: 0, index: 2)
-            encoder.setVertexBuffer(muteFlags, offset: 0, index: 4)
             encoder.setVertexBytes(&pbrUniforms, length: MemoryLayout<GeometryPBRUniformsGPU>.stride, index: 3)
             encoder.setFragmentBytes(&pbrUniforms, length: MemoryLayout<GeometryPBRUniformsGPU>.stride, index: 3)
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: maskVertexCount)
+            drawBoard(buffers, ranges: geometry.maskRanges, muteTable: muteTableBuffer, encoder: encoder)
         }
 
         // Simulation-activity flash/ripple, drawn before the click-selection highlight below so an
@@ -1029,6 +989,14 @@ final class GeometryView: MTKView, MTKViewDelegate {
         }
 
         encoder.endEncoding()
+        if let timing = pendingPresentationTiming {
+            pendingPresentationTiming = nil
+            let signposter = loadSignposter
+            signposter.emitEvent("First board frame submitted")
+            drawable.addPresentedHandler { _ in
+                signposter.endInterval("Board installed to presentation", timing)
+            }
+        }
         commandBuffer.present(drawable)
         commandBuffer.commit()
     }
@@ -1053,7 +1021,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
     private func updateRegionHighlight(commandBuffer: MTLCommandBuffer) -> MTLTexture? {
         guard let device, let preview, let regionSeedPipelineState, let regionUnionPipelineState,
               let regionDistanceTransform, let hullPadding = activity?.maximumHullPadding,
-              !regionSeedGroups.isEmpty else { return nil }
+              !regionSeedGroups.isEmpty, let seedBuffer = boardGeometry?.seedBuffer else { return nil }
 
         let padding = max(Float(hullPadding * Self.simUnitsPerMicrometer), 0)
         let paddedBoardMin = SIMD2<Float>(Float(preview.xMin) - padding, Float(preview.yMin) - padding)
@@ -1114,9 +1082,11 @@ final class GeometryView: MTKView, MTKViewDelegate {
             seedPass.colorAttachments[0].storeAction = .store
             guard let seedEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: seedPass) else { return nil }
             seedEncoder.setRenderPipelineState(regionSeedPipelineState)
-            seedEncoder.setVertexBuffer(group.positionBuffer, offset: 0, index: 0)
+            seedEncoder.setVertexBuffer(seedBuffer, offset: 0, index: 0)
             seedEncoder.setVertexBytes(&seedUniforms, length: MemoryLayout<RegionSeedUniformsGPU>.stride, index: 2)
-            seedEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: group.vertexCount)
+            for range in group.ranges {
+                seedEncoder.drawPrimitives(type: .triangle, vertexStart: range.lowerBound, vertexCount: range.count)
+            }
             seedEncoder.endEncoding()
 
             let groupPadding = max(Float(group.paddingMicrometers * Self.simUnitsPerMicrometer), 0)
@@ -1412,8 +1382,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
         }
 
         guard let device, let commandQueue, let pickingPipelineState, let pickingDepthStencilState,
-              let positions = pickingPositionBuffer, let identifiers = pickingIdentifierBuffer,
-              pickingVertexCount > 0 else {
+              let geometry = boardGeometry,
+              let positions = geometry.pickPositions, let identifiers = geometry.pickIdentifiers else {
             selectedTarget = nil
             return
         }
@@ -1457,19 +1427,24 @@ final class GeometryView: MTKView, MTKViewDelegate {
         encoder.setVertexBuffer(positions, offset: 0, index: 0)
         encoder.setVertexBuffer(identifiers, offset: 0, index: 1)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<FieldUniformsGPU>.stride, index: 2)
-        let priorityStart = min(pickingPriorityVertexStart, pickingVertexCount)
-        if priorityStart > 0 {
-            encoder.setDepthBias(0, slopeScale: 0, clamp: 0)
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: priorityStart)
+        encoder.setDepthBias(0, slopeScale: 0, clamp: 0)
+        for range in BoardGeometry.drawRanges(geometry.pickRanges, isVisible: isSlotVisible) {
+            encoder.drawPrimitives(type: .triangle, vertexStart: range.lowerBound, vertexCount: range.count)
         }
-        if priorityStart < pickingVertexCount {
-            // Standard depth increases away from this camera (`lessEqual` wins), so a negative
-            // constant bias moves the pin slightly toward it. This resolves tiny rasterized
-            // differences between otherwise coplanar pad/trace triangles, while the normal depth
-            // test still rejects a pin behind meaningfully nearer geometry.
-            encoder.setDepthBias(-1, slopeScale: 0, clamp: 0)
-            encoder.drawPrimitives(type: .triangle, vertexStart: priorityStart,
-                                   vertexCount: pickingVertexCount - priorityStart)
+        // Pins (and invalid components, the only pickable STEP models) follow. Standard depth
+        // increases away from this camera (`lessEqual` wins), so a negative constant bias moves
+        // them slightly toward it. This resolves tiny rasterized differences between otherwise
+        // coplanar pad/trace triangles, while the normal depth test still rejects a pin behind
+        // meaningfully nearer geometry.
+        encoder.setDepthBias(-1, slopeScale: 0, clamp: 0)
+        var priorityRanges = BoardGeometry.drawRanges(geometry.pickPriorityRanges, isVisible: isSlotVisible)
+        if !hideComponents {
+            for reference in activity?.invalidComponentReferences ?? [] {
+                if let range = geometry.componentPickRanges[reference] { priorityRanges.append(range) }
+            }
+        }
+        for range in priorityRanges {
+            encoder.drawPrimitives(type: .triangle, vertexStart: range.lowerBound, vertexCount: range.count)
         }
         encoder.endEncoding()
         commandBuffer.commit()
@@ -1478,9 +1453,15 @@ final class GeometryView: MTKView, MTKViewDelegate {
         var identifier: UInt32 = 0
         colorTexture.getBytes(&identifier, bytesPerRow: MemoryLayout<UInt32>.stride,
                               from: MTLRegionMake2D(pixelX, pixelY, 1, 1), mipmapLevel: 0)
-        guard let picked = pickTargetsByIdentifier[identifier] else {
+        guard var picked = geometry.targetsByIdentifier[identifier] else {
             selectedTarget = nil
             return
+        }
+        // Faulty passives are selected as one component from either terminal; valid pads retain
+        // their existing pin-selection behavior.
+        if case let .pin(reference, _, _) = picked,
+           activity?.invalidComponentReferences.contains(reference) == true {
+            picked = .component(reference)
         }
         // Clicking a zone fill selects its net, exactly as clicking one of the net's traces does.
         // Unconnected (no-net) pours have nothing to select.
@@ -1658,14 +1639,6 @@ final class GeometryView: MTKView, MTKViewDelegate {
     private static let excitedPinMarkerRadius: CGFloat = 1600
     private static let probedPinMarkerRadius: CGFloat = 1600
     private static let absorbingPinMarkerRadius: CGFloat = 2000
-    /// Applies the warning treatment to the model's original material: boost its brightness by
-    /// 30%, then blend strongly toward saturated red. Retaining some of the material color keeps
-    /// the model's shading and part boundaries readable instead of replacing it with a flat mask.
-    private static func invalidComponentColor(_ color: SIMD4<Float>) -> SIMD4<Float> {
-        let boosted = SIMD3<Float>(min(color.x * 1.3, 1), min(color.y * 1.3, 1), min(color.z * 1.3, 1))
-        let tinted = boosted * 0.3 + SIMD3<Float>(1, 0, 0) * 0.7
-        return SIMD4<Float>(tinted.x, tinted.y, tinted.z, color.w)
-    }
     // A soft cyan-white -- distinct from the click-selection highlight's own plain white (see
     // rebuildHighlightBuffer()) so "this net is live in the simulation" never reads as "this is
     // what you clicked."
@@ -1696,38 +1669,28 @@ final class GeometryView: MTKView, MTKViewDelegate {
     private static let failedViaAttemptColor = SIMD4<Float>(0, 0, 0, 1)
     private static let plannedViaColor = SIMD4<Float>(0xC6 / 255.0, 0x9B / 255.0, 0x3C / 255.0, 1)
     // Board-space (sim units) fallback half-length for a failed-via-attempt cross, used only when
-    // this preview has no real/stitching via to size it off of (see rebuildBoardBuffers()) -- 0.15mm
+    // this preview has no real/stitching via to size it off of -- 0.15mm
     // at 10 sim units/micron (see SlicedBoard's own doc comment on the sim-unit convention).
     private static let failedViaAttemptFallbackHalfLength: CGFloat = 1500
     // 80% dark grey -- fixed regardless of light/dark appearance, matching the common EDA-tool
     // convention of a dark canvas independent of the rest of the app's own theme.
     private static let backgroundColor = MTLClearColor(red: 0.2, green: 0.2, blue: 0.2, alpha: 1)
 
-    /// Builds the one combined opaque triangle buffer for every copper layer, via, and port. Each
-    /// copper layer is placed at its own real Z (layer.z -- the cumulative real substrate thickness
-    /// above it, exactly matching where the actual FDTD simulation places it, not an even-spacing
-    /// approximation across the board's own extent -- see EMSGeometryLayer.z's own doc comment).
-    private func rebuildBoardBuffers() {
-        regionHighlightNeedsUpdate = true
-        guard let device, let preview else {
-            boardVertexCount = 0
-            zoneVertexCount = 0
-            pickingVertexCount = 0
-            pickingPriorityVertexStart = 0
-            pickTargetsByIdentifier = [:]
-            pickPositionsByTarget = [:]
-            highlightVertexCount = 0
-            activityPositionBuffer = nil
-            activityColorBuffer = nil
-            activityDistanceBuffer = nil
-            activityVertexCount = 0
-            outlineVertexCount = 0
-            crossVertexCount = 0
-            markerVertexCount = 0
-            maskVertexCount = 0
-            regionSeedGroups = []
+    /// Asks for the board's geometry to be rebuilt from `preview` on a background queue (see
+    /// BoardGeometryBuilder). Only called when the preview's own triangles change -- layer
+    /// visibility and the selected simulation are applied to the already-built geometry (see
+    /// boardVisibilityChanged() and boardActivityChanged()). Until the build lands, the previous
+    /// geometry keeps drawing.
+    private func requestBoardGeometry() {
+        guard let preview, let device else {
+            boardGeometry = nil
+            boardActivityChanged()
+            appliedBoardGeometryRevision = requestedBoardGeometryRevision
+            fireBoardGeometryCurrentHandlersIfNeeded()
             return
         }
+        let builder = boardGeometryBuilder ?? BoardGeometryBuilder(device: device)
+        boardGeometryBuilder = builder
 
         let layerZValues = preview.layers.map { Float($0.z) }
         let topZ = layerZValues.max() ?? 0
@@ -1736,344 +1699,164 @@ final class GeometryView: MTKView, MTKViewDelegate {
         // one -- same z-fighting concern FieldView's own markerZ avoids, same fix (a small nudge,
         // 1% of board thickness, rather than reusing the topmost layer's own Z exactly).
         let markerZ = topZ + max(topZ - bottomZ, 1) * 0.01
-
-        var positions: [Position3] = []
-        var colors: [SIMD4<Float>] = []
-        var normals: [Position3] = []
-        var muteFlags: [Float] = []
-        var zonePositions: [Position3] = []
-        var zoneColors: [SIMD4<Float>] = []
-        var zoneNormals: [Position3] = []
-        var zoneMuteFlags: [Float] = []
-        // Simulation-net copper grouped by its own padding, rasterized into a camera-independent
-        // board-space mask when these buffers change.
-        var regionSeedPositionsByPadding: [Double: [Position3]] = [:]
-        var pickingPositions: [Position3] = []
-        var pickingIdentifiers: [UInt32] = []
-        // Pins are appended to the combined picking buffers last so they deterministically win
-        // equal-depth overlaps with traces. Keep them separate while walking layers because the
-        // visible board geometry itself must retain its normal physical back-to-front ordering.
-        var priorityPickingPositions: [Position3] = []
-        var priorityPickingIdentifiers: [UInt32] = []
-        var identifierByTarget: [PickTarget: UInt32] = [:]
-        var targetsByIdentifier: [UInt32: PickTarget] = [:]
-        var positionsByTarget: [PickTarget: [Position3]] = [:]
-        var nextPickingIdentifier: UInt32 = 1
-        let invalidReferences = activity?.invalidComponentReferences ?? []
-        var maskPositions: [Position3] = []
-        var maskColors: [SIMD4<Float>] = []
-        var maskNormals: [Position3] = []
-        var maskMuteFlags: [Float] = []
-
         // Submit in physical Z order rather than array order (silkscreen is appended after copper,
         // so a plain reversed array would still put F.Silkscreen in the wrong place): back/bottom
         // first, front/top last. Keep the original index for visibility and color lookup.
-        let backToFrontLayerIndices = preview.layers.indices.sorted {
-            preview.layers[$0].z < preview.layers[$1].z
-        }
-        for index in backToFrontLayerIndices {
+        let backToFront = preview.layers.indices.sorted { preview.layers[$0].z < preview.layers[$1].z }
+        var layers = backToFront.map { index -> BoardGeometrySnapshot.Layer in
             let layer = preview.layers[index]
-            // Hidden layers still seed the hull distance field: the slicing hull is one shared
-            // board-wide region built from every layer's copper, whichever layers are shown.
-            let isLayerHidden = hiddenLayerIndices.contains(index)
-            let layerColor = Self.simdColor(for: layer, index: index, total: preview.layers.count)
-            let z = Float(layer.z)
-            let isSolderMaskLayer = layer.name == "F.Mask" || layer.name == "B.Mask"
-            for triangle in layer.triangles {
-                if isLayerHidden {
-                    if let netName = triangle.netName, let padding = activity?.hullPaddingByNet[netName] {
-                        regionSeedPositionsByPadding[padding, default: []].append(contentsOf: [
-                            Position3(Float(triangle.a.x), Float(triangle.a.y), z),
-                            Position3(Float(triangle.b.x), Float(triangle.b.y), z),
-                            Position3(Float(triangle.c.x), Float(triangle.c.y), z)])
-                    }
-                    continue
-                }
-                // Dynamically loaded mask lives in preview.layers so the list exactly mirrors
-                // KiCad, but it must still use the dedicated mask pass. Treating its 0.45 opacity
-                // as an ordinary zone put it in zonePositionBuffer, where it blended over copper.
-                if isSolderMaskLayer {
-                    Self.appendLitTriangle(Position3(Float(triangle.a.x), Float(triangle.a.y), z),
-                                            Position3(Float(triangle.b.x), Float(triangle.b.y), z),
-                                            Position3(Float(triangle.c.x), Float(triangle.c.y), z),
-                                            color: Self.solderMaskColor, muted: false,
-                                            positions: &maskPositions, colors: &maskColors,
-                                            normals: &maskNormals, muteFlags: &maskMuteFlags)
-                    continue
-                }
-                // Alpha 0 is the "no override" sentinel (see EMSGeometryTriangle.color's own doc
-                // comment) -- real copper is always fully opaque, so a real per-triangle color
-                // (the whole-board preview's own net coloring) never collides with it.
-                let color = triangle.color.w > 0
-                    ? SIMD4<Float>(Float(triangle.color.x), Float(triangle.color.y), Float(triangle.color.z),
-                                   Float(triangle.color.w))
-                    : layerColor
-                // Left unmuted here and combined (once, via OR -- see boardMuteFlagBuffer's own doc
-                // comment) with the region-highlight's own per-pixel "outside the hull" test in
-                // geometry_pbr_fragment, rather than baking mutedSimulationColor in on the CPU as
-                // this used to.
-                var isMuted = false
-                var isHullSeedCopper = false
-                var isSimulatedCopper = false
-                var hullPaddingMicrometers: Double?
-                if let netName = triangle.netName {
-                    let netIncluded = activity?.configurationIncludedNets.contains(netName) == true
-                        || activity?.fullySaturatedNets.contains(netName) == true
-                    isMuted = activity?.hasSelectedSimulation == true && !netIncluded
-                    // Every full simulation net grows the real slicing hull. Geometry-only and
-                    // ground nets remain context and must not seed this distance field.
-                    hullPaddingMicrometers = activity?.hullPaddingByNet[netName]
-                    isHullSeedCopper = hullPaddingMicrometers != nil
-                    isSimulatedCopper = activity?.includedNets.contains(netName) == true
-                }
-                if activity?.hasSelectedSimulation == true,
-                   layer.name == "F.Silkscreen" || layer.name == "B.Silkscreen" {
-                    let belongsToInvolvedComponent = triangle.footprintReference.map {
-                        activity?.involvedComponentReferences.contains($0) == true
-                    } ?? false
-                    if !belongsToInvolvedComponent {
-                        isMuted = true
-                    }
-                }
-                let a = Position3(Float(triangle.a.x), Float(triangle.a.y), z)
-                let b = Position3(Float(triangle.b.x), Float(triangle.b.y), z)
-                let c = Position3(Float(triangle.c.x), Float(triangle.c.y), z)
-                let pickTarget: PickTarget?
-                let geometryTarget: PickTarget?
-                switch triangle.kind {
-                case .pin:
-                    if let reference = triangle.footprintReference {
-                        let pinTarget = PickTarget.pin(reference: reference, number: triangle.padNumber ?? "",
-                                                       net: triangle.netName)
-                        geometryTarget = pinTarget
-                        // Faulty passives are selected as one component from either terminal;
-                        // valid pads retain their existing pin-selection behavior.
-                        pickTarget = invalidReferences.contains(reference) ? .component(reference) : pinTarget
-                    } else {
-                        pickTarget = nil
-                        geometryTarget = nil
-                    }
-                case .trace:
-                    pickTarget = triangle.netName.map(PickTarget.net)
-                    geometryTarget = pickTarget
-                case .zone:
-                    pickTarget = .zone(triangle.netName)
-                    geometryTarget = pickTarget
-                default:
-                    pickTarget = nil
-                    geometryTarget = nil
-                }
-                let pickingIdentifier: UInt32
-                if let pickTarget {
-                    if let existing = identifierByTarget[pickTarget] {
-                        pickingIdentifier = existing
-                    } else {
-                        pickingIdentifier = nextPickingIdentifier
-                        nextPickingIdentifier += 1
-                        identifierByTarget[pickTarget] = pickingIdentifier
-                        targetsByIdentifier[pickingIdentifier] = pickTarget
-                    }
-                } else {
-                    pickingIdentifier = 0
-                }
-                let hasPickPriority = pickTarget?.hasPickPriority == true
-                if triangle.opacity < 1 {
-                    var translucentColor = color
-                    translucentColor.w = Float(triangle.opacity)
-                    // One simulation unit (0.1 micron) behind this layer's opaque copper: enough
-                    // to make tracks/pads win the depth test without visibly separating the pour.
-                    let zoneZ = z - 1
-                    let pickA = Position3(a.x, a.y, zoneZ)
-                    let pickB = Position3(b.x, b.y, zoneZ)
-                    let pickC = Position3(c.x, c.y, zoneZ)
-                    Self.appendLitTriangle(pickA, pickB, pickC, color: translucentColor, muted: isMuted,
-                                            forceUnmutedByRegion: isSimulatedCopper,
-                                            positions: &zonePositions, colors: &zoneColors, normals: &zoneNormals,
-                                            muteFlags: &zoneMuteFlags)
-                    if hasPickPriority {
-                        priorityPickingPositions.append(contentsOf: [pickA, pickB, pickC])
-                        priorityPickingIdentifiers.append(
-                            contentsOf: [pickingIdentifier, pickingIdentifier, pickingIdentifier])
-                    } else {
-                        pickingPositions.append(contentsOf: [pickA, pickB, pickC])
-                        pickingIdentifiers.append(
-                            contentsOf: [pickingIdentifier, pickingIdentifier, pickingIdentifier])
-                    }
-                    if let geometryTarget {
-                        positionsByTarget[geometryTarget, default: []].append(contentsOf: [pickA, pickB, pickC])
-                    }
-                    if let pickTarget, pickTarget != geometryTarget {
-                        positionsByTarget[pickTarget, default: []].append(contentsOf: [pickA, pickB, pickC])
-                    }
-                    if isHullSeedCopper {
-                        regionSeedPositionsByPadding[hullPaddingMicrometers!, default: []]
-                            .append(contentsOf: [pickA, pickB, pickC])
-                    }
-                } else {
-                    Self.appendLitTriangle(a, b, c, color: color, muted: isMuted,
-                                            forceUnmutedByRegion: isSimulatedCopper,
-                                            positions: &positions, colors: &colors, normals: &normals,
-                                            muteFlags: &muteFlags)
-                    if hasPickPriority {
-                        priorityPickingPositions.append(contentsOf: [a, b, c])
-                        priorityPickingIdentifiers.append(
-                            contentsOf: [pickingIdentifier, pickingIdentifier, pickingIdentifier])
-                    } else {
-                        pickingPositions.append(contentsOf: [a, b, c])
-                        pickingIdentifiers.append(
-                            contentsOf: [pickingIdentifier, pickingIdentifier, pickingIdentifier])
-                    }
-                    if let geometryTarget {
-                        positionsByTarget[geometryTarget, default: []].append(contentsOf: [a, b, c])
-                    }
-                    if let pickTarget, pickTarget != geometryTarget {
-                        positionsByTarget[pickTarget, default: []].append(contentsOf: [a, b, c])
-                    }
-                    if isHullSeedCopper {
-                        regionSeedPositionsByPadding[hullPaddingMicrometers!, default: []]
-                            .append(contentsOf: [a, b, c])
-                    }
-                }
-            }
+            let isMask = layer.name == "F.Mask" || layer.name == "B.Mask"
+            return BoardGeometrySnapshot.Layer(
+                slot: .layer(index), layer: layer, revision: layer.revision, name: layer.name, z: Float(layer.z),
+                color: isMask ? Self.solderMaskColor
+                    : Self.simdColor(for: layer, index: index, total: preview.layers.count),
+                triangles: layer.triangles, isStackupMask: false)
         }
-        zoneVertexCount = zonePositions.count
-        zonePositionBuffer = zonePositions.isEmpty ? nil : device.makeBuffer(
-            bytes: zonePositions, length: MemoryLayout<Position3>.stride * zonePositions.count)
-        zoneColorBuffer = zoneColors.isEmpty ? nil : device.makeBuffer(
-            bytes: zoneColors, length: MemoryLayout<SIMD4<Float>>.stride * zoneColors.count)
-        zoneNormalBuffer = zoneNormals.isEmpty ? nil : device.makeBuffer(
-            bytes: zoneNormals, length: MemoryLayout<Position3>.stride * zoneNormals.count)
-        zoneMuteFlagBuffer = zoneMuteFlags.isEmpty ? nil : device.makeBuffer(
-            bytes: zoneMuteFlags, length: MemoryLayout<Float>.stride * zoneMuteFlags.count)
-
         // Solder mask, if this board's stackup has one on that side (see EMSGeometryPreview.
-        // topSolderMask/bottomSolderMask's own doc comment) -- built into its own separate buffer,
-        // drawn in draw(in:)'s own translucent pass after everything above, rather than appended
-        // into this opaque positions/colors pair like every other element in this loop.
-        let maskLayers = [
-            hideTopSolderMask ? nil : preview.topSolderMask,
-            hideBottomSolderMask ? nil : preview.bottomSolderMask,
-        ].compactMap { $0 }
-        for maskLayer in maskLayers {
-            let z = Float(maskLayer.z)
-            for triangle in maskLayer.triangles {
-                Self.appendLitTriangle(Position3(Float(triangle.a.x), Float(triangle.a.y), z),
-                                        Position3(Float(triangle.b.x), Float(triangle.b.y), z),
-                                        Position3(Float(triangle.c.x), Float(triangle.c.y), z),
-                                        color: Self.solderMaskColor, muted: false, positions: &maskPositions,
-                                        colors: &maskColors, normals: &maskNormals, muteFlags: &maskMuteFlags)
-            }
+        // topSolderMask/bottomSolderMask's own doc comment), drawn in its own translucent pass.
+        for (slot, mask) in [(BoardGeometrySlot.topSolderMask, preview.topSolderMask),
+                             (BoardGeometrySlot.bottomSolderMask, preview.bottomSolderMask)] {
+            guard let mask else { continue }
+            layers.append(BoardGeometrySnapshot.Layer(
+                slot: slot, layer: mask, revision: mask.revision, name: mask.name, z: Float(mask.z),
+                color: Self.solderMaskColor, triangles: mask.triangles, isStackupMask: true))
         }
-        maskVertexCount = maskPositions.count
-        maskPositionBuffer = maskPositions.isEmpty ? nil : device.makeBuffer(
-            bytes: maskPositions, length: MemoryLayout<Position3>.stride * maskPositions.count)
-        maskColorBuffer = maskColors.isEmpty ? nil : device.makeBuffer(
-            bytes: maskColors, length: MemoryLayout<SIMD4<Float>>.stride * maskColors.count)
-        maskNormalBuffer = maskNormals.isEmpty ? nil : device.makeBuffer(
-            bytes: maskNormals, length: MemoryLayout<Position3>.stride * maskNormals.count)
-        maskMuteFlagBuffer = maskMuteFlags.isEmpty ? nil : device.makeBuffer(
-            bytes: maskMuteFlags, length: MemoryLayout<Float>.stride * maskMuteFlags.count)
-
-        // Real 3D via geometry (open barrel tube + per-layer annular rings -- see
-        // EMSGeometryPreview.viaMeshTriangles' own doc comment) -- replaces the old flat, single-Z
-        // concentric-capsule marker this used to draw here: that read fine from the old fixed
-        // top-down 2D view, but from any angle a real 3D camera can now reach, three flat discs
-        // floating at one Z (and copper layers with no hole cut for them to sit in) just look wrong.
-        // Each vertex keeps its own real Z, same as componentMeshTriangles below, not a shared flat
-        // markerZ.
-        for triangle in preview.viaMeshTriangles {
-            let color = SIMD4<Float>(Float(triangle.color.x), Float(triangle.color.y), Float(triangle.color.z),
-                                      Float(triangle.color.w))
-            var isMuted = false
-            var isHullSeedCopper = false
-            var isSimulatedCopper = false
-            var hullPaddingMicrometers: Double?
-            if let netName = triangle.netName {
-                let netIncluded = activity?.configurationIncludedNets.contains(netName) == true
-                    || activity?.fullySaturatedNets.contains(netName) == true
-                isMuted = activity?.hasSelectedSimulation == true && !netIncluded
-                // Match layer copper above: every full simulation net seeds the slicing boundary.
-                hullPaddingMicrometers = activity?.hullPaddingByNet[netName]
-                isHullSeedCopper = hullPaddingMicrometers != nil
-                isSimulatedCopper = activity?.includedNets.contains(netName) == true
+        let snapshot = BoardGeometrySnapshot(
+            preview: preview, previewRevision: preview.revision, layers: layers,
+            viaMeshTriangles: preview.viaMeshTriangles, componentMeshTriangles: preview.componentMeshTriangles,
+            outline: preview.outline.map(\.pointValue), markerZ: markerZ, outlineColor: Self.outlineColor)
+        requestedBoardGeometryRevision += 1
+        let revision = requestedBoardGeometryRevision
+        builder.build(snapshot) { [weak self] snapshot, geometry in
+            guard let self, snapshot.preview === self.preview else { return }
+            let installTiming = self.loadSignposter.beginInterval("Install board geometry", id: self.loadSignposter.makeSignpostID())
+            defer { self.loadSignposter.endInterval("Install board geometry", installTiming) }
+            // Multiple builds before a draw share the earliest pending presentation interval.
+            if self.pendingPresentationTiming == nil {
+                self.pendingPresentationTiming = self.loadSignposter.beginInterval("Board installed to presentation", id: self.loadSignposter.makeSignpostID())
             }
-            let a = Position3(Float(triangle.a.x), Float(triangle.a.y), Float(triangle.a.z))
-            let b = Position3(Float(triangle.b.x), Float(triangle.b.y), Float(triangle.b.z))
-            let c = Position3(Float(triangle.c.x), Float(triangle.c.y), Float(triangle.c.z))
-            Self.appendLitTriangle(a, b, c, color: color, muted: isMuted,
-                                    forceUnmutedByRegion: isSimulatedCopper,
-                                    positions: &positions, colors: &colors, normals: &normals,
-                                    muteFlags: &muteFlags)
-            if isHullSeedCopper {
-                regionSeedPositionsByPadding[hullPaddingMicrometers!, default: []]
-                    .append(contentsOf: [a, b, c])
-            }
-            guard let netName = triangle.netName else { continue }
-            let pickTarget = PickTarget.net(netName)
-            let pickingIdentifier: UInt32
-            if let existing = identifierByTarget[pickTarget] {
-                pickingIdentifier = existing
-            } else {
-                pickingIdentifier = nextPickingIdentifier
-                nextPickingIdentifier += 1
-                identifierByTarget[pickTarget] = pickingIdentifier
-                targetsByIdentifier[pickingIdentifier] = pickTarget
-            }
-            pickingPositions.append(contentsOf: [a, b, c])
-            pickingIdentifiers.append(contentsOf: [pickingIdentifier, pickingIdentifier, pickingIdentifier])
-            positionsByTarget[pickTarget, default: []].append(contentsOf: [a, b, c])
+            self.boardGeometry = geometry
+            self.markerZ = snapshot.markerZ
+            self.boardActivityChanged()
+            // Builds coalesce, so this build covers every request made before it started.
+            self.appliedBoardGeometryRevision = max(self.appliedBoardGeometryRevision, revision)
+            self.fireBoardGeometryCurrentHandlersIfNeeded()
         }
+    }
 
-        // Every trace/hull intersection remains pickable even before it has a port role, but an
-        // inactive candidate is deliberately invisible. Configured roles use the same concentric
-        // blue/yellow/red language as pin ports.
-        for spot in activity?.hullCutPortSpots ?? [] {
-            let target = PickTarget.hullCutPort(identifier: spot.identifier, net: spot.netName)
-            let identifier: UInt32
-            if let existing = identifierByTarget[target] {
-                identifier = existing
-            } else {
-                identifier = nextPickingIdentifier
-                nextPickingIdentifier += 1
-                identifierByTarget[target] = identifier
-                targetsByIdentifier[identifier] = target
-            }
-            // Only the pick disc lives here; its visible role markers are drawn by
-            // rebuildMarkerBuffers(), so toggling a role doesn't rebuild the board.
-            var discPositions: [Position3] = []
-            var discColors: [SIMD4<Float>] = []
-            var discNormals: [Position3] = []
-            var discMuteFlags: [Float] = []
-            Self.appendDisc(center: spot.position, radius: Self.absorbingPinMarkerRadius, z: markerZ,
-                            color: Self.absorbingPinColor, positions: &discPositions, colors: &discColors,
-                            normals: &discNormals, muteFlags: &discMuteFlags)
-            priorityPickingPositions.append(contentsOf: discPositions)
-            priorityPickingIdentifiers.append(contentsOf: repeatElement(identifier, count: discPositions.count))
-            positionsByTarget[target, default: []].append(contentsOf: discPositions)
+    /// Calls `handler` on the main thread once the board geometry reflects every preview change
+    /// made so far -- immediately if it already does.
+    func whenBoardGeometryCurrent(_ handler: @escaping () -> Void) {
+        boardGeometryCurrentHandlers.append(handler)
+        fireBoardGeometryCurrentHandlersIfNeeded()
+    }
+
+    private func fireBoardGeometryCurrentHandlersIfNeeded() {
+        guard appliedBoardGeometryRevision >= requestedBoardGeometryRevision else { return }
+        let handlers = boardGeometryCurrentHandlers
+        boardGeometryCurrentHandlers = []
+        handlers.forEach { $0() }
+    }
+
+    /// Layer/mask/component visibility changed. Nothing is re-tessellated; but the highlight,
+    /// activity overlay, markers and passive in-cut test only consider visible geometry.
+    private func boardVisibilityChanged() {
+        boardActivityChanged()
+    }
+
+    /// Re-resolves the selected simulation against the already-built geometry: the per-key mute
+    /// table, the hull seed groups, and everything derived from pick positions.
+    private func boardActivityChanged() {
+        let signposter = OSSignposter(subsystem: "com.kiems", category: "BoardLoad")
+        let signpost = signposter.beginInterval("Board activity rebuild")
+        defer { signposter.endInterval("Board activity rebuild", signpost) }
+        updateMuteTable()
+        updateRegionSeedGroups()
+        rebuildHighlightBuffer()
+        rebuildActivityBuffers()
+        rebuildMarkerBuffers()
+        needsDisplay = true
+    }
+
+    /// One (mute flag, invalid tint) entry per BoardMuteKey -- see geometry_board_pbr_vertex. The
+    /// flag is -1 for involved copper that is always inside the cutout at its own footprint, 0 to
+    /// follow the region texture, 1 to stay muted for a net-exclusion or uninvolved-component
+    /// reason; geometry_pbr_fragment combines it once with the region test.
+    private func updateMuteTable() {
+        guard let device, let geometry = boardGeometry else {
+            muteTableBuffer = nil
+            return
         }
-
-        // The controller has already restricted passive candidates by net membership. Apply the
-        // remaining spatial rule here, where real pad geometry and the main-excitation hull seeds
-        // are both available: at least one pad must lie in the cut area. SimulationNet copper is
-        // always retained at its exact footprint; other eligible nets must fall within the padded
-        // main-excitation region.
+        let activity = activity
+        let hasSelectedSimulation = activity?.hasSelectedSimulation == true
+        let invalidReferences = activity?.invalidComponentReferences ?? []
         let eligiblePassiveReferences = Set((activity?.passiveBridges ?? []).map(\.reference))
-        var passiveReferencesInsideCut = Set<String>()
-        if let activity {
-            func pointSegmentDistance(_ p: SIMD2<Float>, _ a: SIMD2<Float>, _ b: SIMD2<Float>) -> Float {
-                let ab = b - a
-                let lengthSquared = simd_length_squared(ab)
-                let t = lengthSquared > 0 ? max(0, min(1, simd_dot(p - a, ab) / lengthSquared)) : 0
-                return simd_distance(p, a + t * ab)
+        let passiveReferencesInsideCut = passiveReferencesInsideCut()
+
+        func netFlag(_ net: String?) -> (muted: Bool, simulated: Bool) {
+            guard let net else { return (false, false) }
+            let netIncluded = activity?.configurationIncludedNets.contains(net) == true
+                || activity?.fullySaturatedNets.contains(net) == true
+            return (hasSelectedSimulation && !netIncluded, activity?.includedNets.contains(net) == true)
+        }
+        let table = geometry.muteKeys.map { key -> SIMD2<Float> in
+            switch key.kind {
+            case .copper:
+                let (muted, simulated) = netFlag(key.net)
+                return SIMD2(muted ? 1 : (simulated ? -1 : 0), 0)
+            case .silkscreen:
+                var (muted, simulated) = netFlag(key.net)
+                if hasSelectedSimulation,
+                   !(key.footprint.map { activity?.involvedComponentReferences.contains($0) == true } ?? false) {
+                    muted = true
+                }
+                return SIMD2(muted ? 1 : (simulated ? -1 : 0), 0)
+            case .component:
+                if let reference = key.footprint, invalidReferences.contains(reference) {
+                    return SIMD2(-1, 1)
+                }
+                let muted = hasSelectedSimulation && (key.footprint.map { reference in
+                    if eligiblePassiveReferences.contains(reference) {
+                        return !passiveReferencesInsideCut.contains(reference)
+                    }
+                    return activity?.involvedComponentReferences.contains(reference) != true
+                } ?? false)
+                return SIMD2(muted ? 1 : 0, 0)
             }
-            func pointIsInsideCut(_ point: SIMD2<Float>) -> Bool {
-                for (paddingMicrometers, positions) in regionSeedPositionsByPadding {
-                    let padding = Float(paddingMicrometers * Self.simUnitsPerMicrometer)
-                    var index = 0
-                    while index + 2 < positions.count {
-                        let a = SIMD2<Float>(positions[index].x, positions[index].y)
-                        let b = SIMD2<Float>(positions[index + 1].x, positions[index + 1].y)
-                        let c = SIMD2<Float>(positions[index + 2].x, positions[index + 2].y)
+        }
+        muteTableBuffer = table.isEmpty ? nil : device.makeBuffer(
+            bytes: table, length: MemoryLayout<SIMD2<Float>>.stride * table.count)
+    }
+
+    /// The controller has already restricted passive candidates by net membership. Apply the
+    /// remaining spatial rule here, where real pad geometry and the main-excitation hull seeds are
+    /// both available: at least one pad must lie in the cut area. SimulationNet copper is always
+    /// retained at its exact footprint; other eligible nets must fall within the padded
+    /// main-excitation region.
+    private func passiveReferencesInsideCut() -> Set<String> {
+        guard let activity, !activity.passiveBridges.isEmpty, let geometry = boardGeometry else { return [] }
+        let seeds = geometry.seedPositions
+        let seedGroups: [(padding: Float, ranges: [Range<Int>])] = Dictionary(
+            grouping: activity.hullPaddingByNet.compactMap { net, padding in
+                geometry.seedRangesByNet[net].map { (padding, $0) }
+            }, by: \.0
+        ).map { padding, entries in
+            (Float(padding * Self.simUnitsPerMicrometer), entries.map(\.1))
+        }
+        func pointSegmentDistance(_ p: SIMD2<Float>, _ a: SIMD2<Float>, _ b: SIMD2<Float>) -> Float {
+            let ab = b - a
+            let lengthSquared = simd_length_squared(ab)
+            let t = lengthSquared > 0 ? max(0, min(1, simd_dot(p - a, ab) / lengthSquared)) : 0
+            return simd_distance(p, a + t * ab)
+        }
+        func pointIsInsideCut(_ point: SIMD2<Float>) -> Bool {
+            for (padding, ranges) in seedGroups {
+                for range in ranges {
+                    var index = range.lowerBound
+                    while index + 2 < range.upperBound {
+                        let a = SIMD2<Float>(seeds[index].x, seeds[index].y)
+                        let b = SIMD2<Float>(seeds[index + 1].x, seeds[index + 1].y)
+                        let c = SIMD2<Float>(seeds[index + 2].x, seeds[index + 2].y)
                         let ab = b - a
                         let bc = c - b
                         let ca = a - c
@@ -2093,122 +1876,132 @@ final class GeometryView: MTKView, MTKViewDelegate {
                         index += 3
                     }
                 }
+            }
+            return false
+        }
+        func pinInsideCut(reference: String, pad: String, net: String) -> Bool {
+            if activity.includedNets.contains(net) { return true }
+            guard let center = Self.centroid(of: pinPositions(reference: reference, padNumber: pad)) else {
                 return false
             }
-            func pinInsideCut(reference: String, pad: String, net: String) -> Bool {
-                if activity.includedNets.contains(net) { return true }
-                guard let pinPositions = Self.positions(reference: reference, padNumber: pad,
-                                                        in: positionsByTarget),
-                      let center = Self.centroid(of: pinPositions)
-                else { return false }
-                return pointIsInsideCut(SIMD2<Float>(center.x, center.y))
-            }
-            for bridge in activity.passiveBridges
-                where pinInsideCut(reference: bridge.reference, pad: bridge.firstPad, net: bridge.firstNet)
-                    || pinInsideCut(reference: bridge.reference, pad: bridge.secondPad, net: bridge.secondNet) {
-                passiveReferencesInsideCut.insert(bridge.reference)
-            }
+            return pointIsInsideCut(SIMD2<Float>(center.x, center.y))
         }
+        var inside = Set<String>()
+        for bridge in activity.passiveBridges
+            where pinInsideCut(reference: bridge.reference, pad: bridge.firstPad, net: bridge.firstNet)
+                || pinInsideCut(reference: bridge.reference, pad: bridge.secondPad, net: bridge.secondNet) {
+            inside.insert(bridge.reference)
+        }
+        return inside
+    }
 
-        // Real 3D models of every included footprint (see EMSGeometryComponentTriangle's own doc
-        // comment) -- unlike every other marker here, each vertex keeps its own real Z from the
-        // mesh (a component has genuine 3D shape), not a shared flat markerZ. Color is the model's
-        // own real STEP color (see EMSGeometryComponentTriangle.color's own doc comment), not the
-        // fixed accent color used everywhere else in this view -- STL (which carries no color data)
-        // is no longer what these come from.
-        if !hideComponents {
-            for triangle in preview.componentMeshTriangles {
-                let originalColor = SIMD4<Float>(Float(triangle.color.x), Float(triangle.color.y),
-                                                  Float(triangle.color.z), Float(triangle.color.w))
-                let isInvalid = triangle.footprintReference.map(invalidReferences.contains) ?? false
-                let color = isInvalid ? Self.invalidComponentColor(originalColor) : originalColor
-                let isMuted = !isInvalid && activity?.hasSelectedSimulation == true
-                    && (triangle.footprintReference.map { reference in
-                        if eligiblePassiveReferences.contains(reference) {
-                            return !passiveReferencesInsideCut.contains(reference)
-                        }
-                        return activity?.involvedComponentReferences.contains(reference) != true
-                    } ?? false)
-                let a = Position3(Float(triangle.a.x), Float(triangle.a.y), Float(triangle.a.z))
-                let b = Position3(Float(triangle.b.x), Float(triangle.b.y), Float(triangle.b.z))
-                let c = Position3(Float(triangle.c.x), Float(triangle.c.y), Float(triangle.c.z))
-                Self.appendLitTriangle(a, b, c,
-                                        color: color, muted: isMuted, forceUnmutedByRegion: isInvalid,
-                                        positions: &positions, colors: &colors,
-                                        normals: &normals, muteFlags: &muteFlags)
-                if isInvalid, let reference = triangle.footprintReference {
-                    let pickTarget = PickTarget.component(reference)
-                    let pickingIdentifier: UInt32
-                    if let existing = identifierByTarget[pickTarget] {
-                        pickingIdentifier = existing
-                    } else {
-                        pickingIdentifier = nextPickingIdentifier
-                        nextPickingIdentifier += 1
-                        identifierByTarget[pickTarget] = pickingIdentifier
-                        targetsByIdentifier[pickingIdentifier] = pickTarget
+    /// One seed group per distinct hull padding, drawing that padding's nets' ranges of the
+    /// geometry's net-sorted seed buffer.
+    private func updateRegionSeedGroups() {
+        regionHighlightNeedsUpdate = true
+        guard let geometry = boardGeometry, let paddingByNet = activity?.hullPaddingByNet else {
+            regionSeedGroups = []
+            return
+        }
+        var rangesByPadding: [Double: [Range<Int>]] = [:]
+        for (net, padding) in paddingByNet {
+            guard let range = geometry.seedRangesByNet[net] else { continue }
+            rangesByPadding[padding, default: []].append(range)
+        }
+        regionSeedGroups = rangesByPadding
+            .map { RegionSeedGroup(paddingMicrometers: $0.key, ranges: $0.value) }
+            .sorted { $0.paddingMicrometers < $1.paddingMicrometers }
+    }
+
+    /// Draws the visible slots of one of boardGeometry's lit streams with whichever board PBR
+    /// pipeline is already set.
+    private func drawBoard(_ buffers: BoardLitBuffers, ranges: [BoardGeometrySlot: Range<Int>],
+                           muteTable: MTLBuffer, encoder: MTLRenderCommandEncoder) {
+        let visibleRanges = BoardGeometry.drawRanges(ranges, isVisible: isSlotVisible)
+        guard !visibleRanges.isEmpty else { return }
+        encoder.setVertexBuffer(buffers.positions, offset: 0, index: 0)
+        encoder.setVertexBuffer(buffers.colors, offset: 0, index: 1)
+        encoder.setVertexBuffer(buffers.normals, offset: 0, index: 2)
+        encoder.setVertexBuffer(buffers.keys, offset: 0, index: 4)
+        encoder.setVertexBuffer(muteTable, offset: 0, index: 5)
+        for range in visibleRanges {
+            encoder.drawPrimitives(type: .triangle, vertexStart: range.lowerBound, vertexCount: range.count)
+        }
+    }
+
+    private func isSlotVisible(_ slot: BoardGeometrySlot) -> Bool {
+        switch slot {
+        case let .layer(index): return !hiddenLayerIndices.contains(index)
+        case .vias: return true
+        case .components: return !hideComponents
+        case .topSolderMask: return !hideTopSolderMask
+        case .bottomSolderMask: return !hideBottomSolderMask
+        }
+    }
+
+    /// The visible geometry of one pick target. An invalid component also owns its pins, since
+    /// either selects the whole component; a hull-cut port is its pick disc.
+    private func pickPositions(for target: PickTarget) -> [Position3] {
+        switch target {
+        case let .hullCutPort(identifier, _):
+            guard let spot = activity?.hullCutPortSpots.first(where: { $0.identifier == identifier }) else {
+                return []
+            }
+            return Self.hullCutPortDisc(spot, z: markerZ)
+        case let .component(reference):
+            var positions = visiblePositions(of: target)
+            if activity?.invalidComponentReferences.contains(reference) == true {
+                for (pinTarget, _) in boardGeometry?.positionsByTarget ?? [:] {
+                    if case let .pin(pinReference, _, _) = pinTarget, pinReference == reference {
+                        positions.append(contentsOf: visiblePositions(of: pinTarget))
                     }
-                    priorityPickingPositions.append(contentsOf: [a, b, c])
-                    priorityPickingIdentifiers.append(contentsOf: repeatElement(pickingIdentifier, count: 3))
-                    positionsByTarget[pickTarget, default: []].append(contentsOf: [a, b, c])
                 }
             }
+            return positions
+        default:
+            return visiblePositions(of: target)
         }
+    }
 
-        boardVertexCount = positions.count
-        boardPositionBuffer = positions.isEmpty ? nil : device.makeBuffer(
-            bytes: positions, length: MemoryLayout<Position3>.stride * positions.count)
-        boardColorBuffer = colors.isEmpty ? nil : device.makeBuffer(
-            bytes: colors, length: MemoryLayout<SIMD4<Float>>.stride * colors.count)
-        boardNormalBuffer = normals.isEmpty ? nil : device.makeBuffer(
-            bytes: normals, length: MemoryLayout<Position3>.stride * normals.count)
-        boardMuteFlagBuffer = muteFlags.isEmpty ? nil : device.makeBuffer(
-            bytes: muteFlags, length: MemoryLayout<Float>.stride * muteFlags.count)
-
-        regionSeedGroups = regionSeedPositionsByPadding.compactMap { padding, positions in
-            guard !positions.isEmpty, let buffer = device.makeBuffer(
-                bytes: positions, length: MemoryLayout<Position3>.stride * positions.count)
-            else { return nil }
-            return RegionSeedGroup(paddingMicrometers: padding, positionBuffer: buffer,
-                                   vertexCount: positions.count)
-        }.sorted { $0.paddingMicrometers < $1.paddingMicrometers }
-
-        // Record the split before appending pins. pick(at:) submits the two ranges separately so
-        // the pin range can receive its small, explicit depth bias.
-        pickingPriorityVertexStart = pickingPositions.count
-        pickingPositions.append(contentsOf: priorityPickingPositions)
-        pickingIdentifiers.append(contentsOf: priorityPickingIdentifiers)
-        pickingVertexCount = pickingPositions.count
-        pickingPositionBuffer = pickingPositions.isEmpty ? nil : device.makeBuffer(
-            bytes: pickingPositions, length: MemoryLayout<Position3>.stride * pickingPositions.count)
-        pickingIdentifierBuffer = pickingIdentifiers.isEmpty ? nil : device.makeBuffer(
-            bytes: pickingIdentifiers, length: MemoryLayout<UInt32>.stride * pickingIdentifiers.count)
-        pickTargetsByIdentifier = targetsByIdentifier
-        pickPositionsByTarget = positionsByTarget
-        rebuildHighlightBuffer()
-        rebuildActivityBuffers()
-
-        var outlinePositions: [Position3] = preview.outline.map { value in
-            let point = value.pointValue
-            return Position3(Float(point.x), Float(point.y), markerZ)
+    private func visiblePositions(of target: PickTarget) -> [Position3] {
+        var positions: [Position3] = []
+        for chunk in boardGeometry?.positionsByTarget[target] ?? [] where isSlotVisible(chunk.slot) {
+            positions.append(contentsOf: chunk.positions)
         }
-        if let first = outlinePositions.first {
-            outlinePositions.append(first) // Close the loop.
+        return positions
+    }
+
+    /// Every pick target on `nets` with its visible geometry, including hull-cut port discs.
+    private func forEachVisibleTarget(onNets nets: Set<String>, _ body: (PickTarget, [Position3]) -> Void) {
+        for target in boardGeometry?.positionsByTarget.keys ?? [:].keys {
+            guard let net = target.netName, nets.contains(net) else { continue }
+            let positions = visiblePositions(of: target)
+            if !positions.isEmpty { body(target, positions) }
         }
-        let outlineColors = Array(repeating: Self.outlineColor, count: outlinePositions.count)
+        for spot in activity?.hullCutPortSpots ?? [] where nets.contains(spot.netName) {
+            body(.hullCutPort(identifier: spot.identifier, net: spot.netName), Self.hullCutPortDisc(spot, z: markerZ))
+        }
+    }
 
-        outlineVertexCount = outlinePositions.count
-        outlinePositionBuffer = outlinePositions.isEmpty ? nil : device.makeBuffer(
-            bytes: outlinePositions, length: MemoryLayout<Position3>.stride * outlinePositions.count)
-        outlineColorBuffer = outlineColors.isEmpty ? nil : device.makeBuffer(
-            bytes: outlineColors, length: MemoryLayout<SIMD4<Float>>.stride * outlineColors.count)
+    private func pinPositions(reference: String, padNumber: String) -> [Position3] {
+        guard let target = boardGeometry?.pinTargets["\(reference)\t\(padNumber)"] else { return [] }
+        return visiblePositions(of: target)
+    }
 
-        rebuildMarkerBuffers()
+    private static func hullCutPortDisc(_ spot: BoardActivityHighlight.HullCutPortSpot, z: Float) -> [Position3] {
+        var positions: [Position3] = []
+        var colors: [SIMD4<Float>] = []
+        var normals: [Position3] = []
+        var muteFlags: [Float] = []
+        appendDisc(center: spot.position, radius: absorbingPinMarkerRadius, z: z, color: absorbingPinColor,
+                   positions: &positions, colors: &colors, normals: &normals, muteFlags: &muteFlags)
+        return positions
     }
 
     /// Port/probe/excitation dots, planned stitching vias and rejected-via crosses. Kept apart from
-    /// rebuildBoardBuffers() so a port-role edit in Setup (absorbing, probed, excited, impedance)
-    /// only redraws these few hundred vertices instead of re-tessellating the whole board. Reads
-    /// pad positions from pickPositionsByTarget, so it must run after the board buffers are built.
+    /// boardActivityChanged() so a port-role edit in Setup (absorbing, probed, excited, impedance)
+    /// only redraws these few hundred vertices. Reads pad positions from boardGeometry, so it is
+    /// rerun whenever a new build lands.
     private func rebuildMarkerBuffers() {
         guard let device, let preview else {
             markerVertexCount = 0
@@ -2268,9 +2061,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
         // Absorbing pins form the large blue backing/border for any yellow probe or red excitation
         // marker subsequently placed on the same pin.
         for pin in activity?.absorbingPins ?? [] {
-            guard let pinPositions = Self.positions(reference: pin.reference, padNumber: pin.padNumber,
-                                                      in: pickPositionsByTarget),
-                  let centroid = Self.centroid(of: pinPositions)
+            guard let centroid = Self.centroid(of: pinPositions(reference: pin.reference,
+                                                                padNumber: pin.padNumber))
             else { continue }
             Self.appendDisc(center: CGPoint(x: CGFloat(centroid.x), y: CGFloat(centroid.y)),
                              radius: Self.absorbingPinMarkerRadius, z: markerZ,
@@ -2280,9 +2072,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
 
         // Probed pins get a smaller yellow centre, slightly forward of the blue absorbing disc.
         for pin in activity?.probedPins ?? [] {
-            guard let pinPositions = Self.positions(reference: pin.reference, padNumber: pin.padNumber,
-                                                      in: pickPositionsByTarget),
-                  let centroid = Self.centroid(of: pinPositions)
+            guard let centroid = Self.centroid(of: pinPositions(reference: pin.reference,
+                                                                padNumber: pin.padNumber))
             else { continue }
             Self.appendDisc(center: CGPoint(x: CGFloat(centroid.x), y: CGFloat(centroid.y)),
                              radius: Self.probedPinMarkerRadius, z: markerZ + markerDepthStep,
@@ -2295,9 +2086,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
         // See BoardActivityHighlight.ExcitedPin's own doc comment. Pad positions come from the
         // board's already-built pick geometry.
         for pin in activity?.excitedPins ?? [] {
-            guard let pinPositions = Self.positions(reference: pin.reference, padNumber: pin.padNumber,
-                                                      in: pickPositionsByTarget),
-                  let centroid = Self.centroid(of: pinPositions)
+            guard let centroid = Self.centroid(of: pinPositions(reference: pin.reference,
+                                                                padNumber: pin.padNumber))
             else { continue }
             Self.appendDisc(center: CGPoint(x: CGFloat(centroid.x), y: CGFloat(centroid.y)),
                              radius: Self.excitedPinMarkerRadius, z: markerZ + 2 * markerDepthStep,
@@ -2347,17 +2137,11 @@ final class GeometryView: MTKView, MTKViewDelegate {
         var positions: [Position3] = []
         switch selectedTarget {
         case .pin, .component, .hullCutPort:
-            positions = pickPositionsByTarget[selectedTarget] ?? []
+            positions = pickPositions(for: selectedTarget)
         case let .net(selectedNet):
-            for (target, targetPositions) in pickPositionsByTarget where target.netName == selectedNet {
-                positions.append(contentsOf: targetPositions)
-            }
+            forEachVisibleTarget(onNets: [selectedNet]) { positions.append(contentsOf: $1) }
         case let .nets(_, members):
-            let memberSet = Set(members)
-            for (target, targetPositions) in pickPositionsByTarget {
-                guard let net = target.netName, memberSet.contains(net) else { continue }
-                positions.append(contentsOf: targetPositions)
-            }
+            forEachVisibleTarget(onNets: Set(members)) { positions.append(contentsOf: $1) }
         case .zone:
             break
         }
@@ -2372,9 +2156,50 @@ final class GeometryView: MTKView, MTKViewDelegate {
     /// One endpoint in a trace component's internal centerline graph. This is deliberately scoped
     /// by layer as well as net: tracks crossing at the same XY on different layers are not
     /// electrically connected unless a via landmark joins their two trace components.
+    /// A net or layer name reduced to a small integer, so the activity graph's many hash-table
+    /// keys hash and compare as integers instead of strings. Only names from the same
+    /// ActivityNameInterner are comparable. Debug builds keep the original string for inspection;
+    /// it never takes part in equality or hashing.
+    private struct InternedName: Hashable, CustomStringConvertible {
+        let id: Int32
+        #if DEBUG
+        let name: String
+        #endif
+
+        static func == (lhs: InternedName, rhs: InternedName) -> Bool { lhs.id == rhs.id }
+        func hash(into hasher: inout Hasher) { hasher.combine(id) }
+
+        var description: String {
+            #if DEBUG
+            return name
+            #else
+            return "#\(id)"
+            #endif
+        }
+    }
+
+    private struct ActivityNameInterner {
+        private var ids: [String: Int32] = [:]
+
+        mutating func intern(_ name: String) -> InternedName {
+            let id: Int32
+            if let existing = ids[name] {
+                id = existing
+            } else {
+                id = Int32(ids.count)
+                ids[name] = id
+            }
+            #if DEBUG
+            return InternedName(id: id, name: name)
+            #else
+            return InternedName(id: id)
+            #endif
+        }
+    }
+
     private struct ActivityGraphNode {
-        let net: String
-        let layer: String
+        let net: InternedName
+        let layer: InternedName
         let x: Float, y: Float, z: Float
     }
 
@@ -2382,9 +2207,90 @@ final class GeometryView: MTKView, MTKViewDelegate {
     private struct ActivityGraphSegment {
         let a: Int
         let b: Int
-        let layer: String
+        let layer: InternedName
         let ax: Float, ay: Float, bx: Float, by: Float, z: Float
         let length: Float
+    }
+
+    /// Exact nearest-segment lookup for one net's centrelines, replacing a scan of every segment
+    /// for every vertex. Segments are bucketed by the XY grid cells their bounding boxes cover;
+    /// a query searches rings of cells outwards and stops once no unsearched cell can be closer
+    /// than the best match (XY distance is a lower bound on the 3D distance). Ties go to the
+    /// lowest segment index, matching what a front-to-back linear scan would pick.
+    private struct NearestActivitySegmentIndex {
+        private struct Cell: Hashable { let x: Int32, y: Int32 }
+        let segments: [ActivityGraphSegment]
+        private let cellSize: Float
+        private var cells: [Cell: [Int]] = [:]
+        private var minCell = Cell(x: 0, y: 0)
+        private var maxCell = Cell(x: 0, y: 0)
+
+        init(segments: [ActivityGraphSegment], cellSize: Float = 10_000) {
+            self.segments = segments
+            self.cellSize = cellSize
+            guard !segments.isEmpty else { return }
+            var minX = Int32.max, minY = Int32.max, maxX = Int32.min, maxY = Int32.min
+            for (index, segment) in segments.enumerated() {
+                let x0 = cell(min(segment.ax, segment.bx)), x1 = cell(max(segment.ax, segment.bx))
+                let y0 = cell(min(segment.ay, segment.by)), y1 = cell(max(segment.ay, segment.by))
+                minX = min(minX, x0); maxX = max(maxX, x1)
+                minY = min(minY, y0); maxY = max(maxY, y1)
+                for x in x0...x1 {
+                    for y in y0...y1 { cells[Cell(x: x, y: y), default: []].append(index) }
+                }
+            }
+            minCell = Cell(x: minX, y: minY)
+            maxCell = Cell(x: maxX, y: maxY)
+        }
+
+        private func cell(_ coordinate: Float) -> Int32 {
+            Int32(max(-1e9, min(1e9, floor(coordinate / cellSize))))
+        }
+
+        /// `distance(segment)` must return the 3D distance from the query point; it is only called
+        /// for segments near enough to matter.
+        func nearest(x: Float, y: Float, distance: (ActivityGraphSegment) -> Float) -> Int? {
+            guard !segments.isEmpty else { return nil }
+            let cx = cell(x), cy = cell(y)
+            var best = Float.infinity
+            var bestIndex: Int?
+            func visit(_ cellX: Int32, _ cellY: Int32) {
+                guard let indices = cells[Cell(x: cellX, y: cellY)] else { return }
+                for index in indices {
+                    let d = distance(segments[index])
+                    if d < best || (d == best && index < (bestIndex ?? .max)) {
+                        best = d
+                        bestIndex = index
+                    }
+                }
+            }
+            // Rings closer than the occupied area are empty; the farthest occupied cell bounds it.
+            let firstRing = max(0, minCell.x - cx, cx - maxCell.x, minCell.y - cy, cy - maxCell.y)
+            let lastRing = max(abs(minCell.x - cx), abs(maxCell.x - cx), abs(minCell.y - cy), abs(maxCell.y - cy))
+            var ring = firstRing
+            while ring <= lastRing {
+                let x0 = max(cx - ring, minCell.x), x1 = min(cx + ring, maxCell.x)
+                let y0 = max(cy - ring, minCell.y), y1 = min(cy + ring, maxCell.y)
+                if x0 <= x1 && y0 <= y1 {
+                    for cellX in x0...x1 {
+                        if cy - ring >= minCell.y { visit(cellX, cy - ring) }
+                        if ring > 0 && cy + ring <= maxCell.y { visit(cellX, cy + ring) }
+                    }
+                    let innerY0 = max(cy - ring + 1, minCell.y), innerY1 = min(cy + ring - 1, maxCell.y)
+                    if ring > 0 && innerY0 <= innerY1 {
+                        for cellY in innerY0...innerY1 {
+                            if cx - ring >= minCell.x { visit(cx - ring, cellY) }
+                            if cx + ring <= maxCell.x { visit(cx + ring, cellY) }
+                        }
+                    }
+                }
+                // Every point in a cell outside rings 0...ring is at least ring * cellSize away
+                // in XY. Equality must keep searching, as a tie with a lower index could remain.
+                if best < Float(ring) * cellSize { break }
+                ring += 1
+            }
+            return bestIndex
+        }
     }
 
     private struct ActivityGraphAttachment {
@@ -2402,7 +2308,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
 
     private struct ActivityLandmark {
         let key: ActivityLandmarkKey
-        let net: String
+        let net: InternedName
         let x: Float, y: Float
         var attachments: [ActivityGraphAttachment]
     }
@@ -2445,10 +2351,9 @@ final class GeometryView: MTKView, MTKViewDelegate {
 
     /// Builds the translucent flash/ripple overlay (activityPositionBuffer/activityColorBuffer/
     /// activityDistanceBuffer) for every net in activity.includedNets, using this view's own
-    /// already-built pickPositionsByTarget for real copper positions (the same geometry the
-    /// click-selection highlight above reads from) -- called whenever `activity` changes, or
-    /// whenever the board's own geometry does (rebuildBoardBuffers() calls this too, since new
-    /// preview data means pickPositionsByTarget itself just got rebuilt).
+    /// boardGeometry for real copper positions (the same visible pick geometry the click-selection
+    /// highlight above reads from) -- called whenever `activity` changes, or whenever the board's
+    /// own geometry or layer visibility does (see boardActivityChanged()).
     ///
     /// The externally meaningful nodes are pins and vias. Raw KiCad track endpoints and junctions
     /// remain hidden topology nodes, allowing one graph construction to represent a trace component
@@ -2465,7 +2370,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
     /// source of the backwards-moving pulses. Unreachable fragments keep the -1 sentinel and all
     /// flash in lockstep in board_activity_fragment.
     private func rebuildActivityBuffers() {
-        guard let device, let activity, !activity.includedNets.isEmpty else {
+        guard let device, let activity, !activity.includedNets.isEmpty, boardGeometry != nil else {
             activityPositionBuffer = nil
             activityColorBuffer = nil
             activityDistanceBuffer = nil
@@ -2477,14 +2382,16 @@ final class GeometryView: MTKView, MTKViewDelegate {
         // pin's own net, and every passive bridge's own two nets, since current can cross an
         // unincluded net's own real copper on its way to one that is (e.g. a chain of two caps
         // through an intermediate, not-rendered net).
-        var relevantNets = activity.includedNets
-        for pin in activity.excitedPins { relevantNets.insert(pin.netName) }
+        // Net and layer names are interned on the way in; everything below keys on InternedName.
+        var names = ActivityNameInterner()
+        var relevantNets = Set(activity.includedNets.map { names.intern($0) })
+        for pin in activity.excitedPins { relevantNets.insert(names.intern(pin.netName)) }
         for bridge in activity.passiveBridges {
-            relevantNets.insert(bridge.firstNet)
-            relevantNets.insert(bridge.secondNet)
+            relevantNets.insert(names.intern(bridge.firstNet))
+            relevantNets.insert(names.intern(bridge.secondNet))
         }
 
-        struct NodeKey: Hashable { let net: String, layer: String, x: Int32, y: Int32 }
+        struct NodeKey: Hashable { let net: InternedName, layer: InternedName, x: Int32, y: Int32 }
         // Position queries for tracks/vias/pads come from different libkicad calls -- a
         // x10-scale-then-round tolerance merges genuinely-coincident points (a via sitting exactly
         // at a segment's own endpoint) without ever conflating two distinct nearby ones.
@@ -2498,8 +2405,9 @@ final class GeometryView: MTKView, MTKViewDelegate {
         func ensureCapacity() {
             while neighbors.count < nodes.count { neighbors.append([]) }
         }
-        let layerZ = Dictionary(uniqueKeysWithValues: (preview?.layers ?? []).map { ($0.name, Float($0.z)) })
-        func nodeIndex(net: String, layer: String, x: Float, y: Float) -> Int {
+        let layerZ = Dictionary((preview?.layers ?? []).map { (names.intern($0.name), Float($0.z)) },
+                                uniquingKeysWith: { first, _ in first })
+        func nodeIndex(net: InternedName, layer: InternedName, x: Float, y: Float) -> Int {
             let (qx, qy) = quantize(x, y)
             let key = NodeKey(net: net, layer: layer, x: qx, y: qy)
             if let existing = indexOfNode[key] { return existing }
@@ -2516,18 +2424,21 @@ final class GeometryView: MTKView, MTKViewDelegate {
         }
 
         // Internal centerline graph, scoped by net *and* layer.
-        var segmentsByNet: [String: [ActivityGraphSegment]] = [:]
-        for segment in preview?.trackSegments ?? [] where relevantNets.contains(segment.netName) {
+        var segmentsByNet: [InternedName: [ActivityGraphSegment]] = [:]
+        for segment in preview?.trackSegments ?? [] {
+            let net = names.intern(segment.netName)
+            guard relevantNets.contains(net) else { continue }
+            let layer = names.intern(segment.layerName)
             let ax = Float(segment.start.x), ay = Float(segment.start.y)
             let bx = Float(segment.end.x), by = Float(segment.end.y)
-            let a = nodeIndex(net: segment.netName, layer: segment.layerName, x: ax, y: ay)
-            let b = nodeIndex(net: segment.netName, layer: segment.layerName, x: bx, y: by)
+            let a = nodeIndex(net: net, layer: layer, x: ax, y: ay)
+            let b = nodeIndex(net: net, layer: layer, x: bx, y: by)
             let length = ((bx - ax) * (bx - ax) + (by - ay) * (by - ay)).squareRoot()
             addEdge(a, b, weight: length)
-            segmentsByNet[segment.netName, default: []].append(
-                ActivityGraphSegment(a: a, b: b, layer: segment.layerName,
+            segmentsByNet[net, default: []].append(
+                ActivityGraphSegment(a: a, b: b, layer: layer,
                                      ax: ax, ay: ay, bx: bx, by: by,
-                                     z: layerZ[segment.layerName] ?? 0, length: length))
+                                     z: layerZ[layer] ?? 0, length: length))
         }
         ensureCapacity()
 
@@ -2552,7 +2463,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
         // becomes two disconnected graph components and the pulse stops at an arbitrary point.
         // The spatial buckets keep this close to linear even after a curved route has been
         // flattened into many short centreline pieces by libkicad.
-        struct NetLayerKey: Hashable { let net: String, layer: String }
+        struct NetLayerKey: Hashable { let net: InternedName, layer: InternedName }
         struct SegmentCellKey: Hashable { let netLayer: NetLayerKey, x: Int32, y: Int32 }
         let nodesByNetLayer = Dictionary(grouping: nodes.indices) {
             NetLayerKey(net: nodes[$0].net, layer: nodes[$0].layer)
@@ -2596,12 +2507,14 @@ final class GeometryView: MTKView, MTKViewDelegate {
         // Collect pin copper independently of layer visibility. The default whole-board view hides
         // back/inner layers, but a hidden excitation pin must still seed topology that later reaches
         // a visible trace through a via.
-        var pinGeometry: [ActivityLandmarkKey: (net: String, positions: [Position3])] = [:]
+        var pinGeometry: [ActivityLandmarkKey: (net: InternedName, positions: [Position3])] = [:]
         for layer in preview?.layers ?? [] {
             let z = Float(layer.z)
             for triangle in layer.triangles where triangle.kind == .pin {
-                guard let reference = triangle.footprintReference, let net = triangle.netName,
-                      relevantNets.contains(net) else { continue }
+                guard let reference = triangle.footprintReference, let netName = triangle.netName
+                else { continue }
+                let net = names.intern(netName)
+                guard relevantNets.contains(net) else { continue }
                 let key = ActivityLandmarkKey.pin(reference: reference, number: triangle.padNumber ?? "")
                 let trianglePositions = [
                     Position3(Float(triangle.a.x), Float(triangle.a.y), z),
@@ -2631,7 +2544,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
 
         var landmarks: [ActivityLandmark] = []
         var landmarkIndexByKey: [ActivityLandmarkKey: Int] = [:]
-        func appendLandmark(key: ActivityLandmarkKey, net: String, position: Position3,
+        func appendLandmark(key: ActivityLandmarkKey, net: InternedName, position: Position3,
                             attachments: [ActivityGraphAttachment]) -> Int {
             if let existing = landmarkIndexByKey[key] {
                 var bestByNode = Dictionary(uniqueKeysWithValues:
@@ -2678,13 +2591,16 @@ final class GeometryView: MTKView, MTKViewDelegate {
         // One via landmark attaches to every layer's trace component that terminates at its XY.
         // Looking up by quantized XY is exact enough because both sources came from KiCad internal
         // coordinates before the same conversion to simulation units.
-        var rawNodesByNetXY: [String: [String: [Int]]] = [:]
+        struct QuantizedXY: Hashable { let x: Int32, y: Int32 }
+        var rawNodesByNetXY: [InternedName: [QuantizedXY: [Int]]] = [:]
         for index in nodes.indices {
             let (x, y) = quantize(nodes[index].x, nodes[index].y)
-            rawNodesByNetXY[nodes[index].net, default: [:]]["\(x):\(y)", default: []].append(index)
+            rawNodesByNetXY[nodes[index].net, default: [:]][QuantizedXY(x: x, y: y), default: []].append(index)
         }
         for (viaIndex, via) in (preview?.vias ?? []).enumerated() {
-            guard let net = via.netName, relevantNets.contains(net) else { continue }
+            guard let netName = via.netName else { continue }
+            let net = names.intern(netName)
+            guard relevantNets.contains(net) else { continue }
             // Use the annular-ring centre rather than one end of an oblong drill's centreline.
             // A track can terminate anywhere inside that copper, including on the interior of a
             // longer segment, so attach to both segment endpoints with their true along-track cost.
@@ -2692,7 +2608,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
             let y = Float((via.ringPosition.y + via.ringPosition2.y) / 2)
             let (qx, qy) = quantize(x, y)
             var bestAttachmentByNode: [Int: Float] = [:]
-            for node in rawNodesByNetXY[net]?["\(qx):\(qy)"] ?? [] {
+            for node in rawNodesByNetXY[net]?[QuantizedXY(x: qx, y: qy)] ?? [] {
                 bestAttachmentByNode[node] = 0
             }
             let ringRadius = Float(via.annularRingDiameter / 2)
@@ -2734,16 +2650,26 @@ final class GeometryView: MTKView, MTKViewDelegate {
         // The only cross-net graph edges are real two-pin passives. Net membership was filtered by
         // the controller; finish the same spatial test as the real slicer here so a passive on a
         // broad included/ground net cannot connect the activity graph from outside the cut area.
+        // Grouped once: scanning every landmark per hull net per bridge, comparing net names, was
+        // the dominant cost of this whole rebuild on a large board.
+        let includedNets = Set(activity.includedNets.map { names.intern($0) })
+        let hullNets = activity.hullExpandingNets.map {
+            (net: names.intern($0),
+             cutPadding: Float((activity.hullPaddingByNet[$0] ?? 0) * Self.simUnitsPerMicrometer))
+        }
+        let hullNetSet = Set(hullNets.map(\.net))
+        var landmarkPositionsByNet: [InternedName: [(x: Float, y: Float)]] = [:]
+        for landmark in landmarks where hullNetSet.contains(landmark.net) {
+            landmarkPositionsByNet[landmark.net, default: []].append((landmark.x, landmark.y))
+        }
         func landmarkIsInsideCut(_ landmark: ActivityLandmark) -> Bool {
-            if activity.includedNets.contains(landmark.net) { return true }
-            for net in activity.hullExpandingNets {
-                let cutPadding = Float((activity.hullPaddingByNet[net] ?? 0) * Self.simUnitsPerMicrometer)
+            if includedNets.contains(landmark.net) { return true }
+            for (net, cutPadding) in hullNets {
                 for segment in segmentsByNet[net] ?? []
                     where projection(ofX: landmark.x, y: landmark.y, onto: segment).distance <= cutPadding {
                     return true
                 }
-                if landmarks.contains(where: {
-                    guard $0.net == net else { return false }
+                if (landmarkPositionsByNet[net] ?? []).contains(where: {
                     let dx = landmark.x - $0.x
                     let dy = landmark.y - $0.y
                     return (dx * dx + dy * dy).squareRoot() <= cutPadding
@@ -2769,7 +2695,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
         var graphQueue = ActivityPriorityQueue()
         for pin in activity.excitedPins {
             let key = ActivityLandmarkKey.pin(reference: pin.reference, number: pin.padNumber)
-            guard let index = landmarkIndexByKey[key], landmarks[index].net == pin.netName else { continue }
+            guard let index = landmarkIndexByKey[key], landmarks[index].net == names.intern(pin.netName) else { continue }
             let graphIndex = graphIndex(forLandmark: index)
             graphDistance[graphIndex] = 0
             graphQueue.push(node: graphIndex, distance: 0)
@@ -2794,8 +2720,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
         var colors: [SIMD4<Float>] = []
         var distances: [Float] = []
         for netName in activity.includedNets {
-            let netSegments = segmentsByNet[netName] ?? []
-            for (target, targetPositions) in pickPositionsByTarget where target.netName == netName {
+            let netSegments = NearestActivitySegmentIndex(segments: segmentsByNet[names.intern(netName)] ?? [])
+            forEachVisibleTarget(onNets: [netName]) { target, targetPositions in
                 let pinFallback: Float = {
                     guard case let .pin(reference, number, _) = target,
                           let index = landmarkIndexByKey[.pin(reference: reference, number: number)],
@@ -2803,19 +2729,15 @@ final class GeometryView: MTKView, MTKViewDelegate {
                     return landmarkDistance[index]
                 }()
                 let targetDistances: [Float] = targetPositions.map { vertex in
-                    var bestGeometricDistance = Float.infinity
-                    var bestSegment: ActivityGraphSegment?
-                    var bestT: Float = 0
-                    for segment in netSegments {
+                    let geometricDistance = { (segment: ActivityGraphSegment) -> Float in
                         let projected = projection(ofX: vertex.x, y: vertex.y, onto: segment)
                         let dz = vertex.z - segment.z
-                        let geometricDistance = (projected.distance * projected.distance + dz * dz).squareRoot()
-                        guard geometricDistance < bestGeometricDistance else { continue }
-                        bestGeometricDistance = geometricDistance
-                        bestSegment = segment
-                        bestT = projected.t
+                        return (projected.distance * projected.distance + dz * dz).squareRoot()
                     }
-                    guard let segment = bestSegment else { return pinFallback }
+                    guard let nearest = netSegments.nearest(x: vertex.x, y: vertex.y,
+                                                            distance: geometricDistance) else { return pinFallback }
+                    let segment = netSegments.segments[nearest]
+                    let bestT = projection(ofX: vertex.x, y: vertex.y, onto: segment).t
                     let fromA = distanceOfRawNode[segment.a]
                     let fromB = distanceOfRawNode[segment.b]
                     guard fromA.isFinite || fromB.isFinite else { return -1 }
@@ -2836,21 +2758,6 @@ final class GeometryView: MTKView, MTKViewDelegate {
             bytes: colors, length: MemoryLayout<SIMD4<Float>>.stride * colors.count)
         activityDistanceBuffer = distances.isEmpty ? nil : device.makeBuffer(
             bytes: distances, length: MemoryLayout<Float>.stride * distances.count)
-    }
-
-    /// The real pad positions of `reference`.`padNumber`, if any -- searched by scanning `targets`'
-    /// own keys rather than constructing a PickTarget.pin(...) key directly, since that enum's own
-    /// `net` associated value would have to match this call's own idea of that pin's net exactly
-    /// (nil-vs-empty-string, escaping, ...) for a dictionary lookup to hit. Called rarely (once per
-    /// excited pin/passive pad on a rebuild, never per-frame), so the linear scan cost is immaterial.
-    private static func positions(reference: String, padNumber: String,
-                                   in targets: [PickTarget: [Position3]]) -> [Position3]? {
-        for (target, positions) in targets {
-            if case let .pin(ref, num, _) = target, ref == reference, num == padNumber {
-                return positions
-            }
-        }
-        return nil
     }
 
     private static func centroid(of positions: [Position3]) -> Position3? {
@@ -2907,7 +2814,6 @@ final class GeometryView: MTKView, MTKViewDelegate {
 
     private static func appendLitTriangle(_ a: Position3, _ b: Position3, _ c: Position3,
                                            color: SIMD4<Float>, muted: Bool,
-                                           forceUnmutedByRegion: Bool = false,
                                            positions: inout [Position3],
                                            colors: inout [SIMD4<Float>], normals: inout [Position3],
                                            muteFlags: inout [Float]) {
@@ -2924,7 +2830,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
         // -1 means involved signal copper, which belongs to the real cutout at its exact footprint
         // even when it is not a main-excitation hull seed. 0 follows the distance field; +1 stays
         // muted regardless of region membership.
-        let flag: Float = muted ? 1 : (forceUnmutedByRegion ? -1 : 0)
+        let flag: Float = muted ? 1 : 0
         muteFlags.append(contentsOf: [flag, flag, flag])
     }
 
@@ -3117,7 +3023,43 @@ final class GeometryView: MTKView, MTKViewDelegate {
     private static let bottomSolderMaskTag = -2
     private static let componentsTag = -3
 
+    /// Everything rebuildLegend() displays. Layer meshes arrive one at a time, each followed by
+    /// refreshLoadedGeometry(); comparing this lets those calls skip rebuilding every row's controls
+    /// when nothing the legend shows has changed.
+    private struct LegendContents: Equatable {
+        var layers: [[String?]]
+        var hiddenLayerIndices: Set<Int>
+        var hasTopSolderMask: Bool
+        var hasBottomSolderMask: Bool
+        var hasComponents: Bool
+        var hideTopSolderMask: Bool
+        var hideBottomSolderMask: Bool
+        var hideComponents: Bool
+        var showGrid: Bool
+        var gridLayerNames: [String]
+        var selectedGridLayerIndex: Int?
+        var gridMaterials: [String]
+    }
+    private var shownLegendContents: LegendContents?
+
     private func rebuildLegend() {
+        let contents = preview.map { preview in
+            LegendContents(
+                layers: preview.layers.map { [$0.name, $0.hexColor] },
+                hiddenLayerIndices: hiddenLayerIndices,
+                hasTopSolderMask: preview.topSolderMask != nil,
+                hasBottomSolderMask: preview.bottomSolderMask != nil,
+                hasComponents: !preview.componentMeshTriangles.isEmpty,
+                hideTopSolderMask: hideTopSolderMask,
+                hideBottomSolderMask: hideBottomSolderMask,
+                hideComponents: hideComponents,
+                showGrid: showGrid,
+                gridLayerNames: preview.gridLayers.map(\.name),
+                selectedGridLayerIndex: selectedGridLayerIndex,
+                gridMaterials: preview.gridMaterials.map { "\($0.name) \($0.color)" })
+        }
+        guard contents == nil || contents != shownLegendContents else { return }
+        shownLegendContents = contents
         legendStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         guard let preview else { return }
         for (index, layer) in preview.layers.enumerated() {

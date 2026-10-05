@@ -139,6 +139,34 @@ vertex GeometryPBRVertexOut geometry_pbr_vertex(uint vertexID [[vertex_id]],
     return out;
 }
 
+// The board's geometry is built once regardless of the selected simulation: each vertex carries a
+// BoardMuteKey index, and the small per-key table (see GeometryView.updateMuteTable) supplies its
+// tri-state mute flag in .x and, in .y, whether to apply the invalid-component red tint.
+vertex GeometryPBRVertexOut geometry_board_pbr_vertex(uint vertexID [[vertex_id]],
+                                                       constant packed_float3* positions [[buffer(0)]],
+                                                       constant packed_float4* colors [[buffer(1)]],
+                                                       constant packed_float3* normals [[buffer(2)]],
+                                                       constant GeometryPBRUniforms& uniforms [[buffer(3)]],
+                                                       constant uint* muteKeys [[buffer(4)]],
+                                                       constant float2* muteTable [[buffer(5)]]) {
+    GeometryPBRVertexOut out;
+    const float3 worldPosition = positions[vertexID];
+    out.position = uniforms.viewProjection * float4(worldPosition, 1.0);
+    out.worldPosition = worldPosition;
+    out.normal = normals[vertexID];
+    const float2 entry = muteTable[muteKeys[vertexID]];
+    float4 color = colors[vertexID];
+    if (entry.y > 0.5) {
+        // Invalid-component warning: boost the model's own material by 30%, then blend strongly
+        // toward saturated red. Retaining some of the material color keeps the model's shading and
+        // part boundaries readable instead of replacing it with a flat mask.
+        color.rgb = min(color.rgb * 1.3, 1.0) * 0.3 + float3(1.0, 0.0, 0.0) * 0.7;
+    }
+    out.baseColor = color;
+    out.muteFlag = entry.x;
+    return out;
+}
+
 fragment float4 geometry_pbr_fragment(GeometryPBRVertexOut in [[stage_in]],
                                        constant GeometryPBRUniforms& uniforms [[buffer(3)]],
                                        texture2d<half, access::sample> regionDistance [[texture(0)]]) {

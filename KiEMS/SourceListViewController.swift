@@ -1,4 +1,5 @@
 import Cocoa
+import os
 
 /// One row in the source list. A plain reference type (NSOutlineView needs stable item identity
 /// for expand/collapse state) wrapping which kind of thing it represents.
@@ -963,8 +964,11 @@ final class SourceListViewController: NSViewController {
         planeComboBox.addItems(withObjectValues: document.config.metalLayerNames)
         planeComboBox.stringValue = currentPlaneSelection
 
+        let signposter = OSSignposter(subsystem: "com.kiems", category: "BoardLoad")
+        let refreshTiming = signposter.beginInterval("Source list refresh", id: signposter.makeSignpostID())
         let currentScope = scope
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let queryTiming = signposter.beginInterval("Source list queries and nodes", id: signposter.makeSignpostID())
             let nodes: [SourceListNode]
             // Surfaced (see below) rather than swallowed by a bare `try?` -- a query failure used to
             // just look identical to "board genuinely has zero nets/footprints," with no way to tell
@@ -1038,7 +1042,9 @@ final class SourceListViewController: NSViewController {
                     return categoryNode
                 }
             }
+            signposter.endInterval("Source list queries and nodes", queryTiming)
             DispatchQueue.main.async {
+                defer { signposter.endInterval("Source list refresh", refreshTiming) }
                 self?.rootNodes = nodes
                 self?.boardDataError = queryError
                 if let fetchedFootprints {

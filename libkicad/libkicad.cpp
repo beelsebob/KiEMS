@@ -1,5 +1,6 @@
 #include "libkicad_generators.hpp"
 #include "libkicad_result.hpp"
+#include "board_load_timing.hpp"
 
 #include <cstdint>
 #include <cerrno>
@@ -352,7 +353,10 @@ std::optional<std::string> _unreadableFileError(const std::string& path, const c
 // call. It reloads when either file's mtime changes (e.g. the user re-saves the board in KiCad),
 // so callers never see stale geometry.
 std::optional<LoadedBoard> _loadBoard(BoardState& state, std::string& error) {
+    BoardLoadTiming lockTiming("KiCad lock wait");
     std::unique_lock<std::mutex> lock(state.runtime.mutex);
+    lockTiming.end();
+    BoardLoadTiming validationTiming("KiCad file validation");
 
     if (auto accessError = _unreadableFileError(state.projectPath, "project")) {
         error = std::move(*accessError);
@@ -379,6 +383,9 @@ std::optional<LoadedBoard> _loadBoard(BoardState& state, std::string& error) {
         return result;
     }
 
+    validationTiming.end();
+    BoardLoadTiming loadTiming("KiCad cold load");
+
     // Drop stale boards before touching SETTINGS_MANAGER: it holds exactly one active PROJECT, so
     // LoadProject() below may silently unload and delete a different previously-loaded project out
     // from under a loaded BOARD that still points at it (KiCad has no "no MDI yet" concept of
@@ -399,6 +406,7 @@ std::optional<LoadedBoard> _loadBoard(BoardState& state, std::string& error) {
 
     bool projectLoaded = false;
     try {
+        BoardLoadTiming timing("KiCad project parse");
         projectLoaded = settingsManager.LoadProject(wxProjectPath);
     } catch (const std::exception& exception) {
         error = "Could not load the KiCad project file \"" + state.projectPath + "\": " + exception.what();
@@ -422,6 +430,7 @@ std::optional<LoadedBoard> _loadBoard(BoardState& state, std::string& error) {
     wxString wxBoardPath = wxString::FromUTF8(state.boardPath);
     std::unique_ptr<BOARD> board;
     try {
+        BoardLoadTiming timing("KiCad board parse");
         board.reset(plugin.LoadBoard(wxBoardPath, nullptr, nullptr, project));
     } catch (const std::exception& exception) {
         error = "Could not load the KiCad board file \"" + state.boardPath + "\": " + exception.what();
@@ -1172,6 +1181,7 @@ RawBoardGeometryResult boardGeometryRaw(BoardState& state) {
     // splitting the same operations here lets the UI mute only silk belonging to an uninvolved
     // component. Board-level artwork deliberately keeps an empty owner.
     const auto appendSilkscreen = [&](PCB_LAYER_ID layer, std::vector<SilkscreenPolygon>& output) {
+        BoardLoadTiming timing("KiCad text and artwork expansion", layer == F_SilkS ? "front" : "back");
         for (const FOOTPRINT* footprint : board->Footprints()) {
             SHAPE_POLY_SET polygons;
             footprint->TransformFPShapesToPolySet(polygons, layer, 0, maxError, ERROR_INSIDE,
@@ -1417,6 +1427,7 @@ RawFootprintsResult footprintsRaw(BoardState& state) {
     }
     BOARD* board = loaded->board;
 
+    BoardLoadTiming timing("Footprint pad walk");
     RawFootprintsResult result;
     result.ok = true;
     for (FOOTPRINT* footprint : board->Footprints()) {

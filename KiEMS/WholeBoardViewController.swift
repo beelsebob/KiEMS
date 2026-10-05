@@ -1273,6 +1273,9 @@ final class WholeBoardViewController: NSViewController {
             guard latestRevision.withLock({ $0 }) == revision else { return }
             let plan: KicadStitchingViaPlan?
             let planningError: Error?
+            let signposter = OSSignposter(subsystem: "com.kiems", category: "BoardLoad")
+            let signpost = signposter.beginInterval("Stitching via plan")
+            defer { signposter.endInterval("Stitching via plan", signpost) }
             do {
                 plan = try request.compute(withBoard: board)
                 planningError = nil
@@ -1951,44 +1954,61 @@ final class WholeBoardViewController: NSViewController {
                     return
                 }
                 self.boardView.preview = catalog
-                let visible = ["F.Cu", "F.Adhesive", "F.Adhes", "F.Mask", "F.Fab", "Edge.Cuts"]
-                let loader = BoardLayerGeometryLoader(board: board, preview: catalog,
-                                                       view: self.boardView, initiallyVisible: visible,
-                                                       generateAll: false) { [weak self] in
-                    self?.loadWholeBoardDetails(for: board, catalog: catalog)
-                }
-                self.layerGeometryLoader = loader
-                self.onLoadingStateChanged?(false)
-                loader.start()
+                self.loadBoardGeometry(for: board, catalog: catalog)
                 self.refreshStitchingViaPlan()
             }
         }
         return true
     }
 
-    /// Runs only after the initially-visible layer meshes have landed. Keeping this behind that
-    /// small priority batch both bounds concurrent KiCad board loads and prevents the old detailed
-    /// preview path from delaying the layers the user can actually see.
-    private func loadWholeBoardDetails(for board: KicadBoardBridge, catalog: EMSGeometryPreview) {
-        layerGeometryLoader?.cancel()
-        layerGeometryLoader = nil
-        boardView.onLayerNeedsGeometry = nil
-        DispatchQueue.global(qos: .utility).async { [weak self] in
+    /// Copper comes only from the detailed whole-board build (net-grouped, unioned, drilled), which
+    /// starts immediately; there is no rough per-polygon copper pass for it to replace. The
+    /// non-copper layers load alongside it through the layer loader, visible ones first.
+    private func loadBoardGeometry(for board: KicadBoardBridge, catalog: EMSGeometryPreview) {
+        let kicadPcbPath = board.kicadPcbPath
+        let finished = DispatchGroup()
+        // Phases of the initial board load, visible in Instruments' os_signpost track.
+        let signposter = OSSignposter(subsystem: "com.kiems", category: "BoardLoad")
+        let wholeLoad = signposter.beginInterval("Board load")
+
+        finished.enter()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let detailedSignpost = signposter.beginInterval("Detailed board build")
             let detailed = try? board.wholeBoardPreview()
             let footprints = (try? board.footprints()) ?? []
+            signposter.endInterval("Detailed board build", detailedSignpost)
             DispatchQueue.main.async {
-                guard let self, self.loadedForPath == board.kicadPcbPath else { return }
+                defer { finished.leave() }
+                guard let self, self.loadedForPath == kicadPcbPath else { return }
                 self.allFootprints = footprints
                 self.refreshActivityHighlight()
                 if let detailed, let preview = self.boardView.preview {
                     preview.mergeLoadedPreview(detailed)
                     self.boardView.refreshLoadedGeometry()
                 }
-                let loader = BoardLayerGeometryLoader(board: board, preview: catalog,
-                                                       view: self.boardView,
-                                                       initiallyVisible: self.boardView.visibleLayerNames)
-                self.layerGeometryLoader = loader
-                loader.start()
+            }
+        }
+
+        finished.enter()
+        let loaderSignpost = signposter.beginInterval("Other layers")
+        let loader = BoardLayerGeometryLoader(board: board, preview: catalog, view: boardView,
+                                               initiallyVisible: boardView.visibleLayerNames,
+                                               excluding: { $0.hasSuffix(".Cu") }) {
+            signposter.endInterval("Other layers", loaderSignpost)
+            finished.leave()
+        }
+        layerGeometryLoader = loader
+        loader.start()
+
+        // The main-pane spinner stays up until every layer has loaded and been built into the
+        // board's geometry, so the board is never shown partially loaded.
+        finished.notify(queue: .main) { [weak self] in
+            let geometrySignpost = signposter.beginInterval("Waiting for current geometry")
+            self?.boardView.whenBoardGeometryCurrent { [weak self] in
+                signposter.endInterval("Waiting for current geometry", geometrySignpost)
+                signposter.endInterval("Board load", wholeLoad)
+                guard let self, self.loadedForPath == kicadPcbPath else { return }
+                self.onLoadingStateChanged?(false)
             }
         }
     }

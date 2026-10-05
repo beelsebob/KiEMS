@@ -62,6 +62,8 @@ typedef NS_ENUM(NSInteger, EMSGeometryTriangleKind) {
 @property (nonatomic, readonly) double z;
 /// NO for a catalog placeholder whose expensive contours have not been tessellated yet.
 @property (nonatomic, readonly) BOOL geometryGenerated;
+/// Bumped by every replaceTriangles: call, so a renderer can cache work derived from `triangles`.
+@property (nonatomic, readonly) NSUInteger revision;
 + (instancetype)placeholderWithName:(NSString *)name
                            hexColor:(nullable NSString *)hexColor
                                   z:(double)z;
@@ -173,6 +175,8 @@ typedef NS_ENUM(NSInteger, EMSGeometryTriangleKind) {
 /// Distinguishes the configuration screen's complete-board preview from a simulation cutout.
 /// GeometryView uses this only to choose sensible initial layer visibility.
 @property (nonatomic, readonly) BOOL wholeBoard;
+/// Bumped by every mergeLoadedPreview: call (which replaces the via/component meshes and masks).
+@property (nonatomic, readonly) NSUInteger revision;
 @property (nonatomic, copy, readonly) NSArray<EMSGeometryLayer *> *layers;
 /// Top/bottom solder mask, if this board's stackup has one on that side -- nil (not an empty
 /// EMSGeometryLayer) when absent, e.g. no F_Mask.gbr/B_Mask.gbr was exported. Reuses

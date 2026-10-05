@@ -293,6 +293,12 @@ final class DocumentWindowController: NSWindowController {
         }
         sourceListVC.onInvolvedNetsChanged = configurationChanged
         wholeBoardVC.onConfigurationChanged = configurationChanged
+        // Wired before simulationListVC's view loads: its initial selection callback can start the
+        // board load (via wholeBoardVC.refresh()), and a load started with nobody listening never
+        // shows the spinner -- the board view was revealed, interactive, before anything loaded.
+        wholeBoardVC.onLoadingStateChanged = { [weak self] isLoading in
+            self?.setBoardLoading(isLoading)
+        }
         let fieldViewerVC = FieldViewerViewController(document: ownerDocument)
         fieldViewerViewController = fieldViewerVC
 
@@ -569,7 +575,9 @@ final class DocumentWindowController: NSWindowController {
         rightRegion.addSubview(simulationResultsVC.view)
         rightRegion.addSubview(fieldViewerVC.view)
         rightRegion.addSubview(noSelectionLabel)
-        rightRegion.addSubview(mainContentLoadingIndicator)
+        // The sidebar is hidden while a board loads (see setBoardLoading), so the spinner is
+        // centred in the whole area below the header rather than in rightRegion.
+        contentView.addSubview(mainContentLoadingIndicator)
 
         NSLayoutConstraint.activate([
             topSectionView.topAnchor.constraint(equalTo: contentView.topAnchor),
@@ -593,7 +601,7 @@ final class DocumentWindowController: NSWindowController {
             noSelectionLabel.centerXAnchor.constraint(equalTo: rightRegion.centerXAnchor),
             noSelectionLabel.centerYAnchor.constraint(equalTo: rightRegion.centerYAnchor),
 
-            mainContentLoadingIndicator.centerXAnchor.constraint(equalTo: rightRegion.centerXAnchor),
+            mainContentLoadingIndicator.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
             mainContentLoadingIndicator.centerYAnchor.constraint(equalTo: rightRegion.centerYAnchor),
 
             // wholeBoardVC.view now fills the *whole* region, same as geometryVC.view/
@@ -631,8 +639,10 @@ final class DocumentWindowController: NSWindowController {
             fieldViewerVC.view.bottomAnchor.constraint(equalTo: rightRegion.bottomAnchor),
         ])
 
-        wholeBoardVC.onLoadingStateChanged = { [weak self] isLoading in
-            self?.setBoardLoading(isLoading)
+        // A load the initial selection started above ran setBoardLoading(true) before every view
+        // here existed; re-apply it now that they all do.
+        if isLoadingBoard {
+            setBoardLoading(true)
         }
         // On reopen, restoreLinkedBoardIfNeeded() has already reconstructed the picker state above;
         // this is the actual asynchronous KiCad parse/preview load whose completion gates the UI.

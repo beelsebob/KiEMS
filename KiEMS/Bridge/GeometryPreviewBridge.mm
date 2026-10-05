@@ -25,6 +25,7 @@
 #include "kiems/constants.hpp"
 #include "kiems/importer.hpp"
 #include "libkicad/libkicad.hpp"
+#include "libkicad/board_load_timing.hpp"
 #include "logging.hpp"
 #include "kiems/paths_config.hpp"
 
@@ -410,6 +411,7 @@ ComponentExportOutcome exportComponentTriangles(const libkicad::Board& board, co
 - (void)replaceTriangles:(NSArray<EMSGeometryTriangle*>*)triangles {
     _triangles = [triangles copy];
     _geometryGenerated = YES;
+    _revision++;
 }
 @end
 
@@ -599,6 +601,7 @@ ComponentExportOutcome exportComponentTriangles(const libkicad::Board& board, co
     return self;
 }
 - (void)mergeLoadedPreview:(EMSGeometryPreview*)preview {
+    _revision++;
     NSMutableDictionary<NSString*, EMSGeometryLayer*>* incoming = [NSMutableDictionary dictionary];
     for (EMSGeometryLayer* layer in preview.layers) incoming[layer.name] = layer;
     for (EMSGeometryLayer* layer in _layers) {
@@ -1798,9 +1801,12 @@ std::expected<EMSGeometryLayer*, std::string> buildSlicedBoardLayerPreview(
 }
 
 std::expected<EMSGeometryPreview*, std::string> buildWholeBoardPreview(const libkicad::Board& board) {
+    libkicad::BoardLoadTiming previewTiming("Whole-board preview");
+    libkicad::BoardLoadTiming extractionTiming("Board geometry extraction");
     const auto previewStartedAt = std::chrono::steady_clock::now();
     auto geometryResult = board.boardGeometry();
     if (!geometryResult) return std::unexpected(std::move(geometryResult).error());
+    extractionTiming.end();
     const libkicad::BoardGeometry& geometry = *geometryResult;
 
     auto boundsResult = kiems::boardBoundsInSimulationUnits(geometry);
@@ -1912,7 +1918,41 @@ std::expected<EMSGeometryPreview*, std::string> buildWholeBoardPreview(const lib
                    holes.error());
     }
 
-    NSMutableArray<EMSGeometryLayer*>* layers = [NSMutableArray arrayWithCapacity:metals.size()];
+    // The remaining KiCad queries run now, so the component export -- the slowest part of this
+    // preview, and single-threaded inside KiCad -- can overlap the GEOS copper work below. Every
+    // libkicad query takes the same process-wide lock, so queries issued after the export started
+    // would just queue behind it.
+    auto tracksResult = board.allTracks();
+    std::vector<std::string> componentRefs;
+    NSMutableArray<NSString*>* renderedRefs = [NSMutableArray array];
+    if (auto footprintsResult = board.footprints(); footprintsResult) {
+        componentRefs.reserve(footprintsResult->size());
+        for (const auto& footprint : *footprintsResult) {
+            componentRefs.push_back(footprint.reference);
+            [renderedRefs addObject:@(footprint.reference.c_str())];
+        }
+    } else {
+        logWarning("GeometryPreview: footprint listing failed, skipping whole-board component model "
+                   "export: " + footprintsResult.error());
+    }
+    auto componentOutcome = std::make_shared<ComponentExportOutcome>();
+    dispatch_group_t componentExport = dispatch_group_create();
+    const libkicad::Board* boardForExport = &board;
+    dispatch_group_async(componentExport, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        try {
+            libkicad::BoardLoadTiming timing("Component export");
+            *componentOutcome = exportComponentTriangles(*boardForExport, componentRefs);
+        } catch (const std::exception& exception) {
+            logWarning(std::string("GeometryPreview: component model export failed: ") + exception.what());
+        }
+    });
+    // Every return below must first wait for the export, which still uses `board` and these locals.
+    struct WaitForComponentExport {
+        dispatch_group_t group;
+        ~WaitForComponentExport() { dispatch_group_wait(group, DISPATCH_TIME_FOREVER); }
+    } waitForComponentExport{componentExport};
+
+    std::vector<std::vector<WholeBoardCopperGroup>> groupsByLayer(metals.size());
     for (std::size_t layerIndex = 0; layerIndex < metals.size(); ++layerIndex) {
         const std::string& layerName = metals[layerIndex].name();
 
@@ -1944,12 +1984,7 @@ std::expected<EMSGeometryPreview*, std::string> buildWholeBoardPreview(const lib
             }
         }
 
-        NSString* hexColor = nil;
-        if (const auto colorIt = colorsByLayerName.find(layerName); colorIt != colorsByLayerName.end()) {
-            hexColor = @(colorIt->second.c_str());
-        }
-
-        std::vector<WholeBoardCopperGroup> copperGroups;
+        std::vector<WholeBoardCopperGroup>& copperGroups = groupsByLayer[layerIndex];
         copperGroups.reserve(groupsByIdentity.size());
         for (auto& entry : groupsByIdentity) {
             copperGroups.push_back(std::move(entry.second));
@@ -1970,17 +2005,54 @@ std::expected<EMSGeometryPreview*, std::string> buildWholeBoardPreview(const lib
             return lhsPriority == rhsPriority ? lhs.key < rhs.key : lhsPriority < rhsPriority;
         });
 
-        // GEOS re-entrant contexts are thread-local in polygon_geometry.cpp. Each task writes only
-        // its own result slot; Cocoa object creation remains on this calling thread below.
-        WholeBoardCopperGroup* groupData = copperGroups.data();
-        const std::string* layerNameForTasks = &layerName;
-        const std::vector<IndexedHoleCutout>* cutoutsForTasks = &platedHoleCutouts;
-        const PolygonSet* allCutoutsForTasks = &allPlatedHoleCutouts;
-        dispatch_apply(copperGroups.size(), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
-                       ^(std::size_t index) {
-            buildWholeBoardCopperGroup(groupData[index], *layerNameForTasks, *cutoutsForTasks,
-                                       *allCutoutsForTasks, kWholeBoardTessellationToleranceSimUnits);
-        });
+    }
+
+    // Build every layer's groups in one parallel pass rather than one pass per layer: a per-layer
+    // pass waits on that layer's slowest group (typically a large pour) with the other cores idle.
+    // Starting the most expensive groups first lets them overlap with everything else.
+    struct CopperTask {
+        WholeBoardCopperGroup* group;
+        const std::string* layerName;
+        std::size_t cost;
+    };
+    std::vector<CopperTask> copperTasks;
+    for (std::size_t layerIndex = 0; layerIndex < metals.size(); ++layerIndex) {
+        for (WholeBoardCopperGroup& group : groupsByLayer[layerIndex]) {
+            std::size_t cost = 0;
+            for (const Polygon& polygon : group.rawPolygons) cost += polygon.size();
+            copperTasks.push_back({&group, &metals[layerIndex].name(), cost});
+        }
+    }
+    std::stable_sort(copperTasks.begin(), copperTasks.end(),
+                     [](const CopperTask& lhs, const CopperTask& rhs) { return lhs.cost > rhs.cost; });
+
+    // GEOS re-entrant contexts are thread-local in polygon_geometry.cpp. Each task writes only
+    // its own result slot; Cocoa object creation remains on this calling thread below.
+    const CopperTask* taskData = copperTasks.data();
+    const std::vector<IndexedHoleCutout>* cutoutsForTasks = &platedHoleCutouts;
+    const PolygonSet* allCutoutsForTasks = &allPlatedHoleCutouts;
+    libkicad::BoardLoadTiming copperTiming("Copper parallel pass");
+    dispatch_apply(copperTasks.size(), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+                   ^(std::size_t index) {
+        const CopperTask& task = taskData[index];
+        libkicad::BoardLoadTiming timing("Copper group",
+            (*task.layerName + " / " + task.group->key).c_str(),
+            task.cost, task.group->rawPolygons.size());
+        buildWholeBoardCopperGroup(*task.group, *task.layerName, *cutoutsForTasks, *allCutoutsForTasks,
+                                   kWholeBoardTessellationToleranceSimUnits);
+    });
+
+    copperTiming.end();
+    libkicad::BoardLoadTiming materializationTiming("Copper Cocoa objects");
+    NSMutableArray<EMSGeometryLayer*>* layers = [NSMutableArray arrayWithCapacity:metals.size()];
+    for (std::size_t layerIndex = 0; layerIndex < metals.size(); ++layerIndex) {
+        const std::string& layerName = metals[layerIndex].name();
+        const std::vector<WholeBoardCopperGroup>& copperGroups = groupsByLayer[layerIndex];
+
+        NSString* hexColor = nil;
+        if (const auto colorIt = colorsByLayerName.find(layerName); colorIt != colorsByLayerName.end()) {
+            hexColor = @(colorIt->second.c_str());
+        }
 
         NSMutableArray<EMSGeometryTriangle*>* layerTriangles = [NSMutableArray array];
         for (const WholeBoardCopperGroup& group : copperGroups) {
@@ -2017,6 +2089,8 @@ std::expected<EMSGeometryPreview*, std::string> buildWholeBoardPreview(const lib
                                                                   z:layerZ]];
     }
 
+    materializationTiming.end();
+    libkicad::BoardLoadTiming maskTiming("Solder mask geometry");
     // Build the complete board's solder-mask coverage from its Edge.Cuts shape minus KiCad's mask
     // openings. The configuration screen uses the same flat mask-layer representation as a
     // simulation preview; these layers are display geometry only.
@@ -2046,6 +2120,8 @@ std::expected<EMSGeometryPreview*, std::string> buildWholeBoardPreview(const lib
         else bottomSolderMask = layer;
     }
 
+    maskTiming.end();
+    libkicad::BoardLoadTiming silkTiming("Silkscreen geometry");
     // KiCad has already expanded every text glyph and stroked board/footprint graphic into these
     // contours. Keep each side as a real layer so it gets its own legend visibility control.
     const auto appendSilkscreenLayer = [&](const std::vector<libkicad::SilkscreenPolygon>& polygons,
@@ -2109,28 +2185,21 @@ std::expected<EMSGeometryPreview*, std::string> buildWholeBoardPreview(const lib
         }
     }
 
+    silkTiming.end();
     // Real 3D models of *every* footprint on the board -- unlike buildGeometryPreview's own
     // includedFootprintReferences() (just this simulation's auto-discovered lumped components),
     // there's no simulation here to narrow the list at all. Best-effort throughout, same as
     // buildGeometryPreview's own identically-shaped block: a query/export failure just leaves these
     // three arrays empty rather than failing the whole whole-board preview.
-    NSMutableArray<NSString*>* renderedRefs = [NSMutableArray array];
     NSMutableArray<EMSGeometryComponentTriangle*>* componentTriangles = [NSMutableArray array];
     NSMutableArray<NSString*>* componentModelExportMessages = [NSMutableArray array];
     {
-        std::vector<std::string> refs;
-        if (auto footprintsResult = board.footprints();
-            footprintsResult) {
-            refs.reserve(footprintsResult->size());
-            for (const auto& footprint : *footprintsResult) {
-                refs.push_back(footprint.reference);
-                [renderedRefs addObject:@(footprint.reference.c_str())];
-            }
-        } else {
-            logWarning("GeometryPreview: footprint listing failed, skipping whole-board component model "
-                       "export: " + footprintsResult.error());
-        }
-        const ComponentExportOutcome outcome = exportComponentTriangles(board, refs);
+        // Started above, alongside the copper work.
+        libkicad::BoardLoadTiming waitTiming("Component export remaining wait");
+        dispatch_group_wait(componentExport, DISPATCH_TIME_FOREVER);
+        waitTiming.end();
+        libkicad::BoardLoadTiming componentTiming("Component Cocoa objects");
+        const ComponentExportOutcome& outcome = *componentOutcome;
         for (const auto& message : outcome.messages) {
             [componentModelExportMessages addObject:@(message.c_str())];
         }
@@ -2161,7 +2230,7 @@ std::expected<EMSGeometryPreview*, std::string> buildWholeBoardPreview(const lib
     // weighted by each segment's own physical length) rather than approximating "distance along the
     // copper" from triangulated fill geometry alone.
     NSMutableArray<EMSGeometryTrackSegment*>* trackSegments = [NSMutableArray array];
-    if (auto tracksResult = board.allTracks(); tracksResult) {
+    if (tracksResult) {
         trackSegments = [NSMutableArray arrayWithCapacity:tracksResult->size()];
         for (const auto& [netName, segment] : *tracksResult) {
             const CGPoint start = CGPointMake(mmToSimUnits(segment.startXMm) - originX,
