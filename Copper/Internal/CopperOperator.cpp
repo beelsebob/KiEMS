@@ -920,6 +920,25 @@ void CopperOperator::computePEC() {
     const CSProperties::PropertyType pecType =
         static_cast<CSProperties::PropertyType>(CSProperties::MATERIAL | CSProperties::METAL);
     const PrimitiveTypeCache& pecTypeCache = primitiveTypeCache(pecType);
+    struct PrimitiveRange {
+        unsigned int xStart, xStopEx, zStart, zStopEx;
+    };
+    std::vector<PrimitiveRange> primitiveRanges(pecTypeCache.prims.size());
+    std::vector<PolygonRasterShape> primitiveShapes(pecTypeCache.prims.size());
+    std::vector<std::uint8_t> canRasterize(pecTypeCache.prims.size(), 0);
+    for (std::size_t i = 0; i < pecTypeCache.prims.size(); ++i) {
+        const double* bb = pecTypeCache.boundBoxes[i].box.data();
+        bool bounded = true;
+        for (int n = 0; n < 6; ++n) {
+            bounded = bounded && std::isfinite(bb[n]);
+        }
+        const auto [xStart, xStopEx] =
+            boundedRange(xLines, std::min(bb[0], bb[1]), std::max(bb[0], bb[1]), bounded, nx);
+        const auto [zStart, zStopEx] =
+            boundedRange(zLines, std::min(bb[4], bb[5]), std::max(bb[4], bb[5]), bounded, nz);
+        primitiveRanges[i] = {xStart, xStopEx, zStart, zStopEx};
+        canRasterize[i] = tryBuildPolygonRasterShape(pecTypeCache.prims[i], primitiveShapes[i]) ? 1U : 0U;
+    }
 
     // winner[axis][x*nz+z] -- one row's worth of PaintPECColumn's own per-column winnerCache,
     // widened to cover every column in the row at once (row-major, not column-major, is what lets a
@@ -930,9 +949,8 @@ void CopperOperator::computePEC() {
         winner[a].assign(static_cast<std::size_t>(nx) * nz, nullptr);
     }
 
-    PolygonRasterShape shape;
-    std::vector<double> colBuf;
-    std::vector<bool> insideMask;
+    std::vector<std::uint8_t> insideMask(nx);
+    PolygonRasterScratch rasterScratch;
 
     for (unsigned int y = 0; y < ny; ++y) {
         for (int a = 0; a < 3; ++a) {
@@ -944,23 +962,23 @@ void CopperOperator::computePEC() {
         for (auto it = vPrimIdx.rbegin(); it != vPrimIdx.rend(); ++it) {
             CSPrimitives* prim = pecTypeCache.prims[*it];
             const double* bb = pecTypeCache.boundBoxes[*it].box.data();
-            bool bounded = true;
-            for (int n = 0; n < 6; ++n) {
-                bounded = bounded && std::isfinite(bb[n]);
-            }
-
-            const auto [xStart, xStopEx] = boundedRange(xLines, std::min(bb[0], bb[1]), std::max(bb[0], bb[1]), bounded, nx);
-            const auto [zStart, zStopEx] = boundedRange(zLines, std::min(bb[4], bb[5]), std::max(bb[4], bb[5]), bounded, nz);
+            const PrimitiveRange& range = primitiveRanges[*it];
+            const unsigned int xStart = range.xStart;
+            const unsigned int xStopEx = range.xStopEx;
+            const unsigned int zStart = range.zStart;
+            const unsigned int zStopEx = range.zStopEx;
             if (xStart >= xStopEx || zStart >= zStopEx) {
                 continue;
             }
 
-            if (tryBuildPolygonRasterShape(prim, shape)) {
+            if (canRasterize[*it] != 0) {
+                const PolygonRasterShape& shape = primitiveShapes[*it];
                 for (int axis = 0; axis < 3; ++axis) {
                     const double rowCoord = (axis == 1) ? yDual[y] : yPrimary[y];
                     const std::vector<double>& fullCols = (axis == 0) ? xDual : xPrimary;
-                    colBuf.assign(fullCols.begin() + xStart, fullCols.begin() + xStopEx);
-                    rasterizePolygonRow(shape, rowCoord, colBuf, insideMask);
+                    const auto cols = std::span<const double>(fullCols).subspan(xStart, xStopEx - xStart);
+                    const auto mask = std::span<std::uint8_t>(insideMask).first(cols.size());
+                    rasterizePolygonRowBytes(shape, rowCoord, cols, mask, rasterScratch);
 
                     for (unsigned int z = zStart; z < zStopEx; ++z) {
                         const double zc = (axis == 2) ? zDual[z] : zPrimary[z];
@@ -969,8 +987,8 @@ void CopperOperator::computePEC() {
                                       // since the rasterizer above only ever resolves the in-plane
                                       // (x,y) decision -- see rasterizePolygonRow()'s own doc comment.
                         }
-                        for (unsigned int xi = 0; xi < colBuf.size(); ++xi) {
-                            if (insideMask[xi]) {
+                        for (unsigned int xi = 0; xi < mask.size(); ++xi) {
+                            if (mask[xi]) {
                                 winner[axis][static_cast<std::size_t>(xStart + xi) * nz + z] = prim;
                             }
                         }
