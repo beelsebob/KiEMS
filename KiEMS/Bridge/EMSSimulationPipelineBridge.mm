@@ -5,6 +5,8 @@
 #import "KicadBoardBridge+Private.h"
 #import "SimulationResultsBridge+Private.h"
 
+#include <CommonCrypto/CommonDigest.h>
+
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -114,7 +116,7 @@ constexpr const char* kCancelledMessage = "Cancelled";
 // not the shape of geometry.json or the S-parameter CSVs, so merely finding those files is not
 // enough to prove they can be reused. Bump this version whenever a solver/serialization change
 // makes otherwise-identical saved products unsafe to restore.
-constexpr const char* kPipelineCacheVersion = "KiEMS-pipeline-cache-v5\n";
+constexpr const char* kPipelineCacheVersion = "KiEMS-pipeline-cache-v6\n";
 constexpr const char* kGeometryCacheInputsName = "cache_inputs.txt";
 constexpr const char* kResultsCacheInputsName = "cache_inputs.txt";
 
@@ -124,10 +126,30 @@ std::optional<std::string> readWholeFile(const std::filesystem::path& path) {
     return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
 
+std::string sha256Hex(const std::string& data) {
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(data.data(), static_cast<CC_LONG>(data.size()), digest);
+    static constexpr char hex[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(2 * CC_SHA256_DIGEST_LENGTH);
+    for (unsigned char byte : digest) {
+        out.push_back(hex[byte >> 4]);
+        out.push_back(hex[byte & 0xF]);
+    }
+    return out;
+}
+
+// simulation.json alone doesn't identify the model: it only names the KiCad board, whose contents
+// (copied into fab/ by exportKicadPcb before this is called) can change under an identical config.
+// Digest the board and its project (net classes) too, so editing the PCB invalidates saved products.
 std::optional<std::string> pipelineCacheInputs(const PathsConfig& paths) {
     auto config = readWholeFile(paths.configFile);
     if (!config.has_value()) return std::nullopt;
-    return std::string(kPipelineCacheVersion) + *config;
+    auto board = readWholeFile(paths.fabBoardFile);
+    if (!board.has_value()) return std::nullopt;
+    auto project = readWholeFile(paths.fabProjectFile);
+    return std::string(kPipelineCacheVersion) + "board-sha256 " + sha256Hex(*board) + "\nproject-sha256 " +
+           (project.has_value() ? sha256Hex(*project) : std::string("none")) + "\n" + *config;
 }
 
 bool cacheInputsMatch(const std::filesystem::path& marker, const std::optional<std::string>& current) {
