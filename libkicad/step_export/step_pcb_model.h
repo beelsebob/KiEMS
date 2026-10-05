@@ -185,6 +185,13 @@ public:
     bool AddPolygonShapes( const SHAPE_POLY_SET* aPolyShapes, PCB_LAYER_ID aLayer,
                            const VECTOR2D& aOrigin, const wxString& aNetname );
 
+    /**
+     * Read every plain STEP file in \a aFileNames concurrently, ahead of the AddComponent() calls
+     * that use them.  getModelLabel() takes a preloaded document instead of reading the file again.
+     * Files that fail here are simply read again (serially, reporting the error) when used.
+     */
+    void PreloadSTEPModels( const std::vector<std::string>& aFileNames );
+
     // add a component at the given position and orientation
     bool AddComponent( const wxString& aBaseName, const wxString& aFileName,
                        const std::vector<wxString>& aAltFilenames, const wxString& aRefDes,
@@ -405,6 +412,7 @@ private:
     bool                            m_extraPadThickness; // add extra thickness to pads
     std::vector<TDF_Label>          m_pcb_labels;       // labels for the PCB model (one by main outline)
     MODEL_MAP                       m_models;           // map of file names to model labels
+    std::map<std::string, Handle( TDocStd_Document )> m_preloadedSTEPs; // see PreloadSTEPModels()
 
     struct COMPONENT_MODEL_INSTANCE
     {

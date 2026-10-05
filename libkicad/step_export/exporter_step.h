@@ -67,6 +67,9 @@ public:
 private:
     bool buildBoard3DShapes();
     bool buildFootprint3DShapes( FOOTPRINT* aFootprint, const VECTOR2D& aOrigin, SHAPE_POLY_SET* aClipPolygon );
+    bool includesFootprintModels( FOOTPRINT* aFootprint ) const;
+    wxString footprintModelBasePath( FOOTPRINT* aFootprint ) const;
+    void preloadFootprintModels();
     bool buildTrack3DShape( PCB_TRACK* aTrack, const VECTOR2D& aOrigin );
     void buildZones3DShape( VECTOR2D aOrigin, bool aSolderMaskOnly = false );
     bool buildGraphic3DShape( BOARD_ITEM* aItem, const VECTOR2D& aOrigin );

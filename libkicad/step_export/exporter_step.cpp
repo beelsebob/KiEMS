@@ -219,6 +219,89 @@ bool EXPORTER_STEP::netFilterMatches( const wxString& netname ) const
 }
 
 
+bool EXPORTER_STEP::includesFootprintModels( FOOTPRINT* aFootprint ) const
+{
+    if( ( !(aFootprint->GetAttributes() & (FP_THROUGH_HOLE|FP_SMD)) ) && !m_params.m_IncludeUnspecified )
+        return false;
+
+    if( aFootprint->GetDNPForVariant( m_board ? m_board->GetCurrentVariant() : wxString() )
+            && !m_params.m_IncludeDNP )
+    {
+        return false;
+    }
+
+    // Exit early if we don't want to include footprint models
+    if( m_params.m_BoardOnly || !m_params.m_ExportComponents )
+        return false;
+
+    if( m_params.m_ComponentFilter.IsEmpty() )
+        return true;
+
+    wxStringTokenizer tokenizer( m_params.m_ComponentFilter, ", \t\r\n", wxTOKEN_STRTOK );
+
+    while( tokenizer.HasMoreTokens() )
+    {
+        if( aFootprint->GetReference().Matches( tokenizer.GetNextToken() ) )
+            return true;
+    }
+
+    return false;
+}
+
+
+wxString EXPORTER_STEP::footprintModelBasePath( FOOTPRINT* aFootprint ) const
+{
+    // Prefetch the library for this footprint
+    // In case we need to resolve relative footprint paths
+    wxString libraryName = aFootprint->GetFPID().GetLibNickname();
+    wxString footprintBasePath = wxEmptyString;
+
+    if( m_board->GetProject() )
+    {
+        std::optional<LIBRARY_TABLE_ROW*> fpRow =
+                            PROJECT_PCB::FootprintLibAdapter( m_board->GetProject() )->GetRow( libraryName );
+        if( fpRow )
+            footprintBasePath = LIBRARY_MANAGER::GetFullURI( *fpRow, true );
+    }
+
+    return footprintBasePath;
+}
+
+
+void EXPORTER_STEP::preloadFootprintModels()
+{
+    // Reading the model files dominates a component export, and each read is independent, so
+    // read them all concurrently up front.  Mirrors buildFootprint3DShapes()' own model selection.
+    std::vector<std::string> fileNames;
+
+    for( FOOTPRINT* footprint : m_board->Footprints() )
+    {
+        if( !includesFootprintModels( footprint ) )
+            continue;
+
+        const wxString footprintBasePath = footprintModelBasePath( footprint );
+
+        for( const FP_3DMODEL& fp_model : footprint->Models() )
+        {
+            if( !fp_model.m_Show || fp_model.m_Filename.empty() )
+                continue;
+
+            std::vector<const EMBEDDED_FILES*> embeddedFilesStack;
+            embeddedFilesStack.push_back( footprint->GetEmbeddedFiles() );
+            embeddedFilesStack.push_back( m_board->GetEmbeddedFiles() );
+
+            wxString mainPath = m_resolver->ResolvePath( fp_model.m_Filename, footprintBasePath,
+                                                         embeddedFilesStack );
+
+            if( !mainPath.empty() && wxFileName::FileExists( mainPath ) )
+                fileNames.push_back( mainPath.utf8_string() );
+        }
+    }
+
+    m_pcbModel->PreloadSTEPModels( fileNames );
+}
+
+
 bool EXPORTER_STEP::buildFootprint3DShapes( FOOTPRINT* aFootprint, const VECTOR2D& aOrigin,
                                             SHAPE_POLY_SET* aClipPolygon )
 {
@@ -507,63 +590,13 @@ bool EXPORTER_STEP::buildFootprint3DShapes( FOOTPRINT* aFootprint, const VECTOR2
         }
     }
 
-    if( ( !(aFootprint->GetAttributes() & (FP_THROUGH_HOLE|FP_SMD)) ) && !m_params.m_IncludeUnspecified )
-    {
-        return hasdata;
-    }
-
-    if( aFootprint->GetDNPForVariant( m_board ? m_board->GetCurrentVariant() : wxString() )
-            && !m_params.m_IncludeDNP )
-    {
-        return hasdata;
-    }
-
-    // Prefetch the library for this footprint
-    // In case we need to resolve relative footprint paths
-    wxString libraryName = aFootprint->GetFPID().GetLibNickname();
-    wxString footprintBasePath = wxEmptyString;
-
     double posX = aFootprint->GetPosition().x - aOrigin.x;
     double posY = (aFootprint->GetPosition().y) - aOrigin.y;
 
-    if( m_board->GetProject() )
-    {
-        std::optional<LIBRARY_TABLE_ROW*> fpRow =
-                            PROJECT_PCB::FootprintLibAdapter( m_board->GetProject() )->GetRow( libraryName );
-        if( fpRow )
-            footprintBasePath = LIBRARY_MANAGER::GetFullURI( *fpRow, true );
-    }
-
-    // Exit early if we don't want to include footprint models
-    if( m_params.m_BoardOnly || !m_params.m_ExportComponents )
-    {
+    if( !includesFootprintModels( aFootprint ) )
         return hasdata;
-    }
 
-    bool componentFilter = !m_params.m_ComponentFilter.IsEmpty();
-    std::vector<wxString> componentFilterPatterns;
-
-    if( componentFilter )
-    {
-        wxStringTokenizer tokenizer( m_params.m_ComponentFilter, ", \t\r\n", wxTOKEN_STRTOK );
-
-        while( tokenizer.HasMoreTokens() )
-            componentFilterPatterns.push_back( tokenizer.GetNextToken() );
-
-        bool found = false;
-
-        for( const wxString& pattern : componentFilterPatterns )
-        {
-            if( aFootprint->GetReference().Matches( pattern ) )
-            {
-                found = true;
-                break;
-            }
-        }
-
-        if( !found )
-            return hasdata;
-    }
+    const wxString footprintBasePath = footprintModelBasePath( aFootprint );
 
     VECTOR2D newpos( pcbIUScale.IUTomm( posX ), pcbIUScale.IUTomm( posY ) );
 
@@ -1237,6 +1270,8 @@ bool EXPORTER_STEP::buildBoard3DShapes()
 
     // For copper layers, only pads and tracks are added, because adding everything on copper
     // generate unreasonable file sizes and take a unreasonable calculation time.
+    preloadFootprintModels();
+
     for( FOOTPRINT* fp : m_board->Footprints() )
         buildFootprint3DShapes( fp, origin, &pcbOutlinesNoArcs );
 

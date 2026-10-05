@@ -20,6 +20,8 @@
  */
 
 #include <algorithm>
+#include <cstdlib>
+#include <memory>
 #include <cmath>
 #include <functional>
 #include <new>
@@ -3601,7 +3603,15 @@ bool STEP_PCB_MODEL::getModelLabel( const wxString& aBaseName, const wxString& a
         break;
 
     case FMT_STEP:
-        if( !readSTEP( doc, fileNameUTF8.c_str() ) )
+        if( auto preloaded = m_preloadedSTEPs.find( fileNameUTF8 ); preloaded != m_preloadedSTEPs.end() )
+        {
+            if( doc->CanClose() == CDM_CCS_OK )
+                doc->Close();
+
+            doc = preloaded->second;
+            m_preloadedSTEPs.erase( preloaded );
+        }
+        else if( !readSTEP( doc, fileNameUTF8.c_str() ) )
         {
             m_reporter->Report( wxString::Format( wxT( "readSTEP() failed on filename '%s'." ), aFileName ),
                                 RPT_SEVERITY_ERROR );
@@ -4051,6 +4061,97 @@ bool STEP_PCB_MODEL::readIGES( Handle( TDocStd_Document )& doc, const char* fnam
     }
 
     return true;
+}
+
+
+void STEP_PCB_MODEL::PreloadSTEPModels( const std::vector<std::string>& aFileNames )
+{
+    // Escape hatch back to KiCad's original one-file-at-a-time reads, should a model ever trip
+    // over OpenCASCADE thread safety.
+    if( std::getenv( "KIEMS_SERIAL_STEP_READS" ) )
+        return;
+
+    std::vector<std::string> fileNames;
+
+    for( const std::string& fileName : aFileNames )
+    {
+        if( fileType( fileName.c_str() ) == FMT_STEP && !m_preloadedSTEPs.count( fileName )
+            && std::find( fileNames.begin(), fileNames.end(), fileName ) == fileNames.end() )
+        {
+            fileNames.push_back( fileName );
+        }
+    }
+
+    if( fileNames.size() < 2 )
+        return;
+
+    // The XCAF application, reader construction (which registers OCCT's STEP protocol) and the
+    // Interface_Static parameters are process-wide, so set all of them up on this thread first.
+    // The workers then only touch their own reader and document.
+    std::vector<Handle( TDocStd_Document )>             docs( fileNames.size() );
+    std::vector<std::unique_ptr<STEPCAFControl_Reader>> readers;
+    readers.reserve( fileNames.size() );
+
+    for( size_t i = 0; i < fileNames.size(); ++i )
+    {
+        m_app->NewDocument( "MDTV-XCAF", docs[i] );
+        readers.push_back( std::make_unique<STEPCAFControl_Reader>() );
+        readers.back()->SetColorMode( true );
+        readers.back()->SetNameMode( true );
+        readers.back()->SetLayerMode( false );
+    }
+
+    // Same settings readSTEP() applies.
+    if( !Interface_Static::SetIVal( "read.precision.mode", 1 )
+        || !Interface_Static::SetRVal( "read.precision.val", USER_PREC ) )
+    {
+        return;
+    }
+
+    std::vector<char> succeeded( fileNames.size(), 0 );
+
+    auto readOne =
+            [&]( size_t i )
+            {
+                try
+                {
+                    STEPCAFControl_Reader& reader = *readers[i];
+
+                    if( reader.ReadFile( fileNames[i].c_str() ) == IFSelect_RetDone
+                        && reader.Transfer( docs[i] ) && reader.NbRootsForTransfer() >= 1 )
+                    {
+                        succeeded[i] = 1;
+                    }
+                }
+                catch( ... )
+                {
+                    // Left for getModelLabel() to read again and report.
+                }
+            };
+
+    thread_pool&            tp = GetKiCadThreadPool();
+    BS::multi_future<void> futures;
+
+    try
+    {
+        futures = tp.submit_loop( 0, fileNames.size(), readOne );
+    }
+    catch( ... )
+    {
+        // As AddPolygonShapes' cut loop: drain anything already queued before unwinding.
+        tp.wait();
+        throw;
+    }
+
+    futures.wait();
+
+    for( size_t i = 0; i < fileNames.size(); ++i )
+    {
+        if( succeeded[i] )
+            m_preloadedSTEPs.emplace( fileNames[i], docs[i] );
+        else if( docs[i]->CanClose() == CDM_CCS_OK )
+            docs[i]->Close();
+    }
 }
 
 
