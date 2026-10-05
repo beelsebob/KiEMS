@@ -1,6 +1,10 @@
 #include "board_slicing.hpp"
 
 #include <algorithm>
+#include <stdexcept>
+#if defined(__APPLE__)
+#include <dispatch/dispatch.h>
+#endif
 #include <cmath>
 #include <unordered_set>
 
@@ -44,6 +48,17 @@ PolygonSet _polygonLoopsToPolygons(const std::vector<libkicad::PolygonLoop>& loo
         }
     }
     return paths;
+}
+
+/// Runs body(0..count-1) concurrently on Apple platforms, serially elsewhere.
+template <typename Body>
+void parallelFor(std::size_t count, const Body& body) {
+#if defined(__APPLE__)
+    dispatch_apply_f(count, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), const_cast<Body*>(&body),
+                     [](void* context, std::size_t i) { (*static_cast<const Body*>(context))(i); });
+#else
+    for (std::size_t i = 0; i < count; ++i) body(i);
+#endif
 }
 
 PolygonSet _copperOnLayer(const std::vector<libkicad::CopperPolygon>& polygons, const std::string& layerName,
@@ -401,16 +416,28 @@ std::expected<CutoutStage, std::string> computeCutoutStage(
         }
     }
 
-    for (std::size_t layerIndex = 0; layerIndex < layerNames.size(); ++layerIndex) {
-        const std::string& layerName = layerNames[layerIndex];
-        signalPerLayer[layerIndex] = _copperOnLayer(involvedCopper, layerName, origin.xMin, origin.yMin);
-        polygonPrimitiveDone();
-        groundPerLayer[layerIndex] = _copperOnLayer(groundCopper, layerName, origin.xMin, origin.yMin);
-        polygonPrimitiveDone();
-        nonGroundCopperObstaclesPerLayer[layerIndex] =
-            _copperOnLayer(nonGroundCopperObstacles, layerName, origin.xMin, origin.yMin);
-        polygonPrimitiveDone();
+    // Every (layer, copper class) union is independent, and together they dominate this stage, so
+    // run them concurrently. GEOS contexts are thread-local in polygon_geometry.cpp; each task
+    // writes only its own slot, and progress is reported afterwards on this thread.
+    const std::vector<libkicad::CopperPolygon>* copperClasses[] = {&involvedCopper, &groundCopper,
+                                                                   &nonGroundCopperObstacles};
+    std::vector<PolygonSet>* perLayerClasses[] = {&signalPerLayer, &groundPerLayer,
+                                                  &nonGroundCopperObstaclesPerLayer};
+    std::vector<std::string> unionErrors(3 * layerNames.size());
+    parallelFor(3 * layerNames.size(), [&](std::size_t task) {
+        const std::size_t layerIndex = task / 3;
+        const std::size_t copperClass = task % 3;
+        try {
+            (*perLayerClasses[copperClass])[layerIndex] = _copperOnLayer(
+                *copperClasses[copperClass], layerNames[layerIndex], origin.xMin, origin.yMin);
+        } catch (const std::exception& exception) {
+            unionErrors[task] = exception.what();
+        }
+    });
+    for (const std::string& error : unionErrors) {
+        if (!error.empty()) throw std::runtime_error(error);
     }
+    for (std::size_t task = 0; task < 3 * layerNames.size(); ++task) polygonPrimitiveDone();
 
     // Each per-layer set is already a regularized union, so "no copper anywhere" is just "every
     // layer empty" -- no need to union all layers together (which, done incrementally, re-unioned
