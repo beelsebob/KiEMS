@@ -53,7 +53,9 @@ private:
 /// file's mtime changes reloads. KiCad keeps only one active project, so loading a board of a
 /// different project from the same Runtime unloads this one; its next query reloads it.
 ///
-/// Queries are thread-safe (serialized by the Runtime). `runtime` must outlive this Board.
+/// Queries are thread-safe. Board access is serialized by the Runtime; component export
+/// snapshots its inputs, then runs under a separate export lock without retaining board state.
+/// `runtime` must outlive this Board.
 class Board {
 public:
     Board(Runtime& runtime, std::string projectPath, std::string boardPath);

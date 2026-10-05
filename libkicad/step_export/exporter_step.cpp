@@ -46,6 +46,8 @@
 #include <project_pcb.h>
 #include <wildcards_and_files_ext.h>
 
+#include <stdexcept>
+#include <thread_pool.h>
 #include <new>                        // std::bad_alloc
 #include <Message.hxx>                // OpenCascade messenger
 #include <Message_PrinterOStream.hxx> // OpenCascade output messenger
@@ -121,6 +123,187 @@ private:
     REPORTER* m_reporter;
 };
 
+
+// Owns all input needed after releasing libkicad's board lock. No BOARD, FOOTPRINT,
+// PROJECT, resolver or embedded-file pointers may escape into this snapshot.
+struct EXPORTER_STEP::COMPONENT_SNAPSHOT
+{
+    struct MODEL
+    {
+        wxString baseName, path, reference;
+        std::vector<wxString> alternatives;
+        bool bottom;
+        VECTOR2D position;
+        double rotation;
+        VECTOR3D offset, orientation, scale;
+    };
+    struct EXTRUSION
+    {
+        wxString reference;
+        SHAPE_POLY_SET outline, pins;
+        bool bottom;
+        double standoff, height;
+        uint32_t color;
+        EXTRUSION_MATERIAL material;
+    };
+    BOARD_STACKUP stackup;
+    SHAPE_POLY_SET outline;
+    VECTOR2D origin;
+    std::vector<MODEL> models;
+    std::vector<EXTRUSION> extrusions;
+};
+
+void EXPORTER_STEP::PrepareComponentSnapshot()
+{
+    if( m_componentSnapshot )
+        return;
+
+    if( m_params.m_Format != EXPORTER_STEP_PARAMS::FORMAT::STL || m_params.m_ExportBoardBody
+        || !m_params.m_ExportComponents || m_params.m_BoardOnly )
+        throw std::logic_error( "Component snapshot requires a component-only STL export" );
+
+    // KiCad caches its process-wide pool through an unsynchronised lazy pointer. Initialise it
+    // under the board lock before any detached export can race a board query on first use.
+    (void) GetKiCadThreadPool();
+    auto snapshot = std::make_unique<COMPONENT_SNAPSHOT>();
+    snapshot->stackup = m_board->GetStackupOrDefault();
+    snapshot->origin = m_params.m_UseDrillOrigin ? VECTOR2D( m_board->GetDesignSettings().GetAuxOrigin() )
+                      : m_params.m_UseGridOrigin ? VECTOR2D( m_board->GetDesignSettings().GetGridOrigin() )
+                                                : m_params.m_Origin;
+    // CreatePCB still uses the outline to finalise the assembly (including extruded bodies).
+    if( !m_board->GetBoardPolygonOutlines( snapshot->outline, true, nullptr, true ) )
+        wxLogWarning( _( "Board outline is malformed. Run DRC for a full analysis." ) );
+
+    m_layersToExport = LSET::ExternalCuMask() & m_board->GetEnabledLayers();
+    if( m_params.m_OutputFile.IsEmpty() )
+    {
+        wxFileName fn( m_board->GetFileName() );
+        fn.SetExt( m_params.GetDefaultExportExtension() );
+        m_params.m_OutputFile = fn.GetFullName();
+    }
+
+    for( FOOTPRINT* footprint : m_board->Footprints() )
+    {
+        if( !includesFootprintModels( footprint ) )
+            continue;
+
+        const wxString reference = footprint->GetReference();
+        const bool bottom = footprint->GetLayer() == B_Cu;
+        const VECTOR2D position = ( VECTOR2D( footprint->GetPosition() ) - snapshot->origin )
+                                 / pcbIUScale.IU_PER_MM;
+        const wxString basePath = footprintModelBasePath( footprint );
+        const std::vector<const EMBEDDED_FILES*> embedded = {
+            footprint->GetEmbeddedFiles(), m_board->GetEmbeddedFiles()
+        };
+        for( const FP_3DMODEL& model : footprint->Models() )
+        {
+            if( !model.m_Show || model.m_Filename.empty() )
+                continue;
+            wxString path = m_resolver->ResolvePath( model.m_Filename, basePath, embedded );
+            if( path.empty() || !wxFileName::FileExists( path ) )
+            {
+                m_reporter->Report( wxString::Format(
+                    _( "Could not add 3D model for %s.\nFile not found: %s\n" ),
+                    reference, path.empty() ? model.m_Filename : path ), RPT_SEVERITY_WARNING );
+                continue;
+            }
+            // Resolve and materialise embedded alternatives while their owners are still alive.
+            const wxString baseName = model.m_Filename.AfterLast( '/' ).AfterLast( '\\' ).BeforeLast( '.' );
+            std::vector<wxString> alternatives;
+            if( model.m_Filename.StartsWith( FILEEXT::KiCadUriPrefix + "://" ) )
+            {
+                for( const EMBEDDED_FILES* files : embedded )
+                    for( const auto& [name, file] : files->EmbeddedFileMap() )
+                        if( name.BeforeLast( '.' ) == baseName )
+                        {
+                            wxFileName alternative = files->GetTemporaryFileName( name );
+                            if( alternative.IsOk() && alternative.GetFullPath() != path )
+                                alternatives.push_back( alternative.GetFullPath() );
+                        }
+            }
+            VECTOR3D orientation = model.m_Rotation;
+            orientation *= M_PI;
+            orientation /= 180.0;
+            snapshot->models.push_back( { baseName, path, reference, std::move( alternatives ),
+                bottom, position, footprint->GetOrientation().AsRadians(), model.m_Offset,
+                orientation, model.m_Scale } );
+        }
+
+        if( !footprint->HasExtrudedBody() || !footprint->GetExtrudedBody()->m_show )
+            continue;
+        const EXTRUDED_3D_BODY* body = footprint->GetExtrudedBody();
+        COMPONENT_SNAPSHOT::EXTRUSION extrusion;
+        if( !GetExtrusionOutline( footprint, extrusion.outline ) || extrusion.outline.OutlineCount() == 0 )
+            continue;
+        ApplyExtrusionTransform( extrusion.outline, body, footprint->GetPosition() );
+        extrusion.reference = reference;
+        extrusion.bottom = bottom;
+        extrusion.standoff = pcbIUScale.IUTomm( body->m_standoff ) + body->m_offset.z;
+        extrusion.height = extrusion.standoff
+                           + pcbIUScale.IUTomm( body->m_height - body->m_standoff ) * body->m_scale.z;
+        KIGFX::COLOR4D color = body->m_color;
+        if( color == KIGFX::COLOR4D::UNSPECIFIED )
+            color = EXTRUDED_3D_BODY::GetDefaultColor( body->m_material );
+        extrusion.color = EXTRUDED_3D_BODY::PackColorKey( color );
+        extrusion.material = body->m_material;
+        if( extrusion.standoff > 0 && GetExtrusionPinOutline( footprint, extrusion.pins ) )
+            ApplyExtrusionTransform( extrusion.pins, body, footprint->GetPosition() );
+        snapshot->extrusions.push_back( std::move( extrusion ) );
+    }
+    m_componentSnapshot = std::move( snapshot );
+    // Make accidental board access in the unlocked phase fail immediately, rather than retaining
+    // dangling project state across a reload. Destroy the resolver while still under the lock.
+    m_resolver.reset();
+    m_board = nullptr;
+}
+
+bool EXPORTER_STEP::buildComponentSnapshot()
+{
+    const COMPONENT_SNAPSHOT& snapshot = *m_componentSnapshot;
+    m_pcbModel = std::make_unique<STEP_PCB_MODEL>( m_pcbBaseName, m_reporter );
+    initOutputVariant();
+    m_pcbModel->SetStackup( snapshot.stackup );
+    m_pcbModel->SetEnabledLayers( m_layersToExport );
+    m_pcbModel->SetFuseShapes( m_params.m_FuseShapes );
+    m_pcbModel->OCCSetMergeMaxDistance( OCC_MAX_DISTANCE_TO_MERGE_POINTS );
+    std::vector<std::string> paths;
+    paths.reserve( snapshot.models.size() );
+    for( const auto& model : snapshot.models )
+        paths.push_back( model.path.utf8_string() );
+    m_pcbModel->PreloadSTEPModels( paths );
+    for( const auto& model : snapshot.models )
+    {
+        try
+        {
+            m_pcbModel->AddComponent( model.baseName, model.path, model.alternatives, model.reference,
+                model.bottom, model.position, model.rotation, model.offset, model.orientation,
+                model.scale, m_params.m_SubstModels );
+        }
+        catch( const Standard_Failure& e )
+        {
+            m_reporter->Report( wxString::Format( _( "Could not add 3D model for %s.\nOpenCASCADE error: %s\n" ),
+                model.reference, e.GetMessageString() ), RPT_SEVERITY_WARNING );
+        }
+    }
+    for( const auto& extrusion : snapshot.extrusions )
+    {
+        try
+        {
+            m_pcbModel->AddExtrudedBody( extrusion.outline, extrusion.bottom, extrusion.standoff,
+                extrusion.height, snapshot.origin, extrusion.color, extrusion.material, extrusion.reference );
+            if( extrusion.standoff > 0 && extrusion.pins.OutlineCount() > 0 )
+                m_pcbModel->AddExtrudedPinOutline( extrusion.pins, extrusion.bottom, extrusion.standoff,
+                                                  snapshot.origin );
+        }
+        catch( const Standard_Failure& e )
+        {
+            m_reporter->Report( wxString::Format( _( "Could not add extruded body for %s.\nOpenCASCADE error: %s\n" ),
+                extrusion.reference, e.GetMessageString() ), RPT_SEVERITY_WARNING );
+        }
+    }
+    SHAPE_POLY_SET outline = snapshot.outline;
+    return m_pcbModel->CreatePCB( outline, snapshot.origin, false );
+}
 
 EXPORTER_STEP::EXPORTER_STEP( BOARD* aBoard, const EXPORTER_STEP_PARAMS& aParams,
                               REPORTER* aReporter ) :
@@ -1372,7 +1555,7 @@ bool EXPORTER_STEP::Export()
 
     m_reporter->Report( wxT( "Determining PCB data.\n" ), RPT_SEVERITY_DEBUG );
 
-    if( m_params.m_OutputFile.IsEmpty() )
+    if( !m_componentSnapshot && m_params.m_OutputFile.IsEmpty() )
     {
         wxFileName fn = m_board->GetFileName();
         fn.SetName( fn.GetName() );
@@ -1381,31 +1564,35 @@ bool EXPORTER_STEP::Export()
         m_params.m_OutputFile = fn.GetFullName();
     }
 
-    m_layersToExport = LSET::ExternalCuMask();
-
-    if( m_params.m_ExportInnerCopper )
-        m_layersToExport |= LSET::InternalCuMask();
-
-    if( m_params.m_ExportSilkscreen )
+    if( !m_componentSnapshot )
     {
-        m_layersToExport.set( F_SilkS );
-        m_layersToExport.set( B_SilkS );
-    }
+        m_layersToExport = LSET::ExternalCuMask();
 
-    if( m_params.m_ExportSoldermask )
-    {
-        m_layersToExport.set( F_Mask );
-        m_layersToExport.set( B_Mask );
-    }
+        if( m_params.m_ExportInnerCopper )
+            m_layersToExport |= LSET::InternalCuMask();
 
-    m_layersToExport &= m_board->GetEnabledLayers();
+        if( m_params.m_ExportSilkscreen )
+        {
+            m_layersToExport.set( F_SilkS );
+            m_layersToExport.set( B_SilkS );
+        }
+
+        if( m_params.m_ExportSoldermask )
+        {
+            m_layersToExport.set( F_Mask );
+            m_layersToExport.set( B_Mask );
+        }
+
+        m_layersToExport &= m_board->GetEnabledLayers();
+
+    }
 
     try
     {
         m_reporter->Report( wxString::Format( wxT( "Build %s data.\n" ), m_params.GetFormatName() ),
                             RPT_SEVERITY_DEBUG );
 
-        if( !buildBoard3DShapes() )
+        if( !( m_componentSnapshot ? buildComponentSnapshot() : buildBoard3DShapes() ) )
         {
             m_reporter->Report( _( "\n"
                                    "** Error building STEP board model. Export aborted. **\n" ),

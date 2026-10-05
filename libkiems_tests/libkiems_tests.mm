@@ -6,6 +6,8 @@
 #include <complex>
 #include <filesystem>
 #include <fstream>
+#include <future>
+#include <map>
 #include <limits>
 #include <optional>
 #include <string>
@@ -2638,6 +2640,88 @@ static kiems::EMSConfig makeSyntheticConfig() {
     Cu::logInfo() << "suppressed at Error level " << 1;
     const int actual = 5;
     CU_ASSERT(actual == 5) << "x was " << actual << " when it should have been 5";
+}
+
+// Exercise detached model inputs while another project repeatedly replaces the live board.
+// Both exports must preserve component identity/placement and leave the process CWD alone.
+- (void)testComponentExportSurvivesConcurrentProjectQueries {
+    const auto dir = std::filesystem::temp_directory_path() /
+        ("kiems-component-snapshot-" + std::to_string(arc4random()));
+    std::filesystem::create_directories(dir);
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() { std::error_code error; std::filesystem::remove_all(path, error); }
+    } cleanup{dir};
+    const auto model = std::filesystem::path(__FILE__).parent_path().parent_path() /
+        "submodules/kicad/qa/data/pcbnew/step_model_colors/TO-252-2.step";
+    XCTAssertTrue(std::filesystem::exists(model));
+    const auto project = dir / "fixture.kicad_pro";
+    const auto boardPath = dir / "fixture.kicad_pcb";
+    std::ofstream(project) << R"({"meta":{"filename":"fixture.kicad_pro","version":1}})";
+    std::ofstream pcb(boardPath);
+    pcb << R"((kicad_pcb (version 20240108) (generator "libkiems_tests")
+      (general (thickness 1.6)) (paper "A4")
+      (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+      (setup (pad_to_mask_clearance 0)) (net 0 "")
+      (gr_rect (start 0 0) (end 40 40) (stroke (width 0.1) (type default))
+        (fill none) (layer "Edge.Cuts"))
+    )";
+    for (int index = 0; index < 2; ++index) {
+        pcb << "(footprint \"fixture:Model\" (layer \"F.Cu\") (at " << 10 + index * 15 << " 10)\n"
+            << "(attr smd) (property \"Reference\" \"U" << index + 1
+            << "\" (at 0 0) (layer \"F.SilkS\"))\n"
+            << "(model \"" << model.string() << "\" (offset (xyz 0 0 0))"
+            << " (scale (xyz 1 1 1)) (rotate (xyz 0 0 0))))\n";
+    }
+    pcb << ")";
+    pcb.close();
+    const auto otherProject = dir / "other.kicad_pro";
+    const auto otherBoardPath = dir / "other.kicad_pcb";
+    std::filesystem::copy_file(project, otherProject);
+    std::filesystem::copy_file(boardPath, otherBoardPath);
+    const libkicad::Board board(*_runtime, project.string(), boardPath.string());
+    const libkicad::Board other(*_runtime, otherProject.string(), otherBoardPath.string());
+    const auto cwd = std::filesystem::current_path();
+    auto exportOne = std::async(std::launch::async, [&] {
+        return board.exportComponentModels("U1,U2", (dir / "first ü.stl").string());
+    });
+    auto exportTwo = std::async(std::launch::async, [&] {
+        return board.exportComponentModels("U1,U2", (dir / "second.stl").string());
+    });
+    for (int i = 0; i < 8; ++i) {
+        const auto footprints = (i % 2 == 0 ? other : board).footprints();
+        XCTAssertTrue(footprints.has_value(), @"%s", footprints ? "" : footprints.error().c_str());
+        if (footprints) XCTAssertEqual(footprints->size(), 2u);
+        XCTAssertTrue(std::filesystem::current_path() == cwd);
+    }
+    const auto first = exportOne.get();
+    const auto second = exportTwo.get();
+    XCTAssertTrue(first.has_value(), @"%s", first ? "" : first.error().c_str());
+    XCTAssertTrue(second.has_value(), @"%s", second ? "" : second.error().c_str());
+    if (!first || !second) return;
+    XCTAssertTrue(first->exportSucceeded && second->exportSucceeded);
+    XCTAssertFalse(first->triangles.empty());
+    XCTAssertEqual(first->triangles.size(), second->triangles.size());
+    XCTAssertEqualWithAccuracy(first->topCopperZMm, second->topCopperZMm, 1e-9);
+    std::map<std::string, double> minX;
+    for (const auto& triangle : first->triangles) {
+        const double x = std::min({triangle.ax, triangle.bx, triangle.cx});
+        const auto [it, inserted] = minX.emplace(triangle.footprintReference, x);
+        if (!inserted) it->second = std::min(it->second, x);
+    }
+    XCTAssertEqual(minX.size(), 2u);
+    if (minX.contains("U1") && minX.contains("U2"))
+        XCTAssertEqualWithAccuracy(minX.at("U2") - minX.at("U1"), 15.0, 1e-6);
+    XCTAssertTrue(std::filesystem::exists(dir / "first ü.stl"));
+    XCTAssertTrue(std::filesystem::exists(dir / "second.stl"));
+    const auto filtered = board.exportComponentModels("U2", (dir / "filtered.stl").string());
+    XCTAssertTrue(filtered.has_value() && filtered->exportSucceeded);
+    if (filtered) {
+        XCTAssertFalse(filtered->triangles.empty());
+        for (const auto& triangle : filtered->triangles)
+            XCTAssertTrue(triangle.footprintReference == "U2");
+    }
+    XCTAssertTrue(std::filesystem::current_path() == cwd);
 }
 
 // A two-pad, one-track board written to a temp directory, so the libkicad Board queries can be

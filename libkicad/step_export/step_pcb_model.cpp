@@ -1766,6 +1766,12 @@ bool STEP_PCB_MODEL::AddExtrudedPins( const FOOTPRINT* aFootprint, bool aBottom,
         ApplyExtrusionTransform( pinPoly, body, fpPos );
     }
 
+    return AddExtrudedPinOutline( pinPoly, aBottom, aStandoff, aOrigin );
+}
+
+bool STEP_PCB_MODEL::AddExtrudedPinOutline( const SHAPE_POLY_SET& pinPoly, bool aBottom,
+                                            double aStandoff, const VECTOR2D& aOrigin )
+{
     double f_pos, f_thickness;
     double b_pos, b_thickness;
     getLayerZPlacement( F_Cu, f_pos, f_thickness );
@@ -4443,34 +4449,29 @@ bool STEP_PCB_MODEL::WriteSTL( const wxString& aFileName )
     performMeshing( m_assy );
 
     wxFileName fn( aFileName );
+    fn.MakeAbsolute();
 
-    const char* tmpFname = "$tempfile$.stl";
-
-    // Creates a temporary file with a ascii7 name, because writer does not know unicode filenames.
-    wxString currCWD = wxGetCwd();
-    wxString workCWD = fn.GetPath();
-
-    if( !workCWD.IsEmpty() )
-        wxSetWorkingDirectory( workCWD );
-
-    bool success = StlAPI_Writer().Write( getOneShape( m_assy ), tmpFname );
-
+    // OCCT accepts a UTF-8 path here. Use an absolute sibling path: changing the process CWD
+    // while detached board queries resolve paths would race those queries.
+    const wxString tmpName = wxFileName::CreateTempFileName( fn.GetFullPath() + ".tmp" );
+    if( tmpName.empty() )
+        return false;
+    struct TEMP_FILE
+    {
+        wxString path;
+        ~TEMP_FILE() { if( wxFileExists( path ) ) wxRemoveFile( path ); }
+    } cleanup{ tmpName };
+    bool success = StlAPI_Writer().Write( getOneShape( m_assy ), tmpName.utf8_str() );
     if( success )
     {
-        // Preserve the permissions of the current file
-        KIPLATFORM::IO::DuplicatePermissions( fn.GetFullPath(), tmpFname );
-
-        if( !wxRenameFile( tmpFname, fn.GetFullName(), true ) )
+        KIPLATFORM::IO::DuplicatePermissions( fn.GetFullPath(), tmpName );
+        if( !wxRenameFile( tmpName, fn.GetFullPath(), true ) )
         {
             m_reporter->Report( wxString::Format( _( "Cannot rename temporary file '%s' to '%s'." ),
-                                                  tmpFname,
-                                                  fn.GetFullName() ),
-                                RPT_SEVERITY_ERROR );
+                                                tmpName, fn.GetFullPath() ), RPT_SEVERITY_ERROR );
             success = false;
         }
     }
-
-    wxSetWorkingDirectory( currCWD );
 
     return success;
 }

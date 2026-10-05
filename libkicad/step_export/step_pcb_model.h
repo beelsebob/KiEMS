@@ -252,6 +252,10 @@ public:
      * @param aOrigin is the coordinate origin.
      * @return true if any pins were created.
      */
+    /// Pre-transformed, owned pin geometry for export without a live footprint.
+    bool AddExtrudedPinOutline( const SHAPE_POLY_SET& aOutline, bool aBottom, double aStandoff,
+                                const VECTOR2D& aOrigin );
+
     bool AddExtrudedPins( const FOOTPRINT* aFootprint, bool aBottom, double aStandoff, const VECTOR2D& aOrigin );
 
     /**

@@ -1570,8 +1570,23 @@ RawComponentModelExportResult exportComponentModelsRaw(BoardState& state, const 
     params.m_UseDrillOrigin = true;
     params.m_Overwrite = true;
 
+    // OCCT's application, import settings and messenger are process-wide. Serialise exports,
+    // but never wait for this lock while holding the board lock. Declared before exporter so
+    // its OCCT objects are also destroyed before the export lock is released.
+    static std::mutex componentExportMutex;
+    std::unique_lock<std::mutex> exportLock(componentExportMutex, std::defer_lock);
     WX_STRING_REPORTER reporter;
     EXPORTER_STEP exporter(board, params, &reporter);
+    {
+        BoardLoadTiming snapshotTiming("Component export snapshot");
+        exporter.PrepareComponentSnapshot();
+    }
+    loaded.reset(); // releases the board lock and all references to the loaded context
+    board = nullptr;
+    BoardLoadTiming exportWaitTiming("Component exporter lock wait");
+    exportLock.lock();
+    exportWaitTiming.end();
+    BoardLoadTiming detachedTiming("Component export without board lock");
     // Not set by the constructor -- see EXPORTER_STEP's own header and KiCad's own CLI reference
     // usage (pcbnew_jobs_handler.cpp), which sets this the same way after construction. Export()
     // still needs *a* real output path even though the STL it writes here is no longer read back by

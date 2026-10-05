@@ -19,6 +19,11 @@ Useful boundaries:
 - Copper parallel pass contains per-group intervals with layer/group identity,
   input polygon count, and input vertex count. Sort by duration to locate the
   tail, then inspect those intervals in Time Profiler.
+- Component export snapshot measures input copying, path resolution and embedded-file
+  materialisation while holding the board lock. Component exporter lock wait measures
+  contention between exports on the separate OCCT lock. Component export without board
+  lock covers model construction, output and triangle extraction after releasing the
+  board lock; ordinary queries can run during this interval.
 - Component export measures background work; component export remaining wait
   measures only the time the preview caller still waits after other work.
 - Copper Cocoa objects, solder mask geometry, silkscreen geometry, and component

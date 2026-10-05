@@ -50,6 +50,9 @@ public:
 
     bool Export();
 
+    /// Call under the board lock. Afterwards Export() and triangle extraction use only owned data.
+    void PrepareComponentSnapshot();
+
     /// Forwards to the already-built STEP_PCB_MODEL's own GetComponentTriangles() (see its own doc
     /// comment) -- only meaningful to call after a successful Export(), which is what actually
     /// builds m_pcbModel's shapes in the first place; the specific output format Export() was
@@ -65,6 +68,9 @@ public:
     wxString m_outputFile;
 
 private:
+    struct COMPONENT_SNAPSHOT;
+    std::unique_ptr<COMPONENT_SNAPSHOT> m_componentSnapshot;
+    bool buildComponentSnapshot();
     bool buildBoard3DShapes();
     bool buildFootprint3DShapes( FOOTPRINT* aFootprint, const VECTOR2D& aOrigin, SHAPE_POLY_SET* aClipPolygon );
     bool includesFootprintModels( FOOTPRINT* aFootprint ) const;
