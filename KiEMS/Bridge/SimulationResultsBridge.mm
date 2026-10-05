@@ -238,6 +238,21 @@ private:
 }
 @end
 
+@implementation EMSResultsEyeStatistics
+- (instancetype)initWithOpening:(const kiems::EyeOpening&)opening {
+    self = [super init];
+    if (self) {
+        _samplingUI = opening.samplingUI;
+        _oneLevelV = opening.oneLevelV;
+        _zeroLevelV = opening.zeroLevelV;
+        _amplitudeV = opening.amplitudeV();
+        _qFactor = opening.qFactor;
+        _jitterUI = opening.jitterUI;
+    }
+    return self;
+}
+@end
+
 @implementation EMSResultsEyeNoise
 - (instancetype)initWithEye:(const kiems::EyeDiagramData&)eye aggressorCount:(NSInteger)aggressorCount {
     self = [super init];
@@ -249,6 +264,7 @@ private:
         _traces = [traces copy];
         _heightV = eye.noisyOpening->heightV;
         _widthUI = eye.noisyOpening->widthUI;
+        _statistics = [[EMSResultsEyeStatistics alloc] initWithOpening:*eye.noisyOpening];
         _lowestHeightV = eye.noise->lowest.heightV;
         _highestHeightV = eye.noise->highest.heightV;
         _lowestWidthUI = eye.noise->lowest.widthUI;
@@ -283,6 +299,7 @@ private:
         _traces = [traces copy];
         _heightV = eye.opening.heightV;
         _widthUI = eye.opening.widthUI;
+        _statistics = [[EMSResultsEyeStatistics alloc] initWithOpening:eye.opening];
         if (eye.noise.has_value() && eye.noisyOpening.has_value()) {
             _noise = [[EMSResultsEyeNoise alloc] initWithEye:eye aggressorCount:aggressorCount];
         }

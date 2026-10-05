@@ -113,6 +113,20 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, readonly) NSArray<NSNumber *> *delayNs;
 @end
 
+/// An eye's figures of merit beyond its height and width, for judging it against a receiver's
+/// requirements (see kiems::EyeOpening). Everything is taken at `samplingUI`, the point the eye
+/// height was found at.
+@interface EMSResultsEyeStatistics : NSObject
+@property (nonatomic, readonly) double samplingUI;
+@property (nonatomic, readonly) double oneLevelV;
+@property (nonatomic, readonly) double zeroLevelV;
+@property (nonatomic, readonly) double amplitudeV;
+/// (mu1 - mu0) / (sigma1 + sigma0); zero when the sampled levels have no measurable spread.
+@property (nonatomic, readonly) double qFactor;
+/// Peak-to-peak spread of threshold crossings at the worse edge, in unit intervals.
+@property (nonatomic, readonly) double jitterUI;
+@end
+
 /// An eye's adversarial noise: the same eye with every adversarial excitation's noise added at
 /// sampled transmission times (see kiems::computeEyeDiagram). `traces` is a representative subset
 /// of the draws; the openings cover every draw. The lowest/highest openings are the spread between
@@ -127,6 +141,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) double highestHeightV;
 @property (nonatomic, readonly) double lowestWidthUI;
 @property (nonatomic, readonly) double highestWidthUI;
+@property (nonatomic, readonly) EMSResultsEyeStatistics *statistics;
 @property (nonatomic, readonly) NSInteger drawCount;
 @property (nonatomic, readonly) NSInteger replicateCount;
 @property (nonatomic, readonly) NSInteger aggressorCount;
@@ -148,6 +163,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// The noise-free eye's worst-case opening (see kiems::EyeOpening).
 @property (nonatomic, readonly) double heightV;
 @property (nonatomic, readonly) double widthUI;
+@property (nonatomic, readonly) EMSResultsEyeStatistics *statistics;
 /// Nil when the simulation has no adversarial excitation reaching this eye.
 @property (nonatomic, readonly, nullable) EMSResultsEyeNoise *noise;
 @end

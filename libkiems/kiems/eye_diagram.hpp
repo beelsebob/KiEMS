@@ -39,9 +39,23 @@ struct EyeNoiseOptions {
 /// Worst-case eye opening. `heightV` is the vertical opening (lowest "1" minus highest "0", by the
 /// transmitted bit; negative when closed) at the best sampling point in the central half of the
 /// UI. `widthUI` is the horizontal opening at the decision threshold, in unit intervals.
+///
+/// The remaining figures are the usual pass/fail companions, all taken at `samplingUI` (the
+/// sampling point the height was found at): the mean "1" and "0" levels (their difference is the
+/// eye amplitude), the Q-factor (mu1 - mu0) / (sigma1 + sigma0) of the sampled values, and
+/// `jitterUI`, the peak-to-peak spread of threshold crossings at the worse of the two edges.
+/// Without noise the Q-factor reflects inter-symbol interference alone; it is zero when either
+/// level has no spread to measure.
 struct EyeOpening {
     double heightV = 0;
     double widthUI = 0;
+    double samplingUI = 0.5;
+    double oneLevelV = 0;
+    double zeroLevelV = 0;
+    double qFactor = 0;
+    double jitterUI = 0;
+
+    double amplitudeV() const { return oneLevelV - zeroLevelV; }
 };
 
 /// How settled a noisy eye's opening is. The draws are split into `replicateCount` independently

@@ -15,6 +15,7 @@ final class AdversarialEyeView: NSStackView {
     private let chart = EyeDiagramView()
     private let openingLabel = NSTextField(wrappingLabelWithString: "")
     private let stabilityLabel = NSTextField(wrappingLabelWithString: "")
+    private let statisticsGrid = NSGridView(numberOfColumns: 2, rows: 0)
     private let onModeChanged: (Bool) -> Void
 
     /// `showsAdversarial` picks the initial mode; `onModeChanged` reports the user's later choices
@@ -33,6 +34,10 @@ final class AdversarialEyeView: NSStackView {
             label.isSelectable = true
         }
         openingLabel.textColor = .secondaryLabelColor
+        statisticsGrid.translatesAutoresizingMaskIntoConstraints = false
+        statisticsGrid.rowSpacing = 2
+        statisticsGrid.columnSpacing = 12
+        statisticsGrid.column(at: 1).xPlacement = .trailing
 
         if eye.noise != nil {
             modeControl.controlSize = .small
@@ -44,8 +49,20 @@ final class AdversarialEyeView: NSStackView {
         }
         addArrangedSubview(chart)
         addArrangedSubview(openingLabel)
+        // The table sits at its natural width, centred in a full-width row, so each name stays
+        // next to its value.
+        let statisticsRow = NSView()
+        statisticsRow.translatesAutoresizingMaskIntoConstraints = false
+        statisticsRow.addSubview(statisticsGrid)
+        NSLayoutConstraint.activate([
+            statisticsGrid.topAnchor.constraint(equalTo: statisticsRow.topAnchor),
+            statisticsGrid.bottomAnchor.constraint(equalTo: statisticsRow.bottomAnchor),
+            statisticsGrid.centerXAnchor.constraint(equalTo: statisticsRow.centerXAnchor),
+            statisticsGrid.leadingAnchor.constraint(greaterThanOrEqualTo: statisticsRow.leadingAnchor),
+        ])
+        addArrangedSubview(statisticsRow)
         addArrangedSubview(stabilityLabel)
-        for view in [chart, openingLabel, stabilityLabel] {
+        for view in [chart, openingLabel, statisticsRow, stabilityLabel] {
             NSLayoutConstraint.activate([
                 view.leadingAnchor.constraint(equalTo: leadingAnchor),
                 view.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -89,6 +106,7 @@ final class AdversarialEyeView: NSStackView {
             chart.setData(timeUI: timeUI, traces: eye.traces.map { $0.map(\.doubleValue) })
             openingLabel.stringValue = "Opening: \(Self.height(eye.heightV)) high, " +
                 "\(Self.width(eye.widthUI)) wide."
+            showStatistics(eye.statistics, heightV: eye.heightV, widthUI: eye.widthUI)
             stabilityLabel.isHidden = true
             return
         }
@@ -100,6 +118,7 @@ final class AdversarialEyeView: NSStackView {
             "\(Self.width(noise.widthUI)) wide " +
             "(\(Self.width(noise.lowestWidthUI)) – \(Self.width(noise.highestWidthUI))). " +
             "\(noise.drawCount) draws of \(signals) across \(noise.replicateCount) independent replicates."
+        showStatistics(noise.statistics, heightV: noise.heightV, widthUI: noise.widthUI)
 
         // Judged against the noise-free opening rather than the noisy one, which can legitimately
         // be near zero (a closed eye) while still being well determined.
@@ -117,6 +136,53 @@ final class AdversarialEyeView: NSStackView {
                 "the opening. Increase Adversarial Draws in the simulation's properties."
             stabilityLabel.textColor = .systemOrange
         }
+    }
+
+    /// The figures a receiver specification is usually written against, as a two-column table.
+    private func showStatistics(_ statistics: EMSResultsEyeStatistics, heightV: Double, widthUI: Double) {
+        while statisticsGrid.numberOfRows > 0 {
+            statisticsGrid.removeRow(at: 0)
+        }
+        let picoseconds = { (unitIntervals: Double) in
+            self.eye.bitRateGbps > 0 ? String(format: " (%.3g ps)", unitIntervals * 1e3 / self.eye.bitRateGbps) : ""
+        }
+        var rows: [(String, String)] = [
+            ("Eye height", Self.height(heightV)),
+            ("Eye width", Self.width(widthUI) + picoseconds(widthUI)),
+            ("Sampling point", String(format: "%.2f UI", statistics.samplingUI)),
+            ("Mean levels", "1: \(Self.volts(statistics.oneLevelV)), 0: \(Self.volts(statistics.zeroLevelV))"),
+            ("Eye amplitude", Self.volts(statistics.amplitudeV)),
+        ]
+        if statistics.amplitudeV > 0 {
+            rows.append(("Height / amplitude", String(format: "%.0f%%", max(0, heightV) / statistics.amplitudeV * 100)))
+        }
+        rows.append(("Jitter (peak-to-peak)", Self.width(statistics.jitterUI) + picoseconds(statistics.jitterUI)))
+        if statistics.qFactor > 0 {
+            // Gaussian estimate; only meaningful as a comparison when the spread is mostly random.
+            let ber = 0.5 * erfc(statistics.qFactor / 2.0.squareRoot())
+            let berText = ber < 1e-30 ? "< 1e-30" : String(format: "≈ %.1e", ber)
+            rows.append(("Q-factor", String(format: "%.2f (Gaussian BER %@)", statistics.qFactor, berText)))
+        } else {
+            rows.append(("Q-factor", "– (no spread in the sampled levels)"))
+        }
+        for (name, value) in rows {
+            let nameLabel = NSTextField(labelWithString: name)
+            let valueLabel = NSTextField(labelWithString: value)
+            for label in [nameLabel, valueLabel] {
+                label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+                label.isSelectable = true
+            }
+            nameLabel.textColor = .secondaryLabelColor
+            nameLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+            valueLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+            valueLabel.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+            valueLabel.alignment = .right
+            statisticsGrid.addRow(with: [nameLabel, valueLabel])
+        }
+    }
+
+    private static func volts(_ volts: Double) -> String {
+        abs(volts) >= 1 ? String(format: "%.3g V", volts) : String(format: "%.3g mV", volts * 1e3)
     }
 
     private static func height(_ volts: Double) -> String {

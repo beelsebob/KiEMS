@@ -111,13 +111,21 @@ constexpr std::size_t kDisplayedDrawsPerReplicate = 8;
 constexpr std::size_t kFirstSamplingIndex = kSamplesPerUI * 3 / 4; // 0.25 UI
 constexpr std::size_t kSamplingIndexCount = kSamplesPerUI / 2 + 1;  // ...to 0.75 UI
 
-/// Worst-case extremes over some set of folded traces -- mergeable, so per-draw, per-replicate and
-/// combined openings all come from the same numbers.
+/// Worst-case extremes (and level moments) over some set of folded traces -- mergeable, so
+/// per-draw, per-replicate and combined openings all come from the same numbers.
 struct EyeExtremes {
     std::array<double, kSamplingIndexCount> lowestOne;
     std::array<double, kSamplingIndexCount> highestZero;
+    std::array<double, kSamplingIndexCount> oneSum{};
+    std::array<double, kSamplingIndexCount> oneSumSquares{};
+    std::array<double, kSamplingIndexCount> zeroSum{};
+    std::array<double, kSamplingIndexCount> zeroSumSquares{};
+    std::size_t oneCount = 0;
+    std::size_t zeroCount = 0;
+    double earliestLeftCrossing = std::numeric_limits<double>::infinity();
     double latestLeftCrossing = -std::numeric_limits<double>::infinity();
     double earliestRightCrossing = std::numeric_limits<double>::infinity();
+    double latestRightCrossing = -std::numeric_limits<double>::infinity();
 
     EyeExtremes() {
         lowestOne.fill(std::numeric_limits<double>::infinity());
@@ -128,17 +136,28 @@ struct EyeExtremes {
         for (std::size_t i = 0; i < kSamplingIndexCount; ++i) {
             lowestOne[i] = std::min(lowestOne[i], other.lowestOne[i]);
             highestZero[i] = std::max(highestZero[i], other.highestZero[i]);
+            oneSum[i] += other.oneSum[i];
+            oneSumSquares[i] += other.oneSumSquares[i];
+            zeroSum[i] += other.zeroSum[i];
+            zeroSumSquares[i] += other.zeroSumSquares[i];
         }
+        oneCount += other.oneCount;
+        zeroCount += other.zeroCount;
+        earliestLeftCrossing = std::min(earliestLeftCrossing, other.earliestLeftCrossing);
         latestLeftCrossing = std::max(latestLeftCrossing, other.latestLeftCrossing);
         earliestRightCrossing = std::min(earliestRightCrossing, other.earliestRightCrossing);
+        latestRightCrossing = std::max(latestRightCrossing, other.latestRightCrossing);
     }
 
     EyeOpening opening() const {
         EyeOpening result;
         double best = -std::numeric_limits<double>::infinity();
+        std::size_t bestIndex = kSamplingIndexCount / 2;
         for (std::size_t i = 0; i < kSamplingIndexCount; ++i) {
-            if (std::isfinite(lowestOne[i]) && std::isfinite(highestZero[i])) {
-                best = std::max(best, lowestOne[i] - highestZero[i]);
+            if (std::isfinite(lowestOne[i]) && std::isfinite(highestZero[i]) &&
+                lowestOne[i] - highestZero[i] > best) {
+                best = lowestOne[i] - highestZero[i];
+                bestIndex = i;
             }
         }
         result.heightV = std::isfinite(best) ? best : 0.0;
@@ -147,6 +166,27 @@ struct EyeExtremes {
         const double left = std::isfinite(latestLeftCrossing) ? latestLeftCrossing : 0.0;
         const double right = std::isfinite(earliestRightCrossing) ? earliestRightCrossing : 1.0;
         result.widthUI = result.heightV > 0 ? std::max(0.0, right - left) : 0.0;
+
+        result.samplingUI = static_cast<double>(kFirstSamplingIndex + bestIndex) /
+                                static_cast<double>(kSamplesPerUI) - 0.5;
+        double oneSigma = 0, zeroSigma = 0;
+        if (oneCount > 0) {
+            const double n = static_cast<double>(oneCount);
+            result.oneLevelV = oneSum[bestIndex] / n;
+            oneSigma = std::sqrt(std::max(0.0, oneSumSquares[bestIndex] / n - result.oneLevelV * result.oneLevelV));
+        }
+        if (zeroCount > 0) {
+            const double n = static_cast<double>(zeroCount);
+            result.zeroLevelV = zeroSum[bestIndex] / n;
+            zeroSigma = std::sqrt(std::max(0.0, zeroSumSquares[bestIndex] / n - result.zeroLevelV * result.zeroLevelV));
+        }
+        // Below this relative spread the moments are rounding noise, not a measurable distribution.
+        const double sigma = oneSigma + zeroSigma;
+        result.qFactor = sigma > 1e-9 * std::abs(result.amplitudeV()) ? result.amplitudeV() / sigma : 0.0;
+
+        const double leftSpread = std::isfinite(earliestLeftCrossing) ? latestLeftCrossing - earliestLeftCrossing : 0.0;
+        const double rightSpread = std::isfinite(earliestRightCrossing) ? latestRightCrossing - earliestRightCrossing : 0.0;
+        result.jitterUI = std::max(leftSpread, rightSpread);
         return result;
     }
 };
@@ -159,10 +199,15 @@ void accumulate(EyeExtremes& extremes, const std::vector<double>& trace, bool is
         const double value = trace[kFirstSamplingIndex + i];
         if (isOne) {
             extremes.lowestOne[i] = std::min(extremes.lowestOne[i], value);
+            extremes.oneSum[i] += value;
+            extremes.oneSumSquares[i] += value * value;
         } else {
             extremes.highestZero[i] = std::max(extremes.highestZero[i], value);
+            extremes.zeroSum[i] += value;
+            extremes.zeroSumSquares[i] += value * value;
         }
     }
+    ++(isOne ? extremes.oneCount : extremes.zeroCount);
     for (std::size_t i = 1; i < trace.size(); ++i) {
         const double before = trace[i - 1] - threshold;
         const double after = trace[i] - threshold;
@@ -171,9 +216,11 @@ void accumulate(EyeExtremes& extremes, const std::vector<double>& trace, bool is
         }
         const double t = timeUI[i - 1] + (timeUI[i] - timeUI[i - 1]) * before / (before - after);
         if (t < 0.5) {
+            extremes.earliestLeftCrossing = std::min(extremes.earliestLeftCrossing, t);
             extremes.latestLeftCrossing = std::max(extremes.latestLeftCrossing, t);
         } else {
             extremes.earliestRightCrossing = std::min(extremes.earliestRightCrossing, t);
+            extremes.latestRightCrossing = std::max(extremes.latestRightCrossing, t);
         }
     }
 }
