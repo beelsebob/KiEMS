@@ -73,6 +73,11 @@ final class FieldViewerViewController: NSViewController {
     private var currentSnapshots: [EMSFieldSnapshot] = []
     private var selectedExcitedPortBySimulation: [Int: Int] = [:]
     private var displayedSeriesKey: String?
+    /// Shown only while the selected series is a primary one (or a differential pair of them) with
+    /// adversarial runs to superpose -- see EMSFieldSnapshot.withAdversarialSignals.
+    private let includeAdversarialCheckbox = NSButton(checkboxWithTitle: "Include adversarial signals",
+                                                      target: nil, action: nil)
+    private var includesAdversarialSignals = true
 
     // MARK: - Playback transport (video-player-style controls over fieldSnapshot.frames)
 
@@ -219,7 +224,12 @@ final class FieldViewerViewController: NSViewController {
         seriesProgressStack.spacing = 3
         seriesProgressStack.isHidden = true
 
-        let stack = NSStackView(views: [label, seriesPopUp, seriesProgressStack])
+        includeAdversarialCheckbox.target = self
+        includeAdversarialCheckbox.action = #selector(includeAdversarialChanged)
+        includeAdversarialCheckbox.state = includesAdversarialSignals ? .on : .off
+        includeAdversarialCheckbox.isHidden = true
+
+        let stack = NSStackView(views: [label, seriesPopUp, includeAdversarialCheckbox, seriesProgressStack])
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.spacing = 8
@@ -417,7 +427,10 @@ final class FieldViewerViewController: NSViewController {
         seriesProgressStack.isHidden = false
     }
 
-    private func display(snapshot: EMSFieldSnapshot, preview: EMSGeometryPreview?) {
+    private func display(snapshot selected: EMSFieldSnapshot, preview: EMSGeometryPreview?) {
+        let variant = selected.withAdversarialSignals
+        includeAdversarialCheckbox.isHidden = variant == nil
+        let snapshot = includesAdversarialSignals ? (variant ?? selected) : selected
         let seriesKey = "\(snapshot.simulationName)|\(snapshot.excitedPort)"
         let seriesChanged = displayedSeriesKey != seriesKey
         if seriesChanged {
@@ -432,6 +445,11 @@ final class FieldViewerViewController: NSViewController {
         fieldView.preview = preview
         displayedSeriesKey = seriesKey
         updateTransport(for: snapshot)
+    }
+
+    @objc private func includeAdversarialChanged() {
+        includesAdversarialSignals = includeAdversarialCheckbox.state == .on
+        selectSeries(at: seriesPopUp.indexOfSelectedItem)
     }
 
     @objc private func seriesSelectionChanged() {

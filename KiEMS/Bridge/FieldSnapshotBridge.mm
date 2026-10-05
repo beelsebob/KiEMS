@@ -1,6 +1,7 @@
 #import "FieldSnapshotBridge+Private.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -8,6 +9,7 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <vector>
 
 #include "FieldFrameSeriesReader.hpp"
 #include "kiems/constants.hpp"
@@ -256,17 +258,16 @@ static NSData* energyData(const std::vector<float>& ex, const std::vector<float>
 
 @end
 
-/// Differential-mode view over two legs' own EMSFieldFrameDataSource: `coefficientP`/`coefficientN`
-/// applied to each leg's raw Ex/Ey/Ez/Hx/Hy/Hz components (not to the legs' own precomputed
-/// energies -- see buildCombinedFieldSnapshot()'s own doc comment) before deriving one energy value
-/// per cell from the combined field, so the result reflects genuine differential-mode interference
-/// rather than the sum of two independent single-ended energy maps.
+/// Weighted superposition of several runs' own EMSFieldFrameDataSource -- a differential pair's two
+/// legs (+0.5/-0.5), and/or a primary run plus its adversarial runs. Each coefficient is applied to
+/// that leg's raw Ex/Ey/Ez/Hx/Hy/Hz components (not to the legs' own precomputed energies -- see
+/// buildCombinedFieldSnapshot()'s own doc comment) before deriving one energy value per cell from
+/// the combined field, so the result reflects genuine interference rather than the sum of
+/// independent energy maps.
 @interface EMSCombinedFieldFrameDataSource : NSObject <EMSFieldFrameDataSourcing> {
 @private
-    EMSFieldFrameDataSource* _sourceP;
-    EMSFieldFrameDataSource* _sourceN;
-    double _coefficientP;
-    double _coefficientN;
+    std::vector<EMSFieldFrameDataSource*> _sources;
+    std::vector<double> _coefficients;
     std::mutex _mutex;
     NSUInteger _cachedFrameIndex;
     EMSDecodedFieldFrame* _cachedFrame;
@@ -276,26 +277,20 @@ static NSData* energyData(const std::vector<float>& ex, const std::vector<float>
     dispatch_queue_t _decodeQueue;
     NSUInteger _cacheGeneration;
 }
-- (instancetype)initWithSourceP:(EMSFieldFrameDataSource*)sourceP
-                        sourceN:(EMSFieldFrameDataSource*)sourceN
-                    coefficientP:(double)coefficientP
-                    coefficientN:(double)coefficientN;
+- (instancetype)initWithSources:(std::vector<EMSFieldFrameDataSource*>)sources
+                   coefficients:(std::vector<double>)coefficients;
 - (EMSDecodedFieldFrame*)decodeFrame:(NSUInteger)frameIndex budget:(NSTimeInterval)seconds
                             resuming:(EMSDecodedFieldFrame* _Nullable)existing;
 @end
 
 @implementation EMSCombinedFieldFrameDataSource
 
-- (instancetype)initWithSourceP:(EMSFieldFrameDataSource*)sourceP
-                        sourceN:(EMSFieldFrameDataSource*)sourceN
-                    coefficientP:(double)coefficientP
-                    coefficientN:(double)coefficientN {
+- (instancetype)initWithSources:(std::vector<EMSFieldFrameDataSource*>)sources
+                   coefficients:(std::vector<double>)coefficients {
     self = [super init];
     if (self) {
-        _sourceP = sourceP;
-        _sourceN = sourceN;
-        _coefficientP = coefficientP;
-        _coefficientN = coefficientN;
+        _sources = std::move(sources);
+        _coefficients = std::move(coefficients);
         _cachedFrameIndex = NSNotFound;
         _preparedFrameIndex = NSNotFound;
         _preparingFrameIndex = NSNotFound;
@@ -344,39 +339,37 @@ static NSData* energyData(const std::vector<float>& ex, const std::vector<float>
         existing != nil ? existing.refinements : @[];
     constexpr float kEps0 = 8.8541878128e-12F;
     constexpr float kMu0 = 1.25663706212e-6F;
-    const auto cP = static_cast<float>(_coefficientP);
-    const auto cN = static_cast<float>(_coefficientN);
     NSData* result = existing.previewEnergyData;
     if (result == nil) {
-        std::vector<float> pEx, pEy, pEz, pHx, pHy, pHz;
-        std::vector<float> nEx, nEy, nEz, nHx, nHy, nHz;
-        std::vector<float> pEnergy, nEnergy;
-        auto readP = _sourceP.reader.readPreviewFrame(static_cast<std::uint32_t>(frameIndex), pEnergy,
-                                                      pEx, pEy, pEz, pHx, pHy, pHz);
-        auto readN = _sourceN.reader.readPreviewFrame(static_cast<std::uint32_t>(frameIndex), nEnergy,
-                                                      nEx, nEy, nEz, nHx, nHy, nHz);
-        if (!readP || !readN || pEx.size() != nEx.size()) {
-            Cu::logError() << "Could not combine differential preview frame " << std::to_string(frameIndex);
-            return [[EMSDecodedFieldFrame alloc] initWithPreviewEnergyData:[NSData data]
-                                                                refinements:@[] fullyDecoded:YES];
+        std::array<std::vector<float>, 6> sum;
+        for (std::size_t leg = 0; leg < _sources.size(); ++leg) {
+            std::vector<float> energy;
+            std::array<std::vector<float>, 6> c;
+            auto read = _sources[leg].reader.readPreviewFrame(static_cast<std::uint32_t>(frameIndex), energy,
+                                                              c[0], c[1], c[2], c[3], c[4], c[5]);
+            if (!read || (leg > 0 && c[0].size() != sum[0].size())) {
+                Cu::logError() << "Could not combine preview frame " << std::to_string(frameIndex);
+                return [[EMSDecodedFieldFrame alloc] initWithPreviewEnergyData:[NSData data]
+                                                                    refinements:@[] fullyDecoded:YES];
+            }
+            const auto k = static_cast<float>(_coefficients[leg]);
+            for (std::size_t component = 0; component < 6; ++component) {
+                if (leg == 0) sum[component].assign(c[component].size(), 0.0F);
+                for (std::size_t i = 0; i < c[component].size(); ++i) sum[component][i] += k * c[component][i];
+            }
         }
-        NSMutableData* combined = [NSMutableData dataWithLength:pEx.size() * sizeof(float)];
+        NSMutableData* combined = [NSMutableData dataWithLength:sum[0].size() * sizeof(float)];
         auto* energy = static_cast<float*>(combined.mutableBytes);
-        for (std::size_t i = 0; i < pEx.size(); ++i) {
-            const float ex = cP * pEx[i] + cN * nEx[i];
-            const float ey = cP * pEy[i] + cN * nEy[i];
-            const float ez = cP * pEz[i] + cN * nEz[i];
-            const float hx = cP * pHx[i] + cN * nHx[i];
-            const float hy = cP * pHy[i] + cN * nHy[i];
-            const float hz = cP * pHz[i] + cN * nHz[i];
-            energy[i] = kEps0 * (ex * ex + ey * ey + ez * ez) + kMu0 * (hx * hx + hy * hy + hz * hz);
+        for (std::size_t i = 0; i < sum[0].size(); ++i) {
+            energy[i] = kEps0 * (sum[0][i] * sum[0][i] + sum[1][i] * sum[1][i] + sum[2][i] * sum[2][i]) +
+                        kMu0 * (sum[3][i] * sum[3][i] + sum[4][i] * sum[4][i] + sum[5][i] * sum[5][i]);
         }
         result = combined;
     }
     if (seconds <= 0) return [[EMSDecodedFieldFrame alloc]
         initWithPreviewEnergyData:result refinements:existingRefinements fullyDecoded:NO];
 
-    auto order = _sourceP.reader.readRefinementOrder(static_cast<std::uint32_t>(frameIndex));
+    auto order = _sources.front().reader.readRefinementOrder(static_cast<std::uint32_t>(frameIndex));
     if (!order) return [[EMSDecodedFieldFrame alloc] initWithPreviewEnergyData:result
                                                           refinements:existingRefinements fullyDecoded:YES];
     NSMutableArray<EMSFieldFrameRefinement*>* refinements =
@@ -387,22 +380,42 @@ static NSData* energyData(const std::vector<float>& ex, const std::vector<float>
         const std::size_t batchEnd = std::min(orderIndex + batchSize, order->size());
         std::vector<std::uint32_t> cells(order->begin() + static_cast<std::ptrdiff_t>(orderIndex),
                                          order->begin() + static_cast<std::ptrdiff_t>(batchEnd));
-        auto pDetails = _sourceP.reader.readPreviewCellDetails(static_cast<std::uint32_t>(frameIndex), cells);
-        auto nDetails = _sourceN.reader.readPreviewCellDetails(static_cast<std::uint32_t>(frameIndex), cells);
-        if (!pDetails || !nDetails || pDetails->size() != nDetails->size()) {
-            Cu::logWarning() << "Could not decode differential field-detail batch";
-            break;
-        }
-        for (std::size_t detailIndex = 0; detailIndex < pDetails->size(); ++detailIndex) {
-            auto& p = (*pDetails)[detailIndex];
-            auto& n = (*nDetails)[detailIndex];
-            if (p.components[0].size() != n.components[0].size()) break;
-            for (std::size_t component = 0; component < 6; ++component) {
-                for (std::size_t i = 0; i < p.components[component].size(); ++i) {
-                    p.components[component][i] = cP * p.components[component][i] +
-                                                 cN * n.components[component][i];
+        auto sumDetails = _sources.front().reader.readPreviewCellDetails(static_cast<std::uint32_t>(frameIndex), cells);
+        bool ok = sumDetails.has_value();
+        if (ok) {
+            const auto k0 = static_cast<float>(_coefficients.front());
+            for (auto& detail : *sumDetails) {
+                for (auto& component : detail.components) {
+                    for (float& v : component) v *= k0;
                 }
             }
+        }
+        for (std::size_t leg = 1; ok && leg < _sources.size(); ++leg) {
+            auto details = _sources[leg].reader.readPreviewCellDetails(static_cast<std::uint32_t>(frameIndex), cells);
+            if (!details || details->size() != sumDetails->size()) {
+                ok = false;
+                break;
+            }
+            const auto k = static_cast<float>(_coefficients[leg]);
+            for (std::size_t detailIndex = 0; detailIndex < details->size(); ++detailIndex) {
+                auto& into = (*sumDetails)[detailIndex];
+                const auto& from = (*details)[detailIndex];
+                for (std::size_t component = 0; component < 6; ++component) {
+                    if (into.components[component].size() != from.components[component].size()) {
+                        ok = false;
+                        break;
+                    }
+                    for (std::size_t i = 0; i < from.components[component].size(); ++i) {
+                        into.components[component][i] += k * from.components[component][i];
+                    }
+                }
+            }
+        }
+        if (!ok) {
+            Cu::logWarning() << "Could not decode combined field-detail batch";
+            break;
+        }
+        for (const auto& p : *sumDetails) {
             [refinements addObject:[[EMSFieldFrameRefinement alloc]
                 initWithPreviewCellIndex:p.previewCellIndex nx:p.nx ny:p.ny nz:p.nz
                 energyData:energyData(p.components[0], p.components[1], p.components[2],
@@ -462,8 +475,7 @@ static NSData* energyData(const std::vector<float>& ex, const std::vector<float>
         _preparedFrame = nil;
         _preparingFrameIndex = NSNotFound;
     }
-    [_sourceP discardCachedFrameData];
-    [_sourceN discardCachedFrameData];
+    for (EMSFieldFrameDataSource* source : _sources) [source discardCachedFrameData];
 }
 
 @end
@@ -516,6 +528,8 @@ static NSData* energyData(const std::vector<float>& ex, const std::vector<float>
 @end
 
 @implementation EMSFieldSnapshot
+
+@synthesize withAdversarialSignals = _withAdversarialSignals;
 
 - (instancetype)initWithNx:(NSUInteger)nx
              simulationName:(NSString*)simulationName
@@ -678,35 +692,31 @@ EMSFieldSnapshot* buildFieldSnapshot(const std::filesystem::path& seriesPath,
                                    maxCellEnergy:maxEnergy];
 }
 
-EMSFieldSnapshot* buildCombinedFieldSnapshot(EMSFieldSnapshot* legP, EMSFieldSnapshot* legN, NSString* name,
-                                             NSInteger excitedPort, double coefficientP, double coefficientN) {
-    if (legP.frames.count == 0 || legN.frames.count == 0) {
+EMSFieldSnapshot* buildCombinedFieldSnapshot(NSArray<EMSFieldSnapshot*>* legs, const std::vector<double>& coefficients,
+                                             NSString* name, NSInteger excitedPort) {
+    if (legs.count == 0 || legs.count != coefficients.size()) {
         return nil;
     }
-    if (legP.nx != legN.nx || legP.ny != legN.ny || legP.nz != legN.nz) {
-        Cu::logError() << "Differential field combine '" << name.UTF8String << "': grid mismatch ("
-                        << legP.nx << "x" << legP.ny << "x" << legP.nz << " vs " << legN.nx << "x" << legN.ny
-                        << "x" << legN.nz << ")";
-        return nil;
+    EMSFieldSnapshot* legP = legs.firstObject;
+    std::vector<EMSFieldFrameDataSource*> sources;
+    NSUInteger frameCount = NSUIntegerMax;
+    for (EMSFieldSnapshot* leg in legs) {
+        if (leg.frames.count == 0) {
+            return nil;
+        }
+        if (leg.nx != legP.nx || leg.ny != legP.ny || leg.nz != legP.nz) {
+            Cu::logError() << "Field combine '" << name.UTF8String << "': grid mismatch (" << legP.nx << "x"
+                            << legP.ny << "x" << legP.nz << " vs " << leg.nx << "x" << leg.ny << "x" << leg.nz << ")";
+            return nil;
+        }
+        // Every leg is always built by buildFieldSnapshot() (see this function's own doc comment and
+        // its caller in EMSSimulationPipelineBridge.mm), never by this function, so each leg's own
+        // first-frame data source is always the concrete single-reader kind here.
+        sources.push_back((EMSFieldFrameDataSource*)leg.frames.firstObject.dataSource);
+        frameCount = std::min(frameCount, leg.frames.count);
     }
-
-    // previous is always built by buildFieldSnapshot() (see this function's own doc comment
-    // and its caller in EMSSimulationPipelineBridge.mm), never by this function, so both legs'
-    // own first-frame data sources are always the concrete single-reader kind here.
-    EMSFieldFrameDataSource* sourceP = (EMSFieldFrameDataSource*)legP.frames.firstObject.dataSource;
-    EMSFieldFrameDataSource* sourceN = (EMSFieldFrameDataSource*)legN.frames.firstObject.dataSource;
     EMSCombinedFieldFrameDataSource* combined =
-        [[EMSCombinedFieldFrameDataSource alloc] initWithSourceP:sourceP
-                                                          sourceN:sourceN
-                                                     coefficientP:coefficientP
-                                                     coefficientN:coefficientN];
-
-    const NSUInteger frameCount = std::min(legP.frames.count, legN.frames.count);
-    if (legP.frames.count != legN.frames.count) {
-        Cu::logDebug() << "Differential field combine '" << name.UTF8String << "': leg frame counts differ ("
-                        << legP.frames.count << " vs " << legN.frames.count << "), using first "
-                        << frameCount;
-    }
+        [[EMSCombinedFieldFrameDataSource alloc] initWithSources:sources coefficients:coefficients];
 
     NSMutableArray<EMSFieldFrame*>* frames = [NSMutableArray arrayWithCapacity:frameCount];
     for (NSUInteger i = 0; i < frameCount; ++i) {
@@ -722,8 +732,10 @@ EMSFieldSnapshot* buildCombinedFieldSnapshot(EMSFieldSnapshot* legP, EMSFieldSna
     // triangle inequality, this is a conservative energy upper bound derived from the two legs'
     // cheap precomputed maxima; FieldView derives its tighter on-board scale incrementally as each
     // frame is actually displayed.
-    const double maxAmplitude = std::abs(coefficientP) * std::sqrt(std::max(0.0F, legP.maxCellEnergy)) +
-                                std::abs(coefficientN) * std::sqrt(std::max(0.0F, legN.maxCellEnergy));
+    double maxAmplitude = 0;
+    for (NSUInteger leg = 0; leg < legs.count; ++leg) {
+        maxAmplitude += std::abs(coefficients[leg]) * std::sqrt(std::max(0.0F, legs[leg].maxCellEnergy));
+    }
     const float minEnergy = 0.0F;
     const float maxEnergy = static_cast<float>(maxAmplitude * maxAmplitude);
 

@@ -110,6 +110,11 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) float minCellEnergy;
 @property (nonatomic, readonly) float maxCellEnergy;
 
+/// For a primary (main-excitation) series, or a differential pair of them, the same series with
+/// every adversarial excitation's run superposed onto it (each weighted by its configured
+/// amplitude); nil for adversarial series themselves, or when there are no adversarial runs yet.
+@property (nonatomic, strong, readonly, nullable) EMSFieldSnapshot *withAdversarialSignals;
+
 /// Releases decoded field data while retaining this snapshot's lightweight metadata and open
 /// reader. Used when switching away from a series so visiting several excitations cannot accumulate
 /// one pair of frame caches per series; displaying it again simply streams its selected frame anew.

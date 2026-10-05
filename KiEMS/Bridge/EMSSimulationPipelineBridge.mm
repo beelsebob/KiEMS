@@ -16,6 +16,7 @@
 #include <map>
 #include <optional>
 #include <regex>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -532,6 +533,10 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
     // only when the viewer asks to display a frame. Rebuild only when either leg publishes more.
     NSMutableDictionary<NSString*, EMSFieldSnapshot*>* _combinedFieldSnapshotCache;
 
+    // "<primary series excitedPort>|<adversarial leg count>" -> last snapshot superposing that
+    // primary series with every adversarial run, guarded by the same mutex above.
+    NSMutableDictionary<NSString*, EMSFieldSnapshot*>* _adversarialFieldSnapshotCache;
+
     // Set by -requestCancellation (any thread), read by -ensurePrepared:/-ensureStage: (the
     // background thread actually running them) at each checkpoint -- see -requestCancellation's own
     // doc comment. Cleared at the top of -ensureStage: for the next run, not at the end of this one
@@ -884,6 +889,7 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
             _fieldFrameSeries.clear();
             _fieldSnapshotCache = nil;
             _combinedFieldSnapshotCache = nil;
+            _adversarialFieldSnapshotCache = nil;
         }
         auto portRunner = [self, progressHandler, totalExcitedPorts, &portsCompleted,
                            boardZMinMeters, fieldFrameSeriesDirectory,
@@ -1104,7 +1110,7 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
                 // key, so the field viewer's per-simulation "last selected series" persistence (keyed
                 // on excitedPort) treats this as its own stable series across refreshes.
                 const NSInteger excitedPort = -(sp * 100000 + sn + 1);
-                combined = buildCombinedFieldSnapshot(legP, legN, name, excitedPort, 0.5, -0.5);
+                combined = buildCombinedFieldSnapshot(@[ legP, legN ], {0.5, -0.5}, name, excitedPort);
             }
             if (combined != nil) {
                 [combinedSnapshots addObject:combined];
@@ -1118,7 +1124,111 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
     }
 
     [combinedSnapshots addObjectsFromArray:snapshots];
+    [self attachAdversarialVariantsTo:combinedSnapshots singleEnded:snapshots];
     return [combinedSnapshots copy];
+}
+
+/// Sets each primary series' (or differential pair of primary series') withAdversarialSignals to
+/// that series with every adversarial excitation's run superposed onto it, weighted by the
+/// adversarial excitation's configured amplitude. Like the differential combination, this reuses the
+/// already-built single-ended snapshots' readers and is cached until a leg's frame count changes.
+- (void)attachAdversarialVariantsTo:(NSArray<EMSFieldSnapshot*>*)allSnapshots
+                        singleEnded:(NSArray<EMSFieldSnapshot*>*)singleEnded {
+    if (_simConfig == nullptr) {
+        return;
+    }
+    std::set<NSInteger> primaryPorts;
+    std::map<NSInteger, double> adversarialAmplitudes;
+    for (const auto& excitation : _simConfig->excitations()) {
+        if (!excitation.drivenPortIndex().has_value()) {
+            continue;
+        }
+        const NSInteger port = *excitation.drivenPortIndex();
+        if (excitation.isMain()) {
+            primaryPorts.insert(port);
+        } else {
+            adversarialAmplitudes[port] += excitation.amplitude().value_or(1.0);
+        }
+    }
+    for (const NSInteger port : primaryPorts) {
+        adversarialAmplitudes.erase(port);
+    }
+
+    NSMutableArray<EMSFieldSnapshot*>* adversarialLegs = [NSMutableArray array];
+    std::vector<double> adversarialCoefficients;
+    for (EMSFieldSnapshot* snapshot in singleEnded) {
+        const auto found = adversarialAmplitudes.find(snapshot.excitedPort);
+        if (found != adversarialAmplitudes.end()) {
+            [adversarialLegs addObject:snapshot];
+            adversarialCoefficients.push_back(found->second);
+        }
+    }
+
+    NSDictionary<NSString*, EMSFieldSnapshot*>* previousCache;
+    {
+        std::lock_guard lock(_fieldFrameSeriesMutex);
+        previousCache = [_adversarialFieldSnapshotCache copy];
+    }
+    NSMutableDictionary<NSString*, EMSFieldSnapshot*>* refreshedCache = [NSMutableDictionary dictionary];
+    for (EMSFieldSnapshot* snapshot in allSnapshots) {
+        snapshot.withAdversarialSignals = nil;
+        if (adversarialLegs.count == 0) {
+            continue;
+        }
+        // The primary's own legs: itself, or a differential pair's two primary legs.
+        NSArray<EMSFieldSnapshot*>* baseLegs = nil;
+        std::vector<double> coefficients;
+        if (primaryPorts.contains(snapshot.excitedPort)) {
+            baseLegs = @[ snapshot ];
+            coefficients = {1.0};
+        } else if (snapshot.excitedPort < 0) {
+            for (const DifferentialPairConfig& pair : _simConfig->diffPairs()) {
+                if (!pair.correct() || !pair.positiveExcitation().resolvedIndex().has_value() ||
+                    !pair.negativeExcitation().resolvedIndex().has_value()) {
+                    continue;
+                }
+                const NSInteger sp = *pair.positiveExcitation().resolvedIndex();
+                const NSInteger sn = *pair.negativeExcitation().resolvedIndex();
+                if (snapshot.excitedPort != -(sp * 100000 + sn + 1) || !primaryPorts.contains(sp) ||
+                    !primaryPorts.contains(sn)) {
+                    continue;
+                }
+                EMSFieldSnapshot* legP = nil;
+                EMSFieldSnapshot* legN = nil;
+                for (EMSFieldSnapshot* leg in singleEnded) {
+                    if (leg.excitedPort == sp) legP = leg;
+                    if (leg.excitedPort == sn) legN = leg;
+                }
+                if (legP != nil && legN != nil) {
+                    baseLegs = @[ legP, legN ];
+                    coefficients = {0.5, -0.5};
+                }
+                break;
+            }
+        }
+        if (baseLegs == nil) {
+            continue;
+        }
+
+        NSArray<EMSFieldSnapshot*>* legs = [baseLegs arrayByAddingObjectsFromArray:adversarialLegs];
+        coefficients.insert(coefficients.end(), adversarialCoefficients.begin(), adversarialCoefficients.end());
+        NSUInteger frameCount = NSUIntegerMax;
+        for (EMSFieldSnapshot* leg in legs) frameCount = MIN(frameCount, leg.frames.count);
+
+        NSString* key = [NSString stringWithFormat:@"%ld|%lu", (long)snapshot.excitedPort,
+                                                   (unsigned long)adversarialLegs.count];
+        EMSFieldSnapshot* variant = previousCache[key];
+        if (variant == nil || variant.frames.count != frameCount) {
+            NSString* name = [snapshot.excitationName stringByAppendingString:@" + adversarial"];
+            variant = buildCombinedFieldSnapshot(legs, coefficients, name, snapshot.excitedPort);
+        }
+        if (variant != nil) {
+            snapshot.withAdversarialSignals = variant;
+            refreshedCache[key] = variant;
+        }
+    }
+    std::lock_guard lock(_fieldFrameSeriesMutex);
+    _adversarialFieldSnapshotCache = refreshedCache;
 }
 
 - (void)invalidateFromStage:(EMSPipelineStage)stage {
@@ -1156,6 +1266,7 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
             _fieldFrameSeries.clear();
             _fieldSnapshotCache = nil;
             _combinedFieldSnapshotCache = nil;
+            _adversarialFieldSnapshotCache = nil;
         }
         _grid.reset();
         _geometry.reset();
@@ -1176,6 +1287,7 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
             _fieldFrameSeries.clear();
             _fieldSnapshotCache = nil;
             _combinedFieldSnapshotCache = nil;
+            _adversarialFieldSnapshotCache = nil;
         }
         _grid.reset();
         _geometryPreviewCache = nil;
@@ -1191,6 +1303,7 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
             _fieldFrameSeries.clear();
             _fieldSnapshotCache = nil;
             _combinedFieldSnapshotCache = nil;
+            _adversarialFieldSnapshotCache = nil;
         }
         break;
     }
