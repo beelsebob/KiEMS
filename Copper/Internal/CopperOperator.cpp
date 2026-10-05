@@ -498,77 +498,74 @@ int CopperOperator::snapBox2Mesh(const double start[3], const double stop[3], un
 // AverageMatQuarterCell/PaintPECColumn/CalcPEC_Range/ApplyElectricBC ----
 
 void CopperOperator::quarterCellAverage(int axis, const unsigned int pos[3], double effMat[4],
-                                          const std::vector<CSPropMaterial*> matCache[3][6]) const {
-    const int n = axis;
-    const int nP = (n + 1) % 3;
-    const int nPP = (n + 2) % 3;
-    int locPos[3] = {static_cast<int>(pos[0]), static_cast<int>(pos[1]), static_cast<int>(pos[2])};
-    double coord[3] = {0, 0, 0};
+                                         const std::vector<const ResolvedMaterial*> rowMatCache[3][6],
+                                         const std::array<double, 12>& background,
+                                         const MaterialGeometry& geometry) const {
+    const std::size_t n = static_cast<std::size_t>(axis);
+    const std::size_t nP = (n + 1) % 3;
+    const std::size_t nPP = (n + 2) % 3;
     double area = 0.0;
-
-    CSBackgroundMaterial* bg = _csx.GetBackgroundMaterial();
-    const double bgEpsR = bg->GetEpsilon();
-    const double bgKappa = bg->GetKappa();
-    const double bgMueR = bg->GetMue();
-    const double bgSigma = bg->GetSigma();
-
-    auto lookupMat = [&](int kindIdx, int matType) -> double {
-        return materialValueFromCache(matCache[n][kindIdx][pos[2]], matType, n, coord, bgEpsR, bgKappa, bgMueR,
-                                       bgSigma);
-    };
+    const std::size_t rowIndex = static_cast<std::size_t>(pos[0]) * numLines(2) + pos[2];
+    const ResolvedMaterial* material0 = rowMatCache[n][0].data()[rowIndex];
+    const ResolvedMaterial* material1 = rowMatCache[n][1].data()[rowIndex];
+    const ResolvedMaterial* material2 = rowMatCache[n][2].data()[rowIndex];
+    const ResolvedMaterial* material3 = rowMatCache[n][3].data()[rowIndex];
+    const ResolvedMaterial* material4 = rowMatCache[n][4].data()[rowIndex];
+    const ResolvedMaterial* material5 = rowMatCache[n][5].data()[rowIndex];
+    const auto& values0 = material0 == nullptr ? background : material0->values;
+    const auto& values1 = material1 == nullptr ? background : material1->values;
+    const auto& values2 = material2 == nullptr ? background : material2->values;
+    const auto& values3 = material3 == nullptr ? background : material3->values;
+    const auto& values4 = material4 == nullptr ? background : material4->values;
+    const auto& values5 = material5 == nullptr ? background : material5->values;
+    const std::size_t materialOffset = n * 4;
+    const double* primaryN = geometry.primaryWidth[n].data();
+    const double* primaryNP = geometry.primaryWidth[nP].data();
+    const double* primaryNPP = geometry.primaryWidth[nPP].data();
+    const unsigned int posNP = pos[nP];
+    const unsigned int posNPP = pos[nPP];
+    const double widthNP = primaryNP[posNP];
+    const double widthNPP = primaryNPP[posNPP];
+    const double widthNPLow = posNP == 0 ? 0.0 : primaryNP[posNP - 1];
+    const double widthNPPLow = posNPP == 0 ? 0.0 : primaryNPP[posNPP - 1];
 
     // epsilon, kappa averaging (4 quarter-cell corners)
     double aN;
-    quarterCellCorner(n, 0, pos, coord);
-    aN = nodeArea(n, locPos);
-    effMat[0] = lookupMat(0, 0) * aN;
-    effMat[1] = lookupMat(0, 1) * aN;
+    aN = widthNP * widthNPP;
+    effMat[0] = values0[materialOffset] * aN;
+    effMat[1] = values0[materialOffset + 1] * aN;
     area += aN;
 
-    --locPos[nP];
-    quarterCellCorner(n, 1, pos, coord);
-    aN = nodeArea(n, locPos);
-    effMat[0] += lookupMat(1, 0) * aN;
-    effMat[1] += lookupMat(1, 1) * aN;
+    aN = widthNPLow * widthNPP;
+    effMat[0] += values1[materialOffset] * aN;
+    effMat[1] += values1[materialOffset + 1] * aN;
     area += aN;
 
-    ++locPos[nP];
-    --locPos[nPP];
-    quarterCellCorner(n, 2, pos, coord);
-    aN = nodeArea(n, locPos);
-    effMat[0] += lookupMat(2, 0) * aN;
-    effMat[1] += lookupMat(2, 1) * aN;
+    aN = widthNP * widthNPPLow;
+    effMat[0] += values2[materialOffset] * aN;
+    effMat[1] += values2[materialOffset + 1] * aN;
     area += aN;
 
-    --locPos[nP];
-    quarterCellCorner(n, 3, pos, coord);
-    aN = nodeArea(n, locPos);
-    effMat[0] += lookupMat(3, 0) * aN;
-    effMat[1] += lookupMat(3, 1) * aN;
+    aN = widthNPLow * widthNPPLow;
+    effMat[0] += values3[materialOffset] * aN;
+    effMat[1] += values3[materialOffset + 1] * aN;
     area += aN;
 
     effMat[0] *= physical::epsilon0 / area;
     effMat[1] /= area;
 
     // mu, sigma averaging (2 half-cell taps)
-    locPos[0] = static_cast<int>(pos[0]);
-    locPos[1] = static_cast<int>(pos[1]);
-    locPos[2] = static_cast<int>(pos[2]);
     double length = 0.0;
 
-    halfCellTap(n, 0, pos, coord);
-    --locPos[n];
-    double deltaNy = nodeWidth(n, locPos);
-    effMat[2] = deltaNy / lookupMat(4, 2);
-    double sigma = lookupMat(4, 3);
+    double deltaNy = pos[n] == 0 ? 0.0 : primaryN[pos[n] - 1];
+    effMat[2] = deltaNy / values4[materialOffset + 2];
+    double sigma = values4[materialOffset + 3];
     effMat[3] = (sigma != 0.0) ? deltaNy / sigma : 0.0;
     length = deltaNy;
 
-    halfCellTap(n, 1, pos, coord);
-    ++locPos[n];
-    deltaNy = nodeWidth(n, locPos);
-    effMat[2] += deltaNy / lookupMat(5, 2);
-    sigma = lookupMat(5, 3);
+    deltaNy = primaryN[pos[n]];
+    effMat[2] += deltaNy / values5[materialOffset + 2];
+    sigma = values5[materialOffset + 3];
     if (sigma != 0.0) {
         effMat[3] += deltaNy / sigma;
     } else {
@@ -613,45 +610,56 @@ void CopperOperator::computeMaterialCoefficients() {
     // entire row of x values (and every z in a primitive's own range) by reading pre-tabulated
     // scalars instead of calling quarterCellCorner()/halfCellTap() at all -- see this file's own top
     // comment for why per-point IsInside() (which this replaces) was the dominant cost otherwise.
-    std::vector<double> center[3], quarterRight[3], quarterLeft[3];
+    MaterialGeometry geometry;
     for (int m = 0; m < 3; ++m) {
         const unsigned int n = numLines(m);
-        center[m].resize(n);
-        quarterRight[m].resize(n);
-        quarterLeft[m].resize(n);
+        geometry.center[static_cast<std::size_t>(m)].resize(n);
+        geometry.quarterRight[static_cast<std::size_t>(m)].resize(n);
+        geometry.quarterLeft[static_cast<std::size_t>(m)].resize(n);
+        geometry.primaryWidth[static_cast<std::size_t>(m)].resize(n);
+        geometry.dualWidth[static_cast<std::size_t>(m)].resize(n);
         for (unsigned int p = 0; p < n; ++p) {
             const double base = discLine(m, p);
             const double delta = rawDiscDelta(m, static_cast<int>(p));
             const double deltaM = rawDiscDelta(m, static_cast<int>(p) - 1);
-            center[m][p] = base + delta * 0.5;
-            quarterRight[m][p] = base + delta * 0.25;
-            quarterLeft[m][p] = base - deltaM * 0.25;
+            geometry.center[static_cast<std::size_t>(m)][p] = base + delta * 0.5;
+            geometry.quarterRight[static_cast<std::size_t>(m)][p] = base + delta * 0.25;
+            geometry.quarterLeft[static_cast<std::size_t>(m)][p] = base - deltaM * 0.25;
+            geometry.primaryWidth[static_cast<std::size_t>(m)][p] =
+                discDelta(m, static_cast<int>(p), false) * _gridDeltaMetres;
+            geometry.dualWidth[static_cast<std::size_t>(m)][p] = discDelta(m, static_cast<int>(p), true) * _gridDeltaMetres;
         }
     }
-    // `kind` 0-3 is a quarterCellCorner() cornerIdx, 4-5 a halfCellTap() tapIdx -- matches matCache's
-    // own [axis][kind] indexing below. Returns the precomputed array covering mesh axis `m`'s
-    // contribution to that (yeeAxis,kind) coordinate -- e.g. arrayFor(2,0,0) is quarterCellCorner(2,
-    // 0,pos,_)'s outCoord[0] formula, tabulated over every x line, matching quarterCellCorner()'s
-    // own `right ? base[nP]+deltaP*0.25 : base[nP]-deltaP_M*0.25` exactly for m==nP (here nP==0).
-    auto arrayFor = [&](int yeeAxis, int kind, int m) -> const std::vector<double>& {
+    // `coordinateTable[yeeAxis][kind][meshAxis]` is the pre-tabulated contribution to one
+    // quarter-corner/half-tap coordinate. Build the small dispatch table once rather than deciding
+    // which vector to read in every primitive/axis/kind rasterization pass.
+    const std::vector<double>* coordinateTable[3][6][3];
+    for (int yeeAxis = 0; yeeAxis < 3; ++yeeAxis) {
         const int nP = (yeeAxis + 1) % 3;
-        if (kind < 4) {
-            const bool right = (kind == 0 || kind == 2);
-            const bool up = (kind == 0 || kind == 1);
-            if (m == yeeAxis) {
-                return center[m];
+        for (int kind = 0; kind < 6; ++kind) {
+            for (int meshAxis = 0; meshAxis < 3; ++meshAxis) {
+                const std::size_t meshAxisIndex = static_cast<std::size_t>(meshAxis);
+                if (kind < 4) {
+                    const bool right = (kind == 0 || kind == 2);
+                    const bool up = (kind == 0 || kind == 1);
+                    if (meshAxis == yeeAxis) {
+                        coordinateTable[yeeAxis][kind][meshAxis] = &geometry.center[meshAxisIndex];
+                    } else if (meshAxis == nP) {
+                        coordinateTable[yeeAxis][kind][meshAxis] =
+                            right ? &geometry.quarterRight[meshAxisIndex] : &geometry.quarterLeft[meshAxisIndex];
+                    } else {
+                        coordinateTable[yeeAxis][kind][meshAxis] =
+                            up ? &geometry.quarterRight[meshAxisIndex] : &geometry.quarterLeft[meshAxisIndex];
+                    }
+                } else if (meshAxis == yeeAxis) {
+                    coordinateTable[yeeAxis][kind][meshAxis] =
+                        kind == 4 ? &geometry.quarterLeft[meshAxisIndex] : &geometry.quarterRight[meshAxisIndex];
+                } else {
+                    coordinateTable[yeeAxis][kind][meshAxis] = &geometry.center[meshAxisIndex];
+                }
             }
-            if (m == nP) {
-                return right ? quarterRight[m] : quarterLeft[m];
-            }
-            return up ? quarterRight[m] : quarterLeft[m]; // m == nPP
         }
-        const int tapIdx = kind - 4;
-        if (m == yeeAxis) {
-            return (tapIdx == 0) ? quarterLeft[m] : quarterRight[m];
-        }
-        return center[m]; // m == nP or m == nPP
-    };
+    }
 
     // Finds the [start,stopEx) line-index range (padded one line each side) that could contain
     // `lo..hi` along `lines` -- matches every other bbox-to-index-range conversion in this file.
@@ -669,11 +677,47 @@ void CopperOperator::computeMaterialCoefficients() {
     };
 
     const PrimitiveTypeCache& materialTypeCache = primitiveTypeCache(CSProperties::MATERIAL);
+    std::vector<ResolvedMaterial> resolvedMaterials;
+    resolvedMaterials.reserve(materialTypeCache.prims.size());
+    std::unordered_map<CSPropMaterial*, std::size_t> materialIndices;
+    std::vector<const ResolvedMaterial*> primitiveMaterials(materialTypeCache.prims.size(), nullptr);
+    for (std::size_t i = 0; i < materialTypeCache.prims.size(); ++i) {
+        auto* material = dynamic_cast<CSPropMaterial*>(materialTypeCache.prims[i]->GetProperty());
+        if (material == nullptr) {
+            continue;
+        }
+        // Multiple primitives commonly share one property, so resolve each property only once.
+        const auto existing = materialIndices.find(material);
+        if (existing != materialIndices.end()) {
+            primitiveMaterials[i] = &resolvedMaterials[existing->second];
+            continue;
+        }
+        ResolvedMaterial resolved;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            const int materialAxis = static_cast<int>(axis);
+            resolved.values[axis * 4] = material->GetEpsilon(materialAxis);
+            resolved.values[axis * 4 + 1] = material->GetKappa(materialAxis);
+            resolved.values[axis * 4 + 2] = material->GetMue(materialAxis);
+            resolved.values[axis * 4 + 3] = material->GetSigma(materialAxis);
+        }
+        resolvedMaterials.push_back(resolved);
+        materialIndices.emplace(material, resolvedMaterials.size() - 1);
+        primitiveMaterials[i] = &resolvedMaterials.back();
+    }
+    CSBackgroundMaterial* backgroundMaterial = _csx.GetBackgroundMaterial();
+    const std::array<double, 4> backgroundValues = {backgroundMaterial->GetEpsilon(), backgroundMaterial->GetKappa(),
+                                                     backgroundMaterial->GetMue(), backgroundMaterial->GetSigma()};
+    std::array<double, 12> background;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        for (std::size_t value = 0; value < 4; ++value) {
+            background[axis * 4 + value] = backgroundValues[value];
+        }
+    }
 
     // rowMatCache[axis][kind][x*nz+z] -- one row's worth of matCache below, widened to cover every
     // column in the row at once (row-major, not column-major, is what lets a CSPrimPolygon/
     // CSPrimLinPoly's coverage be rasterized once per row instead of tested point by point).
-    std::vector<CSPropMaterial*> rowMatCache[3][6];
+    std::vector<const ResolvedMaterial*> rowMatCache[3][6];
     for (int a = 0; a < 3; ++a) {
         for (int k = 0; k < 6; ++k) {
             rowMatCache[a][k].assign(static_cast<std::size_t>(nx) * nz, nullptr);
@@ -681,9 +725,8 @@ void CopperOperator::computeMaterialCoefficients() {
     }
 
     PolygonRasterShape shape;
-    std::vector<double> colBuf;
-    std::vector<bool> insideMask;
-    std::vector<CSPropMaterial*> matCache[3][6]; // one column's slice, extracted from rowMatCache below
+    std::vector<std::uint8_t> insideMask(nx);
+    PolygonRasterScratch rasterScratch;
 
     for (unsigned int y = 0; y < ny; ++y) {
         // -- PaintMaterialColumn, widened to a whole row --
@@ -697,8 +740,8 @@ void CopperOperator::computeMaterialCoefficients() {
 
         for (auto it = vPrimIdx.rbegin(); it != vPrimIdx.rend(); ++it) {
             CSPrimitives* prim = materialTypeCache.prims[*it];
-            auto* mat = dynamic_cast<CSPropMaterial*>(prim->GetProperty());
-            if (mat == nullptr) {
+            const ResolvedMaterial* material = primitiveMaterials[*it];
+            if (material == nullptr) {
                 continue;
             }
             const BoundBoxEntry& bbEntry = materialTypeCache.boundBoxes[*it];
@@ -721,21 +764,22 @@ void CopperOperator::computeMaterialCoefficients() {
             for (int axis = 0; axis < 3; ++axis) {
                 for (int kind = 0; kind < 6; ++kind) {
                     if (canRasterize) {
-                        const double rowCoord = arrayFor(axis, kind, 1)[y];
-                        const std::vector<double>& fullCols = arrayFor(axis, kind, 0);
-                        colBuf.assign(fullCols.begin() + xStart, fullCols.begin() + xStopEx);
-                        rasterizePolygonRow(shape, rowCoord, colBuf, insideMask);
+                        const double rowCoord = (*coordinateTable[axis][kind][1])[y];
+                        const std::vector<double>& fullCols = *coordinateTable[axis][kind][0];
+                        const auto cols = std::span<const double>(fullCols).subspan(xStart, xStopEx - xStart);
+                        const auto mask = std::span<std::uint8_t>(insideMask).first(cols.size());
+                        rasterizePolygonRowBytes(shape, rowCoord, cols, mask, rasterScratch);
 
-                        const std::vector<double>& zArray = arrayFor(axis, kind, 2);
+                        const std::vector<double>& zArray = *coordinateTable[axis][kind][2];
                         for (unsigned int z = zStart; z < zStopEx; ++z) {
                             const double zc = zArray[z];
                             if (zc < bb[4] || zc > bb[5]) {
                                 continue; // IsInside()'s own elevation-axis bbox check, done
                                           // separately -- see rasterizePolygonRow()'s doc comment.
                             }
-                            for (unsigned int xi = 0; xi < colBuf.size(); ++xi) {
-                                if (insideMask[xi]) {
-                                    rowMatCache[axis][kind][static_cast<std::size_t>(xStart + xi) * nz + z] = mat;
+                            for (unsigned int xi = 0; xi < mask.size(); ++xi) {
+                                if (mask[xi]) {
+                                    rowMatCache[axis][kind][static_cast<std::size_t>(xStart + xi) * nz + z] = material;
                                 }
                             }
                         }
@@ -752,7 +796,7 @@ void CopperOperator::computeMaterialCoefficients() {
                                     halfCellTap(axis, kind - 4, pos, coord);
                                 }
                                 if (prim->IsInside(coord)) {
-                                    rowMatCache[axis][kind][static_cast<std::size_t>(x) * nz + z] = mat;
+                                    rowMatCache[axis][kind][static_cast<std::size_t>(x) * nz + z] = material;
                                 }
                             }
                         }
@@ -763,31 +807,25 @@ void CopperOperator::computeMaterialCoefficients() {
 
         // -- Calc_EC_Range for this row --
         for (unsigned int x = 0; x < nx; ++x) {
-            for (int a = 0; a < 3; ++a) {
-                for (int k = 0; k < 6; ++k) {
-                    matCache[a][k].resize(nz);
-                    for (unsigned int z = 0; z < nz; ++z) {
-                        matCache[a][k][z] = rowMatCache[a][k][static_cast<std::size_t>(x) * nz + z];
-                    }
-                }
-            }
-
             unsigned int pos[3] = {x, y, 0};
             for (pos[2] = 0; pos[2] < nz; ++pos[2]) {
                 const std::size_t i = index(pos[0], pos[1], pos[2]);
                 for (int n = 0; n < 3; ++n) {
+                    const std::size_t axis = static_cast<std::size_t>(n);
+                    const std::size_t axisP = (axis + 1) % 3;
+                    const std::size_t axisPP = (axis + 2) % 3;
                     double effMat[4];
-                    quarterCellAverage(n, pos, effMat, matCache);
+                    quarterCellAverage(n, pos, effMat, rowMatCache, background, geometry);
 
-                    double delta = edgeLength(n, pos, false);
-                    double area = edgeArea(n, pos, false);
+                    double delta = geometry.primaryWidth[axis][pos[axis]];
+                    double area = geometry.dualWidth[axisP][pos[axisP]] * geometry.dualWidth[axisPP][pos[axisPP]];
                     if (delta != 0.0) {
                         _ecC[n][i] = effMat[0] * area / delta;
                         _ecG[n][i] = effMat[1] * area / delta;
                     }
 
-                    delta = edgeLength(n, pos, true);
-                    area = edgeArea(n, pos, true);
+                    delta = geometry.dualWidth[axis][pos[axis]];
+                    area = geometry.primaryWidth[axisP][pos[axisP]] * geometry.primaryWidth[axisPP][pos[axisPP]];
                     if (delta != 0.0) {
                         _ecL[n][i] = effMat[2] * area / delta;
                         _ecR[n][i] = effMat[3] * area / delta;

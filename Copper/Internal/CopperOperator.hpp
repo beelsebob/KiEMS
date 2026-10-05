@@ -226,6 +226,19 @@ private:
 
     // -- material/PEC resolution (column rasterization, ported from PaintMaterialColumn/
     // PaintPECColumn/Calc_EC_Range/CalcPEC_Range) --
+    // All geometry used while resolving a material is separable by mesh axis.  Build these tables
+    // once per operator rather than reconstructing the same staggered coordinates and widths for
+    // every Yee edge.
+    struct MaterialGeometry {
+        std::array<std::vector<double>, 3> center, quarterRight, quarterLeft;
+        std::array<std::vector<double>, 3> primaryWidth, dualWidth;
+    };
+    // KiEMS only emits plain (non-parametric) CSPropMaterial properties.  Resolve the twelve
+    // direction-specific epsilon/kappa/mue/sigma values once per property, rather than repeatedly
+    // sending every quarter-cell sample through CSPropMaterial's weighted-property API.
+    struct ResolvedMaterial {
+        std::array<double, 12> values;
+    };
     void computeMaterialCoefficients(); // fills _ecC/_ecG/_ecL/_ecR
     void computePEC();                  // zeroes vv/vi wherever a column resolves to METAL
     void computeBoundaryPEC();          // ported from Operator::ApplyElectricBC
@@ -233,7 +246,8 @@ private:
     // ported from Operator::AverageMatQuarterCell -- effMat[0..3] = eps (absolute, F/m), kappa (S/m),
     // mu (absolute, H/m), sigma (magnetic loss, matching EffMat's own units in the source).
     void quarterCellAverage(int axis, const unsigned int pos[3], double effMat[4],
-                              const std::vector<CSPropMaterial*> matCache[3][6]) const;
+                            const std::vector<const ResolvedMaterial*> rowMatCache[3][6],
+                            const std::array<double, 12>& background, const MaterialGeometry& geometry) const;
     void quarterCellCorner(int axis, int cornerIdx, const unsigned int pos[3], double outCoord[3]) const;
     void halfCellTap(int axis, int tapIdx, const unsigned int pos[3], double outCoord[3]) const;
     // ported from Operator::GetNodeWidth/GetNodeArea's signed-pos overloads -- always dualMesh=true
