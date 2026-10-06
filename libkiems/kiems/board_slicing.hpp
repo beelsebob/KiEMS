@@ -13,7 +13,7 @@
 
 #include "config.hpp"
 #include "importer.hpp"
-#include "../../libkicad/libkicad.hpp"
+#include "../../submodules/libkicad/libkicad.hpp"
 #include "paths_config.hpp"
 #include "polygon_geometry.hpp"
 

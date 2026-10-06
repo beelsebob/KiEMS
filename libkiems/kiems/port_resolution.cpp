@@ -23,7 +23,7 @@
 #include "config.hpp"
 #include "constants.hpp"
 #include "gerber_io.hpp"
-#include "../../libkicad/libkicad.hpp"
+#include "../../submodules/libkicad/libkicad.hpp"
 #include "board_slicing.hpp"
 #include "logging.hpp"
 #include "net_name.hpp"

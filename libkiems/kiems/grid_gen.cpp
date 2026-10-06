@@ -13,7 +13,7 @@
 #include "config.hpp"
 #include "constants.hpp"
 #include "csx_grid_utils.hpp"
-#include "../../libkicad/libkicad.hpp"
+#include "../../submodules/libkicad/libkicad.hpp"
 #include "logging.hpp"
 
 namespace kiems {

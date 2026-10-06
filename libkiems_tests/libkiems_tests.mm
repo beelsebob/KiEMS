@@ -32,7 +32,7 @@
 #include "kiems/postprocess.hpp"
 #include "kiems/ports.hpp"
 #include "kiems/via_stitching.hpp"
-#include "../libkicad/libkicad.hpp"
+#include "../submodules/libkicad/libkicad.hpp"
 #include "logging.hpp"
 #include "polygon_geometry.hpp"
 
