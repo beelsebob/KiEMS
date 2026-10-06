@@ -611,8 +611,10 @@ final class BoardGeometryBuilder {
         signposter.endInterval("Geometry merge and remap", mergeTiming)
         let buffersTiming = signposter.beginInterval("Geometry Metal buffers", id: signposter.makeSignpostID())
         defer { signposter.endInterval("Geometry Metal buffers", buffersTiming) }
-        func buffer<T>(_ values: [T]) -> MTLBuffer? {
-            values.isEmpty ? nil : device.makeBuffer(bytes: values, length: MemoryLayout<T>.stride * values.count)
+        func buffer<T: BitwiseCopyable>(_ values: [T]) -> MTLBuffer? {
+            values.withUnsafeBytes { bytes in
+                bytes.isEmpty ? nil : device.makeBuffer(bytes: bytes.baseAddress!, length: bytes.count)
+            }
         }
         return BoardGeometry(
             opaque: BoardLitBuffers(device: device, vertices: opaque), opaqueRanges: opaqueRanges,
