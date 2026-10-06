@@ -12,8 +12,8 @@ Submodules that have their own Scripts/check_dependencies.py (Copper) declare th
 requirements; this script gathers and installs them along with kiems' own, and runs each one's
 setup, so one run sets up everything. See dependency_tool.py for how repositories cooperate.
 
-On success writes the untracked libkicad/DependenciesChecked.generated.h; until it exists every
-Xcode compile stops with an #error from libkicad/DependencyCheck.h. The script never runs from Xcode.
+On success writes the untracked Config/DependenciesChecked.generated.h; until it exists every
+Xcode compile stops with an #error from Config/DependencyCheck.h. The script never runs from Xcode.
 """
 import subprocess
 import sys
@@ -50,7 +50,7 @@ HOMEBREW = [
     Formula("unixodbc",        "2.3",  "KiCad build"),
 ]
 
-SUBMODULES = ["submodules/Copper", "submodules/RememberRemember", "submodules/kicad"]
+SUBMODULES = ["submodules/Copper", "submodules/RememberRemember", "submodules/kicad", "submodules/libkicad"]
 
 # libkicad links pieces of the KiCad submodule built by Scripts/build_kicad.sh (too slow to run from
 # Xcode), which records the submodule commit it built; a build from another commit is out of date.
@@ -78,9 +78,9 @@ def kicad_build_problem(root: Path) -> str:
 
 
 def configure(ctx: Context) -> None:
-    # libkicad/BuildPaths.xcconfig holds machine-specific settings; make its untracked override
+    # Config/BuildPaths.xcconfig holds machine-specific settings; make its untracked override
     # match this machine.
-    ctx.set_build_setting("libkicad/BuildPaths.xcconfig", "HOMEBREW_PREFIX", str(ctx.brew_prefix))
+    ctx.set_build_setting("Config/BuildPaths.xcconfig", "HOMEBREW_PREFIX", str(ctx.brew_prefix))
 
     problem = kicad_build_problem(ctx.root)
     if problem and ctx.confirm(f"{problem}. Run Scripts/build_kicad.sh now?"):
@@ -97,6 +97,6 @@ if __name__ == "__main__":
         name="kiems",
         homebrew=HOMEBREW,
         submodules=SUBMODULES,
-        stamp="libkicad/DependenciesChecked.generated.h",
+        stamp="Config/DependenciesChecked.generated.h",
         configure=configure,
     )))

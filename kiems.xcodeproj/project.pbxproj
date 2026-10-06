@@ -255,8 +255,8 @@
 		27FC500F5EC82E42F046FEF3 /* libkiems_tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = libkiems_tests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		47611C745FA02E5BA7871B3D /* copper_fdtd_worker */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = copper_fdtd_worker; sourceTree = BUILT_PRODUCTS_DIR; };
 		5653046AD79D4C9071AF237F /* KiEMS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = KiEMS.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		601D10000000000000000000 /* BuildPaths.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = libkicad/BuildPaths.xcconfig; sourceTree = SOURCE_ROOT; };
-		601D10000000000000000001 /* KiCadLink.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = libkicad/KiCadLink.xcconfig; sourceTree = SOURCE_ROOT; };
+		601D10000000000000000000 /* BuildPaths.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config/BuildPaths.xcconfig; sourceTree = SOURCE_ROOT; };
+		601D10000000000000000001 /* KiCadLink.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config/KiCadLink.xcconfig; sourceTree = SOURCE_ROOT; };
 		71AD229230263516006D5847 /* kiems */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = kiems; sourceTree = BUILT_PRODUCTS_DIR; };
 		71B40FE53042E223002796EC /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
 		71B40FE73042E24F002796EC /* Accelerate.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Accelerate.framework; path = System/Library/Frameworks/Accelerate.framework; sourceTree = SDKROOT; };
@@ -281,58 +281,44 @@
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		006F3A1386AFF2AD46CD89E4 /* libkiems */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-			);
 			path = libkiems;
 			sourceTree = "<group>";
 		};
 		1E051C9DFB9D9A4CF7CB1120 /* submodules/RememberRemember */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-			);
 			path = submodules/RememberRemember;
 			sourceTree = "<group>";
 		};
-		429F16897495224E3C8CB5A0 /* libkicad */ = {
+		429F16897495224E3C8CB5A0 /* submodules/libkicad */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				831E04806249A2E92CB47E24 /* Exceptions for "libkicad" folder in "libkicad" target */,
 			);
-			path = libkicad;
+			path = submodules/libkicad;
 			sourceTree = "<group>";
 		};
 		71AD229430263516006D5847 /* kiems-cli */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-			);
 			path = "kiems-cli";
 			sourceTree = "<group>";
 		};
 		8290469707C87811FFCE548F /* kiems_fdtd_worker */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-			);
 			path = kiems_fdtd_worker;
 			sourceTree = "<group>";
 		};
 		87EBBDF2469E60AF87C97EB2 /* libkiems_tests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-			);
 			path = libkiems_tests;
 			sourceTree = "<group>";
 		};
 		B7D891E5D67D73D341733A71 /* KiEMS */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-			);
 			path = KiEMS;
 			sourceTree = "<group>";
 		};
 		E331D08A3BF5F110095DBF0C /* copper_fdtd_worker */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-			);
 			path = copper_fdtd_worker;
 			sourceTree = "<group>";
 		};
@@ -451,7 +437,7 @@
 				8290469707C87811FFCE548F /* kiems_fdtd_worker */,
 				006F3A1386AFF2AD46CD89E4 /* libkiems */,
 				87EBBDF2469E60AF87C97EB2 /* libkiems_tests */,
-				429F16897495224E3C8CB5A0 /* libkicad */,
+				429F16897495224E3C8CB5A0 /* submodules/libkicad */,
 				71AD229330263516006D5847 /* Products */,
 				77AE1A0D84F974CC1EDDD9F6 /* Frameworks */,
 				E331D08A3BF5F110095DBF0C /* copper_fdtd_worker */,
@@ -685,7 +671,7 @@
 				6BC027AF2552E38B08C3ADAA /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				429F16897495224E3C8CB5A0 /* libkicad */,
+				429F16897495224E3C8CB5A0 /* submodules/libkicad */,
 			);
 			name = libkicad;
 			productName = libkicad;

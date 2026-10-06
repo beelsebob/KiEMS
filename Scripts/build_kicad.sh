@@ -1,6 +1,6 @@
 #!/bin/bash
 # Configures and builds the parts of the KiCad submodule (submodules/kicad) that libkicad links
-# against (see libkicad/KiCadLink.xcconfig), into build/kicad, using Homebrew's libraries.
+# against (see Config/KiCadLink.xcconfig), into build/kicad, using Homebrew's libraries.
 # Run Scripts/check_dependencies.py first; it checks the Homebrew formulas this needs.
 #
 # Usage: Scripts/build_kicad.sh
@@ -46,7 +46,7 @@ cmake -S "$SOURCE_DIR" -B "$BUILD_DIR" -G Ninja \
   -DKICAD_USE_SENTRY=OFF \
   -DKICAD_UPDATE_CHECK=OFF
 
-# Exactly what libkicad/KiCadLink.xcconfig links: static libraries, the three dylibs (which CMake
+# Exactly what Config/KiCadLink.xcconfig links: static libraries, the three dylibs (which CMake
 # places in build/kicad/kicad/KiCad.app/Contents/Frameworks), and four of pcbnew's object files --
 # built individually, since their pcbnew_kiface_objects target is all ~460 of pcbnew's sources.
 PCBNEW_API_OBJECTS=pcbnew/CMakeFiles/pcbnew_kiface_objects.dir/api

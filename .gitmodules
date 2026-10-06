@@ -8,3 +8,6 @@
 [submodule "submodules/Copper"]
 	path = submodules/Copper
 	url = https://github.com/beelsebob/Copper
+[submodule "submodules/libkicad"]
+	path = submodules/libkicad
+	url = https://github.com/beelsebob/libkicad

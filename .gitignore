@@ -9,6 +9,6 @@ __pycache__/
 /et
 /ht
 /worker_error.txt
-/libkicad/BuildPaths.local.xcconfig
+/Config/BuildPaths.local.xcconfig
 /geometry_preview_components.stl
-/libkicad/DependenciesChecked.generated.h
+/Config/DependenciesChecked.generated.h
