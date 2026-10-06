@@ -4,7 +4,7 @@
 	shallow = true
 [submodule "submodules/RememberRemember"]
 	path = submodules/RememberRemember
-	url = git@github.com:beelsebob/RememberRemember.git
+	url = https://github.com/beelsebob/RememberRemember
 [submodule "submodules/Copper"]
 	path = submodules/Copper
-	url = git@github.com:beelsebob/Copper.git
+	url = https://github.com/beelsebob/Copper

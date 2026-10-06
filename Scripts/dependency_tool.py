@@ -296,7 +296,14 @@ def check_submodules(ctx: Context, subs: list[Submodule], consent: list[Optional
                                      "(git submodule update --init), along with any submodules inside them?")
         if consent[0]:
             for sub, _ in outdated:
-                result = subprocess.run(["git", "-C", str(sub.owner), "submodule", "update", "--init", "--", sub.path])
+                url = git(sub.owner, "config", "-f", ".gitmodules", f"submodule.{sub.path}.url").stdout.strip()
+                print(f"  fetching {sub.full.relative_to(ctx.root)} from {url}")
+                # Pick up URL changes in .gitmodules (e.g. ssh -> https) for an existing clone.
+                git(sub.owner, "submodule", "sync", "--", sub.path)
+                # --recommend-shallow honours `shallow = true` in .gitmodules (KiCad's full history
+                # is several gigabytes); --progress shows the transfer even for large clones.
+                result = subprocess.run(["git", "-C", str(sub.owner), "submodule", "update", "--init",
+                                         "--recommend-shallow", "--progress", "--", sub.path])
                 if result.returncode != 0:
                     print(f"  {RED}error{RESET}    git submodule update failed for {sub.full.relative_to(ctx.root)}")
             outdated = report()
