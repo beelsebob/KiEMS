@@ -1,11 +1,11 @@
 #!/bin/bash
 # Configures and builds the parts of the KiCad submodule (submodules/kicad) that libkicad links
 # against (see libkicad/KiCadLink.xcconfig), into build/kicad, using Homebrew's libraries.
-# Run Scripts/check_dependencies.sh first; it checks the Homebrew formulas this needs.
+# Run Scripts/check_dependencies.py first; it checks the Homebrew formulas this needs.
 #
 # Usage: Scripts/build_kicad.sh
 #
-# Not run from Xcode. Rerun it after the submodule moves; check_dependencies.sh notices when it has.
+# Not run from Xcode. Rerun it after the submodule moves; check_dependencies.py notices when it has.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,7 +22,7 @@ for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
   [ -z "$BREW" ] && [ -x "$candidate" ] && BREW="$candidate"
 done
 if [ -z "$BREW" ]; then
-  echo "error: Homebrew not found -- run Scripts/check_dependencies.sh" >&2
+  echo "error: Homebrew not found -- run Scripts/check_dependencies.py" >&2
   exit 1
 fi
 BREW_PREFIX="$("$BREW" --prefix)"
@@ -57,7 +57,7 @@ cmake --build "$BUILD_DIR" --target \
   "$PCBNEW_API_OBJECTS/headless_pcb_context.cpp.o" \
   "$PCBNEW_API_OBJECTS/pcb_context.cpp.o"
 
-# Lets check_dependencies.sh notice when the submodule has moved on since this build.
+# Lets check_dependencies.py notice when the submodule has moved on since this build.
 git -C "$SOURCE_DIR" rev-parse HEAD > "$BUILD_DIR/.built-commit"
 
 echo "Built KiCad libraries in $BUILD_DIR"

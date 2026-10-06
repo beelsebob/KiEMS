@@ -1,12 +1,3 @@
-[submodule "submodules/CSXCAD"]
-	path = submodules/CSXCAD
-	url = https://github.com/beelsebob/CSXCAD
-[submodule "submodules/tinyxml"]
-	path = submodules/tinyxml
-	url = https://git.code.sf.net/p/tinyxml/git
-[submodule "submodules/fparser"]
-	path = submodules/fparser
-	url = https://github.com/thliebig/fparser
 [submodule "submodules/kicad"]
 	path = submodules/kicad
 	url = https://gitlab.com/kicad/code/kicad.git
