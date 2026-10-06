@@ -5,4 +5,6 @@
 
 #if !__has_include("DependenciesChecked.generated.h")
 #error "Third-party dependencies have not been checked: run Scripts/check_dependencies.py"
+// Stop this compile here rather than also reporting every header a missing dependency provides.
+#include "DependenciesChecked.generated.h"
 #endif

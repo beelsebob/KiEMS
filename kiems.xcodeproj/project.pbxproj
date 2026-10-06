@@ -23,7 +23,7 @@
 		601D00000000000000000005 /* liblibkicad.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */; };
 		601D00000000000000000006 /* liblibkicad.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */; };
 		71AD3CEB302FAAD5006D5847 /* Copper.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3586812A4F6CE84886F63B2D /* Copper.framework */; };
-		71AD3CEC302FAAD5006D5847 /* Copper.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 3586812A4F6CE84886F63B2D /* Copper.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		71AD3CEC302FAAD5006D5847 /* Copper.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = A6B36F967905F85737C9E377 /* Copper.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		71B40FE93042E264002796EC /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 9691133F7B92BAA7BB234B8C /* libCSXCAD.dylib */; };
 		71B40FEA3042E2B5002796EC /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 9691133F7B92BAA7BB234B8C /* libCSXCAD.dylib */; };
 		7E57CB0000000000000000C5 /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 9691133F7B92BAA7BB234B8C /* libCSXCAD.dylib */; };
@@ -257,14 +257,15 @@
 		27FC500F5EC82E42F046FEF3 /* libkiems_tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = libkiems_tests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		47611C745FA02E5BA7871B3D /* copper_fdtd_worker */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = copper_fdtd_worker; sourceTree = BUILT_PRODUCTS_DIR; };
 		5653046AD79D4C9071AF237F /* KiEMS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = KiEMS.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		601D10000000000000000000 /* libkicad/BuildPaths.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = libkicad/BuildPaths.xcconfig; sourceTree = SOURCE_ROOT; };
-		601D10000000000000000001 /* libkicad/KiCadLink.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = libkicad/KiCadLink.xcconfig; sourceTree = SOURCE_ROOT; };
+		601D10000000000000000000 /* BuildPaths.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = libkicad/BuildPaths.xcconfig; sourceTree = SOURCE_ROOT; };
+		601D10000000000000000001 /* KiCadLink.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = libkicad/KiCadLink.xcconfig; sourceTree = SOURCE_ROOT; };
 		71AD229230263516006D5847 /* kiems */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = kiems; sourceTree = BUILT_PRODUCTS_DIR; };
 		71B40FE53042E223002796EC /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
 		71B40FE73042E24F002796EC /* Accelerate.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Accelerate.framework; path = System/Library/Frameworks/Accelerate.framework; sourceTree = SDKROOT; };
 		7A75E68FFCE0FE7A89A86020 /* Copper.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; name = Copper.xcodeproj; path = submodules/Copper/Copper.xcodeproj; sourceTree = SOURCE_ROOT; };
 		922BA8FA4CD5D8901DCAC9DA /* liblibkiems.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = liblibkiems.a; sourceTree = BUILT_PRODUCTS_DIR; };
 		A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = liblibkicad.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		A6B36F967905F85737C9E377 /* Copper.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Copper.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		CE532C213E2D6E98AA310B22 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
 		DEC747CBEC864D957296A740 /* RememberRemember.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = RememberRemember.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -272,41 +273,57 @@
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		006F3A1386AFF2AD46CD89E4 /* libkiems */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
 			path = libkiems;
 			sourceTree = "<group>";
 		};
 		1E051C9DFB9D9A4CF7CB1120 /* submodules/RememberRemember */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
 			path = submodules/RememberRemember;
 			sourceTree = "<group>";
 		};
 		429F16897495224E3C8CB5A0 /* libkicad */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
 			path = libkicad;
 			sourceTree = "<group>";
 		};
 		71AD229430263516006D5847 /* kiems-cli */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
 			path = "kiems-cli";
 			sourceTree = "<group>";
 		};
 		8290469707C87811FFCE548F /* kiems_fdtd_worker */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
 			path = kiems_fdtd_worker;
 			sourceTree = "<group>";
 		};
 		87EBBDF2469E60AF87C97EB2 /* libkiems_tests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
 			path = libkiems_tests;
 			sourceTree = "<group>";
 		};
 		B7D891E5D67D73D341733A71 /* KiEMS */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
 			path = KiEMS;
 			sourceTree = "<group>";
 		};
 		E331D08A3BF5F110095DBF0C /* copper_fdtd_worker */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
 			path = copper_fdtd_worker;
 			sourceTree = "<group>";
 		};
@@ -417,8 +434,8 @@
 		71AD228930263515006D5847 = {
 			isa = PBXGroup;
 			children = (
-				601D10000000000000000000 /* libkicad/BuildPaths.xcconfig */,
-				601D10000000000000000001 /* libkicad/KiCadLink.xcconfig */,
+				601D10000000000000000000 /* BuildPaths.xcconfig */,
+				601D10000000000000000001 /* KiCadLink.xcconfig */,
 				1E051C9DFB9D9A4CF7CB1120 /* submodules/RememberRemember */,
 				B7D891E5D67D73D341733A71 /* KiEMS */,
 				71AD229430263516006D5847 /* kiems-cli */,
@@ -463,6 +480,7 @@
 				71B40FE73042E24F002796EC /* Accelerate.framework */,
 				71B40FE53042E223002796EC /* Metal.framework */,
 				E45C2AB06E543A05FCB6DCC8 /* OS X */,
+				A6B36F967905F85737C9E377 /* Copper.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -957,7 +975,7 @@
 		};
 		267D1CBD028BDD9E5178D2D5 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 601D10000000000000000001 /* libkicad/KiCadLink.xcconfig */;
+			baseConfigurationReference = 601D10000000000000000001 /* KiCadLink.xcconfig */;
 			buildSettings = {
 				CLANG_CXX_LANGUAGE_STANDARD = "c++23";
 				CODE_SIGN_STYLE = Automatic;
@@ -986,7 +1004,7 @@
 		};
 		26BF06E54C44F2408EBAEC10 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 601D10000000000000000001 /* libkicad/KiCadLink.xcconfig */;
+			baseConfigurationReference = 601D10000000000000000001 /* KiCadLink.xcconfig */;
 			buildSettings = {
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
@@ -1195,7 +1213,7 @@
 		};
 		6B1740D988F76B333D388E17 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 601D10000000000000000001 /* libkicad/KiCadLink.xcconfig */;
+			baseConfigurationReference = 601D10000000000000000001 /* KiCadLink.xcconfig */;
 			buildSettings = {
 				CLANG_CXX_LANGUAGE_STANDARD = "c++23";
 				CODE_SIGN_STYLE = Automatic;
@@ -1224,7 +1242,7 @@
 		};
 		71AD229730263516006D5847 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 601D10000000000000000000 /* libkicad/BuildPaths.xcconfig */;
+			baseConfigurationReference = 601D10000000000000000000 /* BuildPaths.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ARCHS = arm64;
@@ -1324,7 +1342,7 @@
 		};
 		71AD229830263516006D5847 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 601D10000000000000000000 /* libkicad/BuildPaths.xcconfig */;
+			baseConfigurationReference = 601D10000000000000000000 /* BuildPaths.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ARCHS = arm64;
@@ -1421,7 +1439,7 @@
 		};
 		71AD229A30263516006D5847 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 601D10000000000000000001 /* libkicad/KiCadLink.xcconfig */;
+			baseConfigurationReference = 601D10000000000000000001 /* KiCadLink.xcconfig */;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				HEADER_SEARCH_PATHS = (
@@ -1453,7 +1471,7 @@
 		};
 		71AD229B30263516006D5847 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 601D10000000000000000001 /* libkicad/KiCadLink.xcconfig */;
+			baseConfigurationReference = 601D10000000000000000001 /* KiCadLink.xcconfig */;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				HEADER_SEARCH_PATHS = (
@@ -1485,7 +1503,7 @@
 		};
 		76CF780F59412846FB761B04 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 601D10000000000000000001 /* libkicad/KiCadLink.xcconfig */;
+			baseConfigurationReference = 601D10000000000000000001 /* KiCadLink.xcconfig */;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				HEADER_SEARCH_PATHS = (
@@ -1510,7 +1528,7 @@
 		};
 		9DC9E0D3568EB7DF36EC7116 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 601D10000000000000000001 /* libkicad/KiCadLink.xcconfig */;
+			baseConfigurationReference = 601D10000000000000000001 /* KiCadLink.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CODE_SIGN_STYLE = Automatic;
@@ -1698,7 +1716,7 @@
 		};
 		C674A4B6897CD58CA339D0D9 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 601D10000000000000000001 /* libkicad/KiCadLink.xcconfig */;
+			baseConfigurationReference = 601D10000000000000000001 /* KiCadLink.xcconfig */;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				HEADER_SEARCH_PATHS = (
@@ -1753,7 +1771,7 @@
 		};
 		D6ACEBA0EED715AFA5287BAE /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 601D10000000000000000001 /* libkicad/KiCadLink.xcconfig */;
+			baseConfigurationReference = 601D10000000000000000001 /* KiCadLink.xcconfig */;
 			buildSettings = {
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
@@ -1782,7 +1800,7 @@
 		};
 		EEA49829DD57398072E0E08B /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 601D10000000000000000001 /* libkicad/KiCadLink.xcconfig */;
+			baseConfigurationReference = 601D10000000000000000001 /* KiCadLink.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CODE_SIGN_STYLE = Automatic;
