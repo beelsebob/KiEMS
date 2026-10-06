@@ -288,14 +288,25 @@ def wanted_url(ctx: Context, sub: Submodule) -> str:
 
 
 def use_url(ctx: Context, sub: Submodule) -> None:
-    """Points `sub` at https or ssh as this run asks, in the owner's local config and, once it is
-    cloned, in the clone's origin. Nothing in .gitmodules changes."""
+    """Points `sub` at https or ssh as this run asks, in the owner's local config and in the
+    submodule's own repository. Nothing in .gitmodules changes."""
     name, url = submodule_name(sub), wanted_url(ctx, sub)
+    changed = False
     configured = git(sub.owner, "config", f"submodule.{name}.url").stdout.strip()
     if configured and configured != url:
         git(sub.owner, "config", f"submodule.{name}.url", url)
-        if (sub.full / ".git").exists():
-            git(sub.full, "remote", "set-url", "origin", url)
+        changed = True
+    # The submodule's repository lives in the owner's .git/modules, and can exist without a
+    # checkout (after an interrupted fetch, say); `git submodule update` then fetches from its
+    # origin, not from the URL above, so that has to change too.
+    git_dir = git(sub.owner, "rev-parse", "--path-format=absolute", "--git-path", f"modules/{name}").stdout.strip()
+    if git_dir and Path(git_dir).is_dir():
+        origin = subprocess.run(["git", "--git-dir", git_dir, "remote", "get-url", "origin"],
+                                capture_output=True, text=True).stdout.strip()
+        if origin and origin != url:
+            subprocess.run(["git", "--git-dir", git_dir, "remote", "set-url", "origin", url], capture_output=True)
+            changed = True
+    if changed:
         ctx.ok(f"{sub.full.relative_to(ctx.root)} now fetches from {url}")
 
 
