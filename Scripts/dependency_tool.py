@@ -104,10 +104,11 @@ class Context:
         if self.assume_yes:
             return True
         # No controlling terminal (Xcode build phase, CI): never prompt, treat as "no".
+        # Separate handles: Python refuses "r+" on a terminal, which can't seek.
         try:
-            with open("/dev/tty", "r+") as tty:
-                tty.write(f"{question} [y/N] ")
-                tty.flush()
+            with open("/dev/tty", "w") as out, open("/dev/tty") as tty:
+                out.write(f"{question} [y/N] ")
+                out.flush()
                 reply = tty.readline().strip().lower()
         except OSError:
             print("  (no terminal to ask; rerun in a terminal, or with --yes)")
