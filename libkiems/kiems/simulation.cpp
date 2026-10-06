@@ -20,7 +20,7 @@
 
 #include "constants.hpp"
 #include "csx_grid_utils.hpp"
-#include "../../submodules/libkicad/libkicad.hpp"
+#include "libkicad/libkicad.hpp"
 #include "board_slicing.hpp"
 #include "logging.hpp"
 

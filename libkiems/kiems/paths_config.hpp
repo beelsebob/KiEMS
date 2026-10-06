@@ -8,7 +8,7 @@
 
 #include <filesystem>
 
-#include "../../submodules/libkicad/libkicad.hpp"
+#include "libkicad/libkicad.hpp"
 
 namespace kiems {
 

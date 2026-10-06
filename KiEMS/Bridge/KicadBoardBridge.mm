@@ -8,7 +8,7 @@
 #include "kiems/constants.hpp"
 #include "kiems/net_name.hpp"
 #include <unordered_set>
-#include "submodules/libkicad/libkicad.hpp"
+#include "libkicad/libkicad.hpp"
 #include <filesystem>
 #include <optional>
 

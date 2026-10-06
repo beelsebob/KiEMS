@@ -2,7 +2,7 @@
 // header -- see EMSConfigBridge+Private.h.
 #import "KicadBoardBridge.h"
 
-#include "submodules/libkicad/libkicad.hpp"
+#include "libkicad/libkicad.hpp"
 
 NS_ASSUME_NONNULL_BEGIN
 

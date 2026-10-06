@@ -5,7 +5,7 @@
 
 #include "config.hpp"
 #include "constants.hpp"
-#include "../../submodules/libkicad/libkicad.hpp"
+#include "libkicad/libkicad.hpp"
 #include "logging.hpp"
 
 namespace kiems {

@@ -10,7 +10,7 @@
 
 #include "config.hpp"
 #include "constants.hpp"
-#include "../../submodules/libkicad/libkicad.hpp"
+#include "libkicad/libkicad.hpp"
 #include "logging.hpp"
 #include "polygon_geometry.hpp"
 #include "via_stitching.hpp"

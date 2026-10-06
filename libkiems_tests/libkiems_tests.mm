@@ -32,7 +32,7 @@
 #include "kiems/postprocess.hpp"
 #include "kiems/ports.hpp"
 #include "kiems/via_stitching.hpp"
-#include "../submodules/libkicad/libkicad.hpp"
+#include "libkicad/libkicad.hpp"
 #include "logging.hpp"
 #include "polygon_geometry.hpp"
 
@@ -2654,7 +2654,7 @@ static kiems::EMSConfig makeSyntheticConfig() {
         ~Cleanup() { std::error_code error; std::filesystem::remove_all(path, error); }
     } cleanup{dir};
     const auto model = std::filesystem::path(__FILE__).parent_path().parent_path() /
-        "submodules/kicad/qa/data/pcbnew/step_model_colors/TO-252-2.step";
+        "submodules/libkicad/submodules/kicad/qa/data/pcbnew/step_model_colors/TO-252-2.step";
     XCTAssertTrue(std::filesystem::exists(model));
     const auto project = dir / "fixture.kicad_pro";
     const auto boardPath = dir / "fixture.kicad_pcb";

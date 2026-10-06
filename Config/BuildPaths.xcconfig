@@ -3,9 +3,6 @@
 // Override any of these on the xcodebuild command line, in Xcode's build settings, or by creating
 // an untracked BuildPaths.local.xcconfig alongside this file. The checked-in defaults match the
 // repository's usual Apple Silicon development layout without embedding a developer's home path.
-KICAD_SOURCE_ROOT = $(SRCROOT)/submodules/kicad
-KICAD_BUILD_ROOT = $(SRCROOT)/build/kicad
-KICAD_FRAMEWORK_ROOT = $(KICAD_BUILD_ROOT)/kicad/KiCad.app/Contents/Frameworks
 HOMEBREW_PREFIX = /opt/homebrew
 
 // Fails every compile with an #error until Scripts/check_dependencies.py has passed on this machine.

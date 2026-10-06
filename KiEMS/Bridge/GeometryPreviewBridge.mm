@@ -24,8 +24,8 @@
 #include "kiems/config.hpp"
 #include "kiems/constants.hpp"
 #include "kiems/importer.hpp"
-#include "submodules/libkicad/libkicad.hpp"
-#include "submodules/libkicad/board_load_timing.hpp"
+#include "libkicad/libkicad.hpp"
+#include "libkicad/board_load_timing.hpp"
 #include "logging.hpp"
 #include "kiems/paths_config.hpp"
 
