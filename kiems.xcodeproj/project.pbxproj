@@ -421,17 +421,14 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		71AD3CED302FAAD5006D5847 /* Exceptions for "Copper" folder in "Copper" target */ = {
+		71AD3CED302FAAD5006D5847 /* Exceptions for "submodules/Copper/Copper" folder in "Copper" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			additionalCompilerFlagsByRelativePath = {
-				Internal/CopperEngine.mm = "-fobjc-arc-exceptions";
-			};
 			publicHeaders = (
 				Copper.h,
 			);
 			target = 71AD3CD5302FAAD5006D5847 /* Copper */;
 		};
-		71B4EE99304224FD002796EC /* Exceptions for "CopperUtils" folder in "libkiems" target */ = {
+		71B4EE99304224FD002796EC /* Exceptions for "submodules/Copper/CopperUtils" folder in "libkiems" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				geometry.cpp,
@@ -441,7 +438,7 @@
 			);
 			target = 0E08621C93A1CC737D3F6A93 /* libkiems */;
 		};
-		71B4EE9A304224FD002796EC /* Exceptions for "CopperUtils" folder in "CopperUtils" target */ = {
+		71B4EE9A304224FD002796EC /* Exceptions for "submodules/Copper/CopperUtils" folder in "CopperUtils" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			publicHeaders = (
 				logging.hpp,
@@ -471,26 +468,26 @@
 			path = "kiems-cli";
 			sourceTree = "<group>";
 		};
-		71AD3CD7302FAAD5006D5847 /* Copper */ = {
+		71AD3CD7302FAAD5006D5847 /* submodules/Copper/Copper */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
-				71AD3CED302FAAD5006D5847 /* Exceptions for "Copper" folder in "Copper" target */,
+				71AD3CED302FAAD5006D5847 /* Exceptions for "submodules/Copper/Copper" folder in "Copper" target */,
 			);
-			path = Copper;
+			path = submodules/Copper/Copper;
 			sourceTree = "<group>";
 		};
-		71AD3CE6302FAAD5006D5847 /* CopperTests */ = {
+		71AD3CE6302FAAD5006D5847 /* submodules/Copper/CopperTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = CopperTests;
+			path = submodules/Copper/CopperTests;
 			sourceTree = "<group>";
 		};
-		71B4EE8F304224C5002796EC /* CopperUtils */ = {
+		71B4EE8F304224C5002796EC /* submodules/Copper/CopperUtils */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
-				71B4EE99304224FD002796EC /* Exceptions for "CopperUtils" folder in "libkiems" target */,
-				71B4EE9A304224FD002796EC /* Exceptions for "CopperUtils" folder in "CopperUtils" target */,
+				71B4EE99304224FD002796EC /* Exceptions for "submodules/Copper/CopperUtils" folder in "libkiems" target */,
+				71B4EE9A304224FD002796EC /* Exceptions for "submodules/Copper/CopperUtils" folder in "CopperUtils" target */,
 			);
-			path = CopperUtils;
+			path = submodules/Copper/CopperUtils;
 			sourceTree = "<group>";
 		};
 		8290469707C87811FFCE548F /* kiems_fdtd_worker */ = {
@@ -508,9 +505,9 @@
 			path = KiEMS;
 			sourceTree = "<group>";
 		};
-		E331D08A3BF5F110095DBF0C /* copper_fdtd_worker */ = {
+		E331D08A3BF5F110095DBF0C /* submodules/Copper/copper_fdtd_worker */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = copper_fdtd_worker;
+			path = submodules/Copper/copper_fdtd_worker;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -652,12 +649,12 @@
 				87EBBDF2469E60AF87C97EB2 /* libkiems_tests */,
 				429F16897495224E3C8CB5A0 /* libkicad */,
 				9D2EF3F131A05169F6A8F5B8 /* libkicad_api */,
-				71AD3CD7302FAAD5006D5847 /* Copper */,
-				71AD3CE6302FAAD5006D5847 /* CopperTests */,
-				71B4EE8F304224C5002796EC /* CopperUtils */,
+				71AD3CD7302FAAD5006D5847 /* submodules/Copper/Copper */,
+				71AD3CE6302FAAD5006D5847 /* submodules/Copper/CopperTests */,
+				71B4EE8F304224C5002796EC /* submodules/Copper/CopperUtils */,
 				71AD229330263516006D5847 /* Products */,
 				77AE1A0D84F974CC1EDDD9F6 /* Frameworks */,
-				E331D08A3BF5F110095DBF0C /* copper_fdtd_worker */,
+				E331D08A3BF5F110095DBF0C /* submodules/Copper/copper_fdtd_worker */,
 				ECADA86A6A99C5289CA01658 /* CSXCAD */,
 				7A1100000000000000000001 /* tinyxml */,
 				7A1200000000000000000001 /* fparser */,
@@ -955,7 +952,7 @@
 				8DE0A57267DFF4C0D725E131 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				E331D08A3BF5F110095DBF0C /* copper_fdtd_worker */,
+				E331D08A3BF5F110095DBF0C /* submodules/Copper/copper_fdtd_worker */,
 			);
 			name = copper_fdtd_worker;
 			productName = copper_fdtd_worker;
@@ -1022,7 +1019,7 @@
 				00D38236B762AE5D5D6823F0 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				71AD3CD7302FAAD5006D5847 /* Copper */,
+				71AD3CD7302FAAD5006D5847 /* submodules/Copper/Copper */,
 			);
 			name = Copper;
 			productName = Copper;
@@ -1044,7 +1041,7 @@
 				3270E36383980EDA455F1809 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				71AD3CE6302FAAD5006D5847 /* CopperTests */,
+				71AD3CE6302FAAD5006D5847 /* submodules/Copper/CopperTests */,
 			);
 			name = CopperTests;
 			productName = CopperTests;
@@ -1064,7 +1061,7 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				71B4EE8F304224C5002796EC /* CopperUtils */,
+				71B4EE8F304224C5002796EC /* submodules/Copper/CopperUtils */,
 			);
 			name = CopperUtils;
 			packageProductDependencies = (
@@ -1550,8 +1547,9 @@
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)",
+					"$(SRCROOT)/submodules/Copper",
 					"$(SRCROOT)/libkiems",
-					"$(SRCROOT)/Copper",
+					"$(SRCROOT)/submodules/Copper/Copper",
 				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -1975,7 +1973,7 @@
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/libkiems",
-					"$(SRCROOT)/Copper",
+					"$(SRCROOT)/submodules/Copper/Copper",
 				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -1994,6 +1992,7 @@
 				SYSTEM_HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)",
+					"$(SRCROOT)/submodules/Copper",
 				);
 			};
 			name = Debug;
@@ -2006,7 +2005,7 @@
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/libkiems",
-					"$(SRCROOT)/Copper",
+					"$(SRCROOT)/submodules/Copper/Copper",
 				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -2025,6 +2024,7 @@
 				SYSTEM_HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)",
+					"$(SRCROOT)/submodules/Copper",
 				);
 			};
 			name = Release;
@@ -2125,7 +2125,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = "$(SRCROOT)/Copper";
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/submodules/Copper/Copper";
 				MARKETING_VERSION = 1.0;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
@@ -2151,7 +2151,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = "$(SRCROOT)/Copper";
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/submodules/Copper/Copper";
 				MARKETING_VERSION = 1.0;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
@@ -2212,8 +2212,9 @@
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)",
+					"$(SRCROOT)/submodules/Copper",
 					"$(SRCROOT)/libkiems",
-					"$(SRCROOT)/Copper",
+					"$(SRCROOT)/submodules/Copper/Copper",
 				);
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
@@ -2239,6 +2240,7 @@
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)",
+					"$(SRCROOT)/submodules/Copper",
 					"$(SRCROOT)/libkiems",
 				);
 				INFOPLIST_FILE = KiEMS/Info.plist;
@@ -2423,8 +2425,9 @@
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)",
+					"$(SRCROOT)/submodules/Copper",
 					"$(SRCROOT)/libkiems",
-					"$(SRCROOT)/Copper",
+					"$(SRCROOT)/submodules/Copper/Copper",
 				);
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
@@ -2449,6 +2452,7 @@
 				SYSTEM_HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)",
+					"$(SRCROOT)/submodules/Copper",
 				);
 			};
 			name = Release;
@@ -2463,6 +2467,7 @@
 				SYSTEM_HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)",
+					"$(SRCROOT)/submodules/Copper",
 				);
 			};
 			name = Debug;
@@ -2474,8 +2479,9 @@
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)",
+					"$(SRCROOT)/submodules/Copper",
 					"$(SRCROOT)/libkiems",
-					"$(SRCROOT)/Copper",
+					"$(SRCROOT)/submodules/Copper/Copper",
 				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -2575,6 +2581,7 @@
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)",
+					"$(SRCROOT)/submodules/Copper",
 					"$(SRCROOT)/libkiems",
 				);
 				INFOPLIST_FILE = KiEMS/Info.plist;

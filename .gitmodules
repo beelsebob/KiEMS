@@ -14,3 +14,6 @@
 [submodule "submodules/RememberRemember"]
 	path = submodules/RememberRemember
 	url = git@github.com:beelsebob/RememberRemember.git
+[submodule "submodules/Copper"]
+	path = submodules/Copper
+	url = git@github.com:beelsebob/Copper.git

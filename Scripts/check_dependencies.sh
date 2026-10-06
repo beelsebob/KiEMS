@@ -56,7 +56,7 @@ fontconfig       2.18  KiCad build
 unixodbc         2.3   KiCad build
 "
 
-SUBMODULES="submodules/CSXCAD submodules/fparser submodules/tinyxml submodules/kicad"
+SUBMODULES="submodules/Copper submodules/CSXCAD submodules/fparser submodules/tinyxml submodules/kicad"
 
 if [ -t 1 ]; then
   RED=$'\033[31m'; YELLOW=$'\033[33m'; GREEN=$'\033[32m'; BOLD=$'\033[1m'; RESET=$'\033[0m'
