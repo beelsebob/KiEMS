@@ -15,7 +15,6 @@
 		479136241E9A85AC3E2BFC9B /* RememberRemember.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DEC747CBEC864D957296A740 /* RememberRemember.framework */; };
 		4988C919C7B2E11A4E12652C /* liblibkiems.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 922BA8FA4CD5D8901DCAC9DA /* liblibkiems.a */; };
 		4AE99EF823B18E76EBD8A114 /* libCopperUtils.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 5A1B3A51A30B8BD9D7ACED8B /* libCopperUtils.a */; };
-		5FE243961E65671FE35C65E0 /* libkicad_api.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 0F1EB3900F88445339BD6FB8 /* libkicad_api.cpp */; settings = {COMPILER_FLAGS = "-std=c++23"; }; };
 		5FEE70EE235A62413F9E6A97 /* Copper.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3586812A4F6CE84886F63B2D /* Copper.framework */; };
 		601D00000000000000000001 /* liblibkicad.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */; };
 		601D00000000000000000002 /* liblibkicad.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */; };
@@ -252,7 +251,6 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		0F1EB3900F88445339BD6FB8 /* libkicad_api.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = libkicad_api.cpp; sourceTree = "<group>"; };
 		1730AB8B76054706EB2AB0BA /* kiems_fdtd_worker */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = kiems_fdtd_worker; sourceTree = BUILT_PRODUCTS_DIR; };
 		27FC500F5EC82E42F046FEF3 /* libkiems_tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = libkiems_tests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		47611C745FA02E5BA7871B3D /* copper_fdtd_worker */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = copper_fdtd_worker; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -269,6 +267,16 @@
 		CE532C213E2D6E98AA310B22 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
 		DEC747CBEC864D957296A740 /* RememberRemember.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = RememberRemember.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		831E04806249A2E92CB47E24 /* Exceptions for "libkicad" folder in "libkicad" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			additionalCompilerFlagsByRelativePath = {
+				libkicad_api.cpp = "-std=c++23";
+			};
+			target = B0B651E8085482933DC2AFFE /* libkicad */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		006F3A1386AFF2AD46CD89E4 /* libkiems */ = {
@@ -288,6 +296,7 @@
 		429F16897495224E3C8CB5A0 /* libkicad */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
+				831E04806249A2E92CB47E24 /* Exceptions for "libkicad" folder in "libkicad" target */,
 			);
 			path = libkicad;
 			sourceTree = "<group>";
@@ -443,7 +452,6 @@
 				006F3A1386AFF2AD46CD89E4 /* libkiems */,
 				87EBBDF2469E60AF87C97EB2 /* libkiems_tests */,
 				429F16897495224E3C8CB5A0 /* libkicad */,
-				9D2EF3F131A05169F6A8F5B8 /* libkicad_api */,
 				71AD229330263516006D5847 /* Products */,
 				77AE1A0D84F974CC1EDDD9F6 /* Frameworks */,
 				E331D08A3BF5F110095DBF0C /* copper_fdtd_worker */,
@@ -483,14 +491,6 @@
 				A6B36F967905F85737C9E377 /* Copper.framework */,
 			);
 			name = Frameworks;
-			sourceTree = "<group>";
-		};
-		9D2EF3F131A05169F6A8F5B8 /* libkicad_api */ = {
-			isa = PBXGroup;
-			children = (
-				0F1EB3900F88445339BD6FB8 /* libkicad_api.cpp */,
-			);
-			path = libkicad_api;
 			sourceTree = "<group>";
 		};
 		E45C2AB06E543A05FCB6DCC8 /* OS X */ = {
@@ -819,7 +819,6 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				5FE243961E65671FE35C65E0 /* libkicad_api.cpp in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
