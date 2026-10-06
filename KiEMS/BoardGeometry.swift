@@ -450,19 +450,18 @@ final class BoardGeometryBuilder {
         }
     }
 
-    private func chunk(for layer: BoardGeometrySnapshot.Layer) -> BoardGeometryChunk {
-        let id = ObjectIdentifier(layer.layer)
-        if let cached = layerCache[id], cached.revision == layer.revision, cached.z == layer.z,
-           cached.color == layer.color {
-            return cached.chunk
-        }
+    private func cachedChunk(for layer: BoardGeometrySnapshot.Layer) -> BoardGeometryChunk? {
+        guard let cached = layerCache[ObjectIdentifier(layer.layer)], cached.revision == layer.revision,
+              cached.z == layer.z, cached.color == layer.color else { return nil }
+        return cached.chunk
+    }
+
+    /// Converts one layer without touching any builder state, so layers can convert concurrently.
+    private static func makeChunk(for layer: BoardGeometrySnapshot.Layer) -> BoardGeometryChunk {
         let signposter = OSSignposter(subsystem: "com.kiems", category: "BoardLoad")
         let timing = signposter.beginInterval("Layer chunk", id: signposter.makeSignpostID(), "\(layer.name, privacy: .public) triangles=\(layer.triangles.count)")
         defer { signposter.endInterval("Layer chunk", timing) }
-        let chunk = BoardGeometryChunk.layer(layer)
-        layerCache[id] = LayerCacheEntry(layer: layer.layer, revision: layer.revision, z: layer.z,
-                                         color: layer.color, chunk: chunk)
-        return chunk
+        return BoardGeometryChunk.layer(layer)
     }
 
     private func assemble(_ snapshot: BoardGeometrySnapshot) -> BoardGeometry {
@@ -470,16 +469,39 @@ final class BoardGeometryBuilder {
         let chunksTiming = signposter.beginInterval("Geometry chunks", id: signposter.makeSignpostID())
         let live = Set(snapshot.layers.map { ObjectIdentifier($0.layer) })
         layerCache = layerCache.filter { live.contains($0.key) }
-        let meshes: (vias: BoardGeometryChunk, components: BoardGeometryChunk)
-        if let meshCache, meshCache.preview === snapshot.preview, meshCache.revision == snapshot.previewRevision {
-            meshes = (meshCache.vias, meshCache.components)
-        } else {
-            meshes = (BoardGeometryChunk.vias(snapshot.viaMeshTriangles),
-                      BoardGeometryChunk.components(snapshot.componentMeshTriangles))
-            meshCache = (snapshot.preview, snapshot.previewRevision, meshes.vias, meshes.components)
+        let meshesCached = meshCache.map {
+            $0.preview === snapshot.preview && $0.revision == snapshot.previewRevision
+        } ?? false
+
+        // Every stale layer, and the via/component meshes, convert independently from their own
+        // immutable inputs into fresh chunks. On a first load that is every layer, so convert
+        // them concurrently; only the cache updates afterwards touch builder state.
+        let staleLayers = snapshot.layers.indices.filter { cachedChunk(for: snapshot.layers[$0]) == nil }
+        let jobCount = staleLayers.count + (meshesCached ? 0 : 2)
+        var built = [BoardGeometryChunk?](repeating: nil, count: jobCount)
+        built.withUnsafeMutableBufferPointer { results in
+            DispatchQueue.concurrentPerform(iterations: jobCount) { job in
+                if job < staleLayers.count {
+                    results[job] = Self.makeChunk(for: snapshot.layers[staleLayers[job]])
+                } else if job == staleLayers.count {
+                    results[job] = BoardGeometryChunk.vias(snapshot.viaMeshTriangles)
+                } else {
+                    results[job] = BoardGeometryChunk.components(snapshot.componentMeshTriangles)
+                }
+            }
         }
+        for (job, layerIndex) in staleLayers.enumerated() {
+            let layer = snapshot.layers[layerIndex]
+            layerCache[ObjectIdentifier(layer.layer)] = LayerCacheEntry(
+                layer: layer.layer, revision: layer.revision, z: layer.z, color: layer.color, chunk: built[job]!)
+        }
+        if !meshesCached {
+            meshCache = (snapshot.preview, snapshot.previewRevision,
+                         built[staleLayers.count]!, built[staleLayers.count + 1]!)
+        }
+        let meshes = (vias: meshCache!.vias, components: meshCache!.components)
         var chunks: [(slot: BoardGeometrySlot, chunk: BoardGeometryChunk)] =
-            snapshot.layers.map { ($0.slot, chunk(for: $0)) }
+            snapshot.layers.map { ($0.slot, cachedChunk(for: $0)!) }
         chunks.append((.vias, meshes.vias))
         chunks.append((.components, meshes.components))
 

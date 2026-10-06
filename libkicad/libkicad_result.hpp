@@ -282,7 +282,8 @@ struct BoardState;
 RuntimeState* createRuntimeRaw(std::string& error);
 void destroyRuntimeRaw(RuntimeState* runtime);
 
-/// A board that loads lazily on its first query. Must be destroyed before `runtime`.
+/// Creates and eagerly loads a board, retaining a small immutable metadata snapshot for lock-free
+/// stackup, layer-colour and enabled-layer queries. Must be destroyed before `runtime`.
 BoardState* createBoardRaw(RuntimeState& runtime, std::string projectPath, std::string boardPath);
 void destroyBoardRaw(BoardState* board);
 

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <complex>
 #include <filesystem>
@@ -2743,7 +2744,7 @@ static kiems::EMSConfig makeSyntheticConfig() {
     "netclass_patterns": [{"netclass": "HS", "pattern": "SIG"}]
   }
 })";
-    std::ofstream(boardPath) << R"((kicad_pcb (version 20240108) (generator "libkiems_tests")
+    const std::string boardContents = R"((kicad_pcb (version 20240108) (generator "libkiems_tests")
   (general (thickness 1.6))
   (paper "A4")
   (layers
@@ -2765,6 +2766,7 @@ static kiems::EMSConfig makeSyntheticConfig() {
   (gr_rect (start 0 0) (end 20 20) (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts"))
 )
 )";
+    std::ofstream(boardPath) << boardContents;
 
     const libkicad::Board board(*_runtime, projectPath.string(), boardPath.string());
 
@@ -2779,6 +2781,25 @@ static kiems::EMSConfig makeSyntheticConfig() {
 
     const auto stackup = board.stackup();
     XCTAssertTrue(stackup.has_value() && !stackup->empty());
+
+    // The lightweight snapshot is invalidated by a board save and republished by the reload.
+    // This proves cached metadata does not outlive the board it describes.
+    const auto initialLayers = board.boardLayers();
+    XCTAssertTrue(initialLayers.has_value());
+    if (initialLayers.has_value()) {
+        XCTAssertTrue(std::any_of(initialLayers->begin(), initialLayers->end(), [](const auto& layer) {
+            return layer.name == "B.Cu";
+        }));
+    }
+    std::filesystem::last_write_time(
+        boardPath, std::filesystem::file_time_type::clock::now() + std::chrono::seconds(1));
+    const auto reloadedLayers = board.boardLayers();
+    XCTAssertTrue(reloadedLayers.has_value());
+    if (reloadedLayers.has_value()) {
+        XCTAssertTrue(std::any_of(reloadedLayers->begin(), reloadedLayers->end(), [](const auto& layer) {
+            return layer.name == "B.Cu";
+        }));
+    }
 
     const auto nets = board.allNets();
     XCTAssertTrue(nets.has_value());

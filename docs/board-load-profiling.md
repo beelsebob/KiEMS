@@ -12,7 +12,20 @@ Useful boundaries:
 
 - Source list refresh: includes queue delay and installing the resulting rows.
   Its nested queries-and-nodes interval measures background work.
-- KiCad lock wait, file validation, cold load, project parse, board parse, and
+- KiCad lock wait and KiCad lock hold include the query name; boardLayerGeometry
+  also includes the layer name. The hold begins after acquisition and ends just
+  before unlock, covering validation/loading and the entire query. Failed loads
+  and board destruction are included. Component export's hold ends after its
+  snapshot, before waiting for the separate export lock. Select a long wait on
+  the timeline and inspect overlapping holds to identify the blocking operation;
+  one wait can span several holds. Stitching planning may issue multiple named
+  queries rather than hold one lock for its entire planning interval.
+- A Board eagerly parses its project and board at construction, then retains an immutable snapshot
+  of its stackup, layer colours and enabled-layer list. Those metadata reads do not acquire the
+  KiCad runtime lock and therefore emit no lock interval while both source files are unchanged.
+  Saving either file invalidates the snapshot; the next metadata read reloads it under the normal
+  named lock interval.
+- File validation, cold load, project parse, board parse, and
   footprint pad walk distinguish listing cost from loading and contention.
 - Board geometry extraction includes KiCad text/artwork expansion, reported
   separately for front and back silkscreen.

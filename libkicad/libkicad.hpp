@@ -48,10 +48,11 @@ private:
     std::unique_ptr<detail::RuntimeState, Deleter> _state;
 };
 
-/// One KiCad board and its project. Owns the HEADLESS_PCB_CONTEXT (and with it the BOARD) once
-/// loaded: the first query loads both files, later queries reuse them, and a query after either
-/// file's mtime changes reloads. KiCad keeps only one active project, so loading a board of a
-/// different project from the same Runtime unloads this one; its next query reloads it.
+/// One KiCad board and its project. Construction eagerly loads both files and captures immutable
+/// stackup, layer-colour and enabled-layer metadata; those small reads avoid the runtime lock while
+/// the files are unchanged. Other queries reuse the loaded BOARD, and a query after either file's
+/// mtime changes reloads it. KiCad keeps only one active project, so loading a board of a different
+/// project from the same Runtime unloads this one; its next non-cached query reloads it.
 ///
 /// Queries are thread-safe. Board access is serialized by the Runtime; component export
 /// snapshots its inputs, then runs under a separate export lock without retaining board state.

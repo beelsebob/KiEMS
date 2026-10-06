@@ -69,6 +69,9 @@ typedef NS_ENUM(NSInteger, EMSGeometryTriangleKind) {
                                   z:(double)z;
 /// Replaces a catalog placeholder's mesh in-place. Call on the main thread.
 - (void)replaceTriangles:(NSArray<EMSGeometryTriangle *> *)triangles;
+/// Replaces geometry and the display Z position from a complete preview. Used when the lightweight
+/// catalog is merged with the detailed whole-board preview that supplies the authoritative stackup.
+- (void)replaceTriangles:(NSArray<EMSGeometryTriangle *> *)triangles z:(double)z;
 @end
 
 /// One via -- either a real board via (from the board's own Excellon drill file, kept only where it

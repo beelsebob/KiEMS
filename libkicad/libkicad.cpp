@@ -2,6 +2,7 @@
 #include "libkicad_result.hpp"
 #include "board_load_timing.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <cerrno>
 #include <cmath>
@@ -80,15 +81,25 @@ struct RuntimeState {
 };
 
 struct BoardState {
+    /// Immutable, inexpensive state captured with the BOARD. Public metadata queries can copy this
+    /// snapshot without taking RuntimeState::mutex while the source files are unchanged.
+    struct SimpleState {
+        std::filesystem::file_time_type projectMTime;
+        std::filesystem::file_time_type boardMTime;
+        std::vector<StackupLayer> stackup;
+        std::vector<LayerColor> layerColors;
+        std::vector<BoardLayerInfo> layers;
+    };
     RuntimeState& runtime;
     std::string projectPath;
     std::string boardPath;
-    // Everything below is guarded by runtime.mutex, and empty until the first query loads it.
+    // Everything below is guarded by runtime.mutex. Construction eagerly loads it when possible.
     std::filesystem::file_time_type projectMTime;
     std::filesystem::file_time_type boardMTime;
     std::shared_ptr<HEADLESS_PCB_CONTEXT> context;
     BOARD* board = nullptr;
     PROJECT* project = nullptr;
+    std::shared_ptr<const SimpleState> simpleState;
 };
 
 namespace {
@@ -286,6 +297,9 @@ struct LoadedBoard {
     // mutable state.  Keep the lock for the complete lifetime of the loaded BOARD, not merely for
     // LoadBoard(), because callers continue consulting its PROJECT and those caches afterwards.
     std::unique_lock<std::mutex> lock;
+    // Reverse destruction order releases the context, ends the hold interval, then unlocks.
+    // Moving LoadedBoard transfers the live interval; failed loads also close it automatically.
+    std::optional<BoardLoadTiming> holdTiming;
     std::shared_ptr<HEADLESS_PCB_CONTEXT> context;
     BOARD* board = nullptr;
 };
@@ -300,6 +314,8 @@ void _releaseUnusedProject(RuntimeState& runtime, PROJECT* project) {
 }
 
 void _unloadBoard(BoardState& state) {
+    std::atomic_store_explicit(&state.simpleState, std::shared_ptr<const BoardState::SimpleState>{},
+                               std::memory_order_release);
     PROJECT* project = std::exchange(state.project, nullptr);
     state.context.reset();
     state.board = nullptr;
@@ -340,6 +356,83 @@ std::optional<std::string> _unreadableFileError(const std::string& path, const c
     return std::nullopt;
 }
 
+std::vector<StackupLayer> _stackupLayers(const BOARD& board) {
+    std::vector<StackupLayer> result;
+    const BOARD_STACKUP& stackup = board.GetDesignSettings().GetStackupDescriptor();
+    for (const BOARD_STACKUP_ITEM* item : stackup.GetList()) {
+        if (!item->IsEnabled()) continue;
+        StackupLayer layer;
+        if (item->GetType() == BS_ITEM_TYPE_COPPER) {
+            // BOARD_STACKUP_ITEM::GetLayerName() is not populated by KiCad's parser; the board
+            // layer table is the authoritative source for copper-layer names.
+            layer.kind = StackupLayerKind::Copper;
+            layer.name = board.GetLayerName(item->GetBrdLayerId()).ToStdString();
+            layer.thicknessMm = pcbIUScale.IUTomm(item->GetThickness());
+        } else if (item->GetType() == BS_ITEM_TYPE_DIELECTRIC) {
+            layer.kind = item->GetTypeName() == KEY_CORE ? StackupLayerKind::Core : StackupLayerKind::Prepreg;
+            layer.name = "Dielectric " + std::to_string(item->GetDielectricLayerId());
+            layer.thicknessMm = pcbIUScale.IUTomm(item->GetThickness());
+            layer.epsilonR = item->GetEpsilonR();
+            layer.lossTangent = item->GetLossTangent();
+        } else if (item->GetType() == BS_ITEM_TYPE_SOLDERMASK) {
+            layer.kind = item->GetBrdLayerId() == F_Mask ? StackupLayerKind::SolderMaskTop
+                                                          : StackupLayerKind::SolderMaskBottom;
+            layer.name = board.GetLayerName(item->GetBrdLayerId()).ToStdString();
+            layer.thicknessMm = pcbIUScale.IUTomm(item->GetThickness());
+            layer.epsilonR = item->GetEpsilonR();
+            layer.lossTangent = item->GetLossTangent();
+        } else {
+            continue; // Paste/silkscreen are not simulation stackup layers.
+        }
+        result.push_back(std::move(layer));
+    }
+    return result;
+}
+
+std::vector<LayerColor> _layerColors(const BOARD& board) {
+    std::vector<LayerColor> result;
+    COLOR_SETTINGS* colorSettings = Pgm().GetSettingsManager().GetColorSettings(wxEmptyString);
+    if (colorSettings == nullptr) return result;
+    for (PCB_LAYER_ID layer : board.GetEnabledLayers().UIOrder()) {
+        result.push_back(LayerColor{board.GetLayerName(layer).ToStdString(),
+                                    colorSettings->GetColor(layer).ToHexString().ToStdString()});
+    }
+    return result;
+}
+
+std::vector<BoardLayerInfo> _boardLayers(const BOARD& board) {
+    std::vector<BoardLayerInfo> result;
+    for (PCB_LAYER_ID layer : board.GetEnabledLayers().UIOrder()) {
+        result.push_back(BoardLayerInfo{board.GetLayerName(layer).ToStdString(), IsCopperLayer(layer),
+                                        layer == F_Mask || layer == B_Mask});
+    }
+    return result;
+}
+
+void _publishSimpleState(BoardState& state, const BOARD& board) {
+    auto snapshot = std::make_shared<BoardState::SimpleState>();
+    snapshot->projectMTime = state.projectMTime;
+    snapshot->boardMTime = state.boardMTime;
+    snapshot->stackup = _stackupLayers(board);
+    snapshot->layerColors = _layerColors(board);
+    snapshot->layers = _boardLayers(board);
+    std::shared_ptr<const BoardState::SimpleState> immutableSnapshot = std::move(snapshot);
+    std::atomic_store_explicit(&state.simpleState, std::move(immutableSnapshot), std::memory_order_release);
+}
+
+std::shared_ptr<const BoardState::SimpleState> _currentSimpleState(const BoardState& state) {
+    std::shared_ptr<const BoardState::SimpleState> snapshot =
+        std::atomic_load_explicit(&state.simpleState, std::memory_order_acquire);
+    if (!snapshot) return {};
+    std::error_code projectError, boardError;
+    const auto projectMTime = std::filesystem::last_write_time(state.projectPath, projectError);
+    const auto boardMTime = std::filesystem::last_write_time(state.boardPath, boardError);
+    if (projectError || boardError || snapshot->projectMTime != projectMTime || snapshot->boardMTime != boardMTime) {
+        return {};
+    }
+    return snapshot;
+}
+
 // Shared board-loading sequence: SETTINGS_MANAGER project load, PCB_IO_KICAD_SEXPR board load,
 // HEADLESS_PCB_CONTEXT construction (this is what wires BOARD::SetProject(), needed before any
 // netclass query -- see netsInNetClassRaw). Bypasses PCB_IO_MGR's format registry (which
@@ -352,10 +445,14 @@ std::optional<std::string> _unreadableFileError(const std::string& path, const c
 // resolvePin() called once per pin while resolving ports -- reparses neither file after the first
 // call. It reloads when either file's mtime changes (e.g. the user re-saves the board in KiCad),
 // so callers never see stale geometry.
-std::optional<LoadedBoard> _loadBoard(BoardState& state, std::string& error) {
-    BoardLoadTiming lockTiming("KiCad lock wait");
-    std::unique_lock<std::mutex> lock(state.runtime.mutex);
+std::optional<LoadedBoard> _loadBoard(BoardState& state, std::string& error, const char* operation,
+                                      const char* detail = "") {
+    const std::string label = std::string(operation) + (detail[0] ? " / " : "") + detail;
+    BoardLoadTiming lockTiming("KiCad lock wait", label.c_str());
+    LoadedBoard result;
+    result.lock = std::unique_lock<std::mutex>(state.runtime.mutex);
     lockTiming.end();
+    result.holdTiming.emplace("KiCad lock hold", label.c_str());
     BoardLoadTiming validationTiming("KiCad file validation");
 
     if (auto accessError = _unreadableFileError(state.projectPath, "project")) {
@@ -376,8 +473,6 @@ std::optional<LoadedBoard> _loadBoard(BoardState& state, std::string& error) {
 
     if (state.context && !projectMTimeError && !boardMTimeError && state.projectMTime == projectMTime &&
         state.boardMTime == boardMTime) {
-        LoadedBoard result;
-        result.lock = std::move(lock);
         result.context = state.context;
         result.board = state.board;
         return result;
@@ -462,9 +557,8 @@ std::optional<LoadedBoard> _loadBoard(BoardState& state, std::string& error) {
     state.board = boardPtr;
     state.project = project;
     state.runtime.loadedBoards.push_back(&state);
+    _publishSimpleState(state, *boardPtr);
 
-    LoadedBoard result;
-    result.lock = std::move(lock);
     result.context = std::move(context);
     result.board = boardPtr;
     return result;
@@ -555,7 +649,15 @@ void destroyRuntimeRaw(RuntimeState* runtime) {
 }
 
 BoardState* createBoardRaw(RuntimeState& runtime, std::string projectPath, std::string boardPath) {
-    return new BoardState{.runtime = runtime, .projectPath = std::move(projectPath), .boardPath = std::move(boardPath)};
+    auto state = std::make_unique<BoardState>(BoardState{.runtime = runtime,
+        .projectPath = std::move(projectPath), .boardPath = std::move(boardPath)});
+    // A Board is created because one of its read queries is imminent. Loading here lets the simple
+    // immutable snapshot serve those metadata queries without competing for the runtime lock.
+    // Preserve the API's deferred-error behavior: an unreadable board remains an object and its
+    // first public query reports the load error (or succeeds after the file becomes available).
+    std::string ignoredError;
+    (void)_loadBoard(*state, ignoredError, "board construction");
+    return state.release();
 }
 
 void destroyBoardRaw(BoardState* state) {
@@ -563,7 +665,10 @@ void destroyBoardRaw(BoardState* state) {
         return;
     }
     {
+        BoardLoadTiming waitTiming("KiCad lock wait", "destroyBoard");
         std::lock_guard<std::mutex> lock(state->runtime.mutex);
+        waitTiming.end();
+        BoardLoadTiming holdTiming("KiCad lock hold", "destroyBoard");
         _unloadBoard(*state);
     }
     delete state;
@@ -573,7 +678,7 @@ RawPadCountsResult countPadsRaw(BoardState& state) {
     ensureGeneratorsRegistered();
 
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error, "countPads");
     if (!loaded) {
         return _fail(std::move(error));
     }
@@ -623,7 +728,7 @@ RawPadCountsResult countPadsRaw(BoardState& state) {
 
 RawNetNameResult netForFootprintPinRaw(BoardState& state, const std::string& footprintRef, const std::string& pin) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error, "netForFootprintPin");
     if (!loaded) {
         return _failNetName(std::move(error));
     }
@@ -643,7 +748,7 @@ RawNetNameResult netForFootprintPinRaw(BoardState& state, const std::string& foo
 
 RawNetNameResult netClassForNetRaw(BoardState& state, const std::string& netName) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error, "netClassForNet");
     if (!loaded) {
         return _failNetName(std::move(error));
     }
@@ -679,7 +784,7 @@ RawNetNameResult netClassForNetRaw(BoardState& state, const std::string& netName
 
 RawPadResult resolvePinRaw(BoardState& state, const std::string& footprintRef, const std::string& pin) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error, "resolvePin");
     if (!loaded) {
         return _failPad(std::move(error));
     }
@@ -717,7 +822,7 @@ RawPadResult resolvePinRaw(BoardState& state, const std::string& footprintRef, c
 
 RawNetClassMembersResult netsInNetClassRaw(BoardState& state, const std::string& netClassName) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error, "netsInNetClass");
     if (!loaded) {
         return _failNetClassMembers(std::move(error));
     }
@@ -747,7 +852,7 @@ RawNetClassMembersResult netsInNetClassRaw(BoardState& state, const std::string&
 
 RawPadsOnNetResult padsOnNetRaw(BoardState& state, const std::string& netName) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error, "padsOnNet");
     if (!loaded) {
         return _failPadsOnNet(std::move(error));
     }
@@ -792,7 +897,7 @@ RawPadsOnNetResult padsOnNetRaw(BoardState& state, const std::string& netName) {
 
 RawTracksOnNetResult tracksOnNetRaw(BoardState& state, const std::string& netName) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error, "tracksOnNet");
     if (!loaded) {
         return _failTracksOnNet(std::move(error));
     }
@@ -824,7 +929,7 @@ RawTracksOnNetResult tracksOnNetRaw(BoardState& state, const std::string& netNam
 
 RawPadsOnNetResult allPadsRaw(BoardState& state) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error, "allPads");
     if (!loaded) {
         return _failPadsOnNet(std::move(error));
     }
@@ -855,7 +960,7 @@ RawPadsOnNetResult allPadsRaw(BoardState& state) {
 
 RawAllTracksResult allTracksRaw(BoardState& state) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error, "allTracks");
     if (!loaded) {
         RawAllTracksResult result;
         result.ok = false;
@@ -924,7 +1029,7 @@ RawAllTracksResult allTracksRaw(BoardState& state) {
 
 RawZonesResult zonesRaw(BoardState& state) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error, "zones");
     if (!loaded) {
         return _failZones(std::move(error));
     }
@@ -967,26 +1072,19 @@ RawZonesResult zonesRaw(BoardState& state) {
 }
 
 RawBoardLayersResult boardLayersRaw(BoardState& state) {
-    std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
-    if (!loaded) return _failBoardLayers(std::move(error));
-
-    RawBoardLayersResult result;
-    result.ok = true;
-    BOARD* board = loaded->board;
-    for (PCB_LAYER_ID layer : board->GetEnabledLayers().UIOrder()) {
-        result.layers.push_back(BoardLayerInfo{
-            board->GetLayerName(layer).ToStdString(),
-            IsCopperLayer(layer),
-            layer == F_Mask || layer == B_Mask,
-        });
+    if (const auto snapshot = _currentSimpleState(state)) {
+        return RawBoardLayersResult{.ok = true, .layers = snapshot->layers};
     }
-    return result;
+    std::string error;
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error, "boardLayers");
+    if (!loaded) return _failBoardLayers(std::move(error));
+    const auto snapshot = _currentSimpleState(state);
+    return RawBoardLayersResult{.ok = true, .layers = snapshot ? snapshot->layers : _boardLayers(*loaded->board)};
 }
 
 RawBoardLayerGeometryResult boardLayerGeometryRaw(BoardState& state, const std::string& layerName) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error, "boardLayerGeometry", layerName.c_str());
     if (!loaded) return _failBoardLayerGeometry(std::move(error));
     BOARD* board = loaded->board;
 
@@ -1074,7 +1172,7 @@ RawBoardLayerGeometryResult boardLayerGeometryRaw(BoardState& state, const std::
 
 RawBoardGeometryResult boardGeometryRaw(BoardState& state) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error, "boardGeometry");
     if (!loaded) {
         return _failBoardGeometry(std::move(error));
     }
@@ -1245,96 +1343,39 @@ RawBoardGeometryResult boardGeometryRaw(BoardState& state) {
 }
 
 RawStackupResult stackupRaw(BoardState& state) {
+    if (const auto snapshot = _currentSimpleState(state)) {
+        return RawStackupResult{.ok = true, .layers = snapshot->stackup};
+    }
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error, "stackup");
     if (!loaded) {
         return _failStackup(std::move(error));
     }
-    BOARD* board = loaded->board;
-
-    RawStackupResult result;
-    result.ok = true;
-    const BOARD_STACKUP& stackup = board->GetDesignSettings().GetStackupDescriptor();
-    for (const BOARD_STACKUP_ITEM* item : stackup.GetList()) {
-        if (!item->IsEnabled()) {
-            continue;
-        }
-        StackupLayer layer;
-        if (item->GetType() == BS_ITEM_TYPE_COPPER) {
-            // BOARD_STACKUP_ITEM::GetLayerName() is never actually populated by the file parser
-            // (only SetBrdLayerId()/SetDielectricLayerId() are, confirmed by reading
-            // pcb_io_kicad_sexpr_parser.cpp's parseBoardStackup()) -- the board's own layer table,
-            // keyed by the copper layer id, is the real source of the "F.Cu"/"In1.Cu"/"B.Cu" names
-            // gerber file matching needs. Same lookup padsOnNetRaw/resolvePinRaw already use for a
-            // pad's copper layer.
-            layer.kind = StackupLayerKind::Copper;
-            layer.name = board->GetLayerName(item->GetBrdLayerId()).ToStdString();
-            layer.thicknessMm = pcbIUScale.IUTomm(item->GetThickness());
-        } else if (item->GetType() == BS_ITEM_TYPE_DIELECTRIC) {
-            layer.kind = item->GetTypeName() == KEY_CORE ? StackupLayerKind::Core : StackupLayerKind::Prepreg;
-            // Dielectric layers have no PCB_LAYER_ID (GetBrdLayerId() is UNDEFINED_LAYER) and, like
-            // GetLayerName() above, no name of their own in the file -- only a 1-based top-to-bottom
-            // index (GetDielectricLayerId()). Synthesize the same "Dielectric N" label the
-            // hand-maintained stackup.json this replaces already used, purely for
-            // Simulation::addDumpBoxes()'s dump-box filenames -- nothing keys lookups off it.
-            layer.name = "Dielectric " + std::to_string(item->GetDielectricLayerId());
-            layer.thicknessMm = pcbIUScale.IUTomm(item->GetThickness());
-            layer.epsilonR = item->GetEpsilonR();
-            layer.lossTangent = item->GetLossTangent();
-        } else if (item->GetType() == BS_ITEM_TYPE_SOLDERMASK) {
-            // Only one BS_ITEM_TYPE_SOLDERMASK enum value exists -- top vs. bottom is distinguished
-            // by which copper layer this item's own GetBrdLayerId() sits alongside, exactly like the
-            // BS_ITEM_TYPE_COPPER branch above. GetEpsilonR()/GetLossTangent()/GetThickness() are
-            // all valid for solder mask items (confirmed against KiCad's own board_stackup.cpp, not
-            // just documentation) and already default to sensible real-world values (ε_r=3.3,
-            // thickness=0.01mm, loss tangent=0.0) even for a board whose stackup was never opened in
-            // KiCad's own stackup editor, so no extra fallback is needed here.
-            layer.kind = item->GetBrdLayerId() == F_Mask ? StackupLayerKind::SolderMaskTop
-                                                            : StackupLayerKind::SolderMaskBottom;
-            layer.name = board->GetLayerName(item->GetBrdLayerId()).ToStdString();
-            layer.thicknessMm = pcbIUScale.IUTomm(item->GetThickness());
-            layer.epsilonR = item->GetEpsilonR();
-            layer.lossTangent = item->GetLossTangent();
-        } else {
-            // Paste/silkscreen -- not part of the layer stack a field simulation cares about.
-            continue;
-        }
-        result.layers.push_back(std::move(layer));
-    }
-    return result;
+    const auto snapshot = _currentSimpleState(state);
+    return RawStackupResult{.ok = true, .layers = snapshot ? snapshot->stackup : _stackupLayers(*loaded->board)};
 }
 
 RawLayerColorsResult layerColorsRaw(BoardState& state) {
+    if (const auto snapshot = _currentSimpleState(state)) {
+        return RawLayerColorsResult{.ok = true, .colors = snapshot->layerColors};
+    }
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error, "layerColors");
     if (!loaded) {
         return _failLayerColors(std::move(error));
     }
-    BOARD* board = loaded->board;
-
-    // Empty name resolves to KiCad's own default color settings if no other theme is found/active
-    // for this (headless, GUI-less) process -- see GetColorSettings()'s own doc comment. This is
-    // the same COLOR_SETTINGS machinery the real PCB editor's "Appearance" panel reads from, just
-    // with no per-project theme selection available outside a full GUI session to prefer instead.
-    COLOR_SETTINGS* colorSettings = Pgm().GetSettingsManager().GetColorSettings(wxEmptyString);
-    if (colorSettings == nullptr) {
+    const auto snapshot = _currentSimpleState(state);
+    if (snapshot) return RawLayerColorsResult{.ok = true, .colors = snapshot->layerColors};
+    // An unavailable color theme is still distinguishable from a board with no enabled layers.
+    if (Pgm().GetSettingsManager().GetColorSettings(wxEmptyString) == nullptr) {
         return _failLayerColors("No PCB color theme available");
     }
-
-    RawLayerColorsResult result;
-    result.ok = true;
-    for (PCB_LAYER_ID layer : board->GetEnabledLayers().UIOrder()) {
-        LayerColor layerColor;
-        layerColor.name = board->GetLayerName(layer).ToStdString();
-        layerColor.hex = colorSettings->GetColor(layer).ToHexString().ToStdString();
-        result.colors.push_back(std::move(layerColor));
-    }
-    return result;
+    return RawLayerColorsResult{.ok = true, .colors = _layerColors(*loaded->board)};
 }
 
 RawNetColorsResult netColorsRaw(BoardState& state) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error, "netColors");
     if (!loaded) {
         return _failNetColors(std::move(error));
     }
@@ -1380,7 +1421,7 @@ RawNetColorsResult netColorsRaw(BoardState& state) {
 
 RawStringListResult netClassesRaw(BoardState& state) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error, "netClasses");
     if (!loaded) {
         return _failStringList(std::move(error));
     }
@@ -1402,7 +1443,7 @@ RawStringListResult netClassesRaw(BoardState& state) {
 
 RawStringListResult allNetsRaw(BoardState& state) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error, "allNets");
     if (!loaded) {
         return _failStringList(std::move(error));
     }
@@ -1421,7 +1462,7 @@ RawStringListResult allNetsRaw(BoardState& state) {
 
 RawFootprintsResult footprintsRaw(BoardState& state) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error, "footprints");
     if (!loaded) {
         return _failFootprints(std::move(error));
     }
@@ -1460,7 +1501,7 @@ RawFootprintsResult footprintsRaw(BoardState& state) {
 
 RawThroughHolesResult throughHolesRaw(BoardState& state) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error, "throughHoles");
     if (!loaded) {
         return _failThroughHoles(std::move(error));
     }
@@ -1525,7 +1566,7 @@ RawThroughHolesResult throughHolesRaw(BoardState& state) {
 
 RawNonPlatedHolesResult nonPlatedHolesRaw(BoardState& state) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error, "nonPlatedHoles");
     if (!loaded) {
         return _failNonPlatedHoles(std::move(error));
     }
@@ -1555,7 +1596,7 @@ RawNonPlatedHolesResult nonPlatedHolesRaw(BoardState& state) {
 RawComponentModelExportResult exportComponentModelsRaw(BoardState& state, const std::string& componentFilter,
                                                           const std::string& outputStlPath) {
     std::string error;
-    std::optional<LoadedBoard> loaded = _loadBoard(state, error);
+    std::optional<LoadedBoard> loaded = _loadBoard(state, error, "exportComponentModels");
     if (!loaded) {
         return _failComponentModelExport(std::move(error));
     }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <utility>
+
 #ifdef __APPLE__
 #include <os/signpost.h>
 #endif
@@ -18,6 +20,14 @@ public:
                                   phase, detail, vertices, polygons);
 #else
         (void)phase; (void)detail; (void)vertices; (void)polygons;
+#endif
+    }
+    // Transfer the interval when its owning lock guard moves out of the board loader.
+    BoardLoadTiming(BoardLoadTiming&& other) noexcept {
+#ifdef __APPLE__
+        id = std::exchange(other.id, OS_SIGNPOST_ID_INVALID);
+#else
+        (void)other;
 #endif
     }
     ~BoardLoadTiming() { end(); }

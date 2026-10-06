@@ -413,6 +413,10 @@ ComponentExportOutcome exportComponentTriangles(const libkicad::Board& board, co
     _geometryGenerated = YES;
     _revision++;
 }
+- (void)replaceTriangles:(NSArray<EMSGeometryTriangle*>*)triangles z:(double)z {
+    [self replaceTriangles:triangles];
+    _z = z;
+}
 @end
 
 @implementation EMSGeometryVia
@@ -606,7 +610,9 @@ ComponentExportOutcome exportComponentTriangles(const libkicad::Board& board, co
     for (EMSGeometryLayer* layer in preview.layers) incoming[layer.name] = layer;
     for (EMSGeometryLayer* layer in _layers) {
         EMSGeometryLayer* loaded = incoming[layer.name];
-        if (loaded != nil && loaded.geometryGenerated) [layer replaceTriangles:loaded.triangles];
+        if (loaded != nil && loaded.geometryGenerated) {
+            [layer replaceTriangles:loaded.triangles z:loaded.z];
+        }
     }
     _topSolderMask = preview.topSolderMask;
     _bottomSolderMask = preview.bottomSolderMask;
@@ -1568,6 +1574,12 @@ namespace {
 // as every sliced-board preview already gets when a simulation hasn't overridden pixelSize itself.
 constexpr double kWholeBoardTessellationToleranceSimUnits = 5.0 * kiems::constants::unitMultiplier;
 
+// Copper pours dominate the whole-board preview's constrained-Delaunay work.  They are cosmetic
+// here (simulation keeps its own configured tolerance), so retain edges to 25 µm rather than the
+// 5 µm used for masks and silkscreen.  This removes clearance-detail vertices which are below a
+// normal board-view pixel footprint while materially reducing large-pour triangulation time.
+constexpr double kWholeBoardCopperTessellationToleranceSimUnits = 25.0 * kiems::constants::unitMultiplier;
+
 // Mirrors board_slicing.cpp's own (private) _polygonLoopToPolygon/_copperOnLayer exactly -- small
 // enough, and different enough in what they're fed (every net's own copper across the whole board,
 // not one SimulationConfig's already-cutout-clipped composite), that duplicating them here reads
@@ -1609,51 +1621,6 @@ std::unordered_map<std::string, simd_double4> previewNetColors(const libkicad::B
 } // namespace
 
 namespace {
-
-struct PreviewLayerPlacement {
-    std::unordered_map<std::string, double> zByName;
-    double top = 0;
-    double bottom = 0;
-};
-
-PreviewLayerPlacement previewLayerPlacement(const libkicad::Board& board) {
-    PreviewLayerPlacement result;
-    kiems::EMSConfig config;
-    if (!kiems::importStackup(board, config)) return result;
-    double z = 0;
-    for (const auto& layer : config.layers()) {
-        if (layer.kind() == kiems::LayerKind::Substrate) z -= layer.thickness();
-        if (layer.kind() == kiems::LayerKind::Metal) result.zByName[layer.name()] = z;
-    }
-    result.bottom = z;
-    return result;
-}
-
-double displayZForLayer(const std::string& name, const PreviewLayerPlacement& placement) {
-    if (const auto found = placement.zByName.find(name); found != placement.zByName.end()) {
-        return found->second;
-    }
-    // Give mask a small, explicit display separation behind its adjacent copper. This is large
-    // enough to remain distinct in the depth buffer at whole-board scale, unlike the earlier
-    // coplanar/depth-comparison approach, while still being visually negligible (100 simulation
-    // units = 10 microns).
-    constexpr double displayLayerSeparation = 100.0;
-    if (name == "F.Mask") {
-        if (const auto copper = placement.zByName.find("F.Cu"); copper != placement.zByName.end()) {
-            return copper->second - displayLayerSeparation;
-        }
-        return placement.top - displayLayerSeparation;
-    }
-    if (name == "B.Mask") {
-        if (const auto copper = placement.zByName.find("B.Cu"); copper != placement.zByName.end()) {
-            return copper->second - displayLayerSeparation;
-        }
-        return placement.bottom - displayLayerSeparation;
-    }
-    if (name.starts_with("B.")) return placement.bottom - 20.0;
-    if (name.starts_with("F.")) return placement.top + 20.0;
-    return (placement.top + placement.bottom) / 2.0;
-}
 
 struct PreviewOutlineFrame {
     double originX = 0;
@@ -1703,7 +1670,6 @@ std::expected<EMSGeometryPreview*, std::string> buildBoardLayerCatalogPreview(
     auto edge = board.boardLayerGeometry("Edge.Cuts");
     if (!edge) return std::unexpected(std::move(edge).error());
     const PreviewOutlineFrame frame = previewOutlineFrame(edge->boardOutline);
-    const PreviewLayerPlacement placement = previewLayerPlacement(board);
 
     std::unordered_map<std::string, std::string> colors;
     if (auto result = board.layerColors(); result) {
@@ -1715,7 +1681,9 @@ std::expected<EMSGeometryPreview*, std::string> buildBoardLayerCatalogPreview(
         if (const auto found = colors.find(info.name); found != colors.end()) hex = @(found->second.c_str());
         [layers addObject:[EMSGeometryLayer placeholderWithName:@(info.name.c_str())
                                                         hexColor:hex
-                                                               z:displayZForLayer(info.name, placement)]];
+        // WholeBoardViewController keeps the loading state up until mergeLoadedPreview: supplies
+        // real Z positions from the detailed preview. Avoid a redundant stackup import here.
+                                                               z:0]];
     }
     return [[EMSGeometryPreview alloc] initWithLayers:layers wholeBoard:wholeBoard
         topSolderMask:nil bottomSolderMask:nil outline:frame.points vias:@[] trackSegments:@[]
@@ -1732,12 +1700,17 @@ static std::expected<EMSGeometryLayer*, std::string> buildBoardLayerPreviewImpl(
     auto result = board.boardLayerGeometry(layerName);
     if (!result) return std::unexpected(std::move(result).error());
     const PreviewOutlineFrame frame = previewOutlineFrame(result->boardOutline);
-    const PreviewLayerPlacement placement = previewLayerPlacement(board);
-    NSString* hex = nil;
-    if (auto colors = board.layerColors(); colors) {
-        for (const auto& color : *colors) if (color.name == layerName) { hex = @(color.hex.c_str()); break; }
-    }
-    const std::unordered_map<std::string, simd_double4> colorsByNetName = previewNetColors(board);
+    // Both callers install these triangles into an existing preview layer. The layer catalog (for
+    // the whole-board view) or the initial simulation preview already owns its theme colour and
+    // real Z position; replaceTriangles: deliberately changes only geometry. Resolving either one
+    // again here once per lazy layer queued layerColors()/stackup() behind long
+    // boardLayerGeometry() holds without changing anything displayed.
+    //
+    // Whole-board copper comes from buildWholeBoardPreview(), not this lazy loader (the controller
+    // excludes .Cu names), so its non-copper work also needs no per-net palette. Sliced copper is
+    // still coloured by net when it is loaded on demand.
+    const std::unordered_map<std::string, simd_double4> colorsByNetName =
+        clip != nullptr ? previewNetColors(board) : std::unordered_map<std::string, simd_double4>{};
 
     NSMutableArray<EMSGeometryTriangle*>* triangles = [NSMutableArray array];
     if (result->layer.copper) {
@@ -1784,7 +1757,7 @@ static std::expected<EMSGeometryLayer*, std::string> buildBoardLayerPreviewImpl(
         }
     }
     return [[EMSGeometryLayer alloc] initWithName:@(layerName.c_str()) triangles:triangles
-        hexColor:hex z:displayZForLayer(layerName, placement)];
+        hexColor:nil z:0]; // Metadata stays on the destination layer above.
 }
 
 std::expected<EMSGeometryLayer*, std::string> buildBoardLayerPreview(
@@ -2039,7 +2012,7 @@ std::expected<EMSGeometryPreview*, std::string> buildWholeBoardPreview(const lib
             (*task.layerName + " / " + task.group->key).c_str(),
             task.cost, task.group->rawPolygons.size());
         buildWholeBoardCopperGroup(*task.group, *task.layerName, *cutoutsForTasks, *allCutoutsForTasks,
-                                   kWholeBoardTessellationToleranceSimUnits);
+                                   kWholeBoardCopperTessellationToleranceSimUnits);
     });
 
     copperTiming.end();
