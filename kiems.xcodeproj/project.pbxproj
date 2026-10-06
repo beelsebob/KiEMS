@@ -11,7 +11,6 @@
 		2FBF45CFAE9FD71F5566E5AA /* kiems_fdtd_worker in Embed Helper Tools */ = {isa = PBXBuildFile; fileRef = 1730AB8B76054706EB2AB0BA /* kiems_fdtd_worker */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		3094727E7CECFEFF14791831 /* liblibkiems.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 922BA8FA4CD5D8901DCAC9DA /* liblibkiems.a */; };
 		3E2C21D20252B9D126B9A44A /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CE532C213E2D6E98AA310B22 /* Cocoa.framework */; };
-		3E7CD25FB948F81DEEC897B3 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CE532C213E2D6E98AA310B22 /* Cocoa.framework */; };
 		479136241E9A85AC3E2BFC9B /* RememberRemember.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DEC747CBEC864D957296A740 /* RememberRemember.framework */; };
 		4988C919C7B2E11A4E12652C /* liblibkiems.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 922BA8FA4CD5D8901DCAC9DA /* liblibkiems.a */; };
 		4AE99EF823B18E76EBD8A114 /* libCopperUtils.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 5A1B3A51A30B8BD9D7ACED8B /* libCopperUtils.a */; };
@@ -96,10 +95,17 @@
 		};
 		4A26F5AB0BDDD56E51069B55 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
-			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			containerPortal = 52E3E30000000000000000A001 /* RememberRemember.xcodeproj */;
 			proxyType = 1;
-			remoteGlobalIDString = 07086D1AD104CA5BBA5AF140;
+			remoteGlobalIDString = 52E3E3000000000000000010;
 			remoteInfo = RememberRemember;
+		};
+		4C1CAD000000000000010003 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 4C1CAD000000000000010001 /* libkicad.xcodeproj */;
+			proxyType = 2;
+			remoteGlobalIDString = 4C1CAD00000000000000000C;
+			remoteInfo = libkicad;
 		};
 		68230F1D42F0B9E29C659103 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -178,13 +184,6 @@
 			remoteGlobalIDString = 3818463DDAC498C89C93C21E;
 			remoteInfo = Copper;
 		};
-		EFDFB27E176D41C2A6785C7A /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 7A75E68FFCE0FE7A89A86020 /* Copper.xcodeproj */;
-			proxyType = 1;
-			remoteGlobalIDString = 436BD46808618ED0B9E3983D;
-			remoteInfo = CSXCAD;
-		};
 		F90E814A552714159096AAF7 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 71AD228A30263515006D5847 /* Project object */;
@@ -206,12 +205,12 @@
 			remoteGlobalIDString = 3818463DDAC498C89C93C21E;
 			remoteInfo = Copper;
 		};
-		4C1CAD000000000000010003 /* PBXContainerItemProxy */ = {
+		52E3E30000000000000000A003 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
-			containerPortal = 4C1CAD000000000000010001 /* libkicad.xcodeproj */;
+			containerPortal = 52E3E30000000000000000A001 /* RememberRemember.xcodeproj */;
 			proxyType = 2;
-			remoteGlobalIDString = 4C1CAD00000000000000000C;
-			remoteInfo = libkicad;
+			remoteGlobalIDString = 52E3E3000000000000000003;
+			remoteInfo = RememberRemember;
 		};
 /* End PBXContainerItemProxy section */
 
@@ -254,6 +253,7 @@
 		1730AB8B76054706EB2AB0BA /* kiems_fdtd_worker */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = kiems_fdtd_worker; sourceTree = BUILT_PRODUCTS_DIR; };
 		27FC500F5EC82E42F046FEF3 /* libkiems_tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = libkiems_tests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		47611C745FA02E5BA7871B3D /* copper_fdtd_worker */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = copper_fdtd_worker; sourceTree = BUILT_PRODUCTS_DIR; };
+		4C1CAD000000000000010001 /* libkicad.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; name = libkicad.xcodeproj; path = submodules/libkicad/libkicad.xcodeproj; sourceTree = SOURCE_ROOT; };
 		5653046AD79D4C9071AF237F /* KiEMS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = KiEMS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		601D10000000000000000000 /* Config/BuildPaths.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config/BuildPaths.xcconfig; sourceTree = SOURCE_ROOT; };
 		601D10000000000000000001 /* Config/KiCadLink.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config/KiCadLink.xcconfig; sourceTree = SOURCE_ROOT; };
@@ -261,29 +261,22 @@
 		71744BD830756FF300E0D2D5 /* minidump_test.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = minidump_test.xcodeproj; sourceTree = "<group>"; };
 		71744C1930756FF300E0D2D5 /* Breakpad.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = Breakpad.xcodeproj; sourceTree = "<group>"; };
 		717473B03075705F00E0D2D5 /* libkicad.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = libkicad.xcodeproj; sourceTree = "<group>"; };
+		717483B83075760400E0D2D5 /* RememberRemember.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = RememberRemember.xcodeproj; sourceTree = "<group>"; };
 		71AD229230263516006D5847 /* kiems */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = kiems; sourceTree = BUILT_PRODUCTS_DIR; };
 		71B40FE53042E223002796EC /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
 		71B40FE73042E24F002796EC /* Accelerate.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Accelerate.framework; path = System/Library/Frameworks/Accelerate.framework; sourceTree = SDKROOT; };
-		4C1CAD000000000000010001 /* libkicad.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; name = libkicad.xcodeproj; path = submodules/libkicad/libkicad.xcodeproj; sourceTree = SOURCE_ROOT; };
 		7A75E68FFCE0FE7A89A86020 /* Copper.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; name = Copper.xcodeproj; path = submodules/Copper/Copper.xcodeproj; sourceTree = SOURCE_ROOT; };
 		922BA8FA4CD5D8901DCAC9DA /* liblibkiems.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = liblibkiems.a; sourceTree = BUILT_PRODUCTS_DIR; };
 		A6B36F967905F85737C9E377 /* Copper.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Copper.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		CE532C213E2D6E98AA310B22 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
 		DEC747CBEC864D957296A740 /* RememberRemember.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = RememberRemember.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		52E3E30000000000000000A001 /* RememberRemember.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; name = RememberRemember.xcodeproj; path = submodules/RememberRemember/RememberRemember.xcodeproj; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
-
-/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		006F3A1386AFF2AD46CD89E4 /* libkiems */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = libkiems;
-			sourceTree = "<group>";
-		};
-		1E051C9DFB9D9A4CF7CB1120 /* submodules/RememberRemember */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = submodules/RememberRemember;
 			sourceTree = "<group>";
 		};
 		71AD229430263516006D5847 /* kiems-cli */ = {
@@ -314,14 +307,6 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		0C4E4DE5C99212D3ADE4108A /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				3E7CD25FB948F81DEEC897B3 /* Cocoa.framework in Frameworks */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		1E04FB4313433E3400D82F30 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -398,20 +383,20 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		4C1CAD000000000000010002 /* Products */ = {
-			isa = PBXGroup;
-			children = (
-				A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */,
-			);
-			name = Products;
-			sourceTree = "<group>";
-		};
 		1EE1AA4E4B875016D92740A9 /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				5A1B3A51A30B8BD9D7ACED8B /* libCopperUtils.a */,
 				9691133F7B92BAA7BB234B8C /* libCSXCAD.dylib */,
 				3586812A4F6CE84886F63B2D /* Copper.framework */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		4C1CAD000000000000010002 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -444,12 +429,16 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		717483B93075760400E0D2D5 /* Products */ = {
+			isa = PBXGroup;
+			name = Products;
+			sourceTree = "<group>";
+		};
 		71AD228930263515006D5847 = {
 			isa = PBXGroup;
 			children = (
 				601D10000000000000000000 /* Config/BuildPaths.xcconfig */,
 				601D10000000000000000001 /* Config/KiCadLink.xcconfig */,
-				1E051C9DFB9D9A4CF7CB1120 /* submodules/RememberRemember */,
 				B7D891E5D67D73D341733A71 /* KiEMS */,
 				71AD229430263516006D5847 /* kiems-cli */,
 				8290469707C87811FFCE548F /* kiems_fdtd_worker */,
@@ -458,9 +447,9 @@
 				71AD229330263516006D5847 /* Products */,
 				77AE1A0D84F974CC1EDDD9F6 /* Frameworks */,
 				E331D08A3BF5F110095DBF0C /* copper_fdtd_worker */,
-				71BD2E653044E2D900663022 /* Recovered References */,
 				7A75E68FFCE0FE7A89A86020 /* Copper.xcodeproj */,
 				4C1CAD000000000000010001 /* libkicad.xcodeproj */,
+				52E3E30000000000000000A001 /* RememberRemember.xcodeproj */,
 			);
 			sourceTree = "<group>";
 		};
@@ -476,13 +465,6 @@
 				27FC500F5EC82E42F046FEF3 /* libkiems_tests.xctest */,
 			);
 			name = Products;
-			sourceTree = "<group>";
-		};
-		71BD2E653044E2D900663022 /* Recovered References */ = {
-			isa = PBXGroup;
-			children = (
-			);
-			name = "Recovered References";
 			sourceTree = "<group>";
 		};
 		77AE1A0D84F974CC1EDDD9F6 /* Frameworks */ = {
@@ -504,41 +486,17 @@
 			name = "OS X";
 			sourceTree = "<group>";
 		};
+		52E3E30000000000000000A002 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				52E3E30000000000000000A004 /* RememberRemember.framework */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
-/* Begin PBXHeadersBuildPhase section */
-		B729BAF527C6CE60A457BB41 /* Headers */ = {
-			isa = PBXHeadersBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-/* End PBXHeadersBuildPhase section */
-
 /* Begin PBXNativeTarget section */
-		07086D1AD104CA5BBA5AF140 /* RememberRemember */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = A7A05BDB98C84DE3CA4A2188 /* Build configuration list for PBXNativeTarget "RememberRemember" */;
-			buildPhases = (
-				B729BAF527C6CE60A457BB41 /* Headers */,
-				53AC52A1D605A6E26AFDD388 /* Sources */,
-				0C4E4DE5C99212D3ADE4108A /* Frameworks */,
-				B459FA9D725A1F82A1F56D0A /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-				B004034DC659728D2DCC460C /* PBXTargetDependency */,
-			);
-			fileSystemSynchronizedGroups = (
-				1E051C9DFB9D9A4CF7CB1120 /* submodules/RememberRemember */,
-			);
-			name = RememberRemember;
-			productName = RememberRemember;
-			productReference = DEC747CBEC864D957296A740 /* RememberRemember.framework */;
-			productType = "com.apple.product-type.framework";
-		};
 		0E08621C93A1CC737D3F6A93 /* libkiems */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 34A1F94838F1003CDA9ED1F2 /* Build configuration list for PBXNativeTarget "libkiems" */;
@@ -727,16 +685,24 @@
 					ProjectRef = 7A75E68FFCE0FE7A89A86020 /* Copper.xcodeproj */;
 				},
 				{
-					ProductGroup = 4C1CAD000000000000010002 /* Products */;
-					ProjectRef = 4C1CAD000000000000010001 /* libkicad.xcodeproj */;
-				},
-				{
 					ProductGroup = 717473B13075705F00E0D2D5 /* Products */;
 					ProjectRef = 717473B03075705F00E0D2D5 /* libkicad.xcodeproj */;
 				},
 				{
+					ProductGroup = 4C1CAD000000000000010002 /* Products */;
+					ProjectRef = 4C1CAD000000000000010001 /* libkicad.xcodeproj */;
+				},
+				{
 					ProductGroup = 7174577430756FF300E0D2D5 /* Products */;
 					ProjectRef = 71744BD830756FF300E0D2D5 /* minidump_test.xcodeproj */;
+				},
+				{
+					ProductGroup = 717483B93075760400E0D2D5 /* Products */;
+					ProjectRef = 717483B83075760400E0D2D5 /* RememberRemember.xcodeproj */;
+				},
+				{
+					ProductGroup = 52E3E30000000000000000A002 /* Products */;
+					ProjectRef = 52E3E30000000000000000A001 /* RememberRemember.xcodeproj */;
 				},
 			);
 			projectRoot = "";
@@ -745,7 +711,6 @@
 				0E08621C93A1CC737D3F6A93 /* libkiems */,
 				5034717F4A638C8CC653DE57 /* kiems_fdtd_worker */,
 				2971163407AC90FC988D853B /* KiEMS */,
-				07086D1AD104CA5BBA5AF140 /* RememberRemember */,
 				3B7712DA527497624F2DFB43 /* copper_fdtd_worker */,
 				8D5AE14D1127587CA08C54F7 /* libkiems_tests */,
 			);
@@ -781,17 +746,14 @@
 			remoteRef = 4C1CAD000000000000010003 /* PBXContainerItemProxy */;
 			sourceTree = BUILT_PRODUCTS_DIR;
 		};
-/* End PBXReferenceProxy section */
-
-/* Begin PBXResourcesBuildPhase section */
-		B459FA9D725A1F82A1F56D0A /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
+		52E3E30000000000000000A004 /* RememberRemember.framework */ = {
+			isa = PBXReferenceProxy;
+			fileType = wrapper.framework;
+			path = RememberRemember.framework;
+			remoteRef = 52E3E30000000000000000A003 /* PBXContainerItemProxy */;
+			sourceTree = BUILT_PRODUCTS_DIR;
 		};
-/* End PBXResourcesBuildPhase section */
+/* End PBXReferenceProxy section */
 
 /* Begin PBXSourcesBuildPhase section */
 		0A4BFFE015AA0DAC88C73F59 /* Sources */ = {
@@ -816,13 +778,6 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		482BAB6A7C580D0546DBA899 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		53AC52A1D605A6E26AFDD388 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -869,7 +824,6 @@
 		585312645C254E539E00095D /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			name = RememberRemember;
-			target = 07086D1AD104CA5BBA5AF140 /* RememberRemember */;
 			targetProxy = 4A26F5AB0BDDD56E51069B55 /* PBXContainerItemProxy */;
 		};
 		5C43EB69E93D41688CC4B2E5 /* PBXTargetDependency */ = {
@@ -907,11 +861,6 @@
 			isa = PBXTargetDependency;
 			name = Copper;
 			targetProxy = 756FF2D951AC08F5055E1EF7 /* PBXContainerItemProxy */;
-		};
-		B004034DC659728D2DCC460C /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			name = CSXCAD;
-			targetProxy = EFDFB27E176D41C2A6785C7A /* PBXContainerItemProxy */;
 		};
 		B43CBBC55485E3D5DEF4FD4C /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
@@ -952,35 +901,6 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
-		20964BB945CB5768EF92486D /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
-				DEFINES_MODULE = YES;
-				DYLIB_COMPATIBILITY_VERSION = 1;
-				DYLIB_CURRENT_VERSION = 1;
-				DYLIB_INSTALL_NAME_BASE = "@rpath";
-				GENERATE_INFOPLIST_FILE = YES;
-				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/../Frameworks",
-					"@loader_path/Frameworks",
-				);
-				MACOSX_DEPLOYMENT_TARGET = 26.5;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.tomdavie.remember-remember";
-				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
-				SDKROOT = macosx;
-				SKIP_INSTALL = YES;
-				SWIFT_VERSION = 5.0;
-				VERSIONING_SYSTEM = "apple-generic";
-				VERSION_INFO_PREFIX = "";
-			};
-			name = Debug;
-		};
 		267D1CBD028BDD9E5178D2D5 /* Release */ = {
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 601D10000000000000000001 /* Config/KiCadLink.xcconfig */;
@@ -1038,35 +958,6 @@
 				SDKROOT = macosx;
 			};
 			name = Debug;
-		};
-		54329134C4B1132CA2C1E347 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
-				DEFINES_MODULE = YES;
-				DYLIB_COMPATIBILITY_VERSION = 1;
-				DYLIB_CURRENT_VERSION = 1;
-				DYLIB_INSTALL_NAME_BASE = "@rpath";
-				GENERATE_INFOPLIST_FILE = YES;
-				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/../Frameworks",
-					"@loader_path/Frameworks",
-				);
-				MACOSX_DEPLOYMENT_TARGET = 26.5;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.tomdavie.remember-remember";
-				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
-				SDKROOT = macosx;
-				SKIP_INSTALL = YES;
-				SWIFT_VERSION = 5.0;
-				VERSIONING_SYSTEM = "apple-generic";
-				VERSION_INFO_PREFIX = "";
-			};
-			name = Release;
 		};
 		6B1740D988F76B333D388E17 /* Debug */ = {
 			isa = XCBuildConfiguration;
@@ -1598,15 +1489,6 @@
 			buildConfigurations = (
 				71AD229A30263516006D5847 /* Debug */,
 				71AD229B30263516006D5847 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		A7A05BDB98C84DE3CA4A2188 /* Build configuration list for PBXNativeTarget "RememberRemember" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				54329134C4B1132CA2C1E347 /* Release */,
-				20964BB945CB5768EF92486D /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
