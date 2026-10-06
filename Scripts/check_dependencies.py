@@ -3,8 +3,10 @@
 expects; the git submodules; and the KiCad build. Offers to install anything missing, after asking.
 Missing formulas are errors; version mismatches are warnings.
 
-Usage: Scripts/check_dependencies.py [--yes]
+Usage: Scripts/check_dependencies.py [--yes] [--ssh]
   --yes   answer "yes" to every prompt (for unattended setup)
+  --ssh   fetch GitHub submodules over ssh (git@github.com:) instead of https; this is recorded in
+          the clone's local git config, and a later run without --ssh switches back to https
 
 Submodules that have their own Scripts/check_dependencies.py (Copper) declare their own
 requirements; this script gathers and installs them along with kiems' own, and runs each one's

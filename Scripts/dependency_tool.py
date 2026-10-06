@@ -82,6 +82,8 @@ class Context:
     """Passed to a repository's configure step."""
     root: Path
     assume_yes: bool
+    # Fetch GitHub submodules over ssh (git@github.com:...) instead of the https URLs .gitmodules gives.
+    ssh: bool = False
     brew: Optional[Path] = None
     brew_prefix: Optional[Path] = None
     warnings: int = 0
@@ -269,6 +271,34 @@ def submodule_state(sub: Submodule) -> tuple[str, str, str]:
     return "ok", recorded, recorded
 
 
+def submodule_name(sub: Submodule) -> str:
+    """The name .gitmodules files `sub` under (usually, but not necessarily, its path)."""
+    for line in git(sub.owner, "config", "-f", ".gitmodules", "--get-regexp", r"^submodule\..*\.path$").stdout.splitlines():
+        key, _, path = line.partition(" ")
+        if path == sub.path:
+            return key[len("submodule."):-len(".path")]
+    return sub.path
+
+
+def wanted_url(ctx: Context, sub: Submodule) -> str:
+    url = git(sub.owner, "config", "-f", ".gitmodules", f"submodule.{submodule_name(sub)}.url").stdout.strip()
+    if ctx.ssh and url.startswith("https://github.com/"):
+        url = "git@github.com:" + url[len("https://github.com/"):].removesuffix(".git") + ".git"
+    return url
+
+
+def use_url(ctx: Context, sub: Submodule) -> None:
+    """Points `sub` at https or ssh as this run asks, in the owner's local config and, once it is
+    cloned, in the clone's origin. Nothing in .gitmodules changes."""
+    name, url = submodule_name(sub), wanted_url(ctx, sub)
+    configured = git(sub.owner, "config", f"submodule.{name}.url").stdout.strip()
+    if configured and configured != url:
+        git(sub.owner, "config", f"submodule.{name}.url", url)
+        if (sub.full / ".git").exists():
+            git(sub.full, "remote", "set-url", "origin", url)
+        ctx.ok(f"{sub.full.relative_to(ctx.root)} now fetches from {url}")
+
+
 def check_submodules(ctx: Context, subs: list[Submodule], consent: list[Optional[bool]]) -> None:
     """Reports `subs`, offering to check out the ones that are missing or at another commit than
     their owner records. `consent` carries the user's answer between levels of nesting, so a
@@ -288,6 +318,8 @@ def check_submodules(ctx: Context, subs: list[Submodule], consent: list[Optional
                 outdated.append((sub, state))
         return outdated
 
+    for sub in subs:
+        use_url(ctx, sub)
     outdated = report()
     if outdated:
         if consent[0] is None:
@@ -296,10 +328,9 @@ def check_submodules(ctx: Context, subs: list[Submodule], consent: list[Optional
                                      "(git submodule update --init), along with any submodules inside them?")
         if consent[0]:
             for sub, _ in outdated:
-                url = git(sub.owner, "config", "-f", ".gitmodules", f"submodule.{sub.path}.url").stdout.strip()
-                print(f"  fetching {sub.full.relative_to(ctx.root)} from {url}")
-                # Pick up URL changes in .gitmodules (e.g. ssh -> https) for an existing clone.
-                git(sub.owner, "submodule", "sync", "--", sub.path)
+                print(f"  fetching {sub.full.relative_to(ctx.root)} from {wanted_url(ctx, sub)}")
+                git(sub.owner, "submodule", "init", "--", sub.path)
+                use_url(ctx, sub)
                 # --recommend-shallow honours `shallow = true` in .gitmodules (KiCad's full history
                 # is several gigabytes); --progress shows the transfer even for large clones.
                 result = subprocess.run(["git", "-C", str(sub.owner), "submodule", "update", "--init",
@@ -384,6 +415,9 @@ def main(script: str, repo: Repository) -> int:
     parser = argparse.ArgumentParser(description=f"Checks the dependencies {repo.name} builds against, "
                                      "and those of the repositories it includes as submodules.")
     parser.add_argument("-y", "--yes", action="store_true", help='answer "yes" to every prompt (unattended setup)')
+    parser.add_argument("--ssh", "-ssh", action="store_true",
+                        help="fetch GitHub submodules over ssh (git@github.com:) rather than https; "
+                             "a later run without it switches them back")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--manifest", action="store_true", help="print this repository's own requirements as JSON")
     mode.add_argument("--configure", action="store_true",
@@ -391,7 +425,7 @@ def main(script: str, repo: Repository) -> int:
     args = parser.parse_args()
     sys.stdout.reconfigure(line_buffering=True)  # keep our lines in order with git's and brew's
 
-    ctx = Context(root=Path(script).resolve().parent.parent, assume_yes=args.yes)
+    ctx = Context(root=Path(script).resolve().parent.parent, assume_yes=args.yes, ssh=args.ssh)
     if args.manifest:
         json.dump({"protocol": PROTOCOL, "name": repo.name,
                    "homebrew": [f.__dict__ for f in repo.homebrew], "submodules": repo.submodules},
