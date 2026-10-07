@@ -316,10 +316,10 @@ std::filesystem::path resolveKicadCli() {
     return "kicad-cli"; // Let posix_spawnp's own error reporting handle the "truly not found" case.
 }
 
-// Absolute path to the currently-running executable's own directory, via the macOS-specific
-// _NSGetExecutablePath API. Worker executables are sibling build products in the same
-// BUILT_PRODUCTS_DIR as this CLI.
+// Absolute path to the currently-running executable's directory.  Worker executables are sibling
+// build products of this CLI.
 std::filesystem::path executableDir() {
+#if defined(__APPLE__)
     std::array<char, 4096> buffer{};
     std::uint32_t size = static_cast<std::uint32_t>(buffer.size());
     if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
@@ -328,6 +328,17 @@ std::filesystem::path executableDir() {
     std::error_code ec;
     const std::filesystem::path resolved = std::filesystem::canonical(buffer.data(), ec);
     return (ec ? std::filesystem::path(buffer.data()) : resolved).parent_path();
+#elif defined(__linux__)
+    std::error_code ec;
+    const std::filesystem::path executable = std::filesystem::read_symlink("/proc/self/exe", ec);
+    if (ec) {
+        return {};
+    }
+    const std::filesystem::path resolved = std::filesystem::canonical(executable, ec);
+    return (ec ? executable : resolved).parent_path();
+#else
+    return {};
+#endif
 }
 
 void createDir(const std::filesystem::path& directoryPath, bool cleanup = false) {

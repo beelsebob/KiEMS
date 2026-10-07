@@ -142,6 +142,34 @@
 			remoteGlobalIDString = 3B5FA5D05688308C3CEF94DD;
 			remoteInfo = CSXCAD;
 		};
+		C0DEC0DE0000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 4C1CAD000000000000010001 /* libkicad.xcodeproj */;
+			proxyType = 1;
+			remoteGlobalIDString = 4C1CAD00000000000000000B;
+			remoteInfo = libkicad;
+		};
+		C0DEC0DE0000000000000002 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 4C1CAD000000000000010001 /* libkicad.xcodeproj */;
+			proxyType = 1;
+			remoteGlobalIDString = 4C1CAD00000000000000000B;
+			remoteInfo = libkicad;
+		};
+		C0DEC0DE0000000000000003 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 4C1CAD000000000000010001 /* libkicad.xcodeproj */;
+			proxyType = 1;
+			remoteGlobalIDString = 4C1CAD00000000000000000B;
+			remoteInfo = libkicad;
+		};
+		C0DEC0DE0000000000000004 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 4C1CAD000000000000010001 /* libkicad.xcodeproj */;
+			proxyType = 1;
+			remoteGlobalIDString = 4C1CAD00000000000000000B;
+			remoteInfo = libkicad;
+		};
 		BACB4CAE18E04FC816AC3BC0 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 71AD228A30263515006D5847 /* Project object */;
@@ -536,6 +564,7 @@
 				1D8A8E430A62C6E1B2D288CB /* PBXTargetDependency */,
 				BB732F6D1BE34EB63B370480 /* PBXTargetDependency */,
 				5C43EB69E93D41688CC4B2E5 /* PBXTargetDependency */,
+				C0DEC0DE0000000000000011 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				B7D891E5D67D73D341733A71 /* KiEMS */,
@@ -558,6 +587,7 @@
 				932AF7FD89493397A9367F15 /* PBXTargetDependency */,
 				9797BE39AE1FAFB1D500AF6B /* PBXTargetDependency */,
 				063881E7B4FE5FE37B2B3A2A /* PBXTargetDependency */,
+				C0DEC0DE0000000000000012 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				E331D08A3BF5F110095DBF0C /* copper_fdtd_worker */,
@@ -580,6 +610,7 @@
 				3C409D0A5C4DBB5CF700353B /* PBXTargetDependency */,
 				B43CBBC55485E3D5DEF4FD4C /* PBXTargetDependency */,
 				A1115760FE99C8290A2B7CAD /* PBXTargetDependency */,
+				C0DEC0DE0000000000000013 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				8290469707C87811FFCE548F /* kiems_fdtd_worker */,
@@ -603,6 +634,7 @@
 				C3F4DC29303EF0123F35E8D7 /* PBXTargetDependency */,
 				DFF95C78A7D193B940D0E0B0 /* PBXTargetDependency */,
 				8ABC3E8814A693FEEF5A531C /* PBXTargetDependency */,
+				C0DEC0DE0000000000000014 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				71AD229430263516006D5847 /* kiems-cli */,
@@ -835,6 +867,26 @@
 			isa = PBXTargetDependency;
 			name = libkicad;
 			targetProxy = 7E57CB0000000000000000C7 /* PBXContainerItemProxy */;
+		};
+		C0DEC0DE0000000000000011 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = libkicad;
+			targetProxy = C0DEC0DE0000000000000001 /* PBXContainerItemProxy */;
+		};
+		C0DEC0DE0000000000000012 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = libkicad;
+			targetProxy = C0DEC0DE0000000000000002 /* PBXContainerItemProxy */;
+		};
+		C0DEC0DE0000000000000013 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = libkicad;
+			targetProxy = C0DEC0DE0000000000000003 /* PBXContainerItemProxy */;
+		};
+		C0DEC0DE0000000000000014 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = libkicad;
+			targetProxy = C0DEC0DE0000000000000004 /* PBXContainerItemProxy */;
 		};
 		8ABC3E8814A693FEEF5A531C /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;

@@ -12,9 +12,9 @@ The repository contains three main pieces:
 - **`kiems`** — a command-line interface for the same workflow.
 - **`libkiems`** — the C++ simulation library used by both interfaces.
 
-`libkiems` and `kiems` are intended to be cross-platform. At present, however,
-the repository provides build and dependency-setup scripts only for macOS.
-Cross-platform support is a goal, not a currently documented build path.
+`libkiems` and `kiems` are intended to be cross-platform. The macOS app remains
+macOS-only, but the C++ library and command-line tools have CMake build support
+for macOS and Linux.
 
 ## What it does
 
@@ -67,8 +67,8 @@ provides timeline controls for inspecting the simulation.
 | Component | Status |
 | --- | --- |
 | KiEMS.app | macOS only |
-| `libkiems` | Intended to be cross-platform; currently built here with the macOS/Xcode project |
-| `kiems` CLI | Intended to be cross-platform; currently built here with the macOS/Xcode project |
+| `libkiems` | macOS and Linux through CMake |
+| `kiems` CLI | macOS and Linux through CMake |
 
 The current project is an Apple Silicon Xcode project. It has a macOS deployment
 target of 26.5.
@@ -109,6 +109,49 @@ To run the tests without opening Xcode:
 ```sh
 Scripts/run_libkiems_tests.sh
 ```
+
+## Build on Linux
+
+The Linux dependency checker initializes all Git submodules, builds the pinned
+KiCad libraries needed by `libkicad` when they are missing or stale, detects
+APT, DNF, Pacman, and Zypper, then validates the result by configuring CMake.
+It prints the command required for the current distribution and never installs
+packages unless `--install` is supplied.
+
+```sh
+Scripts/check_dependencies_linux.py
+# Review the command, then optionally install and validate:
+Scripts/check_dependencies_linux.py --install
+```
+
+Nix users can enter the fully declared development environment instead of
+installing packages system-wide:
+
+```sh
+nix develop
+cmake --preset linux-debug
+```
+
+The package mappings are maintained in
+[`Dependencies/linux-packages.json`](Dependencies/linux-packages.json). They
+are hints for each distribution; CMake's `find_package()` checks are the
+authoritative validation. For a partial setup, select one or more components:
+
+```sh
+Scripts/check_dependencies_linux.py --component build --component copper
+```
+
+After dependencies and KiCad's matching source build are present, configure
+and build the command-line tools:
+
+```sh
+cmake --preset linux-release
+cmake --build --preset linux-release --target kiems-cli kiems_fdtd_worker copper_fdtd_worker
+```
+
+`libkiems_tests` currently uses Apple's XCTest framework, so it is built and
+run through CTest on macOS only. The Linux target reports that limitation
+instead of silently omitting the test suite.
 
 ## Command-line workflow
 

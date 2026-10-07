@@ -1,0 +1,61 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/cmake/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "macos-debug",
+      "displayName": "macOS Debug",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
+    },
+    {
+      "name": "macos-release",
+      "displayName": "macOS Release",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
+    },
+    {
+      "name": "linux-debug",
+      "displayName": "Linux Debug",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "COPPER_ENABLE_METAL": "OFF"
+      }
+    },
+    {
+      "name": "linux-release",
+      "displayName": "Linux Release",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "COPPER_ENABLE_METAL": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "macos-debug", "configurePreset": "macos-debug" },
+    { "name": "macos-release", "configurePreset": "macos-release" },
+    { "name": "linux-debug", "configurePreset": "linux-debug" },
+    { "name": "linux-release", "configurePreset": "linux-release" }
+  ],
+  "testPresets": [
+    { "name": "macos-debug", "configurePreset": "macos-debug" },
+    { "name": "macos-release", "configurePreset": "macos-release" }
+  ]
+}
