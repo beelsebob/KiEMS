@@ -11,16 +11,19 @@
       devShells = forAllSystems (system:
         let
           pkgs = import nixpkgs { inherit system; };
+          python = pkgs.python3.withPackages (ps: [
+            ps.matplotlib
+          ]);
         in {
           default = pkgs.mkShell {
             packages = with pkgs; [
+              python
               cmake
               ninja
               pkg-config
               stdenv.cc
               nlohmann_json
               geos
-              matplotplusplus
               gnuplot
               hdf5
               blosc2
