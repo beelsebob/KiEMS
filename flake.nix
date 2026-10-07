@@ -39,7 +39,7 @@
               pixman
               freetype
               harfbuzz
-              opencascade
+              opencascade-occt
               ngspice
               libspnav
               libgit2
