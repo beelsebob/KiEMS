@@ -47,7 +47,7 @@
               zstd
               protobuf
               fontconfig
-              unixODBC
+              unixodbc
             ];
 
             shellHook = ''
