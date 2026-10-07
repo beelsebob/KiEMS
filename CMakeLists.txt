@@ -57,6 +57,12 @@ target_link_libraries(libkiems
         GEOS::geos_c
         Matplot++::matplot)
 
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    # GCC emits an ABI-transition advisory for ordinary std::pair use; it does not indicate an
+    # issue in this single-toolchain build and otherwise obscures actionable diagnostics.
+    target_compile_options(libkiems PRIVATE -Wno-psabi)
+endif()
+
 if(APPLE)
     find_library(ACCELERATE_FRAMEWORK Accelerate REQUIRED)
     target_link_libraries(libkiems PRIVATE ${ACCELERATE_FRAMEWORK})

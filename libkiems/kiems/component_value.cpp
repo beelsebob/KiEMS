@@ -94,6 +94,8 @@ char _unitLetter(ComponentUnit unit) {
     case ComponentUnit::Capacitance:
         return 'F';
     }
+
+    return '\0';
 }
 
 } // namespace
