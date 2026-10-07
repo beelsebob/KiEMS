@@ -26,7 +26,7 @@
               geos
               gnuplot
               hdf5
-              blosc2
+              c-blosc2
               cgal
               boost
               gmp
