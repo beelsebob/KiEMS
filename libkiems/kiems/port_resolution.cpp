@@ -361,25 +361,27 @@ std::optional<std::pair<LumpedComponentType, ComponentUnit>> _lumpedComponentKin
     return std::nullopt;
 }
 
-// Auto-discovers every 2-pin R/L/C on the board whose both pins sit on any net included in `sim`
-// (at either SimulationNet or GeometryOnly level), or its ground net, and folds each into a
-// LumpedComponentConfig -- see that type's own doc
-// comment. Silently skips anything not R/L/C-with-2-qualifying-pins (the overwhelming majority of
-// components on any real board); logs and skips a component that *is* in scope but couldn't
-// actually be modeled (unparseable value, pins on different/unknown layers, non-axis-aligned pins).
+// Models every component the user included in `sim` (IncludedComponentConfig) that is a 2-pin
+// R/L/C as a LumpedComponentConfig -- see that type's own doc comment. Nothing is modelled unless
+// it was included; an included component that can't be modelled (not an R/L/C designator, not
+// exactly 2 connected pins, unusable value, pins on different/unknown layers) is logged and
+// skipped.
 std::expected<void, std::string> _resolveLumpedComponents(const EMSConfig& config, SimulationConfig& sim,
                                                             const libkicad::Board& board, const Position& edgeCutsOrigin,
                                                             const std::vector<std::string>& orderedNets) {
     sim.lumpedComponents().clear();
+    if (sim.includedComponents().empty()) {
+        return {};
+    }
 
     auto groundNetsResult = resolveGroundNetNames(board, sim.groundNet());
     if (!groundNetsResult) {
         return std::unexpected(std::move(groundNetsResult).error());
     }
+    // Only for diagnostics: a pin on a net whose copper isn't in the model leaves that end of the
+    // element connected to nothing. orderedNets holds only SimulationNet entries (it also drives
+    // ports), so add the GeometryOnly entries' nets and the ground net(s).
     std::unordered_set<std::string> membership(orderedNets.begin(), orderedNets.end());
-    // orderedNets deliberately contains only SimulationNet entries because it also drives ports.
-    // Lumped components have broader geometry semantics: a passive between any two nets whose
-    // copper is included must exist in the model, even when one or both nets are GeometryOnly.
     for (const InvolvedNetConfig& entry : sim.involvedNets()) {
         if (entry.inclusionLevel() != NetInclusionLevel::GeometryOnly) continue;
         auto nets = resolveInvolvedNetNames(board, entry);
@@ -392,48 +394,50 @@ std::expected<void, std::string> _resolveLumpedComponents(const EMSConfig& confi
     if (!footprintsResult) {
         return std::unexpected(std::move(footprintsResult).error());
     }
-
+    std::unordered_map<std::string, const libkicad::FootprintInfo*> footprintsByReference;
     for (const auto& footprint : *footprintsResult) {
+        footprintsByReference.emplace(footprint.reference, &footprint);
+    }
+
+    for (const IncludedComponentConfig& included : sim.includedComponents()) {
+        const auto found = footprintsByReference.find(included.reference);
+        if (found == footprintsByReference.end()) {
+            logWarning("Simulation \"" + sim.name() + "\": included component " + included.reference +
+                       " is not on the board -- skipping");
+            continue;
+        }
+        const libkicad::FootprintInfo& footprint = *found->second;
         const auto kind = _lumpedComponentKind(_letterPrefix(footprint.reference));
         if (!kind.has_value()) {
+            logWarning("Simulation \"" + sim.name() + "\": included component " + footprint.reference +
+                       " isn't an R, L or C, the only components that can be simulated yet -- skipping");
             continue;
         }
         if (footprint.pins.size() != 2) {
-            // Same visibility reasoning as the net-membership skip below -- an R/L/C-prefixed
-            // footprint that isn't exactly 2 pins (a resistor network, a 4-pin common-mode choke,
-            // an unpopulated/DNP third pad some capacitor footprint variants report) would
-            // otherwise silently vanish, indistinguishable from "wrong prefix, never considered."
-            logInfo("Simulation \"" + sim.name() + "\": component " + footprint.reference + " has " +
-                     std::to_string(footprint.pins.size()) + " pin(s), not 2 -- skipping (not a supported R/L/C shape)");
+            logWarning("Simulation \"" + sim.name() + "\": included component " + footprint.reference + " has " +
+                       std::to_string(footprint.pins.size()) + " pin(s), not 2 -- skipping (not a supported R/L/C shape)");
             continue;
         }
         const auto& pin1 = footprint.pins[0];
         const auto& pin2 = footprint.pins[1];
         if (pin1.netName.empty() || pin2.netName.empty()) {
-            logInfo("Simulation \"" + sim.name() + "\": component " + footprint.reference +
-                     " has an unconnected pin -- skipping");
+            logWarning("Simulation \"" + sim.name() + "\": included component " + footprint.reference +
+                       " has an unconnected pin -- skipping");
             continue;
         }
-        if (membership.find(pin1.netName) == membership.end() || membership.find(pin2.netName) == membership.end()) {
-            // logInfo, not logWarning: this is the ordinary, expected outcome for most R/L/C parts
-            // on a real board (only a small minority ever sit between two simulated/ground nets) --
-            // but it's the one skip reason every other branch below already logs an equivalent of
-            // and this one didn't, leaving "found the part but its nets didn't match" completely
-            // silent and indistinguishable from "never considered it at all" (wrong prefix/pin
-            // count). Bounded volume: only ever printed for genuine 2-pin R/L/C footprints, already
-            // a small subset of a real board.
-            logInfo("Simulation \"" + sim.name() + "\": component " + footprint.reference + " (pins on \"" +
-                     _unescapeForDisplay(pin1.netName) + "\" / \"" + _unescapeForDisplay(pin2.netName) +
-                     "\") -- neither/only one net is included in this simulation or its ground nets, skipping");
-            continue;
+        for (const auto* pin : {&pin1, &pin2}) {
+            if (membership.find(pin->netName) == membership.end()) {
+                logWarning("Simulation \"" + sim.name() + "\": included component " + footprint.reference + " pin " +
+                           pin->number + " is on \"" + _unescapeForDisplay(pin->netName) +
+                           "\", which isn't included in this simulation -- that end connects to nothing");
+            }
         }
 
         const auto [type, unit] = *kind;
         const std::optional<double> parsedValue = parseSensibleComponentValue(footprint.value, unit);
         if (!parsedValue.has_value()) {
-            logWarning("Simulation \"" + sim.name() + "\": component " + footprint.reference +
-                       " is on a simulated net but its value \"" + footprint.value +
-                       "\" isn't a usable finite value -- skipping");
+            logWarning("Simulation \"" + sim.name() + "\": included component " + footprint.reference +
+                       "'s value \"" + footprint.value + "\" isn't a usable finite value -- skipping");
             continue;
         }
 

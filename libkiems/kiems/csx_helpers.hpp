@@ -49,7 +49,7 @@ CSPropProbeBox* addProbe(ContinuousStructure& csx, const std::string& name, std:
                           std::int32_t normDir = -1);
 /// `type`/`inductance`/`capacitance` default to a plain PARALLEL resistor (this helper's original,
 /// still-used shape -- see ports.cpp's port-resistor call sites) -- pass `SERIES` plus real
-/// inductance/capacitance for an auto-discovered lumped R/L/C component (see
+/// inductance/capacitance for an included lumped R/L/C component (see
 /// Simulation::addLumpedComponents()). NaN (the CSPropLumpedElement/Operator_Ext_LumpedRLC default
 /// for an unset value) means "not physically present", not "present, value zero" -- see
 /// operator_ext_lumpedRLC.cpp's own doc comment on that distinction.

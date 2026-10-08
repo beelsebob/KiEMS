@@ -359,6 +359,18 @@ std::expected<ClassifiedCopper, std::string> classifyCopperForSimulation(const S
             }
         }
     }
+
+    // An included component contributes its own pads, whatever nets they're on, grown by its own
+    // distance -- after the per-net groups, so their indices still match involvedNets() order.
+    for (const IncludedComponentConfig& component : sim.includedComponents()) {
+        if (!component.contributesToHull) continue;
+        ClassifiedCopper::HullContribution contribution;
+        contribution.padding = component.hullPadding;
+        for (const libkicad::CopperPolygon& polygon : geometry.copper) {
+            if (polygon.footprintRef == component.reference) contribution.copper.push_back(polygon);
+        }
+        result.hullContributions.push_back(std::move(contribution));
+    }
     return result;
 }
 

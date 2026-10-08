@@ -118,6 +118,18 @@ void from_json(const nlohmann::json& j, ProbedPin& p) {
     p.probe = j.value("probe", true);
 }
 
+void to_json(nlohmann::json& j, const IncludedComponentConfig& p) {
+    j = nlohmann::json{{"reference", p.reference}, {"contributes_to_hull", p.contributesToHull},
+                       {"hull_padding", p.hullPadding}};
+}
+
+void from_json(const nlohmann::json& j, IncludedComponentConfig& p) {
+    const IncludedComponentConfig def;
+    p.reference = j.at("reference").get<std::string>();
+    p.contributesToHull = j.value("contributes_to_hull", def.contributesToHull);
+    p.hullPadding = j.value("hull_padding", def.hullPadding);
+}
+
 void to_json(nlohmann::json& j, const PinDirectionOverride& p) {
     j = nlohmann::json{{"footprint", p.footprint}, {"pin", p.pin}, {"direction", p.direction}};
 }
@@ -624,6 +636,9 @@ void SimulationConfig::scaleToSimulationUnits(std::int32_t unitMultiplier) {
     for (auto& net : _involvedNets) {
         net.scaleHullPaddingToSimulationUnits(unitMultiplier);
     }
+    for (auto& component : _includedComponents) {
+        component.hullPadding *= unitMultiplier;
+    }
     _viaEdgeDistance *= unitMultiplier;
     _viaSpacing *= unitMultiplier;
     for (auto& port : _hullCutPorts) {
@@ -670,6 +685,9 @@ void to_json(nlohmann::json& j, const SimulationConfig& p) {
     if (!p._edgeTerminatedNets.empty()) {
         j["edge_terminated_nets"] = p._edgeTerminatedNets;
     }
+    if (!p._includedComponents.empty()) {
+        j["included_components"] = p._includedComponents;
+    }
 }
 
 void from_json(const nlohmann::json& j, SimulationConfig& p) {
@@ -700,6 +718,7 @@ void from_json(const nlohmann::json& j, SimulationConfig& p) {
     p._adversarialSharedClock = j.value("adversarial_shared_clock", def._adversarialSharedClock);
     p._isDifferentialPair = j.value("is_differential_pair", def._isDifferentialPair);
     p._edgeTerminatedNets = j.value("edge_terminated_nets", std::vector<std::string>{});
+    p._includedComponents = j.value("included_components", std::vector<IncludedComponentConfig>{});
     p._excitations = j.value("excitations", std::vector<ExcitationConfig>{});
     p._hullCutPorts = j.value("hull_cut_ports", std::vector<HullCutPortConfig>{});
     p._traces = j.value("traces", std::vector<SingleEndedConfig>{});

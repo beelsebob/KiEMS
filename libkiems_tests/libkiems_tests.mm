@@ -20,6 +20,7 @@
 #include <nlohmann/json.hpp>
 
 #include "kiems/board_slicing.hpp"
+#include "kiems/component_sim_model.hpp"
 #include "kiems/component_value.hpp"
 #include "kiems/config.hpp"
 #include "kiems/excitation_postprocess.hpp"
@@ -33,6 +34,7 @@
 #include "kiems/ports.hpp"
 #include "kiems/via_stitching.hpp"
 #include "libkicad/libkicad.hpp"
+#include "libkicad/spice_subcircuit.hpp"
 #include "logging.hpp"
 #include "polygon_geometry.hpp"
 
@@ -502,6 +504,49 @@ double triangulateLastCallArea(const std::vector<TriangulateCall>& sequence) {
         solution = Cu::triangulate(raw, 0.0, call.label);
     }
     return totalArea(solution);
+}
+
+struct TemporaryDirectory {
+    std::filesystem::path path;
+    ~TemporaryDirectory() {
+        std::error_code error;
+        std::filesystem::remove_all(path, error);
+    }
+};
+
+/// Copies one of KiCad's SPICE QA projects (schematic plus model libraries) into a fresh temporary
+/// directory, beside a generated board placing one footprint per reference -- the QA boards
+/// themselves have no footprints.
+std::filesystem::path makeSimModelFixture(const std::string& qaProject, const std::vector<std::string>& references) {
+    const auto source = std::filesystem::path(__FILE__).parent_path().parent_path() /
+        "submodules/libkicad/submodules/kicad/qa/data/eeschema/spice_netlists" / qaProject;
+    const auto dir = std::filesystem::temp_directory_path() /
+        ("kiems-sim-models-" + std::to_string(arc4random()));
+    std::filesystem::copy(source, dir, std::filesystem::copy_options::recursive);
+    std::ofstream pcb(dir / (qaProject + ".kicad_pcb"));
+    pcb << R"((kicad_pcb (version 20240108) (generator "libkiems_tests")
+      (general (thickness 1.6)) (paper "A4")
+      (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+      (setup (pad_to_mask_clearance 0)) (net 0 "")
+    )";
+    for (std::size_t index = 0; index < references.size(); ++index) {
+        pcb << "(footprint \"fixture:Part\" (layer \"F.Cu\") (at " << 10 + index * 5 << " 10)\n"
+            << "(attr smd) (property \"Reference\" \"" << references[index]
+            << "\" (at 0 0) (layer \"F.SilkS\")))\n";
+    }
+    pcb << ")";
+    return dir;
+}
+
+const libkicad::ComponentSimElement* findSimElement(const libkicad::ComponentSimModel& model, const std::string& name) {
+    for (const auto& element : model.elements) {
+        if (element.name == name) return &element;
+    }
+    return nullptr;
+}
+
+bool isSimNode(const libkicad::ComponentSimNode& node, libkicad::ComponentSimNode::Kind kind, const std::string& name) {
+    return node.kind == kind && node.name == name;
 }
 
 } // namespace
@@ -1037,6 +1082,130 @@ static kiems::EyeAggressor eyeTestTone(const std::vector<double>& frequencies, d
     XCTAssertTrue(classified->geometryOnly.empty());
     XCTAssertTrue(classified->involved.front().netName == "SIG");
     XCTAssertTrue(classified->ground.front().netName == "GND");
+}
+
+- (void)testIncludedComponentPadsContributeToTheHullAtTheirOwnPadding {
+    kiems::SimulationConfig sim;
+    kiems::InvolvedNetConfig involved;
+    involved.setKind(kiems::NetSelectorKind::Net);
+    involved.setNet(std::string("SIG"));
+    involved.setHullPadding(100);
+    sim.involvedNets().push_back(involved);
+    kiems::GroundNetConfig ground;
+    ground.setKind(kiems::GroundSelectorKind::Net);
+    ground.setNet(std::string("GND"));
+    sim.groundNet() = ground;
+    sim.includedComponents().push_back({"C1", true, 250});
+    sim.includedComponents().push_back({"R1", false, 999}); // included, but not growing the hull
+
+    libkicad::BoardGeometry geometry;
+    auto pad = [](const char* net, const char* reference, double x) {
+        libkicad::CopperPolygon polygon = copperRectMm(net, "F.Cu", x, 0, x + 1, 1);
+        polygon.footprintRef = reference;
+        polygon.padNumber = "1";
+        return polygon;
+    };
+    geometry.copper = {copperRectMm("SIG", "F.Cu", 8, 8, 12, 12), pad("OTHER", "C1", 20), pad("GND", "C1", 22),
+                       pad("OTHER", "R1", 30)};
+
+    const libkicad::Board board(*_runtime, "", "");
+    auto classified = kiems::classifyCopperForSimulation(sim, geometry, board);
+    XCTAssertTrue(classified.has_value());
+    if (!classified) return;
+    // The SIG net's group, then C1's pads -- whichever nets they're on -- at C1's own padding.
+    XCTAssertEqual(classified->hullContributions.size(), static_cast<std::size_t>(2));
+    if (classified->hullContributions.size() != 2) return;
+    XCTAssertEqualWithAccuracy(classified->hullContributions[0].padding, 100.0, 1e-9);
+    XCTAssertEqualWithAccuracy(classified->hullContributions[1].padding, 250.0, 1e-9);
+    XCTAssertEqual(classified->hullContributions[1].copper.size(), static_cast<std::size_t>(2));
+    for (const auto& polygon : classified->hullContributions[1].copper) {
+        XCTAssertTrue(polygon.footprintRef == "C1");
+    }
+}
+
+- (void)testOnlyIncludedComponentsBecomeLumpedComponents {
+    const TemporaryDirectory dir{std::filesystem::temp_directory_path() /
+                                 ("kiems-included-components-" + std::to_string(arc4random()))};
+    std::filesystem::create_directories(dir.path);
+    std::ofstream(dir.path / "fixture.kicad_pro") << R"({"meta":{"filename":"fixture.kicad_pro","version":1}})";
+    std::ofstream pcb(dir.path / "fixture.kicad_pcb");
+    pcb << R"((kicad_pcb (version 20240108) (generator "libkiems_tests")
+  (general (thickness 1.6)) (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "") (net 1 "SIG") (net 2 "GND")
+)";
+    // Two identical shunt resistors from SIG to GND: exactly the parts the simulator used to pick
+    // up by itself.
+    for (const auto& [reference, y] : {std::pair{"R1", 10}, std::pair{"R2", 14}}) {
+        pcb << "(footprint \"fixture:R_0603\" (layer \"F.Cu\") (at 10 " << y << ")\n"
+            << "  (property \"Reference\" \"" << reference << "\" (at 0 -1.5 0) (layer \"F.SilkS\"))\n"
+            << "  (property \"Value\" \"10k\" (at 0 1.5 0) (layer \"F.Fab\"))\n"
+            << "  (pad \"1\" smd rect (at -0.8 0) (size 0.8 0.9) (layers \"F.Cu\") (net 1 \"SIG\"))\n"
+            << "  (pad \"2\" smd rect (at 0.8 0) (size 0.8 0.9) (layers \"F.Cu\") (net 2 \"GND\")))\n";
+    }
+    pcb << R"((gr_rect (start 0 0) (end 20 20) (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts"))))";
+    pcb.close();
+    const libkicad::Board board(*_runtime, (dir.path / "fixture.kicad_pro").string(),
+                                (dir.path / "fixture.kicad_pcb").string());
+
+    kiems::EMSConfig config;
+    XCTAssertTrue(kiems::importStackup(board, config).has_value());
+    kiems::SimulationConfig simulation;
+    simulation.setName("Included only");
+    kiems::InvolvedNetConfig signal;
+    signal.setKind(kiems::NetSelectorKind::Net);
+    signal.setNet(std::string("SIG"));
+    simulation.involvedNets().push_back(signal);
+    kiems::GroundNetConfig ground;
+    ground.setKind(kiems::GroundSelectorKind::Net);
+    ground.setNet(std::string("GND"));
+    simulation.groundNet() = ground;
+    config.simulations().push_back(simulation);
+
+    auto resolved = kiems::resolveSimulationPorts(config, board);
+    XCTAssertTrue(resolved.has_value(), @"%s", resolved ? "" : resolved.error().c_str());
+    XCTAssertTrue(config.simulations()[0].lumpedComponents().empty());
+
+    config.simulations()[0].includedComponents().push_back({"R2"});
+    config.simulations()[0].includedComponents().push_back({"U99"}); // not on the board: skipped
+    resolved = kiems::resolveSimulationPorts(config, board);
+    XCTAssertTrue(resolved.has_value(), @"%s", resolved ? "" : resolved.error().c_str());
+    const auto& lumped = config.simulations()[0].lumpedComponents();
+    XCTAssertEqual(lumped.size(), static_cast<std::size_t>(1));
+    if (lumped.size() == 1) {
+        XCTAssertTrue(lumped[0].reference() == "R2");
+        XCTAssertEqualWithAccuracy(lumped[0].resistance(), 10000.0, 1e-6);
+    }
+}
+
+- (void)testIncludedComponentsRoundTripAndScaleToSimulationUnits {
+    const nlohmann::json authored = {
+        {"name", "components"},
+        {"ground_net", {{"net", "GND"}}},
+        {"involved_nets", nlohmann::json::array({{{"net", "A"}}})},
+        {"included_components", nlohmann::json::array({
+            {{"reference", "C1"}, {"contributes_to_hull", true}, {"hull_padding", 300.0}},
+            {{"reference", "R7"}},
+        })},
+    };
+    kiems::SimulationConfig simulation = authored.get<kiems::SimulationConfig>();
+    XCTAssertEqual(simulation.includedComponents().size(), static_cast<std::size_t>(2));
+    if (simulation.includedComponents().size() != 2) return;
+    XCTAssertTrue(simulation.includedComponents()[0] == (kiems::IncludedComponentConfig{"C1", true, 300}));
+    XCTAssertTrue(simulation.includedComponents()[1] == (kiems::IncludedComponentConfig{"R7", false, 5000}));
+
+    const nlohmann::json saved = simulation;
+    XCTAssertTrue(saved.at("included_components") == nlohmann::json::array({
+        {{"reference", "C1"}, {"contributes_to_hull", true}, {"hull_padding", 300.0}},
+        {{"reference", "R7"}, {"contributes_to_hull", false}, {"hull_padding", 5000.0}},
+    }));
+    simulation.scaleToSimulationUnits(10);
+    XCTAssertEqualWithAccuracy(simulation.includedComponents()[0].hullPadding, 3000.0, 1e-9);
+
+    // Nothing included writes nothing, so existing documents (and cache keys) are unchanged.
+    simulation.includedComponents().clear();
+    XCTAssertFalse(nlohmann::json(simulation).contains("included_components"));
 }
 
 - (void)testLegacySimulationHullPaddingMigratesToContributingEntries {
@@ -2851,6 +3020,249 @@ static kiems::EMSConfig makeSyntheticConfig() {
     }
 
     std::filesystem::remove_all(dir);
+}
+
+- (void)testComponentSimModelsResolveThroughTheSchematic {
+    const std::vector<std::string> references{"R1", "C1", "Q1", "V1", "H1"};
+    const TemporaryDirectory dir{makeSimModelFixture("npn_ce_amp", references)};
+    const libkicad::Board board(*_runtime, (dir.path / "npn_ce_amp.kicad_pro").string(),
+                                (dir.path / "npn_ce_amp.kicad_pcb").string());
+    const auto models = board.componentSimModels();
+    XCTAssertTrue(models.has_value(), @"%s", models ? "" : models.error().c_str());
+    if (!models) return;
+    XCTAssertEqual(models->size(), references.size());
+    if (models->size() != references.size()) return;
+    for (std::size_t i = 0; i < references.size(); ++i) {
+        XCTAssertTrue(models->at(i).reference == references[i]); // board order
+    }
+    using Status = libkicad::ComponentSimModelStatus;
+    using Kind = libkicad::ComponentSimNode::Kind;
+
+    const auto& r1 = models->at(0);
+    XCTAssertTrue(r1.status == Status::Resolved, @"%s", r1.message.c_str());
+    XCTAssertTrue(r1.deviceType == "R");
+    XCTAssertEqual(r1.elements.size(), 1u);
+    if (r1.elements.size() == 1) {
+        XCTAssertEqual(r1.elements[0].kind, 'R');
+        XCTAssertFalse(r1.elements[0].value.empty());
+        XCTAssertEqual(r1.elements[0].nodes.size(), 2u);
+        if (r1.elements[0].nodes.size() == 2) {
+            XCTAssertTrue(isSimNode(r1.elements[0].nodes[0], Kind::Pin, "1"));
+            XCTAssertTrue(isSimNode(r1.elements[0].nodes[1], Kind::Pin, "2"));
+        }
+    }
+    XCTAssertTrue(kiems::assessComponentSimModel(r1).supported);
+    XCTAssertTrue(kiems::assessComponentSimModel(models->at(1)).supported);
+
+    const auto& q1 = models->at(2);
+    XCTAssertTrue(q1.status == Status::Resolved, @"%s", q1.message.c_str());
+    XCTAssertTrue(q1.deviceType == "NPN");
+    XCTAssertTrue(q1.modelName == "NPN");
+    XCTAssertTrue(std::filesystem::path(q1.libraryPath).filename() == "npn.lib.spice");
+    XCTAssertEqual(q1.elements.size(), 1u);
+    if (!q1.elements.empty()) {
+        XCTAssertEqual(q1.elements[0].kind, 'Q');
+        // KiCad's BJT has a fourth (substrate) terminal, which pspice:QNPN brings out as pin 4.
+        const auto& nodes = q1.elements[0].nodes;
+        XCTAssertEqual(nodes.size(), 4u);
+        if (nodes.size() == 4) {
+            XCTAssertTrue(isSimNode(nodes[0], Kind::Pin, "1"));
+            XCTAssertTrue(isSimNode(nodes[1], Kind::Pin, "2"));
+            XCTAssertTrue(isSimNode(nodes[2], Kind::Pin, "3"));
+            XCTAssertTrue(isSimNode(nodes[3], Kind::Pin, "4"));
+        }
+    }
+    const auto q1Support = kiems::assessComponentSimModel(q1);
+    XCTAssertFalse(q1Support.supported);
+    XCTAssertNotEqual(q1Support.reason.find("Q1 (bipolar transistor)"), std::string::npos);
+
+    XCTAssertFalse(kiems::assessComponentSimModel(models->at(3)).supported); // a voltage source
+
+    const auto& h1 = models->at(4);
+    XCTAssertTrue(h1.status == Status::NoSymbol);
+    XCTAssertFalse(kiems::assessComponentSimModel(h1).supported);
+}
+
+- (void)testComponentSimModelsExpandNestedLibrarySubcircuits {
+    const TemporaryDirectory dir{makeSimModelFixture("opamp", {"U1", "R1"})};
+    // Same subcircuit name and ports as the model the schematic's U1 selects (Sim.Pins
+    // "3=+IN 4=-IN 5=VCC 2=VEE 1=OUT"), but built from nested R/L/C-only subcircuits.
+    std::ofstream(dir.path / "uopamp.lib.spice") << R"(* KiEMS fixture
+.subckt uopamp_lvl2 +IN -IN VCC VEE OUT
+X1 +IN mid rc_section
+X2 mid OUT rc_section PARAMS: r=2k
+Rload OUT 0 1meg
+Rsupply VCC VEE 10k
+.ends
+.subckt rc_section a b PARAMS: r=1k
+R1 a n1 {r}
+C1 n1 0 1n
++ IC=0
+L1 n1 b 10n
+.ends
+)";
+    const libkicad::Board board(*_runtime, (dir.path / "opamp.kicad_pro").string(),
+                                (dir.path / "opamp.kicad_pcb").string());
+    const auto models = board.componentSimModels();
+    XCTAssertTrue(models.has_value(), @"%s", models ? "" : models.error().c_str());
+    if (!models || models->size() != 2) return;
+    using Kind = libkicad::ComponentSimNode::Kind;
+
+    const auto& u1 = models->at(0);
+    XCTAssertTrue(u1.status == libkicad::ComponentSimModelStatus::Resolved, @"%s", u1.message.c_str());
+    XCTAssertTrue(u1.deviceType == "SUBCKT");
+    XCTAssertTrue(u1.modelName == "uopamp_lvl2");
+    XCTAssertTrue(std::filesystem::path(u1.libraryPath).filename() == "uopamp.lib.spice");
+    std::vector<std::string> names;
+    for (const auto& element : u1.elements) names.push_back(element.name);
+    const std::vector<std::string> expected{"U1.X1.R1", "U1.X1.C1", "U1.X1.L1", "U1.X2.R1", "U1.X2.C1",
+                                            "U1.X2.L1", "U1.Rload", "U1.Rsupply"};
+    XCTAssertTrue(names == expected);
+
+    if (const auto* r1 = findSimElement(u1, "U1.X1.R1"); r1 && r1->nodes.size() == 2) {
+        XCTAssertTrue(isSimNode(r1->nodes[0], Kind::Pin, "3"));
+        XCTAssertTrue(isSimNode(r1->nodes[1], Kind::Internal, "U1.X1.n1"));
+        XCTAssertTrue(r1->value == "{r}");
+    } else {
+        XCTFail(@"U1.X1.R1 missing or malformed");
+    }
+    if (const auto* c1 = findSimElement(u1, "U1.X1.C1"); c1 && c1->nodes.size() == 2) {
+        XCTAssertTrue(isSimNode(c1->nodes[1], Kind::Ground, "0"));
+        XCTAssertTrue(c1->value == "1n IC=0");
+    } else {
+        XCTFail(@"U1.X1.C1 missing or malformed");
+    }
+    if (const auto* l1 = findSimElement(u1, "U1.X2.L1"); l1 && l1->nodes.size() == 2) {
+        XCTAssertTrue(isSimNode(l1->nodes[0], Kind::Internal, "U1.X2.n1"));
+        XCTAssertTrue(isSimNode(l1->nodes[1], Kind::Pin, "1"));
+    } else {
+        XCTFail(@"U1.X2.L1 missing or malformed");
+    }
+    if (const auto* l1 = findSimElement(u1, "U1.X1.L1"); l1 && l1->nodes.size() == 2) {
+        XCTAssertTrue(isSimNode(l1->nodes[1], Kind::Internal, "U1.mid")); // shared with X2's input
+    } else {
+        XCTFail(@"U1.X1.L1 missing or malformed");
+    }
+    XCTAssertTrue(kiems::assessComponentSimModel(u1).supported, @"%s",
+                  kiems::assessComponentSimModel(u1).reason.c_str());
+}
+
+- (void)testComponentSimModelsLoadMultiRootProjects {
+    // A multi-root project lists its top-level sheets in the project file, under the sheet UUIDs
+    // its symbol instance paths start from; the .kicad_sch named after the project needn't exist.
+    const TemporaryDirectory dir{makeSimModelFixture("npn_ce_amp", {"R1", "Q1"})};
+    std::filesystem::rename(dir.path / "npn_ce_amp.kicad_sch", dir.path / "amplifier.kicad_sch");
+    nlohmann::json project = nlohmann::json::parse(std::ifstream(dir.path / "npn_ce_amp.kicad_pro"));
+    project["schematic"]["top_level_sheets"] = nlohmann::json::array({{
+        {"filename", "amplifier.kicad_sch"},
+        {"name", "Amplifier"},
+        {"uuid", "48817d43-3f4d-4e7e-ae5d-40c9da0e33d5"},
+    }});
+    std::ofstream(dir.path / "npn_ce_amp.kicad_pro") << project.dump(2);
+
+    const libkicad::Board board(*_runtime, (dir.path / "npn_ce_amp.kicad_pro").string(),
+                                (dir.path / "npn_ce_amp.kicad_pcb").string());
+    const auto models = board.componentSimModels();
+    XCTAssertTrue(models.has_value(), @"%s", models ? "" : models.error().c_str());
+    if (!models || models->size() != 2) return;
+    XCTAssertTrue(models->at(0).status == libkicad::ComponentSimModelStatus::Resolved, @"%s",
+                  models->at(0).message.c_str());
+    XCTAssertTrue(models->at(0).deviceType == "R");
+    XCTAssertTrue(models->at(1).status == libkicad::ComponentSimModelStatus::Resolved, @"%s",
+                  models->at(1).message.c_str());
+    XCTAssertTrue(models->at(1).deviceType == "NPN");
+}
+
+- (void)testComponentSimModelsRequireTheProjectSchematic {
+    const TemporaryDirectory dir{makeSimModelFixture("rlc", {"Rs1"})};
+    std::filesystem::remove(dir.path / "rlc.kicad_sch");
+    const libkicad::Board board(*_runtime, (dir.path / "rlc.kicad_pro").string(),
+                                (dir.path / "rlc.kicad_pcb").string());
+    const auto models = board.componentSimModels();
+    XCTAssertFalse(models.has_value());
+    if (!models) XCTAssertNotEqual(models.error().find("schematic file does not exist"), std::string::npos, @"%s",
+                                   models.error().c_str());
+}
+
+- (void)testSubcircuitExpansionHandlesNestingCommentsAndUnresolvedInstances {
+    const std::string code = R"(* header comment
+.SUBCKT outer IN OUT gnd_ref PARAMS: scale = 2
+Rin IN mid {scale * 10} ; inline comment
+X1 mid OUT inner
++ PARAMS: c=1n
+.subckt inner a b
+C1 a b {c}
+Lshunt a 0 1u $ PSpice-style comment
+.ends inner
+Xmissing mid gnd_ref nowhere
+Dclamp OUT gnd_ref DMOD
+Xlib OUT gnd_ref from_library
+.ENDS outer
+)";
+    const libkicad::detail::SubcircuitLookup lookup = [](const std::string& name) -> std::optional<std::string> {
+        if (name == "from_library") return std::string(".subckt FROM_LIBRARY p q\nRlib p q 50\n.endsubckt\n");
+        return std::nullopt;
+    };
+    using Kind = libkicad::ComponentSimNode::Kind;
+    const std::vector<libkicad::ComponentSimNode> ports{
+        {Kind::Pin, "1"}, {Kind::Pin, "2"}, {Kind::Pin, "3"}};
+    std::string error;
+    const auto elements = libkicad::detail::expandSubcircuit(code, "C1", ports, lookup, error);
+    XCTAssertTrue(elements.has_value(), @"%s", error.c_str());
+    if (!elements) return;
+
+    libkicad::ComponentSimModel model;
+    model.elements = *elements;
+    std::vector<std::string> names;
+    for (const auto& element : model.elements) names.push_back(element.name);
+    const std::vector<std::string> expected{"C1.Rin", "C1.X1.C1", "C1.X1.Lshunt", "C1.Xmissing", "C1.Dclamp",
+                                            "C1.Xlib.Rlib"};
+    XCTAssertTrue(names == expected);
+    if (names != expected) return;
+
+    const auto& rin = model.elements[0];
+    XCTAssertTrue(isSimNode(rin.nodes[0], Kind::Pin, "1"));
+    XCTAssertTrue(isSimNode(rin.nodes[1], Kind::Internal, "C1.mid"));
+    XCTAssertTrue(rin.value == "{scale * 10}");
+    const auto& capacitor = model.elements[1];
+    XCTAssertTrue(isSimNode(capacitor.nodes[0], Kind::Internal, "C1.mid"));
+    XCTAssertTrue(isSimNode(capacitor.nodes[1], Kind::Pin, "2"));
+    const auto& shunt = model.elements[2];
+    XCTAssertTrue(isSimNode(shunt.nodes[1], Kind::Ground, "0"));
+    XCTAssertTrue(shunt.value == "1u");
+    const auto& missing = model.elements[3];
+    XCTAssertEqual(missing.kind, 'X');
+    XCTAssertNotEqual(missing.value.find("nowhere not found"), std::string::npos);
+    XCTAssertEqual(model.elements[4].kind, 'D');
+    const auto& fromLibrary = model.elements[5];
+    XCTAssertTrue(isSimNode(fromLibrary.nodes[0], Kind::Pin, "2"));
+    XCTAssertTrue(isSimNode(fromLibrary.nodes[1], Kind::Pin, "3"));
+
+    model.status = libkicad::ComponentSimModelStatus::Resolved;
+    const auto support = kiems::assessComponentSimModel(model);
+    XCTAssertFalse(support.supported);
+    XCTAssertNotEqual(support.reason.find("C1.Xmissing (subcircuit nowhere not found)"), std::string::npos);
+    XCTAssertNotEqual(support.reason.find("C1.Dclamp (diode)"), std::string::npos);
+
+    XCTAssertFalse(libkicad::detail::expandSubcircuit("R1 1 2 10k\n", "R1", {}, lookup, error).has_value());
+}
+
+- (void)testComponentSimModelSupportExplainsMissingModels {
+    using Status = libkicad::ComponentSimModelStatus;
+    libkicad::ComponentSimModel model;
+    model.status = Status::NoModel;
+    XCTAssertTrue(kiems::assessComponentSimModel(model).reason == "No SPICE model");
+    model.status = Status::ExcludedFromSimulation;
+    XCTAssertFalse(kiems::assessComponentSimModel(model).supported);
+    model.status = Status::Error;
+    model.message = "could not find base model 'X'\nsecond line";
+    XCTAssertTrue(kiems::assessComponentSimModel(model).reason ==
+                  "The SPICE model could not be loaded: could not find base model 'X'");
+    model.status = Status::Resolved;
+    model.message.clear();
+    XCTAssertFalse(kiems::assessComponentSimModel(model).supported); // no elements at all
+    model.elements.push_back({'L', "L1", {}, "1u"});
+    XCTAssertTrue(kiems::assessComponentSimModel(model).supported);
 }
 
 @end

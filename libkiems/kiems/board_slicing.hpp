@@ -306,9 +306,10 @@ struct ClassifiedCopper {
     std::vector<libkicad::CopperPolygon> involved;
     std::vector<libkicad::CopperPolygon> geometryOnly;
     std::vector<libkicad::CopperPolygon> ground;
-    /// One group per SimulationNet entry, retaining its own padding so the cutout can be the union
-    /// of individually expanded selectors. Empty groups are harmless and diagnose naturally if
-    /// every contributing selector resolves to no copper.
+    /// One group per SimulationNet entry, then one per included component that contributes to the
+    /// hull (its pads), each retaining its own padding so the cutout can be the union of
+    /// individually expanded selectors. Empty groups are harmless and diagnose naturally if every
+    /// contributing selector resolves to no copper.
     std::vector<HullContribution> hullContributions;
 };
 
@@ -401,7 +402,7 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(
     const std::vector<NPTHHole>& npthHoles,
     const GeometryProcessingProgressCallback& onProgress = {});
 
-/// Removes auto-discovered lumped R/L/C components whose two pad centres both lie outside the
+/// Removes included lumped R/L/C components whose two pad centres both lie outside the
 /// board cutout. Called immediately after slicing (and after loading cached sliced geometry), so
 /// subsequent grid generation and FDTD construction see exactly the passives that physically
 /// intersect the retained simulation region.

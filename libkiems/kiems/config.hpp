@@ -148,15 +148,15 @@ PortGridFootprint portGridFootprint(const PortConfig& port);
 /// Which of a LumpedComponentConfig's R/L/C fields are physically present -- mirrors how
 /// CSPropLumpedElement/Operator_Ext_LumpedRLC themselves distinguish "absent" (NaN) from "present,
 /// value zero" (see operator_ext_lumpedRLC.cpp's own doc comment on this), just narrowed to the
-/// three single-quantity component kinds resolveSimulationPorts() ever auto-discovers.
+/// three single-quantity component kinds resolveSimulationPorts() ever models.
 enum class LumpedComponentType { Resistor, Inductor, Capacitor };
 
-/// One auto-discovered 2-pin R/L/C component, resolved to real board geometry -- populated
-/// entirely by resolveSimulationPorts() (never (de)serialized, same as PortConfig; see
+/// One included 2-pin R/L/C component, resolved to real board geometry -- populated entirely by
+/// resolveSimulationPorts() (never (de)serialized, same as PortConfig; see
 /// SimulationConfig::_lumpedComponents' own comment). A component only ever gets one of these if
-/// both its pins sit on nets included at either inclusion level (or on the simulation's ground net)
-/// and at least one pad centre survives inside the subsequently computed board cutout -- see
-/// port_resolution.cpp's discovery and restrictLumpedComponentsToCutout()'s spatial filter.
+/// the user included it (SimulationConfig::includedComponents()) and at least one pad centre
+/// survives inside the subsequently computed board cutout -- see port_resolution.cpp's
+/// _resolveLumpedComponents() and restrictLumpedComponentsToCutout()'s spatial filter.
 class LumpedComponentConfig {
 public:
     const std::string& reference() const { return _reference; }
@@ -401,6 +401,26 @@ struct PinImpedanceOverride {
 
 void to_json(nlohmann::json& j, const PinImpedanceOverride& p);
 void from_json(const nlohmann::json& j, PinImpedanceOverride& p);
+
+/// One component the user has included in a simulation (the Info panel's "Included in Simulation"
+/// checkbox). Included 2-pin R/L/C components become lumped components -- see port_resolution.cpp's
+/// _resolveLumpedComponents(). Nothing is included automatically.
+struct IncludedComponentConfig {
+    std::string reference;
+    /// Whether the component's own pads grow the simulation hull, by hullPadding -- the component
+    /// equivalent of an InvolvedNetConfig at NetInclusionLevel::SimulationNet. Off for a newly
+    /// included component, as for a newly included net (which starts GeometryOnly).
+    bool contributesToHull = false;
+    /// Micrometers in a saved configuration and simulation units in a scaled working copy, like
+    /// InvolvedNetConfig::hullPadding(). Kept while contributesToHull is off, so turning it back on
+    /// restores the last distance.
+    double hullPadding = 5000;
+
+    bool operator==(const IncludedComponentConfig& other) const = default;
+};
+
+void to_json(nlohmann::json& j, const IncludedComponentConfig& p);
+void from_json(const nlohmann::json& j, IncludedComponentConfig& p);
 
 /// One entry in a SimulationConfig's involved-nets list. Resolves (via port_resolution.cpp and
 /// libkicad) to a set of net names -- a net class expands to every net assigned to it; a
@@ -1177,7 +1197,11 @@ public:
     std::vector<PortConfig>& ports() { return _ports; }
     const std::vector<PortConfig>& ports() const { return _ports; }
 
-    /// Auto-discovered 2-pin R/L/C components -- see LumpedComponentConfig's own doc comment.
+    /// Components the user included -- see IncludedComponentConfig.
+    std::vector<IncludedComponentConfig>& includedComponents() { return _includedComponents; }
+    const std::vector<IncludedComponentConfig>& includedComponents() const { return _includedComponents; }
+
+    /// Lumped R/L/C models of includedComponents() -- see LumpedComponentConfig's own doc comment.
     /// Populated by resolveSimulationPorts(), alongside ports(); never (de)serialized (same
     /// reasoning as _ports itself -- see that member's own comment below).
     std::vector<LumpedComponentConfig>& lumpedComponents() { return _lumpedComponents; }
@@ -1193,7 +1217,7 @@ public:
     std::vector<std::string>& resolvedNets() { return _resolvedNets; }
     const std::vector<std::string>& resolvedNets() const { return _resolvedNets; }
 
-    /// Scales every involved net's hull padding, viaEdgeDistance/viaSpacing, and every resolved
+    /// Scales every involved net's and included component's hull padding, viaEdgeDistance/viaSpacing, and every resolved
     /// port's width/length (PortConfig::scaleToSimulationUnits), into simulation units. The other
     /// InvolvedNetConfig fields stay in file units: impedance/length/width are copied verbatim into
     /// a PortConfig by port_resolution.cpp and scaled with that port exactly once. Only ever called
@@ -1216,6 +1240,7 @@ private:
     bool _adversarialSharedClock = false;
     bool _isDifferentialPair = false;
     std::vector<std::string> _edgeTerminatedNets;
+    std::vector<IncludedComponentConfig> _includedComponents;
     std::vector<ExcitationConfig> _excitations;
     std::vector<HullCutPortConfig> _hullCutPorts;
     std::vector<SingleEndedConfig> _traces;

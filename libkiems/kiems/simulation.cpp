@@ -1228,7 +1228,7 @@ std::expected<void, std::string> Simulation::addLumpedComponents() {
     if (components.empty()) {
         return {};
     }
-    logInfo("Adding " + std::to_string(components.size()) + " auto-discovered lumped component(s)");
+    logInfo("Adding " + std::to_string(components.size()) + " included lumped component(s)");
 
     // direction is the pad1->pad2 angle in file-frame degrees (0/180 => horizontal => x, 90/270 =>
     // vertical => y); it must match the box's long axis below, otherwise Operator_Ext_LumpedRLC

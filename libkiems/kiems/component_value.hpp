@@ -28,8 +28,8 @@ std::optional<double> parseComponentValue(const std::string& raw, ComponentUnit 
 /// Parses `raw` and returns the value the solver should use. Negative, NaN, and infinite values are
 /// rejected, as are zero-valued capacitors and inductors. A deliberately zero-ohm resistor is a
 /// valid physical jumper, though, so it is normalized to a representative 10 mOhm rather than
-/// producing the solver's degenerate all-zero R/L/C element. Keep UI validation and automatic
-/// lumped-component discovery on this shared normalization so the board view always agrees with
+/// producing the solver's degenerate all-zero R/L/C element. Keep UI validation and lumped-
+/// component resolution on this shared normalization so the board view always agrees with
 /// what the simulation accepts.
 std::optional<double> parseSensibleComponentValue(const std::string& raw, ComponentUnit unit);
 
