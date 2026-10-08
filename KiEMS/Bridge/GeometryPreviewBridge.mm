@@ -260,7 +260,7 @@ bool viaIntersectsOutline(double x, double y, double diameter, const std::vector
 
 // ---- Component 3D model preview (debug aid -- see EMSGeometryComponentTriangle's own doc comment) ----
 
-// Every footprint auto-discovered as a lumped R/L/C component (see
+// Every footprint modelled as a lumped R/L/C component (see
 // kiems::LumpedComponentConfig's own doc comment) -- deliberately NOT every footprint with a
 // resolved port/probe pin too (an earlier version of this function unioned both): a port/probe pin
 // commonly sits on an IC or connector, not just a passive, and rendering those alongside the
@@ -1622,6 +1622,53 @@ std::unordered_map<std::string, simd_double4> previewNetColors(const libkicad::B
 
 namespace {
 
+struct PreviewLayerPlacement {
+    std::unordered_map<std::string, double> zByName;
+    double top = 0;
+    double bottom = 0;
+};
+
+/// Copper Z positions from the board's stackup, the same walk buildWholeBoardPreview() makes.
+/// Board::stackup() reads the snapshot taken at load, so this doesn't wait on the KiCad lock.
+PreviewLayerPlacement previewLayerPlacement(const libkicad::Board& board) {
+    PreviewLayerPlacement result;
+    kiems::EMSConfig config;
+    if (!kiems::importStackup(board, config)) return result;
+    double z = 0;
+    for (const auto& layer : config.layers()) {
+        if (layer.kind() == kiems::LayerKind::Substrate) z -= layer.thickness();
+        if (layer.kind() == kiems::LayerKind::Metal) result.zByName[layer.name()] = z;
+    }
+    result.bottom = z;
+    return result;
+}
+
+double displayZForLayer(const std::string& name, const PreviewLayerPlacement& placement) {
+    if (const auto found = placement.zByName.find(name); found != placement.zByName.end()) {
+        return found->second;
+    }
+    // Give mask a small, explicit display separation behind its adjacent copper. This is large
+    // enough to remain distinct in the depth buffer at whole-board scale, unlike the earlier
+    // coplanar/depth-comparison approach, while still being visually negligible (100 simulation
+    // units = 10 microns).
+    constexpr double displayLayerSeparation = 100.0;
+    if (name == "F.Mask") {
+        if (const auto copper = placement.zByName.find("F.Cu"); copper != placement.zByName.end()) {
+            return copper->second - displayLayerSeparation;
+        }
+        return placement.top - displayLayerSeparation;
+    }
+    if (name == "B.Mask") {
+        if (const auto copper = placement.zByName.find("B.Cu"); copper != placement.zByName.end()) {
+            return copper->second - displayLayerSeparation;
+        }
+        return placement.bottom - displayLayerSeparation;
+    }
+    if (name.starts_with("B.")) return placement.bottom - 20.0;
+    if (name.starts_with("F.")) return placement.top + 20.0;
+    return (placement.top + placement.bottom) / 2.0;
+}
+
 struct PreviewOutlineFrame {
     double originX = 0;
     double originY = 0;
@@ -1670,6 +1717,7 @@ std::expected<EMSGeometryPreview*, std::string> buildBoardLayerCatalogPreview(
     auto edge = board.boardLayerGeometry("Edge.Cuts");
     if (!edge) return std::unexpected(std::move(edge).error());
     const PreviewOutlineFrame frame = previewOutlineFrame(edge->boardOutline);
+    const PreviewLayerPlacement placement = previewLayerPlacement(board);
 
     std::unordered_map<std::string, std::string> colors;
     if (auto result = board.layerColors(); result) {
@@ -1679,11 +1727,11 @@ std::expected<EMSGeometryPreview*, std::string> buildBoardLayerCatalogPreview(
     for (const auto& info : *catalog) {
         NSString* hex = nil;
         if (const auto found = colors.find(info.name); found != colors.end()) hex = @(found->second.c_str());
+        // Every layer needs its Z here. The detailed preview's mergeLoadedPreview: only replaces
+        // the layers it builds (copper and silkscreen); the lazy loader keeps this Z for the rest.
         [layers addObject:[EMSGeometryLayer placeholderWithName:@(info.name.c_str())
                                                         hexColor:hex
-        // WholeBoardViewController keeps the loading state up until mergeLoadedPreview: supplies
-        // real Z positions from the detailed preview. Avoid a redundant stackup import here.
-                                                               z:0]];
+                                                               z:displayZForLayer(info.name, placement)]];
     }
     return [[EMSGeometryPreview alloc] initWithLayers:layers wholeBoard:wholeBoard
         topSolderMask:nil bottomSolderMask:nil outline:frame.points vias:@[] trackSegments:@[]
@@ -2160,7 +2208,7 @@ std::expected<EMSGeometryPreview*, std::string> buildWholeBoardPreview(const lib
 
     silkTiming.end();
     // Real 3D models of *every* footprint on the board -- unlike buildGeometryPreview's own
-    // includedFootprintReferences() (just this simulation's auto-discovered lumped components),
+    // includedFootprintReferences() (just this simulation's lumped components),
     // there's no simulation here to narrow the list at all. Best-effort throughout, same as
     // buildGeometryPreview's own identically-shaped block: a query/export failure just leaves these
     // three arrays empty rather than failing the whole whole-board preview.

@@ -31,9 +31,19 @@ final class WholeBoardViewController: NSViewController {
     private let infoTitle = NSTextField(labelWithString: "Info")
     private let pinHeading = NSTextField(labelWithString: "")
     /// Shown for a selected passive component -- reference is already in pinHeading, this adds its
-    /// Value field text, in systemRed when EMSConfigBridge.componentValueIsSensible(_:unit:)
-    /// rejects it (matching GeometryView's component-body warning tint).
+    /// Value field text. An unreadable value is called out in componentModelErrorBox.
     private let componentValueLabel = NSTextField(labelWithString: "")
+    /// A selected component's own inclusion: the component equivalents of includedCheckbox and
+    /// simulatedCheckbox/hullPaddingField (see kiems::IncludedComponentConfig). Disabled, with
+    /// componentModelErrorBox saying why, unless the component has an R/L/C-only SPICE model.
+    private let componentIncludedCheckbox = NSButton(checkboxWithTitle: "Included in Simulation", target: nil, action: nil)
+    private let componentHullCheckbox = NSButton(checkboxWithTitle: "Contributes to Hull", target: nil, action: nil)
+    private let componentHullPaddingField = NSTextField(string: "")
+    private let componentHullPaddingFormatter = MicrometerValueFormatter()
+    private let componentControls = NSStackView()
+    private let componentModelErrorBox = NSBox()
+    /// One row per warning -- see showComponentWarnings(_:note:).
+    private let componentWarningRows = NSStackView()
     private let netHeadingPrefix = NSTextField(labelWithString: "Net:")
     private let netClassHeadingPrefix = NSTextField(labelWithString: "Net Class:")
     private let netHeading = NSStackView()
@@ -86,6 +96,8 @@ final class WholeBoardViewController: NSViewController {
     private var selection: GeometrySelection?
     private var selectedSimulationIndex: Int?
     private var selectedNetClassName: String?
+    /// The selection's nets belong to different classes; selectedNetClassName is nil then.
+    private var selectedNetClassIsMultiple = false
     private var isLoadingSelectedNetClass = false
     /// Empty values cache a successful "this net has no class" result; absence means not queried.
     private var netClassByNet: [String: String] = [:]
@@ -108,6 +120,15 @@ final class WholeBoardViewController: NSViewController {
     /// board data SourceListViewController's own identically-purposed mirroring logic reads from
     /// allFootprints.
     private var allFootprints: [KicadFootprintInfo] = []
+
+    /// Why each footprint without a usable SPICE model lacks one, by reference -- see
+    /// KicadBoardBridge.componentSimModels(). Loaded alongside allFootprints; simModelsLoaded says
+    /// whether it has been yet.
+    private var unsupportedSimModelReasons: [String: String] = [:]
+    private var simModelsLoaded = false
+    /// Set when the schematic couldn't be read at all, which leaves every footprint without a
+    /// model; updateSimModelReasons() then explains each one with this.
+    private var simModelLoadError: String?
 
     /// Configuration edits invalidate the same downstream geometry/results state as the retired
     /// source-list editor. DocumentWindowController owns those caches and supplies this callback.
@@ -183,6 +204,38 @@ final class WholeBoardViewController: NSViewController {
         }
         componentValueLabel.font = detailFont
         componentValueLabel.isHidden = true
+        let componentHullRow = NSStackView(views: [componentHullCheckbox, componentHullPaddingField])
+        componentHullRow.orientation = .horizontal
+        componentHullRow.alignment = .centerY
+        componentHullRow.spacing = 6
+        configureControlStack(componentControls, views: [componentIncludedCheckbox, componentHullRow])
+        componentControls.isHidden = true
+        for checkbox in [componentIncludedCheckbox, componentHullCheckbox] {
+            checkbox.controlSize = .small
+            checkbox.font = Self.formFont
+        }
+        componentIncludedCheckbox.target = self
+        componentIncludedCheckbox.action = #selector(componentIncludedToggled)
+        componentHullCheckbox.target = self
+        componentHullCheckbox.action = #selector(componentHullToggled)
+        componentHullPaddingField.formatter = componentHullPaddingFormatter
+        componentHullPaddingField.target = self
+        componentHullPaddingField.action = #selector(hullPaddingChanged(_:))
+        componentHullPaddingField.controlSize = .small
+        componentHullPaddingField.font = Self.formFont
+        componentHullPaddingField.alignment = .right
+        componentHullPaddingField.widthAnchor.constraint(equalToConstant: 74).isActive = true
+
+        // Rows and colours depend on what the box is saying -- see showComponentWarnings(_:note:).
+        componentWarningRows.orientation = .vertical
+        componentWarningRows.alignment = .leading
+        componentWarningRows.spacing = 6
+        componentModelErrorBox.boxType = .custom
+        componentModelErrorBox.cornerRadius = 5
+        componentModelErrorBox.titlePosition = .noTitle
+        componentModelErrorBox.contentViewMargins = NSSize(width: 8, height: 6)
+        componentModelErrorBox.contentView = componentWarningRows
+        componentModelErrorBox.isHidden = true
         configureHeadingStack(netHeading, views: [netHeadingPrefix, selectedNetView])
         configureHeadingStack(netClassHeading, views: [netClassHeadingPrefix, selectedNetClassView])
         pinSeparator.boxType = .separator
@@ -295,7 +348,8 @@ final class WholeBoardViewController: NSViewController {
         absorbingCheckbox.target = self
         absorbingCheckbox.action = #selector(absorbingToggled)
 
-        let infoStack = NSStackView(views: [infoTitle, pinHeading, componentValueLabel, pinControls, pinSeparator,
+        let infoStack = NSStackView(views: [infoTitle, pinHeading, componentValueLabel, componentControls,
+                                            componentModelErrorBox, pinControls, pinSeparator,
                                             netHeading, netControls, netSeparator,
                                             netClassHeading, netClassControls])
         infoStack.orientation = .vertical
@@ -304,6 +358,7 @@ final class WholeBoardViewController: NSViewController {
         infoStack.setCustomSpacing(16, after: infoTitle)
         infoStack.setCustomSpacing(4, after: pinHeading)
         infoStack.setCustomSpacing(10, after: componentValueLabel)
+        infoStack.setCustomSpacing(14, after: componentControls)
         infoStack.setCustomSpacing(12, after: pinControls)
         infoStack.setCustomSpacing(10, after: netHeading)
         infoStack.setCustomSpacing(12, after: netControls)
@@ -351,6 +406,7 @@ final class WholeBoardViewController: NSViewController {
             infoStack.leadingAnchor.constraint(equalTo: infoPanel.leadingAnchor, constant: 10),
             infoStack.trailingAnchor.constraint(equalTo: infoPanel.trailingAnchor, constant: -10),
             pinSeparator.widthAnchor.constraint(equalTo: infoStack.widthAnchor),
+            componentModelErrorBox.widthAnchor.constraint(equalTo: infoStack.widthAnchor),
             netSeparator.widthAnchor.constraint(equalTo: infoStack.widthAnchor),
             netHeading.widthAnchor.constraint(equalTo: infoStack.widthAnchor),
             netClassHeading.widthAnchor.constraint(equalTo: infoStack.widthAnchor),
@@ -514,34 +570,55 @@ final class WholeBoardViewController: NSViewController {
     /// Resolves the selected net's highest-priority effective KiCad class off the main thread and
     /// caches it for the lifetime of this board preview. Selection can change while the helper is
     /// running, so the UI update is guarded by both board path and current net name.
+    /// The nets whose class the Net Class field describes: every net of a group selection, or the
+    /// selection's own net.
+    private var netClassSourceNets: [String] {
+        if case let .connectedNets(members, _, _)? = selection?.kind, !members.isEmpty { return members }
+        guard let netName = selection?.netName, !netName.isEmpty else { return [] }
+        return [netName]
+    }
+
+    /// Whether the selection spans several nets, which the Net field shows as "<Multiple>". The
+    /// single-net controls are disabled then, rather than acting on just one of them.
+    private var selectionHasMultipleNets: Bool {
+        if case let .connectedNets(members, _, _)? = selection?.kind { return members.count > 1 }
+        return false
+    }
+
     private func resolveNetClassForSelection() {
-        guard let netName = selection?.netName, !netName.isEmpty,
-              let board = document?.board
-        else {
-            selectedNetClassName = nil
-            isLoadingSelectedNetClass = false
+        let nets = netClassSourceNets
+        guard !nets.isEmpty, let board = document?.board else {
+            applyNetClasses(of: [])
             return
         }
-        if let cached = netClassByNet[netName] {
-            selectedNetClassName = cached.isEmpty ? nil : cached
-            isLoadingSelectedNetClass = false
+        let missing = nets.filter { netClassByNet[$0] == nil }
+        if missing.isEmpty {
+            applyNetClasses(of: nets)
             return
         }
 
         selectedNetClassName = nil
+        selectedNetClassIsMultiple = false
         isLoadingSelectedNetClass = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let resolved = try? board.netClass(forNet: netName)
+            let resolved = missing.map { (net: $0, netClass: (try? board.netClass(forNet: $0)) ?? "") }
             DispatchQueue.main.async {
                 guard let self, self.loadedForPath == board.kicadPcbPath else { return }
-                let value = resolved ?? ""
-                self.netClassByNet[netName] = value
-                guard self.selection?.netName == netName else { return }
-                self.selectedNetClassName = value.isEmpty ? nil : value
-                self.isLoadingSelectedNetClass = false
+                for (net, netClass) in resolved { self.netClassByNet[net] = netClass }
+                guard self.netClassSourceNets == nets else { return }
+                self.applyNetClasses(of: nets)
                 self.updateConfigurationControls()
             }
         }
+    }
+
+    /// Sets the Net Class field's state from already-resolved `nets`: their one shared class (or
+    /// none), or "<Multiple>" when they differ.
+    private func applyNetClasses(of nets: [String]) {
+        let classes = Set(nets.compactMap { netClassByNet[$0] })
+        isLoadingSelectedNetClass = false
+        selectedNetClassIsMultiple = classes.count > 1
+        selectedNetClassName = classes.count == 1 ? classes.first.flatMap { $0.isEmpty ? nil : $0 } : nil
     }
 
     private func excitationIndex(reference: String, pin: String, in simulation: EMSSimulationBridge) -> Int? {
@@ -714,8 +791,8 @@ final class WholeBoardViewController: NSViewController {
         partner.amplitude = NSNumber(value: -(source.amplitude?.doubleValue ?? 1.0))
     }
 
-    /// Matches the simulator's auto-discovered lumped parts: an exact, single-letter R/L/C
-    /// designator prefix is passive; networks and specialised multi-letter variants are not.
+    /// Matches the parts the simulator can model as lumped components: an exact, single-letter
+    /// R/L/C designator prefix is passive; networks and specialised multi-letter variants are not.
     private func isPassive(reference: String) -> Bool {
         let prefix = String(reference.prefix { $0.isLetter }).uppercased()
         return prefix == "R" || prefix == "L" || prefix == "C"
@@ -750,6 +827,196 @@ final class WholeBoardViewController: NSViewController {
         case "C": return .capacitance
         default: return nil
         }
+    }
+
+    private func includedComponent(_ reference: String,
+                                   in simulation: EMSSimulationBridge) -> EMSIncludedComponentBridge? {
+        simulation.includedComponents.first { $0.reference == reference }
+    }
+
+    /// The component equivalent of the net controls: only a component whose SPICE model KiEMS can
+    /// simulate (see kiems::assessComponentSimModel()) can be included; for anything else both
+    /// checkboxes are greyed out and componentModelErrorBox says why. One that is already included
+    /// can still be removed.
+    private func updateComponentControls(reference: String) {
+        componentControls.isHidden = false
+        componentIncludedCheckbox.allowsMixedState = false
+        componentHullCheckbox.allowsMixedState = false
+        componentHullPaddingField.placeholderString = nil
+        let simulation = selectedSimulation
+        let entry = simulation.flatMap { includedComponent(reference, in: $0) }
+        componentIncludedCheckbox.state = entry != nil ? .on : .off
+        componentHullCheckbox.state = entry?.contributesToHull == true ? .on : .off
+        if let entry {
+            componentHullPaddingField.doubleValue = entry.hullPadding
+        } else {
+            componentHullPaddingField.stringValue = ""
+        }
+
+        let modelProblem = simModelsLoaded ? unsupportedSimModelReasons[reference] : nil
+        let usable = simModelsLoaded && modelProblem == nil
+        componentIncludedCheckbox.isEnabled = simulation != nil && (usable || entry != nil)
+        componentHullCheckbox.isEnabled = simulation != nil && usable && entry != nil
+        componentHullPaddingField.isEnabled = simulation != nil && usable && entry?.contributesToHull == true
+
+        // An unreadable value doesn't stop the part being included, but the simulator will skip it.
+        let warnings = [modelProblem, valueWarning(for: reference)].compactMap { $0 }
+        showComponentWarnings(warnings,
+                              note: simModelsLoaded ? nil : "Checking the schematic for this component's SPICE model…")
+    }
+
+    /// One net or component of a group selection, as the group controls see it.
+    private struct GroupPart {
+        let isIncluded: Bool
+        let contributesToHull: Bool
+        let padding: Double
+        let setPadding: (Double) -> Void
+    }
+
+    /// A group's includable parts -- its nets, and its components with a usable SPICE model --
+    /// plus the components left out for want of one.
+    private func groupParts(nets: [String], components: [String], in simulation: EMSSimulationBridge)
+        -> (all: [GroupPart], contributing: [GroupPart], unusable: [String]) {
+        var all: [GroupPart] = []
+        for net in nets {
+            let entry = involvedNet(named: net, in: simulation)
+            all.append(GroupPart(isIncluded: entry != nil, contributesToHull: entry?.inclusionLevel == .simulationNet,
+                                 padding: entry?.hullPadding ?? 0, setPadding: { entry?.hullPadding = $0 }))
+        }
+        var unusable: [String] = []
+        for reference in components {
+            let entry = includedComponent(reference, in: simulation)
+            guard entry != nil || (simModelsLoaded && unsupportedSimModelReasons[reference] == nil) else {
+                unusable.append(reference)
+                continue
+            }
+            all.append(GroupPart(isIncluded: entry != nil, contributesToHull: entry?.contributesToHull == true,
+                                 padding: entry?.hullPadding ?? 0, setPadding: { entry?.hullPadding = $0 }))
+        }
+        return (all, all.filter { $0.isIncluded && $0.contributesToHull }, unusable)
+    }
+
+    /// The group equivalent of updateComponentControls(reference:): the same two checkboxes, mixed
+    /// when the group's parts disagree, acting on every net and usable component together.
+    private func updateGroupControls(nets: [String], components: [String]) {
+        componentControls.isHidden = false
+        componentIncludedCheckbox.allowsMixedState = true
+        componentHullCheckbox.allowsMixedState = true
+        guard let simulation = selectedSimulation else {
+            componentIncludedCheckbox.state = .off
+            componentHullCheckbox.state = .off
+            componentHullPaddingField.stringValue = ""
+            for control in [componentIncludedCheckbox, componentHullCheckbox, componentHullPaddingField] as [NSControl] {
+                control.isEnabled = false
+            }
+            return
+        }
+        let parts = groupParts(nets: nets, components: components, in: simulation)
+        let included = parts.all.filter(\.isIncluded)
+        func state(_ count: Int, of total: Int) -> NSControl.StateValue {
+            count == 0 ? .off : count == total ? .on : .mixed
+        }
+        componentIncludedCheckbox.state = state(included.count, of: parts.all.count)
+        componentIncludedCheckbox.isEnabled = !parts.all.isEmpty
+        componentHullCheckbox.state = state(parts.contributing.count, of: included.count)
+        componentHullCheckbox.isEnabled = !included.isEmpty
+        let paddings = Set(parts.contributing.map(\.padding))
+        if paddings.count == 1, let padding = paddings.first {
+            componentHullPaddingField.doubleValue = padding
+        } else {
+            componentHullPaddingField.stringValue = ""
+        }
+        componentHullPaddingField.placeholderString = paddings.count > 1 ? "Multiple" : nil
+        componentHullPaddingField.isEnabled = !parts.contributing.isEmpty
+
+        func list(_ references: [String]) -> String {
+            let more = references.count > 4 ? " and \(references.count - 4) more" : ""
+            return references.prefix(4).joined(separator: ", ") + more
+        }
+        var warnings: [String] = []
+        if simModelsLoaded && !parts.unusable.isEmpty {
+            warnings.append("Left out, with no SPICE model of only R, L and C: \(list(parts.unusable))")
+        }
+        let unreadable = components.filter { !parts.unusable.contains($0) && valueWarning(for: $0) != nil }
+        if !unreadable.isEmpty {
+            warnings.append("Could not read the value of \(list(unreadable))")
+        }
+        showComponentWarnings(warnings, note: !simModelsLoaded && !components.isEmpty
+                                  ? "Checking the schematic for these components' SPICE models…" : nil)
+    }
+
+    /// The warning for an R/L/C part whose Value the simulator can't read, if it can't.
+    private func valueWarning(for reference: String) -> String? {
+        guard let unit = lumpedComponentUnit(forReference: reference),
+              let footprint = allFootprints.first(where: { $0.reference == reference }),
+              !EMSConfigBridge.componentValueIsSensible(footprint.value, unit: unit)
+        else { return nil }
+        return footprint.value.isEmpty ? "No value given" : "Could not read value \"\(footprint.value)\""
+    }
+
+    /// Fills componentModelErrorBox with one row per warning, each with a caution sign in its
+    /// yellow, then `note` (the schematic still being read, which isn't a problem) in neutral grey
+    /// without one. Hides the box when there's nothing to say.
+    private func showComponentWarnings(_ warnings: [String], note: String?) {
+        for row in componentWarningRows.arrangedSubviews { row.removeFromSuperview() }
+        func row(_ text: String, color: NSColor, caution: Bool) -> NSView {
+            let label = NSTextField(wrappingLabelWithString: text)
+            label.font = Self.formFont
+            label.textColor = color
+            label.preferredMaxLayoutWidth = Self.infoPanelWidth - (caution ? 62 : 40)
+            guard caution else { return label }
+            let icon = NSImageView(image: NSImage(systemSymbolName: "exclamationmark.triangle.fill",
+                                                  accessibilityDescription: "Caution")!)
+            icon.contentTintColor = color
+            icon.setContentHuggingPriority(.required, for: .horizontal)
+            let stack = NSStackView(views: [icon, label])
+            stack.orientation = .horizontal
+            stack.alignment = .top
+            stack.spacing = 6
+            return stack
+        }
+        for warning in warnings {
+            componentWarningRows.addArrangedSubview(row(warning, color: .systemYellow, caution: true))
+        }
+        if let note {
+            componentWarningRows.addArrangedSubview(row(note, color: .secondaryLabelColor, caution: false))
+        }
+        let tint: NSColor = warnings.isEmpty ? .secondaryLabelColor : .systemYellow
+        componentModelErrorBox.borderColor = tint
+        componentModelErrorBox.fillColor = tint.withAlphaComponent(0.1)
+        componentModelErrorBox.isHidden = warnings.isEmpty && note == nil
+    }
+
+    /// Includes every part unless all are already included, in which case removes them all.
+    private func groupIncludedToggled(nets: [String], components: [String]) {
+        guard let simulation = selectedSimulation else { return }
+        let parts = groupParts(nets: nets, components: components, in: simulation)
+        let include = !parts.all.allSatisfy(\.isIncluded)
+        for net in nets { applyNetIncluded(include, netName: net, in: simulation) }
+        for reference in components where !parts.unusable.contains(reference) {
+            if include {
+                simulation.includeComponent(withReference: reference)
+            } else {
+                simulation.removeIncludedComponent(withReference: reference)
+            }
+        }
+        configurationChanged()
+    }
+
+    /// Makes every included part contribute to the hull unless all already do, in which case none.
+    private func groupHullToggled(nets: [String], components: [String]) {
+        guard let simulation = selectedSimulation else { return }
+        let parts = groupParts(nets: nets, components: components, in: simulation)
+        let included = parts.all.filter(\.isIncluded)
+        let contribute = parts.contributing.count < included.count
+        for net in nets {
+            guard let entry = involvedNet(named: net, in: simulation) else { continue }
+            entry.inclusionLevel = contribute ? .simulationNet : .geometryOnly
+        }
+        for reference in components {
+            includedComponent(reference, in: simulation)?.contributesToHull = contribute
+        }
+        configurationChanged()
     }
 
     private func pinKey(reference: String, number: String) -> PinKey? {
@@ -787,6 +1054,8 @@ final class WholeBoardViewController: NSViewController {
         probedCheckbox.state = .off
         absorbingCheckbox.state = .off
         pinImpedanceField.objectValue = NSNumber(value: 45)
+        componentControls.isHidden = true
+        componentModelErrorBox.isHidden = true
 
         guard let selection else {
             // Nothing picked on the board -- show this simulation's own settings instead of net/pin
@@ -811,7 +1080,8 @@ final class WholeBoardViewController: NSViewController {
 
         // A picked component (see PickTarget.component's own doc comment) has no single net of
         // its own -- a 2-terminal passive bridges two -- so none of the net/net-class sections
-        // below apply to it; its own case in the switch below shows just reference + value.
+        // below apply to it; its own case in the switch below shows its reference, value and
+        // inclusion.
         var isComponentSelection = false
         if case .component = selection.kind {
             isComponentSelection = true
@@ -822,7 +1092,7 @@ final class WholeBoardViewController: NSViewController {
         netClassHeading.isHidden = isComponentSelection
         netClassControls.isHidden = isComponentSelection
 
-        let netName = isComponentSelection ? "" : (selection.netName ?? "")
+        let netName = isComponentSelection || selectionHasMultipleNets ? "" : (selection.netName ?? "")
         guard !isComponentSelection else {
             switch selection.kind {
             case let .component(reference):
@@ -830,23 +1100,27 @@ final class WholeBoardViewController: NSViewController {
                 pinHeading.stringValue = "Component: \(reference)"
                 pinSeparator.isHidden = true
                 pinControls.isHidden = true
-                if let unit = lumpedComponentUnit(forReference: reference),
+                if lumpedComponentUnit(forReference: reference) != nil,
                    let footprint = allFootprints.first(where: { $0.reference == reference }) {
                     let value = footprint.value.isEmpty ? "(none)" : footprint.value
                     componentValueLabel.stringValue = "Value: \(value)"
-                    componentValueLabel.textColor = EMSConfigBridge.componentValueIsSensible(footprint.value, unit: unit)
-                        ? .labelColor : .systemRed
+                    componentValueLabel.textColor = .labelColor
                     componentValueLabel.isHidden = false
                 } else {
                     componentValueLabel.isHidden = true
                 }
+                updateComponentControls(reference: reference)
             case .net, .pin, .hullCutPort, .connectedNets:
                 break // unreachable -- isComponentSelection is only true for .component
             }
             return
         }
-        selectedNetView.configure(name: netName.isEmpty ? "No net" : netName, font: detailFont,
-                                  color: netName.isEmpty ? .secondaryLabelColor : .labelColor)
+        if selectionHasMultipleNets {
+            selectedNetView.configure(name: "<Multiple>", font: detailFont, color: .labelColor)
+        } else {
+            selectedNetView.configure(name: netName.isEmpty ? "No net" : netName, font: detailFont,
+                                      color: netName.isEmpty ? .secondaryLabelColor : .labelColor)
+        }
         includedCheckbox.isEnabled = hasSimulation && !netName.isEmpty
         if let simulation = selectedSimulation, !netName.isEmpty,
            let entry = involvedNet(named: netName, in: simulation) {
@@ -864,10 +1138,11 @@ final class WholeBoardViewController: NSViewController {
         if isLoadingSelectedNetClass {
             netClassDisplayName = "Loading…"
         } else {
-            netClassDisplayName = selectedNetClassName ?? "No net class"
+            netClassDisplayName = selectedNetClassIsMultiple ? "<Multiple>" : selectedNetClassName ?? "No net class"
         }
         selectedNetClassView.configure(name: netClassDisplayName, font: detailFont,
-                                       color: selectedNetClassName == nil ? .secondaryLabelColor : .labelColor)
+                                       color: selectedNetClassName == nil && !selectedNetClassIsMultiple
+                                           ? .secondaryLabelColor : .labelColor)
         if let simulation = selectedSimulation, let netClassName = selectedNetClassName,
            !netClassName.isEmpty {
             netClassIncludedCheckbox.isEnabled = true
@@ -890,13 +1165,19 @@ final class WholeBoardViewController: NSViewController {
             pinControls.isHidden = true
             componentValueLabel.isHidden = true
 
-        case let .connectedNets(members):
-            // The net details below still describe the net the group was grown from.
+        case let .connectedNets(members, components, pins):
             pinHeading.isHidden = false
-            pinHeading.stringValue = members.count == 1 ? "1 connected net" : "\(members.count) connected nets"
-            pinSeparator.isHidden = false
+            func count(_ n: Int, _ noun: String) -> String? { n == 0 ? nil : n == 1 ? "1 \(noun)" : "\(n) \(noun)s" }
+            pinHeading.stringValue = [count(members.count, "net"), count(components.count, "component"),
+                                      count(pins.count, "pin")].compactMap { $0 }.joined(separator: ", ")
+            pinSeparator.isHidden = true
             pinControls.isHidden = true
             componentValueLabel.isHidden = true
+            // A group is edited as a whole, not through any one net's or class's controls.
+            for view in [netHeading, netControls, netSeparator, netClassHeading, netClassControls] {
+                view.isHidden = true
+            }
+            updateGroupControls(nets: members, components: components)
 
         case .component:
             break // handled above, before isComponentSelection's early return
@@ -1197,24 +1478,28 @@ final class WholeBoardViewController: NSViewController {
                 highlight.involvedComponentReferences.insert(pin.footprintReference)
             }
         }
-        // Match port_resolution.cpp's lumped-component discovery: both terminals must belong to
-        // copper included at either level, with the selected ground net(s) also eligible. This
-        // includes series passives between GeometryOnly nets and shunt parts jumping from any
-        // included net to ground, without pulling unrelated passives elsewhere on the PCB into the
-        // activity graph.
-        let passiveEligibleNets = highlight.configurationIncludedNets.union(groundNets)
-        for footprint in allFootprints where footprint.pins.count == 2 && isPassive(reference: footprint.reference) {
+        // Included components are the simulation's lumped parts (port_resolution.cpp's
+        // _resolveLumpedComponents()): each is involved and may grow the hull; a two-pin R/L/C
+        // bridges its two nets in the activity graph, and is flagged if its Value is unusable,
+        // because the simulator will skip it.
+        for component in simulation.includedComponents {
+            let reference = component.reference
+            highlight.involvedComponentReferences.insert(reference)
+            if component.contributesToHull {
+                highlight.hullPaddingByComponent[reference] = component.hullPadding
+            }
+            guard let footprint = footprintByReference[reference], footprint.pins.count == 2,
+                  isPassive(reference: reference)
+            else { continue }
             let first = footprint.pins[0]
             let second = footprint.pins[1]
-            guard !first.netName.isEmpty, !second.netName.isEmpty, first.netName != second.netName,
-                  passiveEligibleNets.contains(first.netName), passiveEligibleNets.contains(second.netName)
-            else { continue }
+            guard !first.netName.isEmpty, !second.netName.isEmpty, first.netName != second.netName else { continue }
             highlight.passiveBridges.append(BoardActivityHighlight.PassiveBridge(
-                reference: footprint.reference, firstPad: first.number, firstNet: first.netName,
+                reference: reference, firstPad: first.number, firstNet: first.netName,
                 secondPad: second.number, secondNet: second.netName))
-            if let unit = lumpedComponentUnit(forReference: footprint.reference),
+            if let unit = lumpedComponentUnit(forReference: reference),
                !EMSConfigBridge.componentValueIsSensible(footprint.value, unit: unit) {
-                highlight.invalidComponentReferences.insert(footprint.reference)
+                highlight.invalidComponentReferences.insert(reference)
             }
         }
         return highlight
@@ -1383,10 +1668,46 @@ final class WholeBoardViewController: NSViewController {
                   let entry = involvedNetClass(named: netClassName, in: simulation),
                   entry.inclusionLevel == .simulationNet {
             entry.hullPadding = padding
+        } else if sender === componentHullPaddingField, case let .component(reference)? = selection?.kind,
+                  let entry = includedComponent(reference, in: simulation), entry.contributesToHull {
+            entry.hullPadding = padding
+        } else if sender === componentHullPaddingField,
+                  case let .connectedNets(members, components, _)? = selection?.kind {
+            let parts = groupParts(nets: members, components: components, in: simulation)
+            guard !parts.contributing.isEmpty else { return }
+            for part in parts.contributing { part.setPadding(padding) }
         } else {
             return
         }
         sender.doubleValue = padding
+        configurationChanged()
+    }
+
+    @objc private func componentIncludedToggled() {
+        if case let .connectedNets(members, components, _)? = selection?.kind {
+            groupIncludedToggled(nets: members, components: components)
+            return
+        }
+        guard case let .component(reference)? = selection?.kind, let simulation = selectedSimulation else { return }
+        if componentIncludedCheckbox.state == .on {
+            simulation.includeComponent(withReference: reference)
+        } else {
+            simulation.removeIncludedComponent(withReference: reference)
+        }
+        configurationChanged()
+    }
+
+    /// Like simulatedToggled(), this never removes the entry -- the component stays included and
+    /// keeps its padding for when it contributes again.
+    @objc private func componentHullToggled() {
+        if case let .connectedNets(members, components, _)? = selection?.kind {
+            groupHullToggled(nets: members, components: components)
+            return
+        }
+        guard case let .component(reference)? = selection?.kind, let simulation = selectedSimulation,
+              let entry = includedComponent(reference, in: simulation)
+        else { return }
+        entry.contributesToHull = componentHullCheckbox.state == .on
         configurationChanged()
     }
 
@@ -1729,9 +2050,10 @@ final class WholeBoardViewController: NSViewController {
         case .pin, .hullCutPort:
             addPinItems(to: menu)
         case .component:
-            return nil
+            addSelectionItems(to: menu, selection: selection)
+            return menu
         }
-        addSharedItems(to: menu, netName: selection.netName ?? "")
+        addSharedItems(to: menu, selection: selection)
         return menu
     }
 
@@ -1746,11 +2068,11 @@ final class WholeBoardViewController: NSViewController {
         case .component?, nil: isNetOrPin = false
         }
         addPinItems(to: menu)
-        let deselectAllItem = addSharedItems(to: menu, netName: selection?.netName ?? "")
-        if !isShowing || !isNetOrPin {
-            for item in menu.items {
-                item.isEnabled = false
-            }
+        let deselectAllItem = addSharedItems(to: menu, selection: selection)
+        // Selecting connected or complementary items also applies to a component.
+        let selectionItems = Set(menu.items.filter { $0.representedObject as? String == Self.selectionItemTag })
+        for item in menu.items where !isShowing || (!isNetOrPin && !selectionItems.contains(item)) {
+            item.isEnabled = false
         }
         // Escape belongs to a text field being edited (to cancel the edit), and the menu bar sees
         // key equivalents before the first responder does, so only claim it outside text editing.
@@ -1760,13 +2082,46 @@ final class WholeBoardViewController: NSViewController {
 
     /// Returns the Deselect All item, whose enabling the Item menu decides separately.
     @discardableResult
-    private func addSharedItems(to menu: NSMenu, netName: String) -> NSMenuItem {
+    private func addSharedItems(to menu: NSMenu, selection: GeometrySelection?) -> NSMenuItem {
         menu.addItem(.separator())
-        addNetGeometryItems(to: menu, netName: netName)
+        // Like the Info panel, net items don't pick one net out of several.
+        addNetGeometryItems(to: menu, netName: selectionHasMultipleNets ? "" : selection?.netName ?? "")
+        return addSelectionItems(to: menu, selection: selection)
+    }
+
+    /// Marks addSelectionItems(to:selection:)'s own items, which populateItemMenu(_:) leaves
+    /// enabled for a component.
+    private static let selectionItemTag = "selection"
+
+    /// The meta-network selection items, then Deselect All, which it returns.
+    @discardableResult
+    private func addSelectionItems(to menu: NSMenu, selection: GeometrySelection?) -> NSMenuItem {
         menu.addItem(.separator())
-        menu.addItem(ClosureMenuItem(title: "Select Connected Nets", key: "u", enabled: !netName.isEmpty) {
-            [weak self] in self?.selectConnectedNets(from: netName)
-        })
+        let connected = ClosureMenuItem(title: "Select Connected Nets and Components", key: "u",
+                                        enabled: selection.map { !seedNets(for: $0).isEmpty } ?? false) {
+            [weak self] in
+            guard let self, let selection else { return }
+            self.selectConnectedNetsAndComponents(for: selection)
+        }
+        let hasComplement = selection.flatMap { complementParts(for: $0) } != nil
+        // Holding Shift swaps in the variant that adds to the selection instead of replacing it.
+        let complementary = ClosureMenuItem(title: complementMenuTitle(for: selection, alsoSelect: false),
+                                            modifiers: [], enabled: hasComplement) {
+            [weak self] in
+            guard let selection else { return }
+            self?.selectComplement(of: selection, alsoSelect: false)
+        }
+        let alsoComplementary = ClosureMenuItem(title: complementMenuTitle(for: selection, alsoSelect: true),
+                                                modifiers: [.shift], enabled: hasComplement) {
+            [weak self] in
+            guard let selection else { return }
+            self?.selectComplement(of: selection, alsoSelect: true)
+        }
+        alsoComplementary.isAlternate = true
+        for item in [connected, complementary, alsoComplementary] {
+            item.representedObject = Self.selectionItemTag
+            menu.addItem(item)
+        }
         menu.addItem(.separator())
         let deselect = ClosureMenuItem(title: "Deselect All", key: "\u{1b}", modifiers: [], enabled: true) {
             [weak self] in self?.boardView.deselectAll()
@@ -1877,37 +2232,260 @@ final class WholeBoardViewController: NSViewController {
         configurationChanged()
     }
 
-    /// Selects `netName` plus every net reachable from it through 2-terminal passives (R/L/C),
-    /// the same bridges the simulation turns into lumped components. Ground nets are not walked
-    /// through -- nearly every shunt part lands there, so crossing it would select most of the
-    /// board -- unless the walk starts on ground.
-    private func selectConnectedNets(from netName: String) {
-        guard !netName.isEmpty else { return }
-        var groundNets = Set<String>()
-        if let simulation = selectedSimulation, let groundName = simulation.groundNetName, !groundName.isEmpty {
-            if simulation.groundNetKind == .net {
-                groundNets.insert(groundName)
-            } else if simulation.groundNetKind == .netClass {
-                groundNets.formUnion(netsByNetClass[groundName] ?? [])
-            }
+    /// A meta-network: a set of nets joined by 2-terminal passives (R/L/C, the same bridges the
+    /// simulation turns into lumped components), and those passives.
+    private struct MetaNetwork {
+        var nets: Set<String> = []
+        var components: Set<String> = []
+    }
+
+    /// The selected simulation's ground net(s).
+    private var groundNetNames: Set<String> {
+        guard let simulation = selectedSimulation, let groundName = simulation.groundNetName, !groundName.isEmpty
+        else { return [] }
+        switch simulation.groundNetKind {
+        case .net: return [groundName]
+        case .netClass: return netsByNetClass[groundName] ?? []
+        default: return []
         }
-        var neighbours: [String: Set<String>] = [:]
+    }
+
+    /// Two-pin passives keyed by each of their (distinct, connected) nets.
+    private func passivesByNet() -> [String: [KicadFootprintInfo]] {
+        var result: [String: [KicadFootprintInfo]] = [:]
         for footprint in allFootprints where footprint.pins.count == 2 && isPassive(reference: footprint.reference) {
             let first = footprint.pins[0].netName
             let second = footprint.pins[1].netName
             guard !first.isEmpty, !second.isEmpty, first != second else { continue }
-            neighbours[first, default: []].insert(second)
-            neighbours[second, default: []].insert(first)
+            result[first, default: []].append(footprint)
+            result[second, default: []].append(footprint)
         }
-        var reached: Set<String> = [netName]
+        return result
+    }
+
+    /// Everything passively connected to `netName`. Ground is neither walked through nor included
+    /// -- nearly every shunt part lands there, so crossing it would take in most of the board --
+    /// though the passives reaching it are. A walk starting on ground walks out from it.
+    private func metaNetwork(from netName: String) -> MetaNetwork {
+        let groundNets = groundNetNames
+        let passives = passivesByNet()
+        var network = MetaNetwork(nets: [netName])
         var frontier = [netName]
         while let net = frontier.popLast() {
-            if net != netName && groundNets.contains(net) { continue }
-            for next in neighbours[net] ?? [] where reached.insert(next).inserted {
-                frontier.append(next)
+            for passive in passives[net] ?? [] {
+                network.components.insert(passive.reference)
+                for pin in passive.pins where pin.netName != net && !groundNets.contains(pin.netName) {
+                    if network.nets.insert(pin.netName).inserted { frontier.append(pin.netName) }
+                }
             }
         }
-        boardView.selectNets(NetNameFormatting.sortedForDisplay(Array(reached)), origin: netName)
+        return network
+    }
+
+    /// The nets a selection grows its meta-network from.
+    private func seedNets(for selection: GeometrySelection) -> [String] {
+        switch selection.kind {
+        case .net, .pin, .hullCutPort:
+            return selection.netName.map { $0.isEmpty ? [] : [$0] } ?? []
+        case let .connectedNets(members, components, pins):
+            let ground = groundNetNames
+            let componentNets = components.flatMap { reference in
+                allFootprints.first { $0.reference == reference }?.pins.map(\.netName) ?? []
+            }
+            let all = members + pins.compactMap(\.net) + componentNets
+            var seen = Set<String>()
+            return all.filter { !$0.isEmpty && !ground.contains($0) && seen.insert($0).inserted }
+        case let .component(reference):
+            let ground = groundNetNames
+            let nets = allFootprints.first { $0.reference == reference }?.pins.map(\.netName) ?? []
+            let signal = nets.filter { !$0.isEmpty && !ground.contains($0) }
+            return signal.isEmpty ? nets.filter { !$0.isEmpty } : signal
+        }
+    }
+
+    private func selectConnectedNetsAndComponents(for selection: GeometrySelection) {
+        var network = MetaNetwork()
+        for net in seedNets(for: selection) {
+            let grown = metaNetwork(from: net)
+            network.nets.formUnion(grown.nets)
+            network.components.formUnion(grown.components)
+        }
+        if case let .component(reference) = selection.kind { network.components.insert(reference) }
+        guard let origin = selection.netName.flatMap({ $0.isEmpty ? nil : $0 }) ?? network.nets.sorted().first
+        else { return }
+        boardView.selectNets(NetNameFormatting.sortedForDisplay(Array(network.nets)),
+                             components: network.components.sorted(), origin: origin)
+    }
+
+    // MARK: - Complementary selection
+    //
+    // A differential pair's two halves are mirror-image meta-networks: the same passives, with the
+    // same values, in the same places. The complement of a selection is its counterpart there.
+
+    /// How one half of a differential pair's meta-network corresponds to the other.
+    private struct ComplementMapping {
+        var nets: [String: String] = [:]
+        var components: [String: String] = [:]
+    }
+
+    /// Pairs the meta-network containing `netName` with its complement. The two are seeded by
+    /// DifferentialPairNetHeuristic's name match on any of their nets, then walked in parallel:
+    /// passives on corresponding nets correspond when they have the same kind and value, and lead to
+    /// ground or not alike, and the nets on their far sides then correspond too.
+    /// Corresponding nets the walk doesn't reach fall back to the name heuristic.
+    private func complementMapping(containing netName: String) -> ComplementMapping? {
+        let network = metaNetwork(from: netName)
+        guard let (seed, partnerSeed) = network.nets.sorted().lazy.compactMap({ net -> (String, String)? in
+            guard let partner = self.differentialPairPartnerNetName(for: net), !network.nets.contains(partner)
+            else { return nil }
+            return (net, partner)
+        }).first else { return nil }
+        let partnerNetwork = metaNetwork(from: partnerSeed)
+        guard partnerNetwork.nets.isDisjoint(with: network.nets) else { return nil }
+
+        let ground = groundNetNames
+        let passives = passivesByNet()
+        // Pin numbers aren't compared: a mirrored layout often turns the same part round.
+        struct Key: Hashable { let kind: String, value: String, toGround: Bool }
+        func key(_ passive: KicadFootprintInfo, on net: String) -> Key {
+            let other = passive.pins.first { $0.netName != net }?.netName ?? ""
+            return Key(kind: String(passive.reference.prefix { $0.isLetter }).uppercased(),
+                       value: passive.value, toGround: ground.contains(other))
+        }
+
+        var mapping = ComplementMapping(nets: [seed: partnerSeed])
+        var mappedPartners: Set<String> = [partnerSeed]
+        var queue = [(seed, partnerSeed)]
+        while let (net, partner) = queue.popLast() {
+            var candidates = (passives[partner] ?? []).filter { !mapping.components.values.contains($0.reference) }
+                .sorted { $0.reference < $1.reference }
+            for passive in (passives[net] ?? []).sorted(by: { $0.reference < $1.reference })
+            where mapping.components[passive.reference] == nil && network.components.contains(passive.reference) {
+                let wanted = key(passive, on: net)
+                guard let index = candidates.firstIndex(where: { key($0, on: partner) == wanted }) else { continue }
+                let counterpart = candidates.remove(at: index)
+                mapping.components[passive.reference] = counterpart.reference
+                guard let far = passive.pins.first(where: { $0.netName != net })?.netName,
+                      let partnerFar = counterpart.pins.first(where: { $0.netName != partner })?.netName,
+                      !ground.contains(far), mapping.nets[far] == nil, !mappedPartners.contains(partnerFar)
+                else { continue }
+                mapping.nets[far] = partnerFar
+                mappedPartners.insert(partnerFar)
+                queue.append((far, partnerFar))
+            }
+        }
+        for net in network.nets where mapping.nets[net] == nil {
+            if let partner = differentialPairPartnerNetName(for: net), partnerNetwork.nets.contains(partner),
+               !mappedPartners.contains(partner) {
+                mapping.nets[net] = partner
+                mappedPartners.insert(partner)
+            }
+        }
+        return mapping
+    }
+
+    /// The individual nets, components and pins a selection is made of.
+    private struct SelectionParts {
+        var nets: [String] = []
+        var components: [String] = []
+        var pins: [BoardPinRef] = []
+
+        var isEmpty: Bool { nets.isEmpty && components.isEmpty && pins.isEmpty }
+
+        mutating func formUnion(_ other: SelectionParts) {
+            nets += other.nets.filter { !nets.contains($0) }
+            components += other.components.filter { !components.contains($0) }
+            pins += other.pins.filter { !pins.contains($0) }
+        }
+    }
+
+    private func parts(of selection: GeometrySelection) -> SelectionParts {
+        switch selection.kind {
+        case .net:
+            return SelectionParts(nets: selection.netName.map { [$0] } ?? [])
+        case let .pin(reference, number):
+            return SelectionParts(pins: [BoardPinRef(reference: reference, number: number, net: selection.netName)])
+        case let .component(reference):
+            return SelectionParts(components: [reference])
+        case let .connectedNets(members, components, pins):
+            return SelectionParts(nets: members, components: components, pins: pins)
+        case .hullCutPort:
+            return SelectionParts()
+        }
+    }
+
+    /// The board target selecting exactly `parts`: a single part on its own, otherwise a group.
+    private func target(selecting parts: SelectionParts, origin: String?) -> BoardPickTarget? {
+        switch (parts.nets.count, parts.components.count, parts.pins.count) {
+        case (0, 0, 0): return nil
+        case (1, 0, 0): return .net(parts.nets[0])
+        case (0, 1, 0): return .component(parts.components[0])
+        case (0, 0, 1):
+            let pin = parts.pins[0]
+            return .pin(reference: pin.reference, number: pin.number, net: pin.net)
+        default:
+            let nets = NetNameFormatting.sortedForDisplay(parts.nets)
+            return .nets(origin: origin ?? nets.first ?? parts.pins.first?.net ?? "", members: nets,
+                         components: parts.components.sorted(), pins: parts.pins)
+        }
+    }
+
+    /// The pin mirroring `pin`: on the corresponding passive, the pin on the corresponding net (or
+    /// on ground, for a pin on ground); on any other part (a connector carrying both halves, say),
+    /// that same part's pin on the corresponding net.
+    private func complementPin(_ pin: BoardPinRef, mapping: ComplementMapping) -> BoardPinRef? {
+        let net = pin.net ?? ""
+        let ground = groundNetNames
+        let reference = mapping.components[pin.reference] ?? pin.reference
+        if mapping.components[pin.reference] == nil && mapping.nets[net] == nil { return nil }
+        let pins = allFootprints.first { $0.reference == reference }?.pins ?? []
+        let match = mapping.nets[net].flatMap { partnerNet in pins.first { $0.netName == partnerNet } }
+            ?? (ground.contains(net) && reference != pin.reference ? pins.first { ground.contains($0.netName) } : nil)
+        return match.map { BoardPinRef(reference: reference, number: $0.number, net: $0.netName) }
+    }
+
+    /// Every part of `selection`'s complement, or nil if none of it has one. Each meta-network the
+    /// selection touches is mapped onto its own complement.
+    private func complementParts(for selection: GeometrySelection) -> SelectionParts? {
+        var mapping = ComplementMapping()
+        var covered = Set<String>()
+        for net in seedNets(for: selection) where !covered.contains(net) {
+            covered.formUnion(metaNetwork(from: net).nets)
+            guard let found = complementMapping(containing: net) else { continue }
+            mapping.nets.merge(found.nets) { first, _ in first }
+            mapping.components.merge(found.components) { first, _ in first }
+        }
+        let source = parts(of: selection)
+        let result = SelectionParts(nets: source.nets.compactMap { mapping.nets[$0] },
+                                    components: source.components.compactMap { mapping.components[$0] },
+                                    pins: source.pins.compactMap { complementPin($0, mapping: mapping) })
+        return result.isEmpty ? nil : result
+    }
+
+    /// Replaces the selection with its complement, or (`alsoSelect`) adds the complement to it.
+    private func selectComplement(of selection: GeometrySelection, alsoSelect: Bool) {
+        guard var result = complementParts(for: selection) else { return }
+        if alsoSelect {
+            var combined = parts(of: selection)
+            combined.formUnion(result)
+            result = combined
+        }
+        if let target = target(selecting: result, origin: alsoSelect ? selection.netName : nil) {
+            boardView.select(target)
+        }
+    }
+
+    private func complementMenuTitle(for selection: GeometrySelection?, alsoSelect: Bool) -> String {
+        let noun: String
+        switch selection?.kind {
+        case .pin?: noun = "Pin"
+        case .net?: noun = "Net"
+        case .component?: noun = "Component"
+        case .connectedNets?: noun = "Parts"
+        case .hullCutPort?, nil: noun = ""
+        }
+        let title = alsoSelect ? "Also Select Complementary" : "Select Complementary"
+        return noun.isEmpty ? title : "\(title) \(noun)"
     }
 
     func setSelectedSimulationIndex(_ index: Int?) {
@@ -1927,6 +2505,10 @@ final class WholeBoardViewController: NSViewController {
         guard loadedForPath != kicadPcbPath else { return false }
         loadedForPath = kicadPcbPath
         stitchingViaPlanInputsKey = nil
+        // References are only meaningful on the board they came from.
+        unsupportedSimModelReasons = [:]
+        simModelLoadError = nil
+        simModelsLoaded = false
         layerGeometryLoader?.cancel()
         layerGeometryLoader = nil
         onLoadingStateChanged?(true)
@@ -1981,11 +2563,35 @@ final class WholeBoardViewController: NSViewController {
                 defer { finished.leave() }
                 guard let self, self.loadedForPath == kicadPcbPath else { return }
                 self.allFootprints = footprints
+                self.updateSimModelReasons()
                 self.refreshActivityHighlight()
                 if let detailed, let preview = self.boardView.preview {
                     preview.mergeLoadedPreview(detailed)
                     self.boardView.refreshLoadedGeometry()
                 }
+            }
+        }
+
+        // Resolving models reads the schematic, which the board doesn't need, so the board is
+        // shown without waiting for it.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let reasons: [String: String]
+            let loadError: String?
+            do {
+                let models = try board.componentSimModels()
+                reasons = Dictionary(models.filter { !$0.supported }.map { ($0.reference, $0.reason) },
+                                     uniquingKeysWith: { first, _ in first })
+                loadError = nil
+            } catch {
+                reasons = [:]
+                loadError = error.localizedDescription
+            }
+            DispatchQueue.main.async {
+                guard let self, self.loadedForPath == kicadPcbPath else { return }
+                self.unsupportedSimModelReasons = reasons
+                self.simModelLoadError = loadError
+                self.simModelsLoaded = true
+                self.updateSimModelReasons()
             }
         }
 
@@ -2013,6 +2619,17 @@ final class WholeBoardViewController: NSViewController {
         }
     }
 
+    /// Refreshes the Info panel's component controls, which depend on each component's SPICE model.
+    /// A schematic that couldn't be read leaves every footprint without a model.
+    private func updateSimModelReasons() {
+        if let simModelLoadError {
+            let reason = "Couldn't read the schematic: \(simModelLoadError)"
+            unsupportedSimModelReasons = Dictionary(allFootprints.map { ($0.reference, reason) },
+                                                    uniquingKeysWith: { first, _ in first })
+        }
+        updateConfigurationControls()
+    }
+
     /// Forces the next refresh() call to actually re-query the board, rather than treating it as
     /// already loaded -- see DocumentWindowController.handleLinkedKicadFilesChanged.
     func invalidate() {
@@ -2025,6 +2642,7 @@ final class WholeBoardViewController: NSViewController {
         netsByNetClass.removeAll()
         resolvingActivityNetClasses.removeAll()
         selectedNetClassName = nil
+        selectedNetClassIsMultiple = false
         isLoadingSelectedNetClass = false
     }
 }

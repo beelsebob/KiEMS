@@ -27,6 +27,15 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, readonly) NSArray<KicadFootprintPin*>* pins;
 @end
 
+/// Whether KiEMS can simulate one footprint from the SPICE model KiCad's simulator resolves for it
+/// -- see kiems::assessComponentSimModel().
+@interface KicadComponentSimModel : NSObject
+@property (nonatomic, copy, readonly) NSString* reference;
+@property (nonatomic, readonly) BOOL supported;
+/// Empty when supported; otherwise why not, for display.
+@property (nonatomic, copy, readonly) NSString* reason;
+@end
+
 /// Candidate stitching-via positions computed with the same slicing pass the Geometry stage uses.
 /// Accepted positions become gold dots in Setup; rejected positions become black crosses.
 @interface KicadStitchingViaPlan : NSObject
@@ -50,7 +59,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// Immutable configuration snapshot created cheaply on the main thread, then evaluated off-thread.
 @interface KicadStitchingViaPlanRequest : NSObject
 /// Identifies everything the plan depends on: involved/geometry-only net selectors and their hull
-/// padding, the ground selector, and via placement settings. Two requests with equal keys against
+/// padding, hull-contributing components and their padding, the ground selector, and via placement
+/// settings. Two requests with equal keys against
 /// the same (unchanged) board produce the same plan, so ports, probes, absorbing/excitation state
 /// and other settings that can't move the cut or its vias never trigger a recompute.
 @property (nonatomic, copy, readonly) NSString* inputsKey;
@@ -88,6 +98,11 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable NSArray<NSString*>*)netsInNetClass:(NSString*)netClass error:(NSError**)error;
 
 - (nullable NSArray<KicadFootprintInfo*>*)footprintsWithError:(NSError**)error;
+
+/// One entry per footprint, resolved through the project's schematic (which is reloaded on every
+/// call -- it isn't one of the files this bridge watches). Fails if the schematic is missing or
+/// unreadable.
+- (nullable NSArray<KicadComponentSimModel*>*)componentSimModelsWithError:(NSError**)error;
 
 /// Every net's own copper, on every copper layer, at its own real stackup Z -- the whole board,
 /// not clipped down to any one simulation's involved-nets hull the way EMSSimulationPipelineBridge.

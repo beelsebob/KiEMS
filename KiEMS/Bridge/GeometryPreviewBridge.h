@@ -215,10 +215,10 @@ typedef NS_ENUM(NSInteger, EMSGeometryTriangleKind) {
 /// points plus one flat color -- is exactly what this needs too, not because a via has anything to
 /// do with a footprint's own 3D model.
 @property (nonatomic, copy, readonly) NSArray<EMSGeometryComponentTriangle *> *viaMeshTriangles;
-/// Real KiCad 3D models for every footprint auto-discovered as a lumped R/L/C component in this
+/// Real KiCad 3D models for every footprint modelled as a lumped R/L/C component in this
 /// simulation (not every footprint with a resolved port/probe pin too -- see
 /// includedFootprintReferences()'s own comment for why). A debug/visualization aid (confirming a
-/// lumped-component auto-discovery picked the right physical part), not used by the FDTD simulation
+/// lumped component is the right physical part), not used by the FDTD simulation
 /// itself. Empty if no lumped components are involved, or if the export failed (best-effort,
 /// degrades gracefully -- see buildGeometryPreview()).
 @property (nonatomic, copy, readonly) NSArray<EMSGeometryComponentTriangle *> *componentMeshTriangles;

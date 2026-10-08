@@ -2,6 +2,7 @@
 #import "EMSConfigBridge+Private.h"
 #import "GeometryPreviewBridge+Private.h"
 
+#include "kiems/component_sim_model.hpp"
 #include "kiems/importer.hpp"
 #include "kiems/board_slicing.hpp"
 #include "kiems/grid_gen.hpp"
@@ -55,6 +56,18 @@ NSArray<NSString*>* toNSStringArray(const std::vector<std::string>& values) {
         _reference = [reference copy];
         _value = [value copy];
         _pins = [pins copy];
+    }
+    return self;
+}
+@end
+
+@implementation KicadComponentSimModel
+- (instancetype)initWithReference:(NSString*)reference supported:(BOOL)supported reason:(NSString*)reason {
+    self = [super init];
+    if (self) {
+        _reference = [reference copy];
+        _supported = supported;
+        _reason = [reason copy];
     }
     return self;
 }
@@ -120,7 +133,13 @@ std::string stitchingViaPlanInputsKey(const kiems::EMSConfig& config, const kiem
         selector["hull_padding"] = entry.hullPadding();
         nets.push_back(std::move(selector));
     }
+    // Only components that grow the hull can move the cut; including one otherwise doesn't.
+    nlohmann::json components = nlohmann::json::array();
+    for (const kiems::IncludedComponentConfig& component : simulation.includedComponents()) {
+        if (component.contributesToHull) components.push_back(component);
+    }
     const nlohmann::json key{{"involved_nets", nets},
+                             {"hull_components", components},
                              {"ground_net", simulation.groundNet()},
                              {"via_edge_distance", simulation.viaEdgeDistance()},
                              {"via_spacing", simulation.viaSpacing()},
@@ -376,6 +395,22 @@ std::string stitchingViaPlanInputsKey(const kiems::EMSConfig& config, const kiem
                                                                            pins:pins]];
     }
     return footprints;
+}
+
+- (nullable NSArray<KicadComponentSimModel*>*)componentSimModelsWithError:(NSError**)error {
+    auto result = _board->componentSimModels();
+    if (!result) {
+        if (error != nil) *error = makeError(result.error());
+        return nil;
+    }
+    NSMutableArray<KicadComponentSimModel*>* models = [NSMutableArray arrayWithCapacity:result->size()];
+    for (const auto& model : *result) {
+        const kiems::ComponentSimModelSupport support = kiems::assessComponentSimModel(model);
+        [models addObject:[[KicadComponentSimModel alloc] initWithReference:@(model.reference.c_str())
+                                                                    supported:support.supported
+                                                                       reason:@(support.reason.c_str())]];
+    }
+    return models;
 }
 
 - (nullable EMSGeometryPreview*)wholeBoardPreviewWithError:(NSError**)error {

@@ -9,6 +9,7 @@ using kiems::ExcitationConfig;
 using kiems::ExcitationDurationMode;
 using kiems::GroundSelectorKind;
 using kiems::HullCutPortConfig;
+using kiems::IncludedComponentConfig;
 using kiems::InvolvedNetConfig;
 using kiems::NetInclusionLevel;
 using kiems::NetSelectorKind;
@@ -64,6 +65,15 @@ NSErrorDomain const EMSConfigErrorDomain = @"EMSConfigErrorDomain";
     NSInteger _index;
 }
 - (HullCutPortConfig&)cxxPort;
+@end
+
+@interface EMSIncludedComponentBridge () {
+@public
+    // Strong -- see EMSInvolvedNetBridge's own _parentSim comment above.
+    EMSSimulationBridge* _parentSim;
+    NSInteger _index;
+}
+- (IncludedComponentConfig&)cxxComponent;
 @end
 
 namespace {
@@ -421,6 +431,18 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
 @end
 
 
+@implementation EMSIncludedComponentBridge
+- (IncludedComponentConfig&)cxxComponent {
+    return _parentSim.cxxSim.includedComponents().at(static_cast<std::size_t>(_index));
+}
+- (NSString*)reference { return @(self.cxxComponent.reference.c_str()); }
+- (BOOL)contributesToHull { return self.cxxComponent.contributesToHull ? YES : NO; }
+- (void)setContributesToHull:(BOOL)value { self.cxxComponent.contributesToHull = value; }
+- (double)hullPadding { return self.cxxComponent.hullPadding; }
+- (void)setHullPadding:(double)value { self.cxxComponent.hullPadding = value; }
+@end
+
+
 @implementation EMSHullCutPortBridge
 - (HullCutPortConfig&)cxxPort {
     return _parentSim.cxxSim.hullCutPorts().at(static_cast<std::size_t>(_index));
@@ -646,6 +668,40 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
     wrapper->_parentSim = self;
     wrapper->_index = index;
     return wrapper;
+}
+
+- (EMSIncludedComponentBridge*)_wrapperForIncludedComponentIndex:(NSInteger)index {
+    EMSIncludedComponentBridge* wrapper = [[EMSIncludedComponentBridge alloc] init];
+    wrapper->_parentSim = self;
+    wrapper->_index = index;
+    return wrapper;
+}
+
+- (NSArray<EMSIncludedComponentBridge*>*)includedComponents {
+    NSMutableArray<EMSIncludedComponentBridge*>* result =
+        [NSMutableArray arrayWithCapacity:self.cxxSim.includedComponents().size()];
+    for (std::size_t i = 0; i < self.cxxSim.includedComponents().size(); ++i) {
+        [result addObject:[self _wrapperForIncludedComponentIndex:static_cast<NSInteger>(i)]];
+    }
+    return result;
+}
+
+- (EMSIncludedComponentBridge*)includeComponentWithReference:(NSString*)reference {
+    auto& components = self.cxxSim.includedComponents();
+    const std::string name = reference.UTF8String;
+    for (std::size_t i = 0; i < components.size(); ++i) {
+        if (components[i].reference == name) return [self _wrapperForIncludedComponentIndex:static_cast<NSInteger>(i)];
+    }
+    IncludedComponentConfig component;
+    component.reference = name;
+    components.push_back(std::move(component));
+    return [self _wrapperForIncludedComponentIndex:static_cast<NSInteger>(components.size() - 1)];
+}
+
+- (void)removeIncludedComponentWithReference:(NSString*)reference {
+    const std::string name = reference.UTF8String;
+    std::erase_if(self.cxxSim.includedComponents(),
+                  [&](const IncludedComponentConfig& component) { return component.reference == name; });
 }
 
 - (NSArray<EMSHullCutPortBridge*>*)hullCutPorts {

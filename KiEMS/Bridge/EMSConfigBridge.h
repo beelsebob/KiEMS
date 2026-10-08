@@ -170,6 +170,16 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 @end
 
 
+/// One component included in a simulation -- see kiems::IncludedComponentConfig. Forwards through
+/// its simulation by index, like EMSInvolvedNetBridge.
+@interface EMSIncludedComponentBridge : NSObject
+@property (nonatomic, copy, readonly) NSString *reference;
+/// Whether the component's pads grow the simulation hull, by hullPadding.
+@property (nonatomic) BOOL contributesToHull;
+/// Hull expansion in micrometers. Kept while contributesToHull is off.
+@property (nonatomic) double hullPadding;
+@end
+
 @interface EMSHullCutPortBridge : NSObject
 @property (nonatomic, copy, readonly) NSString *identifier;
 @property (nonatomic, copy, readonly) NSString *netName;
@@ -219,6 +229,11 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 @property (nonatomic, readonly) NSArray<EMSInvolvedNetBridge *> *involvedNets;
 - (EMSInvolvedNetBridge *)addInvolvedNetWithKind:(EMSNetSelectorKind)kind;
 - (void)removeInvolvedNetAtIndex:(NSInteger)index;
+
+@property (nonatomic, readonly) NSArray<EMSIncludedComponentBridge *> *includedComponents;
+/// Includes the component, or returns its existing entry if it's already included.
+- (EMSIncludedComponentBridge *)includeComponentWithReference:(NSString *)reference;
+- (void)removeIncludedComponentWithReference:(NSString *)reference;
 
 @property (nonatomic, readonly) NSArray<EMSExcitationBridge *> *excitations;
 - (EMSExcitationBridge *)addExcitationForFootprint:(NSString *)footprint pin:(NSString *)pin;

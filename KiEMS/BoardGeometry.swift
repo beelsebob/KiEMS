@@ -3,6 +3,13 @@ import Metal
 import os
 import simd
 
+/// One pin within a group selection.
+struct BoardPinRef: Hashable {
+    let reference: String
+    let number: String
+    let net: String?
+}
+
 /// Something a click on GeometryView's board can select.
 enum BoardPickTarget: Hashable {
     case pin(reference: String, number: String, net: String?)
@@ -10,7 +17,8 @@ enum BoardPickTarget: Hashable {
     case zone(String?)
     case component(String)
     case hullCutPort(identifier: String, net: String)
-    case nets(origin: String, members: [String])
+    /// A group: several nets, components and individual pins -- typically a meta-network.
+    case nets(origin: String, members: [String], components: [String], pins: [BoardPinRef])
 
     var netName: String? {
         switch self {
@@ -19,7 +27,7 @@ enum BoardPickTarget: Hashable {
         case let .zone(net): return net
         case .component: return nil
         case let .hullCutPort(_, net): return net
-        case let .nets(origin, _): return origin
+        case let .nets(origin, _, _, _): return origin
         }
     }
 
@@ -140,8 +148,8 @@ final class BoardGeometry {
     let pickRanges: [BoardGeometrySlot: Range<Int>]
     /// Pins: drawn after pickRanges with a small toward-camera bias.
     let pickPriorityRanges: [BoardGeometrySlot: Range<Int>]
-    /// STEP-model pick geometry per footprint. Only invalid components are pickable, so these are
-    /// drawn (with the priority bias) for just those references.
+    /// STEP-model pick geometry per footprint, drawn with the priority bias whenever component
+    /// models are visible.
     let componentPickRanges: [String: Range<Int>]
     let targetsByIdentifier: [UInt32: BoardPickTarget]
 
@@ -151,10 +159,13 @@ final class BoardGeometry {
     let pinTargets: [String: BoardPickTarget]
 
     /// Every netted copper triangle on every layer (hidden or not) and every netted via, grouped by
-    /// net -- the hull distance field's seeds. Kept on the CPU too for the passive in-cut test.
+    /// net, then every pad triangle again grouped by footprint -- the hull distance field's seeds,
+    /// for net and component hull contributions respectively. Kept on the CPU too for the passive
+    /// in-cut test.
     let seedPositions: [Position3]
     let seedBuffer: MTLBuffer?
     let seedRangesByNet: [String: Range<Int>]
+    let seedRangesByComponent: [String: Range<Int>]
 
     let muteKeys: [BoardMuteKey]
 
@@ -173,6 +184,7 @@ final class BoardGeometry {
                      positionsByTarget: [BoardPickTarget: [(slot: BoardGeometrySlot, positions: [Position3])]],
                      pinTargets: [String: BoardPickTarget],
                      seedPositions: [Position3], seedBuffer: MTLBuffer?, seedRangesByNet: [String: Range<Int>],
+                     seedRangesByComponent: [String: Range<Int>],
                      muteKeys: [BoardMuteKey],
                      outlineBuffer: MTLBuffer?, outlineColorBuffer: MTLBuffer?, outlineVertexCount: Int) {
         self.opaque = opaque
@@ -192,6 +204,7 @@ final class BoardGeometry {
         self.seedPositions = seedPositions
         self.seedBuffer = seedBuffer
         self.seedRangesByNet = seedRangesByNet
+        self.seedRangesByComponent = seedRangesByComponent
         self.muteKeys = muteKeys
         self.outlineBuffer = outlineBuffer
         self.outlineColorBuffer = outlineColorBuffer
@@ -255,6 +268,7 @@ private final class BoardGeometryChunk {
     var componentPickPositions: [String: [Position3]] = [:]
     var positionsByTarget: [Int: [Position3]] = [:]
     var seedsByNet: [String: [Position3]] = [:]
+    var seedsByComponent: [String: [Position3]] = [:]
 
     private(set) var targets: [BoardPickTarget] = []
     private var targetIndex: [BoardPickTarget: Int32] = [:]
@@ -315,9 +329,13 @@ private final class BoardGeometryChunk {
                 chunk.mask.appendTriangle(a, b, c, color: layer.color, key: chunk.key(.neutral))
                 continue
             }
-            // Every netted triangle seeds the slicing hull, whether or not its layer is shown.
+            // Every netted triangle seeds the slicing hull, whether or not its layer is shown; pads
+            // also seed their own footprint's hull contribution.
             if let netName = triangle.netName {
                 chunk.seedsByNet[netName, default: []].append(contentsOf: [a, b, c])
+            }
+            if triangle.kind == .pin, let reference = triangle.footprintReference {
+                chunk.seedsByComponent[reference, default: []].append(contentsOf: [a, b, c])
             }
             // Alpha 0 is the "no override" sentinel (see EMSGeometryTriangle.color's own doc
             // comment) -- real copper is always fully opaque, so a real per-triangle color never
@@ -517,6 +535,7 @@ final class BoardGeometryBuilder {
         var identifierByTarget: [BoardPickTarget: UInt32] = [:]
         var positionsByTarget: [BoardPickTarget: [(slot: BoardGeometrySlot, positions: [Position3])]] = [:]
         var seedsByNet: [String: [Position3]] = [:]
+        var seedsByComponent: [String: [Position3]] = [:]
         var pickPositions: [Position3] = [], pickIdentifiers: [UInt32] = []
         var priorityPositions: [Position3] = [], priorityIdentifiers: [UInt32] = []
         var normalPickRanges: [BoardGeometrySlot: Range<Int>] = [:]
@@ -578,6 +597,9 @@ final class BoardGeometryBuilder {
             for (net, positions) in chunk.seedsByNet {
                 seedsByNet[net, default: []].append(contentsOf: positions)
             }
+            for (reference, positions) in chunk.seedsByComponent {
+                seedsByComponent[reference, default: []].append(contentsOf: positions)
+            }
         }
 
         // Pins and components follow every other pick target so their depth-biased draw wins
@@ -603,6 +625,12 @@ final class BoardGeometryBuilder {
             seedPositions.append(contentsOf: positions)
             seedRangesByNet[net] = start..<seedPositions.count
         }
+        var seedRangesByComponent: [String: Range<Int>] = [:]
+        for (reference, positions) in seedsByComponent {
+            let start = seedPositions.count
+            seedPositions.append(contentsOf: positions)
+            seedRangesByComponent[reference] = start..<seedPositions.count
+        }
 
         var outlinePositions = snapshot.outline.map { Position3(Float($0.x), Float($0.y), snapshot.markerZ) }
         if let first = outlinePositions.first { outlinePositions.append(first) } // Close the loop.
@@ -625,6 +653,7 @@ final class BoardGeometryBuilder {
             componentPickRanges: componentPickRanges, targetsByIdentifier: targetsByIdentifier,
             positionsByTarget: positionsByTarget, pinTargets: pinTargets,
             seedPositions: seedPositions, seedBuffer: buffer(seedPositions), seedRangesByNet: seedRangesByNet,
+            seedRangesByComponent: seedRangesByComponent,
             muteKeys: muteKeys,
             outlineBuffer: buffer(outlinePositions), outlineColorBuffer: buffer(outlineColors),
             outlineVertexCount: outlinePositions.count)

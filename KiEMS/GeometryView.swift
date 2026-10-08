@@ -106,9 +106,9 @@ struct GeometrySelection: Equatable {
         case pin(reference: String, number: String)
         case component(reference: String)
         case hullCutPort(identifier: String)
-        /// A whole group of nets (see GeometryView.selectNets(_:origin:)); `netName` is the net
-        /// the group was grown from, which the Info panel and context menu keep acting on.
-        case connectedNets([String])
+        /// A group of nets, components and pins (see GeometryView.selectNets(_:components:pins:origin:));
+        /// `netName` is the net the group was grown from.
+        case connectedNets([String], components: [String], pins: [BoardPinRef])
     }
 
     let kind: Kind
@@ -163,7 +163,10 @@ struct BoardActivityHighlight: Equatable {
     /// Per-concrete-net hull expansion in configuration micrometers. A zero-valued entry is still
     /// a contributor; absence means the net is clipped by the hull made by other entries.
     var hullPaddingByNet: [String: Double] = [:]
-    var maximumHullPadding: Double? { hullPaddingByNet.values.max() }
+    /// Included components whose own pads grow the hull, with their padding in configuration
+    /// micrometers -- the component equivalent of hullPaddingByNet.
+    var hullPaddingByComponent: [String: Double] = [:]
+    var maximumHullPadding: Double? { (Array(hullPaddingByNet.values) + Array(hullPaddingByComponent.values)).max() }
     /// Nets whose copper is present at either inclusion level. This drives the muted/non-muted
     /// board colours independently of `includedNets`, which remains the narrower set that receives
     /// the animated simulation-path overlay.
@@ -179,7 +182,7 @@ struct BoardActivityHighlight: Equatable {
     var absorbingPins: [AbsorbingPin] = []
     var hullCutPortSpots: [HullCutPortSpot] = []
     var passiveBridges: [PassiveBridge] = []
-    /// R/L/C-prefixed footprints whose Value field cannot produce a usable lumped component.
+    /// Included R/L/C-prefixed footprints whose Value field cannot produce a usable lumped component.
     /// Component bodies use this warning state; pins deliberately do not, because their colors
     /// already communicate excitation/probe/absorption roles.
     var invalidComponentReferences: Set<String> = []
@@ -197,6 +200,7 @@ struct BoardActivityHighlight: Equatable {
     struct BoardInputs: Equatable {
         var includedNets: Set<String>
         var hullPaddingByNet: [String: Double]
+        var hullPaddingByComponent: [String: Double]
         var configurationIncludedNets: Set<String>
         var fullySaturatedNets: Set<String>
         var involvedComponentReferences: Set<String>
@@ -207,6 +211,7 @@ struct BoardActivityHighlight: Equatable {
     }
     var boardInputs: BoardInputs {
         BoardInputs(includedNets: includedNets, hullPaddingByNet: hullPaddingByNet,
+                    hullPaddingByComponent: hullPaddingByComponent,
                     configurationIncludedNets: configurationIncludedNets,
                     fullySaturatedNets: fullySaturatedNets,
                     involvedComponentReferences: involvedComponentReferences,
@@ -501,8 +506,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
             return GeometrySelection(kind: .component(reference: reference), netName: nil)
         case let .hullCutPort(identifier, net):
             return GeometrySelection(kind: .hullCutPort(identifier: identifier), netName: net)
-        case let .nets(origin, members):
-            return GeometrySelection(kind: .connectedNets(members), netName: origin)
+        case let .nets(origin, members, components, pins):
+            return GeometrySelection(kind: .connectedNets(members, components: components, pins: pins), netName: origin)
         case .zone, nil:
             return nil
         }
@@ -1353,10 +1358,20 @@ final class GeometryView: MTKView, MTKViewDelegate {
         needsDisplay = true
     }
 
+    /// A click selects what's under it. Shift-click adds it to the selection; Command-click adds it,
+    /// or removes it if it's already selected. Clicking empty board with either leaves the
+    /// selection alone.
     override func mouseUp(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         if let mouseDownPoint, hypot(point.x - mouseDownPoint.x, point.y - mouseDownPoint.y) <= 3 {
+            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let previous = selectedTarget
             pick(at: point)
+            if modifiers.contains(.shift) || modifiers.contains(.command), let previous {
+                selectedTarget = selectedTarget.map {
+                    Self.extendSelection(previous, with: $0, toggling: modifiers.contains(.command))
+                } ?? previous
+            }
         }
         lastDragPoint = nil
         mouseDownPoint = nil
@@ -1431,17 +1446,15 @@ final class GeometryView: MTKView, MTKViewDelegate {
         for range in BoardGeometry.drawRanges(geometry.pickRanges, isVisible: isSlotVisible) {
             encoder.drawPrimitives(type: .triangle, vertexStart: range.lowerBound, vertexCount: range.count)
         }
-        // Pins (and invalid components, the only pickable STEP models) follow. Standard depth
-        // increases away from this camera (`lessEqual` wins), so a negative constant bias moves
-        // them slightly toward it. This resolves tiny rasterized differences between otherwise
-        // coplanar pad/trace triangles, while the normal depth test still rejects a pin behind
-        // meaningfully nearer geometry.
+        // Pins and component models follow. Standard depth increases away from this camera
+        // (`lessEqual` wins), so a negative constant bias moves them slightly toward it. This
+        // resolves tiny rasterized differences between otherwise coplanar pad/trace triangles, while
+        // the normal depth test still rejects a pin behind meaningfully nearer geometry -- including
+        // a pad under its own component's body, which picks the component.
         encoder.setDepthBias(-1, slopeScale: 0, clamp: 0)
         var priorityRanges = BoardGeometry.drawRanges(geometry.pickPriorityRanges, isVisible: isSlotVisible)
         if !hideComponents {
-            for reference in activity?.invalidComponentReferences ?? [] {
-                if let range = geometry.componentPickRanges[reference] { priorityRanges.append(range) }
-            }
+            priorityRanges.append(contentsOf: geometry.componentPickRanges.values)
         }
         for range in priorityRanges {
             encoder.drawPrimitives(type: .triangle, vertexStart: range.lowerBound, vertexCount: range.count)
@@ -1552,14 +1565,19 @@ final class GeometryView: MTKView, MTKViewDelegate {
     }
 
     /// A right-click that did not pan picks whatever is under the cursor, then offers that
-    /// selection's context menu (if the owner supplies one for it).
+    /// selection's context menu (if the owner supplies one for it). Right-clicking part of a group
+    /// selection keeps the group, so its menu acts on all of it.
     override func rightMouseUp(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         let wasClick = rightMouseDownPoint.map { hypot(point.x - $0.x, point.y - $0.y) <= 3 } ?? false
         lastPanDragPoint = nil
         rightMouseDownPoint = nil
         guard wasClick else { return }
+        let group = selectedTarget
         pick(at: point)
+        if let group, let picked = selectedTarget, Self.group(group, contains: picked) {
+            selectedTarget = group
+        }
         if let selection = currentSelection, let menu = contextMenuForSelection?(selection) {
             NSMenu.popUpContextMenu(menu, with: event, for: self)
         }
@@ -1576,6 +1594,73 @@ final class GeometryView: MTKView, MTKViewDelegate {
         return menu.performKeyEquivalent(with: event) || super.performKeyEquivalent(with: event)
     }
 
+    /// The nets, components and pins a target selects. A pour selects its net; a hull-cut port
+    /// can't join a group, so it contributes nothing.
+    private static func selectionParts(of target: PickTarget)
+        -> (nets: [String], components: [String], pins: [BoardPinRef]) {
+        switch target {
+        case let .pin(reference, number, net):
+            return ([], [], [BoardPinRef(reference: reference, number: number, net: net)])
+        case let .net(net):
+            return ([net], [], [])
+        case let .zone(net):
+            return (net.map { [$0] } ?? [], [], [])
+        case let .component(reference):
+            return ([], [reference], [])
+        case let .nets(_, members, components, pins):
+            return (members, components, pins)
+        case .hullCutPort:
+            return ([], [], [])
+        }
+    }
+
+    /// `selection` with `added`'s parts added -- or, when `toggling`, with any already selected
+    /// removed instead. Collapses to a single target when only one part is left.
+    private static func extendSelection(_ selection: PickTarget, with added: PickTarget, toggling: Bool) -> PickTarget? {
+        var (nets, components, pins) = selectionParts(of: selection)
+        let addition = selectionParts(of: added)
+        func merge<T: Equatable>(_ current: inout [T], _ extra: [T]) {
+            for item in extra {
+                if let index = current.firstIndex(of: item) {
+                    if toggling { current.remove(at: index) }
+                } else {
+                    current.append(item)
+                }
+            }
+        }
+        merge(&nets, addition.nets)
+        merge(&components, addition.components)
+        merge(&pins, addition.pins)
+        switch (nets.count, components.count, pins.count) {
+        case (0, 0, 0): return nil
+        case (1, 0, 0): return .net(nets[0])
+        case (0, 1, 0): return .component(components[0])
+        case (0, 0, 1): return .pin(reference: pins[0].reference, number: pins[0].number, net: pins[0].net)
+        default:
+            let origin = selection.netName.flatMap { nets.contains($0) ? $0 : nil } ?? nets.first ?? pins.first?.net ?? ""
+            return .nets(origin: origin, members: nets, components: components, pins: pins)
+        }
+    }
+
+    /// Whether `target` is one of `group`'s own parts: a member net (or anything on one), one of
+    /// its components, or one of its pins.
+    private static func group(_ group: PickTarget, contains target: PickTarget) -> Bool {
+        guard case let .nets(_, members, components, pins) = group else { return false }
+        switch target {
+        case let .pin(reference, number, net):
+            return pins.contains(BoardPinRef(reference: reference, number: number, net: net))
+                || net.map(members.contains) == true || components.contains(reference)
+        case let .component(reference):
+            return components.contains(reference)
+        case let .net(net), let .hullCutPort(_, net):
+            return members.contains(net)
+        case let .zone(net):
+            return net.map(members.contains) == true
+        case .nets:
+            return false
+        }
+    }
+
     func deselectAll() {
         selectedTarget = nil
     }
@@ -1585,9 +1670,15 @@ final class GeometryView: MTKView, MTKViewDelegate {
         deselectAll()
     }
 
-    /// Selects (and highlights) every net in `nets`, reporting `origin` as the selection's net.
-    func selectNets(_ nets: [String], origin: String) {
-        selectedTarget = .nets(origin: origin, members: nets)
+    /// Selects (and highlights) every net in `nets`, component in `components` and pin in `pins`,
+    /// reporting `origin` as the selection's net.
+    func selectNets(_ nets: [String], components: [String], pins: [BoardPinRef] = [], origin: String) {
+        selectedTarget = .nets(origin: origin, members: nets, components: components, pins: pins)
+    }
+
+    /// Selects one pin, net or component, as clicking it would.
+    func select(_ target: BoardPickTarget) {
+        selectedTarget = target
     }
 
     override func scrollWheel(with event: NSEvent) {
@@ -1836,12 +1927,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
     private func passiveReferencesInsideCut() -> Set<String> {
         guard let activity, !activity.passiveBridges.isEmpty, let geometry = boardGeometry else { return [] }
         let seeds = geometry.seedPositions
-        let seedGroups: [(padding: Float, ranges: [Range<Int>])] = Dictionary(
-            grouping: activity.hullPaddingByNet.compactMap { net, padding in
-                geometry.seedRangesByNet[net].map { (padding, $0) }
-            }, by: \.0
-        ).map { padding, entries in
-            (Float(padding * Self.simUnitsPerMicrometer), entries.map(\.1))
+        let seedGroups = hullSeedRangesByPadding(activity: activity, geometry: geometry).map { padding, ranges in
+            (padding: Float(padding * Self.simUnitsPerMicrometer), ranges: ranges)
         }
         func pointSegmentDistance(_ p: SIMD2<Float>, _ a: SIMD2<Float>, _ b: SIMD2<Float>) -> Float {
             let ab = b - a
@@ -1895,20 +1982,31 @@ final class GeometryView: MTKView, MTKViewDelegate {
         return inside
     }
 
-    /// One seed group per distinct hull padding, drawing that padding's nets' ranges of the
-    /// geometry's net-sorted seed buffer.
-    private func updateRegionSeedGroups() {
-        regionHighlightNeedsUpdate = true
-        guard let geometry = boardGeometry, let paddingByNet = activity?.hullPaddingByNet else {
-            regionSeedGroups = []
-            return
-        }
+    /// The seed buffer ranges of every hull contribution -- each contributing net's copper and
+    /// each contributing component's pads -- grouped by padding in configuration micrometers.
+    private func hullSeedRangesByPadding(activity: BoardActivityHighlight,
+                                         geometry: BoardGeometry) -> [Double: [Range<Int>]] {
         var rangesByPadding: [Double: [Range<Int>]] = [:]
-        for (net, padding) in paddingByNet {
+        for (net, padding) in activity.hullPaddingByNet {
             guard let range = geometry.seedRangesByNet[net] else { continue }
             rangesByPadding[padding, default: []].append(range)
         }
-        regionSeedGroups = rangesByPadding
+        for (reference, padding) in activity.hullPaddingByComponent {
+            guard let range = geometry.seedRangesByComponent[reference] else { continue }
+            rangesByPadding[padding, default: []].append(range)
+        }
+        return rangesByPadding
+    }
+
+    /// One seed group per distinct hull padding, drawing that padding's contributions' ranges of the
+    /// geometry's seed buffer.
+    private func updateRegionSeedGroups() {
+        regionHighlightNeedsUpdate = true
+        guard let geometry = boardGeometry, let activity else {
+            regionSeedGroups = []
+            return
+        }
+        regionSeedGroups = hullSeedRangesByPadding(activity: activity, geometry: geometry)
             .map { RegionSeedGroup(paddingMicrometers: $0.key, ranges: $0.value) }
             .sorted { $0.paddingMicrometers < $1.paddingMicrometers }
     }
@@ -2140,8 +2238,14 @@ final class GeometryView: MTKView, MTKViewDelegate {
             positions = pickPositions(for: selectedTarget)
         case let .net(selectedNet):
             forEachVisibleTarget(onNets: [selectedNet]) { positions.append(contentsOf: $1) }
-        case let .nets(_, members):
+        case let .nets(_, members, components, pins):
             forEachVisibleTarget(onNets: Set(members)) { positions.append(contentsOf: $1) }
+            for reference in components {
+                positions.append(contentsOf: pickPositions(for: .component(reference)))
+            }
+            for pin in pins {
+                positions.append(contentsOf: pinPositions(reference: pin.reference, padNumber: pin.number))
+            }
         case .zone:
             break
         }
