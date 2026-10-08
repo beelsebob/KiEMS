@@ -1574,12 +1574,6 @@ namespace {
 // as every sliced-board preview already gets when a simulation hasn't overridden pixelSize itself.
 constexpr double kWholeBoardTessellationToleranceSimUnits = 5.0 * kiems::constants::unitMultiplier;
 
-// Copper pours dominate the whole-board preview's constrained-Delaunay work.  They are cosmetic
-// here (simulation keeps its own configured tolerance), so retain edges to 25 µm rather than the
-// 5 µm used for masks and silkscreen.  This removes clearance-detail vertices which are below a
-// normal board-view pixel footprint while materially reducing large-pour triangulation time.
-constexpr double kWholeBoardCopperTessellationToleranceSimUnits = 25.0 * kiems::constants::unitMultiplier;
-
 // Mirrors board_slicing.cpp's own (private) _polygonLoopToPolygon/_copperOnLayer exactly -- small
 // enough, and different enough in what they're fed (every net's own copper across the whole board,
 // not one SimulationConfig's already-cutout-clipped composite), that duplicating them here reads
@@ -2060,7 +2054,7 @@ std::expected<EMSGeometryPreview*, std::string> buildWholeBoardPreview(const lib
             (*task.layerName + " / " + task.group->key).c_str(),
             task.cost, task.group->rawPolygons.size());
         buildWholeBoardCopperGroup(*task.group, *task.layerName, *cutoutsForTasks, *allCutoutsForTasks,
-                                   kWholeBoardCopperTessellationToleranceSimUnits);
+                                   kWholeBoardTessellationToleranceSimUnits);
     });
 
     copperTiming.end();
