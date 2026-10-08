@@ -2477,6 +2477,21 @@ static kiems::EyeAggressor eyeTestTone(const std::vector<double>& frequencies, d
     XCTAssertEqualWithAccuracy(points[1].inwardDirectionDegrees, 180.0, 1e-12);
 }
 
+- (void)testHullCutTracePointAtABendOnTheHull {
+    // The hull edge passes exactly through the bend where the trace leaves, so the retained piece
+    // ends at an original corner rather than a newly created endpoint.
+    const std::vector<std::vector<Cu::Position>> cutout = {{{0, 0}, {10, 0}, {10, 10}, {0, 10}}};
+    const std::vector<kiems::grid_detail::HullCutTrace> traces = {
+        {kiems::TraceSegment({2, 5}, {6, 5}, "", 1.0), "DATA", "F.Cu"},
+        {kiems::TraceSegment({6, 5}, {10, 5}, "", 1.0), "DATA", "F.Cu"},
+        {kiems::TraceSegment({10, 5}, {15, 8}, "", 1.0), "DATA", "F.Cu"}};
+    const auto points = kiems::grid_detail::hullCutTracePoints(traces, cutout);
+    XCTAssertEqual(points.size(), 1U);
+    XCTAssertEqualWithAccuracy(points[0].position.x(), 10.0, 1e-12);
+    XCTAssertEqualWithAccuracy(points[0].position.y(), 5.0, 1e-12);
+    XCTAssertEqualWithAccuracy(points[0].inwardDirectionDegrees, 180.0, 1e-12);
+}
+
 - (void)testHullCutPortAndExcitationRoundTripWithoutFakePinIdentity {
     kiems::HullCutPortConfig port;
     port.setID("DATA|F.Cu|100|200");

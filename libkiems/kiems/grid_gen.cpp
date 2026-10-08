@@ -1026,15 +1026,46 @@ std::vector<grid_detail::HullCutPoint> grid_detail::hullCutTracePoints(
         result.push_back({boundary, trace.netName, trace.layerName,
                           direction < 0 ? direction + 360.0 : direction, trace.segment.width()});
     };
+    auto onBoundary = [&](const Position& p) {
+        for (const std::vector<Position>& loop : cutoutLoops) {
+            for (std::size_t i = 0, j = loop.size() - 1; i < loop.size(); j = i++) {
+                if (pointSegmentDistance(p, loop[j], loop[i]) <= comparisonTolerance) return true;
+            }
+        }
+        return false;
+    };
+    std::vector<std::vector<TraceSegment>> piecesByTrace;
+    piecesByTrace.reserve(traces.size());
     for (const HullCutTrace& trace : traces) {
-        const auto pieces = clipTraceSegmentsToCutout({trace.segment}, cutoutLoops, boundaryTolerance);
-        for (const TraceSegment& piece : pieces) {
-            const bool startWasCreated = distance(piece.start(), trace.segment.start()) > comparisonTolerance &&
-                                         distance(piece.start(), trace.segment.stop()) > comparisonTolerance;
-            const bool stopWasCreated = distance(piece.stop(), trace.segment.start()) > comparisonTolerance &&
-                                        distance(piece.stop(), trace.segment.stop()) > comparisonTolerance;
-            if (startWasCreated) append(trace, piece.start(), piece.stop());
-            if (stopWasCreated) append(trace, piece.stop(), piece.start());
+        piecesByTrace.push_back(clipTraceSegmentsToCutout({trace.segment}, cutoutLoops, boundaryTolerance));
+    }
+    // An original corner can sit on the hull when the hull outline passes through a bend. It is
+    // a cut unless another retained piece of the same net and layer carries the trace on from it.
+    auto continuesInside = [&](std::size_t self, const Position& corner) {
+        for (std::size_t other = 0; other < traces.size(); ++other) {
+            if (other == self || traces[other].netName != traces[self].netName ||
+                traces[other].layerName != traces[self].layerName) {
+                continue;
+            }
+            for (const TraceSegment& piece : piecesByTrace[other]) {
+                if (distance(piece.start(), corner) <= comparisonTolerance ||
+                    distance(piece.stop(), corner) <= comparisonTolerance) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+    for (std::size_t index = 0; index < traces.size(); ++index) {
+        const HullCutTrace& trace = traces[index];
+        auto isCut = [&](const Position& end) {
+            const bool original = distance(end, trace.segment.start()) <= comparisonTolerance ||
+                                  distance(end, trace.segment.stop()) <= comparisonTolerance;
+            return !original || (onBoundary(end) && !continuesInside(index, end));
+        };
+        for (const TraceSegment& piece : piecesByTrace[index]) {
+            if (isCut(piece.start())) append(trace, piece.start(), piece.stop());
+            if (isCut(piece.stop())) append(trace, piece.stop(), piece.start());
         }
     }
     return result;
