@@ -1302,7 +1302,8 @@ final class WholeBoardViewController: NSViewController {
         for point in hullCutTracePoints {
             let port = hullCutPort(identifier: point.identifier, in: simulation)
             highlight.hullCutPortSpots.append(BoardActivityHighlight.HullCutPortSpot(
-                identifier: point.identifier, netName: point.netName, position: point.position,
+                identifier: point.identifier, netName: point.netName, layerName: point.layerName,
+                position: point.position,
                 excited: hullCutExcitation(identifier: point.identifier, in: simulation) != nil,
                 probed: port?.probe ?? false, absorbing: port?.absorbSignal ?? false))
         }

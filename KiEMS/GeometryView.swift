@@ -151,6 +151,7 @@ struct BoardActivityHighlight: Equatable {
     struct HullCutPortSpot: Equatable {
         let identifier: String
         let netName: String
+        let layerName: String
         let position: CGPoint
         let excited: Bool
         let probed: Bool
@@ -218,7 +219,7 @@ struct BoardActivityHighlight: Equatable {
                     invalidComponentReferences: invalidComponentReferences,
                     passiveBridges: passiveBridges,
                     hullCutPickSpots: hullCutPortSpots.map {
-                        "\($0.identifier)|\($0.netName)|\($0.position.x)|\($0.position.y)"
+                        "\($0.identifier)|\($0.netName)|\($0.layerName)|\($0.position.x)|\($0.position.y)"
                     },
                     hasSelectedSimulation: hasSelectedSimulation)
     }
@@ -1494,6 +1495,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
               bounds.width > 0, bounds.height > 0 else { return nil }
 
         let eye = currentEyePosition()
+        // Only crossings on layers ticked on in the legend can be clicked.
+        let shownLayers = Set(visibleLayerNames)
         let viewProjection = currentProjectionMatrix() * lookAt(
             eye: eye, center: SIMD3(target.x, target.y, target.z),
             up: -currentOrientation().act(SIMD3<Float>(1, 0, 0)))
@@ -1514,7 +1517,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
         }
 
         var best: (target: PickTarget, distance: CGFloat, depth: Float)?
-        for spot in spots {
+        for spot in spots where shownLayers.contains(spot.layerName) {
             let centerWorld = Position3(Float(spot.position.x), Float(spot.position.y), markerZ)
             guard let center = project(centerWorld) else { continue }
             let radius = Float(Self.absorbingPinMarkerRadius)
@@ -2129,7 +2132,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
                             normals: &normals, muteFlags: &muteFlags)
         }
 
-        for spot in activity?.hullCutPortSpots ?? [] {
+        let shownLayers = Set(visibleLayerNames)
+        for spot in activity?.hullCutPortSpots ?? [] where shownLayers.contains(spot.layerName) {
             if spot.absorbing {
                 Self.appendDisc(center: spot.position, radius: Self.absorbingPinMarkerRadius, z: markerZ,
                                 color: Self.absorbingPinColor, positions: &positions, colors: &colors,
@@ -2600,8 +2604,10 @@ final class GeometryView: MTKView, MTKViewDelegate {
                 guard let layerSegments = segmentCells[cellKey] else { continue }
                 for segment in layerSegments where nodeIndex != segment.a && nodeIndex != segment.b {
                     let projected = projection(ofX: node.x, y: node.y, onto: segment)
-                    guard projected.distance <= junctionTolerance,
-                          projected.t > 0, projected.t < 1 else { continue }
+                    // Endpoints are deliberately included: KiCad's tuning-pattern generator emits
+                    // adjacent tracks/arcs whose shared ends differ by ~1 nm, enough to quantize
+                    // into distinct nodes, which left whole length-matching meanders disconnected.
+                    guard projected.distance <= junctionTolerance else { continue }
                     addEdge(nodeIndex, segment.a, weight: projected.t * segment.length)
                     addEdge(nodeIndex, segment.b, weight: (1 - projected.t) * segment.length)
                 }
