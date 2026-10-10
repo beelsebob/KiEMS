@@ -99,11 +99,15 @@ final class SimulationResultsViewController: NSViewController {
     private weak var document: Document?
 
     private let progressStatus = ProgressStatusView()
+    private let banner = StatusBannerView()
     /// Shown left of progressStatus's own progress bar only while EMSPipelineProgress.duringExcitation
     /// is true (the excitation pulse is still actively being injected, as opposed to the run just
     /// observing decay afterward) -- see that property's own doc comment.
     private let excitationIcon = NSImageView()
     private let energyHistoryChart = MultiCurveLineChartView()
+    /// Measured core/boundary throughput and the step/run-time prediction, under the time estimate
+    /// while an FDTD pass is running.
+    private let throughputLabel = NSTextField(labelWithString: "")
     private let categoryControl = NSSegmentedControl()
     private let scrollView = NSScrollView()
     private let stack = ResultsDocumentStackView()
@@ -111,6 +115,11 @@ final class SimulationResultsViewController: NSViewController {
     private var progressGroupToEnergyChartConstraint: NSLayoutConstraint!
 
     private var errors: [Int: String] = [:]
+    /// The last results a simulation produced before a config edit invalidated them -- kept and
+    /// shown (under an "out of date" banner listing staleReasons) until a re-run replaces them,
+    /// rather than leaving the tab empty. See invalidateCache(forSimulationIndex:reason:).
+    private var staleResults: [Int: EMSResultsPreview] = [:]
+    private var staleReasons: [Int: [String]] = [:]
     private var runningIndices: Set<Int> = []
     // Latest known progress per simulation, from this VC's own in-flight ensureStage: call -- see
     // GeometryViewController's identical progressFraction field for why refreshDisplay() needs this
@@ -128,6 +137,21 @@ final class SimulationResultsViewController: NSViewController {
     // Latest known time-remaining text per simulation, mirroring latestProgress's own "so
     // refreshDisplay() can restore state on re-selection" role.
     private var timeEstimateText: [Int: String] = [:]
+    /// The last FDTD progress report's step and arrival time -- consecutive reports within one
+    /// port's pass bound a measurement window for StepTimingModel.
+    private struct StepSample {
+        let portsCompleted: Int
+        let step: Int
+        let time: Date
+    }
+    private var lastStepSample: [Int: StepSample] = [:]
+    /// Wall time and steps measured so far in this simulation's current run.
+    private var measuredSteps: [Int: Int] = [:]
+    private var measuredSeconds: [Int: Double] = [:]
+    /// StepTimingModel's rates as they stood when this run started, so the prediction shown is the
+    /// one made before this run's own measurements fed into it.
+    private var predictedRates: [Int: StepTimingModel.Rates] = [:]
+    private var predictionCaptured: Set<Int> = []
     private struct EnergyHistorySample {
         let timeNanoseconds: Double
         let relativeEnergyDB: Double
@@ -181,6 +205,9 @@ final class SimulationResultsViewController: NSViewController {
     override func loadView() {
         let container = NSView()
 
+        banner.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(banner)
+
         progressStatus.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(progressStatus)
 
@@ -190,6 +217,15 @@ final class SimulationResultsViewController: NSViewController {
         excitationIcon.isHidden = true
         excitationIcon.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(excitationIcon)
+
+        throughputLabel.font = .systemFont(ofSize: 11)
+        throughputLabel.textColor = .secondaryLabelColor
+        throughputLabel.alignment = .center
+        throughputLabel.lineBreakMode = .byWordWrapping
+        throughputLabel.maximumNumberOfLines = 0
+        throughputLabel.isHidden = true
+        throughputLabel.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(throughputLabel)
 
         energyHistoryChart.configure(yAxisLabel: "Relative energy [dB]")
         energyHistoryChart.isHidden = true
@@ -227,7 +263,11 @@ final class SimulationResultsViewController: NSViewController {
         progressGroupToEnergyChartConstraint = progressGroupGuide.bottomAnchor.constraint(
             equalTo: energyHistoryChart.bottomAnchor)
         NSLayoutConstraint.activate([
-            categoryControl.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
+            banner.topAnchor.constraint(equalTo: container.topAnchor),
+            banner.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            banner.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+
+            categoryControl.topAnchor.constraint(equalTo: banner.bottomAnchor, constant: 12),
             categoryControl.centerXAnchor.constraint(equalTo: container.centerXAnchor),
 
             scrollView.topAnchor.constraint(equalTo: categoryControl.bottomAnchor, constant: 12),
@@ -236,7 +276,7 @@ final class SimulationResultsViewController: NSViewController {
             scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             stack.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
 
-            progressStatus.topAnchor.constraint(equalTo: container.topAnchor),
+            progressStatus.topAnchor.constraint(equalTo: banner.bottomAnchor),
             progressStatus.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             progressStatus.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             progressStatus.bottomAnchor.constraint(equalTo: container.bottomAnchor),
@@ -251,8 +291,13 @@ final class SimulationResultsViewController: NSViewController {
             excitationIcon.widthAnchor.constraint(equalToConstant: 16),
             excitationIcon.heightAnchor.constraint(equalToConstant: 16),
 
-            energyHistoryChart.topAnchor.constraint(equalTo: progressStatus.timeEstimateLabel.bottomAnchor,
-                                                    constant: 12),
+            throughputLabel.topAnchor.constraint(equalTo: progressStatus.timeEstimateLabel.bottomAnchor,
+                                                 constant: 6),
+            throughputLabel.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            throughputLabel.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor, constant: 24),
+            throughputLabel.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -24),
+
+            energyHistoryChart.topAnchor.constraint(equalTo: throughputLabel.bottomAnchor, constant: 12),
             energyHistoryChart.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             energyHistoryChart.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor, constant: 24),
             energyHistoryChart.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -24),
@@ -263,18 +308,34 @@ final class SimulationResultsViewController: NSViewController {
     }
 
     /// Called by DocumentWindowController whenever the user selects a simulation's "Simulation
-    /// Results" sub-entry (including re-selecting one already showing). Shows a cached result or
-    /// error immediately if there is one; otherwise kicks off the full pipeline in the background --
-    /// unlike Geometry, there is no separate "Run" button: selecting the tab is the trigger.
+    /// Results" sub-entry (including re-selecting one already showing). Shows a cached result,
+    /// out-of-date result or error if there is one; never starts a run by itself -- an FDTD run can
+    /// take minutes to hours, so that's left to the banner's "Run Simulation" button.
     func showResults(forSimulationIndex index: Int) {
+        if currentIndex != index { banner.hide(force: true) }
         currentIndex = index
         refreshDisplay()
+    }
 
-        guard let document, index < document.config.simulations.count else { return }
-        let name = document.config.simulations[index].name
-        let pipeline = document.pipeline(forSimulationNamed: name)
-        guard !pipeline.hasStage(.results), errors[index] == nil, !runningIndices.contains(index) else { return }
-        JobScheduler.shared.request(document: document, simulationName: name, target: .simulation)
+    /// Whether `index` has out-of-date results kept for display -- see staleResults.
+    func hasStaleResults(forSimulationIndex index: Int) -> Bool {
+        staleResults[index] != nil
+    }
+
+    /// The banner's "Run Simulation" button: runs the full pipeline (geometry first if needed) in
+    /// the background for whichever simulation is showing.
+    private func runSimulation() {
+        guard let currentIndex else { return }
+        runSimulation(forSimulationIndex: currentIndex)
+    }
+
+    /// Starts (or queues) `index`'s full pipeline run -- the banner button for the showing
+    /// simulation, or the sidebar's "Run Simulation" context-menu item for any simulation.
+    func runSimulation(forSimulationIndex index: Int) {
+        guard let document, index < document.config.simulations.count, !runningIndices.contains(index) else { return }
+        errors[index] = nil
+        JobScheduler.shared.request(document: document, simulationName: document.config.simulations[index].name,
+                                    target: .simulation)
         // request() may have only queued this job behind another simulation's own in-flight run --
         // refresh again now (not just the pre-request call above) so the freshly-queued state is
         // shown immediately instead of a blank content area (see ProgressStatusView.State.queued).
@@ -289,12 +350,42 @@ final class SimulationResultsViewController: NSViewController {
     /// result (or error) from before the edit doesn't keep being shown. Deliberately doesn't re-run
     /// immediately: just invalidates the shared pipeline's cache from the Results stage onward
     /// (Geometry and grid lines stay valid and don't get recomputed) and clears this VC's own error,
-    /// so the next explicit Results selection is what triggers the real re-run.
-    func invalidateCache(forSimulationIndex index: Int) {
+    /// so the next explicit run is what recomputes them.
+    ///
+    /// `reason` (a short user-facing description of the edit) keeps the results being discarded
+    /// around as out of date, listed under that reason in this tab's banner; nil (File > Regenerate
+    /// Geometry / Reset Results) genuinely discards them. Must be called before
+    /// GeometryViewController's own invalidateCache for the same edit, which drops the pipeline's
+    /// results along with its geometry.
+    func invalidateCache(forSimulationIndex index: Int, reason: String?) {
         errors[index] = nil
         guard let document, index < document.config.simulations.count else { return }
+        if let reason {
+            let pipeline = document.pipeline(forSimulationNamed: document.config.simulations[index].name)
+            if let preview = pipeline.resultsPreview() {
+                staleResults[index] = preview
+                staleReasons[index] = []
+            }
+            if staleResults[index] != nil, !(staleReasons[index] ?? []).contains(reason) {
+                staleReasons[index, default: []].append(reason)
+            }
+        } else {
+            staleResults[index] = nil
+            staleReasons[index] = nil
+        }
         JobScheduler.shared.invalidate(document: document, simulationName: document.config.simulations[index].name,
                                         fromStage: .results)
+    }
+
+    /// Recomputes postprocessing from the existing FDTD data without re-running FDTD.
+    func rerunPostprocessing(forSimulationIndex index: Int) {
+        errors[index] = nil
+        guard let document, index < document.config.simulations.count else { return }
+        JobScheduler.shared.invalidatePostprocessing(document: document,
+                                                     simulationName: document.config.simulations[index].name)
+        if currentIndex == index {
+            runSimulation()
+        }
     }
 
     /// Eye settings (bit rate, adversarial-noise draws, shared clock) affect only PRBS post-analysis.
@@ -331,7 +422,11 @@ final class SimulationResultsViewController: NSViewController {
         defer { updateProgressGroupCentering() }
         let name = document.config.simulations[currentIndex].name
         let pipeline = document.pipeline(forSimulationNamed: name)
+        banner.hide()
+        throughputLabel.isHidden = true
         if let preview = pipeline.resultsPreview() {
+            staleResults[currentIndex] = nil
+            staleReasons[currentIndex] = nil
             // These default to visible (NSControl's own isHidden default) until a run's own
             // running/error/idle branch below first sets them -- a simulation whose results are
             // already cached before this VC's very first refreshDisplay() call (e.g. from a
@@ -340,12 +435,6 @@ final class SimulationResultsViewController: NSViewController {
             excitationIcon.isHidden = true
             energyHistoryChart.isHidden = true
             showCategories(for: preview)
-        } else if let error = errors[currentIndex] {
-            categoryControl.isHidden = true
-            scrollView.isHidden = true
-            progressStatus.setState(.error(error))
-            excitationIcon.isHidden = true
-            energyHistoryChart.isHidden = true
         } else if runningIndices.contains(currentIndex) {
             categoryControl.isHidden = true
             scrollView.isHidden = true
@@ -376,6 +465,11 @@ final class SimulationResultsViewController: NSViewController {
                     : (timeEstimateText[currentIndex] ?? TimeRemainingFormatter.string(secondsRemaining: nil))),
                 animated: animated)
             excitationIcon.isHidden = !(progress?.phase == .simulation && (progress?.duringExcitation ?? false))
+            if progress?.phase == .simulation, let text = throughputText(forSimulationIndex: currentIndex,
+                                                                         pipeline: pipeline) {
+                throughputLabel.stringValue = text
+                throughputLabel.isHidden = false
+            }
             if isSettingUp {
                 energyHistoryChart.isHidden = true
             } else if let progress, progress.phase == .simulation {
@@ -394,12 +488,33 @@ final class SimulationResultsViewController: NSViewController {
             progressStatus.setState(.queued("Waiting to start…", currentJob: JobScheduler.shared.jobs.first?.progressStatusInfo))
             excitationIcon.isHidden = true
             energyHistoryChart.isHidden = true
+        } else if let error = errors[currentIndex] {
+            categoryControl.isHidden = true
+            scrollView.isHidden = true
+            progressStatus.setState(.error(error))
+            excitationIcon.isHidden = true
+            energyHistoryChart.isHidden = true
+            banner.show(style: .warning, title: "Simulation failed", buttonTitle: "Run Simulation") { [weak self] in
+                self?.runSimulation()
+            }
+        } else if let stale = staleResults[currentIndex] {
+            progressStatus.setState(.hidden)
+            excitationIcon.isHidden = true
+            energyHistoryChart.isHidden = true
+            showCategories(for: stale)
+            banner.show(style: .warning, title: "Warning: Results are out of date:",
+                        details: staleReasons[currentIndex] ?? [], buttonTitle: "Run Simulation") { [weak self] in
+                self?.runSimulation()
+            }
         } else {
             categoryControl.isHidden = true
             scrollView.isHidden = true
             progressStatus.setState(.hidden)
             excitationIcon.isHidden = true
             energyHistoryChart.isHidden = true
+            banner.show(style: .info, title: "Simulation has not yet been run", buttonTitle: "Run Simulation") {
+                [weak self] in self?.runSimulation()
+            }
         }
     }
 
@@ -414,15 +529,20 @@ final class SimulationResultsViewController: NSViewController {
         for index in 0..<document.config.simulations.count {
             let name = document.config.simulations[index].name
             let pipeline = document.pipeline(forSimulationNamed: name)
-            let geometryJob = JobScheduler.shared.job(document: document, simulationName: name, kind: .geometryGeneration)
-            let simulationJob = JobScheduler.shared.job(document: document, simulationName: name, kind: .simulation)
-            let activeJob = simulationJob ?? geometryJob
+            // Only this VC's own .simulation job counts. A .geometryGeneration job with no
+            // .simulation job behind it was requested by GeometryViewController alone; adopting it
+            // here made its completion (no results, so "cancelled") reset the Geometry row to
+            // invalid right after GeometryViewController had marked it succeeded.
+            let activeJob = JobScheduler.shared.job(document: document, simulationName: name, kind: .simulation)
             let wasRunning = runningIndices.contains(index)
 
             switch activeJob?.status {
             case .running, .cancelling:
                 if !wasRunning {
                     runningIndices.insert(index)
+                    if currentIndex == index {
+                        banner.showTransient(style: .success, title: "Simulation Started")
+                    }
                     refreshDisplay()
                 }
                 if let progress = activeJob?.progress {
@@ -466,6 +586,11 @@ final class SimulationResultsViewController: NSViewController {
         lastReportedPhase[index] = nil
         phaseStartTime[index] = nil
         timeEstimateText[index] = nil
+        lastStepSample[index] = nil
+        measuredSteps[index] = nil
+        measuredSeconds[index] = nil
+        predictedRates[index] = nil
+        predictionCaptured.remove(index)
     }
 
     /// Common handler for every EMSPipelineProgress report from this simulation's own
@@ -473,6 +598,10 @@ final class SimulationResultsViewController: NSViewController {
     /// source-list row) and, if this is the currently-shown simulation, applied to this VC's own
     /// progress bar/time estimate and energy-history chart too.
     private func progressReceived(_ progress: EMSPipelineProgress, forSimulationIndex index: Int) {
+        // syncFromScheduler() re-delivers a job's latest report on every scheduler change.
+        if latestProgress[index] !== progress {
+            recordStepTiming(progress, forSimulationIndex: index)
+        }
         latestProgress[index] = progress
         if progress.phase == .settingUp {
             // Each excited port gets its own FDTD run and its own time origin. Do not connect the
@@ -525,6 +654,64 @@ final class SimulationResultsViewController: NSViewController {
         if currentIndex == index, runningIndices.contains(index) {
             refreshDisplay(animated: !phaseJustChanged)
         }
+    }
+
+    /// Feeds the wall time between consecutive FDTD reports of one port's pass to StepTimingModel.
+    private func recordStepTiming(_ progress: EMSPipelineProgress, forSimulationIndex index: Int) {
+        if !predictionCaptured.contains(index) {
+            predictionCaptured.insert(index)
+            predictedRates[index] = StepTimingModel.shared.rates
+        }
+        switch progress.phase {
+        case .settingUp:
+            StepTimingModel.shared.beginRun()
+            lastStepSample[index] = nil
+        case .simulation:
+            let now = Date()
+            let sample = StepSample(portsCompleted: progress.portsCompleted, step: progress.currentStep, time: now)
+            defer { lastStepSample[index] = sample }
+            guard let previous = lastStepSample[index], previous.portsCompleted == sample.portsCompleted,
+                  sample.step > previous.step, let stats = gridStatistics(forSimulationIndex: index) else { return }
+            let steps = sample.step - previous.step
+            let seconds = now.timeIntervalSince(previous.time)
+            StepTimingModel.shared.record(coreCells: stats.coreCells, boundaryCells: stats.boundaryCells,
+                                          steps: steps, seconds: seconds)
+            measuredSteps[index, default: 0] += steps
+            measuredSeconds[index, default: 0] += seconds
+        default:
+            break
+        }
+    }
+
+    private func gridStatistics(forSimulationIndex index: Int) -> EMSGridStatistics? {
+        guard let document, index < document.config.simulations.count else { return nil }
+        return document.pipeline(forSimulationNamed: document.config.simulations[index].name).gridStatistics()
+    }
+
+    /// "Core 512 Mcells/s · Boundary 301 Mcells/s · 12.3 ms/step (predicted 11.8 ms) · ...", or nil
+    /// before there's anything measured or predicted to show.
+    private func throughputText(forSimulationIndex index: Int, pipeline: EMSSimulationPipelineBridge) -> String? {
+        guard let stats = pipeline.gridStatistics() else { return nil }
+        var parts: [String] = []
+        if let rates = StepTimingModel.shared.rates {
+            parts.append("Core \(StepTimingFormat.throughput(secondsPerCell: rates.coreSecondsPerCell))")
+            parts.append("Boundary \(StepTimingFormat.throughput(secondsPerCell: rates.boundarySecondsPerCell))")
+        }
+        let predicted = predictedRates[index].map {
+            $0.secondsPerStep(coreCells: stats.coreCells, boundaryCells: stats.boundaryCells)
+        }
+        if let steps = measuredSteps[index], steps > 0, let seconds = measuredSeconds[index] {
+            var step = "\(StepTimingFormat.stepDuration(seconds / Double(steps)))/step"
+            if let predicted { step += " (predicted \(StepTimingFormat.stepDuration(predicted)))" }
+            parts.append(step)
+        } else if let predicted {
+            parts.append("Predicted \(StepTimingFormat.stepDuration(predicted))/step")
+        }
+        if let predicted {
+            let maxSteps = stats.excitedPortCount * stats.maxTimestepsPerPort
+            parts.append("Predicted full run up to \(StepTimingFormat.runDuration(predicted * Double(maxSteps)))")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     private func recordEnergyHistory(_ progress: EMSPipelineProgress, forSimulationIndex index: Int) {
@@ -699,11 +886,21 @@ final class SimulationResultsViewController: NSViewController {
     }
 
     private func rebuildStack(for preview: EMSResultsPreview) {
+        #if DEBUG
+        let oldCensus = LayoutCensus(stack)
+        let windowBefore = view.window?.contentView.map { LayoutCensus($0) }
+        let removalStart = Date()
+        #endif
         for view in stack.arrangedSubviews {
             stack.removeArrangedSubview(view)
             view.removeFromSuperview()
         }
-        for section in sections(for: selectedCategory, preview: preview) {
+        #if DEBUG
+        let removalTime = Date().timeIntervalSince(removalStart)
+        let buildStart = Date()
+        #endif
+        let newSections = sections(for: selectedCategory, preview: preview)
+        for section in newSections {
             stack.addArrangedSubview(section)
             // See stack.alignment's own comment -- width isn't propagated automatically.
             NSLayoutConstraint.activate([
@@ -711,6 +908,28 @@ final class SimulationResultsViewController: NSViewController {
                 section.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -16),
             ])
         }
+        #if DEBUG
+        let buildTime = Date().timeIntervalSince(buildStart)
+        let category = selectedCategory.title
+        NSLog("[ResultsLayout] -> %@: removed old page in %.3fs (%@); built %d sections in %.3fs",
+              category, removalTime, oldCensus.summary, newSections.count, buildTime)
+        if let windowBefore { NSLog("[ResultsLayout]    window before switch: %@", windowBefore.summary) }
+        let newCensus = LayoutCensus(stack)
+        NSLog("[ResultsLayout]    new page: %@", newCensus.summary)
+        NSLog("[ResultsLayout]    new page views by class: %@", newCensus.viewsByClassDescription)
+        NSLog("[ResultsLayout]    new page constraints by origin: %@", newCensus.constraintsByOriginDescription)
+        for (index, section) in newSections.enumerated().prefix(3) {
+            NSLog("[ResultsLayout]    section %d: %@", index, LayoutCensus(section).summary)
+        }
+        // The layout pass after this run-loop turn is where a dense engine shows up when adding.
+        let layoutStart = Date()
+        DispatchQueue.main.async { [weak self] in
+            self?.view.window?.layoutIfNeeded()
+            let window = self?.view.window?.contentView.map { LayoutCensus($0) }
+            NSLog("[ResultsLayout]    %@ first layout pass %.3fs after build; window now: %@",
+                  category, Date().timeIntervalSince(layoutStart), window?.summary ?? "no window")
+        }
+        #endif
     }
 
     private func sections(for category: ResultsCategory, preview: EMSResultsPreview) -> [NSView] {
@@ -881,28 +1100,20 @@ final class SimulationResultsViewController: NSViewController {
 
         case .probes:
             // A passive (non-absorbing) probe -- see kiems::PortConfig::absorbSignal()'s own
-            // doc comment -- has no S-parameter of its own (no characteristic impedance to
-            // normalize against), just raw voltage/current magnitude vs. frequency, one curve per
-            // excited port that reached it.
+            // doc comment -- has no S-parameter of its own, so show its voltage per unit incident
+            // voltage at each excited port that reached it (Postprocessor::getProbeTransfer()).
+            // The raw probe spectrum is V/Hz, not volts, so it isn't plotted directly.
             return preview.probes.map { probe in
-                let voltageChart = MultiCurveLineChartView()
-                voltageChart.configure(yAxisLabel: "Voltage (V)", showsLabel: false)
-                voltageChart.setCurves(
-                    xValuesGHz: freqGHz,
-                    curves: probe.curves.map { (label: "exc. port \($0.excitedPort + 1)", values: $0.voltageMagnitude.map(\.doubleValue)) })
-
-                let currentChart = MultiCurveLineChartView()
-                currentChart.configure(yAxisLabel: "Current (A)", showsLabel: false)
-                let currentCurves = probe.curves.map {
-                    (label: "exc. port \($0.excitedPort + 1)", values: $0.currentMagnitude.map(\.doubleValue))
+                let transferCurves = probe.curves.map {
+                    (label: "exc. port \($0.excitedPort + 1)", values: $0.transferMagnitude.map(\.doubleValue))
                 }
-                currentChart.setCurves(
+                let transferChart = MultiCurveLineChartView()
+                transferChart.configure(yAxisLabel: "|V / V_inc|", showsLabel: false)
+                transferChart.setCurves(
                     xValuesGHz: freqGHz,
-                    curves: currentCurves,
-                    minRange: Self.nonnegativeMagnitudeRange(for: currentCurves.map { $0.values }))
-
-                return makeSection(title: "Probe: \(probe.name)",
-                                   graphs: [("Voltage (V)", voltageChart), ("Current (A)", currentChart)])
+                    curves: transferCurves,
+                    minRange: Self.nonnegativeMagnitudeRange(for: transferCurves.map { $0.values }))
+                return makeSection(title: "Probe: \(probe.name)", graphs: [("|V / V_inc|", transferChart)])
             }
         }
     }
@@ -966,3 +1177,62 @@ final class SimulationResultsViewController: NSViewController {
         return (average, (low, high))
     }
 }
+
+#if DEBUG
+/// Counts the views and constraints in a subtree, and why they exist, for [ResultsLayout] logging.
+/// Constraints are counted once, on the view that owns them. Their origin comes from the
+/// identifier AppKit gives its own constraints (NSStackView's internal "NSStackView-…",
+/// autoresizing-mask "NSAutoresizingMaskLayoutConstraint", content-size "NSContentSizeLayoutConstraint"
+/// etc.); unidentified ones are our own explicit constraints, grouped by owner class. The
+/// width-dependent counts flag the known slow pattern: anything that makes a height a function of
+/// a width (see SmithChartView's heightConstraint and AdversarialEyeView.layout()).
+private struct LayoutCensus {
+    var views = 0
+    var constraints = 0
+    var viewsByClass: [String: Int] = [:]
+    var constraintsByOrigin: [String: Int] = [:]
+    var autoWrappingLabels = 0
+    var crossAxisConstraints = 0
+
+    init(_ root: NSView) { visit(root) }
+
+    private mutating func visit(_ view: NSView) {
+        views += 1
+        viewsByClass[String(describing: type(of: view)), default: 0] += 1
+        if let field = view as? NSTextField, field.cell?.wraps == true, field.preferredMaxLayoutWidth == 0 {
+            autoWrappingLabels += 1
+        }
+        for constraint in view.constraints {
+            constraints += 1
+            let origin: String
+            if let identifier = constraint.identifier, !identifier.isEmpty {
+                // Drop per-instance suffixes so like constraints group together.
+                origin = String(identifier.prefix { $0 != "-" && $0 != ":" && !$0.isNumber })
+            } else {
+                origin = "explicit on \(type(of: view))"
+            }
+            constraintsByOrigin[origin, default: 0] += 1
+            let horizontal: Set<NSLayoutConstraint.Attribute> = [.width, .leading, .trailing, .left, .right, .centerX]
+            let vertical: Set<NSLayoutConstraint.Attribute> = [.height, .top, .bottom, .centerY, .firstBaseline, .lastBaseline]
+            let first = constraint.firstAttribute, second = constraint.secondAttribute
+            if (horizontal.contains(first) && vertical.contains(second)) ||
+                (vertical.contains(first) && horizontal.contains(second)) {
+                crossAxisConstraints += 1
+            }
+        }
+        for subview in view.subviews { visit(subview) }
+    }
+
+    var summary: String {
+        "\(views) views, \(constraints) constraints, width-dependent: \(autoWrappingLabels) auto-wrapping labels, " +
+            "\(crossAxisConstraints) width<->height constraints"
+    }
+
+    var viewsByClassDescription: String { Self.describe(viewsByClass) }
+    var constraintsByOriginDescription: String { Self.describe(constraintsByOrigin) }
+
+    private static func describe(_ counts: [String: Int]) -> String {
+        counts.sorted { $0.value > $1.value }.map { "\($0.key)=\($0.value)" }.joined(separator: ", ")
+    }
+}
+#endif

@@ -298,7 +298,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
             // separately blended mask meshes, but drawing those as well would duplicate F/B.Mask.
             hideTopSolderMask = preview?.layers.contains(where: { $0.name == "F.Mask" }) == true
             hideBottomSolderMask = preview?.layers.contains(where: { $0.name == "B.Mask" }) == true
-            hideComponents = false
+            hideFrontComponents = false
+            hideBackComponents = false
             boardActivityChanged()
             requestBoardGeometry()
             rebuildGridBuffers()
@@ -311,6 +312,11 @@ final class GeometryView: MTKView, MTKViewDelegate {
     /// A layer object was filled in-place, or a detailed preview was merged into the current
     /// catalog. Visibility is deliberately untouched.
     func refreshLoadedGeometry() {
+        // A detailed preview merged into the catalog brings the hull-cut domain bounds with it.
+        // Reframe onto them, unless the user has already moved the camera off the initial fit.
+        if hasFitCamera, !fittedToHull, hullFrameBox() != nil, cameraState() == fittedCameraState {
+            hasFitCamera = false
+        }
         requestBoardGeometry()
         rebuildGridBuffers()
         rebuildLegend()
@@ -380,12 +386,37 @@ final class GeometryView: MTKView, MTKViewDelegate {
             boardVisibilityChanged()
         }
     }
-    /// STEP-model visibility, controlled by the Components row in the legend.
-    private var hideComponents = false {
+    /// STEP-model visibility, controlled by the F.Components/B.Components rows in the legend.
+    private var hideFrontComponents = false {
         didSet {
-            guard hideComponents != oldValue else { return }
+            guard hideFrontComponents != oldValue else { return }
             boardVisibilityChanged()
         }
+    }
+    private var hideBackComponents = false {
+        didSet {
+            guard hideBackComponents != oldValue else { return }
+            boardVisibilityChanged()
+        }
+    }
+
+    /// Which footprints' STEP models are on the bottom of the board (from each model's placement --
+    /// see EMSGeometryPreview.backComponentReferences), and whether either side has any, cached
+    /// per preview revision.
+    private var componentSidesCache: (preview: ObjectIdentifier, revision: UInt, hasFront: Bool, hasBack: Bool)?
+
+    private func componentSides() -> (references: Set<String>, hasFront: Bool, hasBack: Bool) {
+        guard let preview else { return ([], false, false) }
+        let back = preview.backComponentReferences
+        if let cache = componentSidesCache, cache.preview == ObjectIdentifier(preview),
+           cache.revision == preview.revision {
+            return (back, cache.hasFront, cache.hasBack)
+        }
+        let rendered = Set(preview.componentMeshTriangles.compactMap(\.footprintReference))
+        let hasFront = !rendered.subtracting(back).isEmpty
+        let hasBack = !rendered.isDisjoint(with: back)
+        componentSidesCache = (ObjectIdentifier(preview), preview.revision, hasFront, hasBack)
+        return (back, hasFront, hasBack)
     }
     private var hideBottomSolderMask = false {
         didSet {
@@ -565,6 +596,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
     // screen-up. The orientation remains fully orbitable after this initial top-down framing.
     private var azimuth: Float = -.pi / 2
     private var elevation: Float = .pi / 2
+    /// Rotation of the view around its own forward axis; positive turns the board clockwise on screen.
+    private var roll: Float = 0
     private var distance: Float = 1
     private var target = Position3(0, 0, 0)
     private var sceneRadius: Float = 1
@@ -575,6 +608,18 @@ final class GeometryView: MTKView, MTKViewDelegate {
     private var rightMouseDownPoint: CGPoint?
 
     private let legendStack = NSStackView()
+    /// Extra controls the owner wants listed beneath the layer rows (e.g. a "Show Grid" toggle).
+    /// Shown or hidden by the owner through its own isHidden.
+    var legendFooterView: NSView? {
+        didSet {
+            oldValue?.removeFromSuperview()
+            shownLegendContents = nil
+            rebuildLegend()
+        }
+    }
+    private let orientationCube = OrientationCubeView()
+    private var cameraAnimationTimer: Timer?
+    private var cameraAnimationEnd: CameraAngles?
 
     convenience init() {
         self.init(frame: .zero, device: MTLCreateSystemDefaultDevice())
@@ -664,6 +709,81 @@ final class GeometryView: MTKView, MTKViewDelegate {
         }
 
         setupLegend()
+        setupOrientationCube()
+    }
+
+    private func setupOrientationCube() {
+        orientationCube.translatesAutoresizingMaskIntoConstraints = false
+        orientationCube.onSelectFace = { [weak self] face in self?.lookAlong(face.normal) }
+        orientationCube.onRoll = { [weak self] clockwise in self?.rollView(clockwise: clockwise) }
+        addSubview(orientationCube)
+        NSLayoutConstraint.activate([
+            orientationCube.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            orientationCube.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            orientationCube.widthAnchor.constraint(equalToConstant: 96),
+            orientationCube.heightAnchor.constraint(equalToConstant: 96),
+        ])
+    }
+
+    /// Animates the orbit camera to look at `target` from `direction` (a world axis). Top/bottom
+    /// keep the default azimuth so +X stays screen-right, matching the initial top-down framing.
+    private func lookAlong(_ direction: SIMD3<Float>) {
+        let endAzimuth: Float, endElevation: Float
+        if abs(direction.z) > 0.5 {
+            endAzimuth = -.pi / 2
+            endElevation = direction.z > 0 ? .pi / 2 : -.pi / 2
+        } else {
+            endAzimuth = atan2(direction.y, direction.x)
+            endElevation = 0
+        }
+
+        // Elevation is unclamped, so first rewrite the current angles as the equivalent pair with
+        // elevation in [-90, 90] degrees (past a pole, (az, el) == (az + 180, +-180 - el)), then
+        // take the shorter way round in azimuth.
+        var startElevation = remainder(elevation, 2 * .pi)
+        var startAzimuth = azimuth
+        if abs(startElevation) > .pi / 2 {
+            startElevation = (startElevation > 0 ? .pi : -.pi) - startElevation
+            startAzimuth += .pi
+        }
+        startAzimuth = endAzimuth + remainder(startAzimuth - endAzimuth, 2 * .pi)
+        let startRoll = remainder(roll, 2 * .pi)
+        animateCamera(from: (startAzimuth, startElevation, startRoll), to: (endAzimuth, endElevation, 0))
+    }
+
+    /// Rolls the view a quarter turn, continuing from the end of any roll already in flight so
+    /// repeated clicks accumulate.
+    private func rollView(clockwise: Bool) {
+        let end = cameraAnimationEnd ?? (azimuth, elevation, roll)
+        animateCamera(from: (azimuth, elevation, roll),
+                      to: (end.azimuth, end.elevation, end.roll + (clockwise ? .pi / 2 : -.pi / 2)))
+    }
+
+    private typealias CameraAngles = (azimuth: Float, elevation: Float, roll: Float)
+
+    private func animateCamera(from start: CameraAngles, to end: CameraAngles) {
+        let (startAzimuth, startElevation, startRoll) = start
+        let (endAzimuth, endElevation, endRoll) = end
+        cameraAnimationTimer?.invalidate()
+        cameraAnimationEnd = end
+        let startTime = CACurrentMediaTime()
+        let duration = 0.35
+        cameraAnimationTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 120, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            let t = Float(min((CACurrentMediaTime() - startTime) / duration, 1))
+            let eased = t * t * (3 - 2 * t)
+            azimuth = startAzimuth + (endAzimuth - startAzimuth) * eased
+            elevation = startElevation + (endElevation - startElevation) * eased
+            roll = startRoll + (endRoll - startRoll) * eased
+            needsDisplay = true
+            if t >= 1 { stopCameraAnimation() }
+        }
+    }
+
+    private func stopCameraAnimation() {
+        cameraAnimationTimer?.invalidate()
+        cameraAnimationTimer = nil
+        cameraAnimationEnd = nil
     }
 
     /// Switches between this view's default (redraw only when needsDisplay is explicitly set --
@@ -853,6 +973,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
               let depthStencilState, let gridDepthStencilState,
               let drawable = currentDrawable, let descriptor = currentRenderPassDescriptor else { return }
         resetCameraIfNeeded()
+        let (cubeRight, cubeUp) = cameraRightAndUp()
+        orientationCube.update(right: cubeRight, up: cubeUp, eyeDirection: eyeOffsetDirection())
 
         descriptor.colorAttachments[0].clearColor = Self.backgroundColor
         descriptor.depthAttachment.clearDepth = 1.0
@@ -881,7 +1003,10 @@ final class GeometryView: MTKView, MTKViewDelegate {
             // A broad key from the upper-right of the default isometric view. Material roughness
             // in the PBR shader spreads its response across the board instead of creating the
             // tight lower-right highlight the original key produced.
-            lightDirection: SIMD4<Float>(-0.30, -0.35, -0.88, 0),
+            // Mirrored through the board plane when the camera is underneath: the shader flips
+            // double-sided normals toward the viewer, so a fixed overhead key leaves every
+            // visible underside face at N.L = 0 (ambient only).
+            lightDirection: SIMD4<Float>(-0.30, -0.35, eye.z < target.z ? 0.88 : -0.88, 0),
             regionWorldMin: regionWorldMin,
             regionWorldInverseSize: regionWorldInverseSize,
             regionMaskThreshold: regionTexture != nil ? 0.5 : -1)
@@ -911,14 +1036,18 @@ final class GeometryView: MTKView, MTKViewDelegate {
             encoder.setVertexBuffer(muteFlags, offset: 0, index: 4)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: markerVertexCount)
         }
-        // Pours are also stored back-to-front. Draw them over the completed opaque stack so an
-        // upper-layer pour correctly blends over lower copper; their tiny rearward Z offset (set
-        // while building the buffers) keeps same-layer tracks and pads crisp on top.
+        // Pours are stored bottom-to-top, so they're drawn in reverse when the camera is below.
+        // Draw them over the completed opaque stack so an upper-layer pour correctly blends over
+        // lower copper. They're coplanar with their layer's copper; the depth bias pushes them away
+        // from the camera from either side, keeping same-layer tracks and pads crisp on top.
         if let geometry = boardGeometry, let buffers = geometry.zone, let muteTableBuffer,
            let boardTranslucentPipelineState, let translucentDepthStencilState {
             encoder.setRenderPipelineState(boardTranslucentPipelineState)
             encoder.setDepthStencilState(translucentDepthStencilState)
-            drawBoard(buffers, ranges: geometry.zoneRanges, muteTable: muteTableBuffer, encoder: encoder)
+            encoder.setDepthBias(2, slopeScale: 1, clamp: 0)
+            drawBoard(buffers, ranges: geometry.zoneRanges, muteTable: muteTableBuffer, encoder: encoder,
+                      backToFrontFromBelow: eye.z < target.z)
+            encoder.setDepthBias(0, slopeScale: 0, clamp: 0)
         }
         encoder.setRenderPipelineState(unlitPipelineState)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<FieldUniformsGPU>.stride, index: 2)
@@ -955,7 +1084,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
             encoder.setDepthStencilState(translucentDepthStencilState)
             encoder.setVertexBytes(&pbrUniforms, length: MemoryLayout<GeometryPBRUniformsGPU>.stride, index: 3)
             encoder.setFragmentBytes(&pbrUniforms, length: MemoryLayout<GeometryPBRUniformsGPU>.stride, index: 3)
-            drawBoard(buffers, ranges: geometry.maskRanges, muteTable: muteTableBuffer, encoder: encoder)
+            drawBoard(buffers, ranges: geometry.maskRanges, muteTable: muteTableBuffer, encoder: encoder,
+                      backToFrontFromBelow: eye.z < target.z)
         }
 
         // Simulation-activity flash/ripple, drawn before the click-selection highlight below so an
@@ -1201,8 +1331,10 @@ final class GeometryView: MTKView, MTKViewDelegate {
     /// own forward axis instead of yawing around world up. See cameraRightAndUp()/draw(in:)'s own
     /// `up:` argument, which read local +X/+Y directly and hit exactly that bug.
     private func currentOrientation() -> simd_quatf {
+        // The trailing local-Z rotation rolls right/up around the view direction without moving the eye.
         simd_quatf(angle: azimuth, axis: SIMD3<Float>(0, 0, 1)) *
-            simd_quatf(angle: .pi / 2 - elevation, axis: SIMD3<Float>(0, 1, 0))
+            simd_quatf(angle: .pi / 2 - elevation, axis: SIMD3<Float>(0, 1, 0)) *
+            simd_quatf(angle: roll, axis: SIMD3<Float>(0, 0, 1))
     }
 
     private func currentEyePosition() -> SIMD3<Float> {
@@ -1275,21 +1407,51 @@ final class GeometryView: MTKView, MTKViewDelegate {
 
     // MARK: - Fit-to-view / orbit / zoom
 
+    /// Camera state at the last automatic fit, so a later reframe can tell whether the user has
+    /// moved the camera since.
+    private var fittedCameraState: [Float]?
+    private var fittedToHull = false
+
+    private func cameraState() -> [Float] {
+        [azimuth, elevation, roll, distance, target.x, target.y, target.z]
+    }
+
+    /// The simulation preview's hull-cut domain on X/Y (the grid generator's core mesh extent, so the
+    /// hull plus its mesh margin) with the board's own Z extent. Nil for the whole-board view and
+    /// before the Grid stage has run.
+    private func hullFrameBox() -> (minX: Float, maxX: Float, minY: Float, maxY: Float, minZ: Float,
+                                    maxZ: Float)? {
+        guard let preview, !preview.wholeBoard,
+              preview.pmlInnerXMax > preview.pmlInnerXMin, preview.pmlInnerYMax > preview.pmlInnerYMin,
+              let board = currentBoundingBox() else { return nil }
+        return (Float(preview.pmlInnerXMin), Float(preview.pmlInnerXMax),
+                Float(preview.pmlInnerYMin), Float(preview.pmlInnerYMax), board.minZ, board.maxZ)
+    }
+
     private func resetCameraIfNeeded() {
         guard !hasFitCamera else { return }
-        guard let box = currentBoundingBox() else { return }
+        let hullBox = hullFrameBox()
+        guard let box = hullBox ?? currentBoundingBox() else { return }
         guard drawableSize.width > 0, drawableSize.height > 0 else { return }
 
         // Start each newly loaded preview square-on. Keeping this here rather than only in the
         // property initializers also resets a view that the user orbited before loading a new board.
         azimuth = -.pi / 2
         elevation = .pi / 2
+        roll = 0
+        stopCameraAnimation()
         target = Position3((box.minX + box.maxX) / 2, (box.minY + box.maxY) / 2, (box.minZ + box.maxZ) / 2)
         let width = max(box.maxX - box.minX, 0.001)
         let height = max(box.maxY - box.minY, 0.001)
         let depth = max(box.maxZ - box.minZ, 0)
         let diagonal = sqrt(width * width + height * height + depth * depth)
-        sceneRadius = max(diagonal / 2, 0.001)
+        // Clipping range still covers the whole board, not just the framed hull.
+        if let board = currentBoundingBox() {
+            let bw = board.maxX - board.minX, bh = board.maxY - board.minY, bd = board.maxZ - board.minZ
+            sceneRadius = max(sqrt(bw * bw + bh * bh + bd * bd) / 2, diagonal / 2, 0.001)
+        } else {
+            sceneRadius = max(diagonal / 2, 0.001)
+        }
 
         // currentProjectionMatrix() makes the visible height `distance * 0.8`. Fit whichever
         // board dimension constrains the current viewport, then leave a modest margin so copper
@@ -1298,10 +1460,12 @@ final class GeometryView: MTKView, MTKViewDelegate {
         // affects scale through that explicit 0.8 relationship.
         let aspect = Float(drawableSize.width / drawableSize.height)
         let fittedVisibleHeight = max(height, width / max(aspect, 0.001))
-        let fitDistance = fittedVisibleHeight * 1.08 / 0.8
+        let fitDistance = fittedVisibleHeight * 1.04 / 0.8
         let depthClearance = depth * 0.55 + 0.001
         distance = max(fitDistance, depthClearance)
         hasFitCamera = true
+        fittedToHull = hullBox != nil
+        fittedCameraState = cameraState()
     }
 
     private func currentBoundingBox() -> (minX: Float, maxX: Float, minY: Float, maxY: Float, minZ: Float,
@@ -1341,6 +1505,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
     /// drag pans instead (see rightMouseDragged(_:)), shifting the orbit target itself rather than
     /// orbiting around it.
     override func mouseDown(with event: NSEvent) {
+        stopCameraAnimation()
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
         lastDragPoint = point
@@ -1350,8 +1515,12 @@ final class GeometryView: MTKView, MTKViewDelegate {
     override func mouseDragged(with event: NSEvent) {
         guard let lastDragPoint else { return }
         let point = convert(event.locationInWindow, from: nil)
-        let dx = Float(point.x - lastDragPoint.x)
-        let dy = Float(point.y - lastDragPoint.y)
+        // Undo the roll so the drag maps onto the unrolled azimuth/elevation axes, keeping a
+        // horizontal drag a horizontal orbit on screen.
+        let screenDX = Float(point.x - lastDragPoint.x)
+        let screenDY = Float(point.y - lastDragPoint.y)
+        let dx = screenDX * cos(roll) - screenDY * sin(roll)
+        let dy = screenDX * sin(roll) + screenDY * cos(roll)
         let sensitivity: Float = 0.01
         azimuth -= dx * sensitivity
         elevation -= dy * sensitivity
@@ -1388,11 +1557,11 @@ final class GeometryView: MTKView, MTKViewDelegate {
         }
         resetCameraIfNeeded()
 
-        // Hull-cut candidates are UI controls over the board, rather than board geometry. Resolve
-        // their screen-space hit discs first -- including inactive candidates with no visible role
-        // marker -- so an exactly coincident trace cannot win the depth-buffer ID pass. Keep a
-        // small minimum radius when the whole board is fitted on screen.
-        if let target = hullCutPortTarget(at: point) {
+        // Hull-cut candidates and pin role markers are UI controls over the board, rather than
+        // board geometry. Resolve their screen-space hit discs first -- including inactive hull-cut
+        // candidates with no visible role marker -- so an exactly coincident trace cannot win the
+        // depth-buffer ID pass. Keep a small minimum radius when the whole board is fitted on screen.
+        if let target = markerTarget(at: point) {
             selectedTarget = target
             return
         }
@@ -1454,9 +1623,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
         // a pad under its own component's body, which picks the component.
         encoder.setDepthBias(-1, slopeScale: 0, clamp: 0)
         var priorityRanges = BoardGeometry.drawRanges(geometry.pickPriorityRanges, isVisible: isSlotVisible)
-        if !hideComponents {
-            priorityRanges.append(contentsOf: geometry.componentPickRanges.values)
-        }
+        priorityRanges.append(contentsOf: geometry.componentPickRanges.values.filter { isSlotVisible($0.slot) }
+            .map(\.range))
         for range in priorityRanges {
             encoder.drawPrimitives(type: .triangle, vertexStart: range.lowerBound, vertexCount: range.count)
         }
@@ -1490,13 +1658,34 @@ final class GeometryView: MTKView, MTKViewDelegate {
         }
     }
 
-    private func hullCutPortTarget(at point: CGPoint) -> PickTarget? {
-        guard let preview, let spots = activity?.hullCutPortSpots, !spots.isEmpty,
-              bounds.width > 0, bounds.height > 0 else { return nil }
+    /// The hull-cut port or pin whose marker disc is under `point`, if any. A pin marker (absorbing,
+    /// probed or excited) is a proxy for its pin, so clicking it selects the pin -- or, as a click on
+    /// the pad itself would, the whole component when that component is invalid.
+    private func markerTarget(at point: CGPoint) -> PickTarget? {
+        guard let preview, bounds.width > 0, bounds.height > 0 else { return nil }
+        // Hull-cut spots on layers ticked on in the legend, then each marked pin once at its pad
+        // centroid; every marker is at most the absorbing radius.
+        var markers: [(center: CGPoint, target: PickTarget)] = []
+        let shownLayers = Set(visibleLayerNames)
+        for spot in activity?.hullCutPortSpots ?? [] where shownLayers.contains(spot.layerName) {
+            markers.append((spot.position, .hullCutPort(identifier: spot.identifier, net: spot.netName)))
+        }
+        var markedPins = Set<String>()
+        let pins = (activity?.absorbingPins.map { ($0.reference, $0.padNumber) } ?? [])
+            + (activity?.probedPins.map { ($0.reference, $0.padNumber) } ?? [])
+            + (activity?.excitedPins.map { ($0.reference, $0.padNumber) } ?? [])
+        for (reference, padNumber) in pins where markedPins.insert("\(reference)\t\(padNumber)").inserted {
+            guard var target = boardGeometry?.pinTargets["\(reference)\t\(padNumber)"],
+                  let centroid = Self.centroid(of: pinPositions(reference: reference, padNumber: padNumber))
+            else { continue }
+            if activity?.invalidComponentReferences.contains(reference) == true {
+                target = .component(reference)
+            }
+            markers.append((CGPoint(x: CGFloat(centroid.x), y: CGFloat(centroid.y)), target))
+        }
+        guard !markers.isEmpty else { return nil }
 
         let eye = currentEyePosition()
-        // Only crossings on layers ticked on in the legend can be clicked.
-        let shownLayers = Set(visibleLayerNames)
         let viewProjection = currentProjectionMatrix() * lookAt(
             eye: eye, center: SIMD3(target.x, target.y, target.z),
             up: -currentOrientation().act(SIMD3<Float>(1, 0, 0)))
@@ -1517,8 +1706,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
         }
 
         var best: (target: PickTarget, distance: CGFloat, depth: Float)?
-        for spot in spots where shownLayers.contains(spot.layerName) {
-            let centerWorld = Position3(Float(spot.position.x), Float(spot.position.y), markerZ)
+        for marker in markers {
+            let centerWorld = Position3(Float(marker.center.x), Float(marker.center.y), markerZ)
             guard let center = project(centerWorld) else { continue }
             let radius = Float(Self.absorbingPinMarkerRadius)
             let projectedX = project(Position3(centerWorld.x + radius, centerWorld.y, centerWorld.z))?.point
@@ -1532,7 +1721,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
             let projectedRadius: CGFloat = max(6, max(xRadius, yRadius))
             let distance = hypot(point.x - center.point.x, point.y - center.point.y)
             guard distance <= projectedRadius else { continue }
-            let candidate = PickTarget.hullCutPort(identifier: spot.identifier, net: spot.netName)
+            let candidate = marker.target
             if best == nil || distance < best!.distance ||
                 (distance == best!.distance && center.depth < best!.depth) {
                 best = (candidate, distance, center.depth)
@@ -1818,6 +2007,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
         let snapshot = BoardGeometrySnapshot(
             preview: preview, previewRevision: preview.revision, layers: layers,
             viaMeshTriangles: preview.viaMeshTriangles, componentMeshTriangles: preview.componentMeshTriangles,
+            backComponentReferences: componentSides().references,
             outline: preview.outline.map(\.pointValue), markerZ: markerZ, outlineColor: Self.outlineColor)
         requestedBoardGeometryRevision += 1
         let revision = requestedBoardGeometryRevision
@@ -2017,8 +2207,10 @@ final class GeometryView: MTKView, MTKViewDelegate {
     /// Draws the visible slots of one of boardGeometry's lit streams with whichever board PBR
     /// pipeline is already set.
     private func drawBoard(_ buffers: BoardLitBuffers, ranges: [BoardGeometrySlot: Range<Int>],
-                           muteTable: MTLBuffer, encoder: MTLRenderCommandEncoder) {
-        let visibleRanges = BoardGeometry.drawRanges(ranges, isVisible: isSlotVisible)
+                           muteTable: MTLBuffer, encoder: MTLRenderCommandEncoder,
+                           backToFrontFromBelow: Bool = false) {
+        let visibleRanges = BoardGeometry.drawRanges(ranges, reversed: backToFrontFromBelow,
+                                                     isVisible: isSlotVisible)
         guard !visibleRanges.isEmpty else { return }
         encoder.setVertexBuffer(buffers.positions, offset: 0, index: 0)
         encoder.setVertexBuffer(buffers.colors, offset: 0, index: 1)
@@ -2034,7 +2226,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
         switch slot {
         case let .layer(index): return !hiddenLayerIndices.contains(index)
         case .vias: return true
-        case .components: return !hideComponents
+        case let .components(back): return !(back ? hideBackComponents : hideFrontComponents)
         case .topSolderMask: return !hideTopSolderMask
         case .bottomSolderMask: return !hideBottomSolderMask
         }
@@ -3131,7 +3323,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
     /// (see EMSGeometryPreview.topSolderMask/bottomSolderMask/componentMeshTriangles).
     private static let topSolderMaskTag = -1
     private static let bottomSolderMaskTag = -2
-    private static let componentsTag = -3
+    private static let frontComponentsTag = -3
+    private static let backComponentsTag = -4
 
     /// Everything rebuildLegend() displays. Layer meshes arrive one at a time, each followed by
     /// refreshLoadedGeometry(); comparing this lets those calls skip rebuilding every row's controls
@@ -3141,16 +3334,43 @@ final class GeometryView: MTKView, MTKViewDelegate {
         var hiddenLayerIndices: Set<Int>
         var hasTopSolderMask: Bool
         var hasBottomSolderMask: Bool
-        var hasComponents: Bool
+        var hasFrontComponents: Bool
+        var hasBackComponents: Bool
         var hideTopSolderMask: Bool
         var hideBottomSolderMask: Bool
-        var hideComponents: Bool
+        var hideFrontComponents: Bool
+        var hideBackComponents: Bool
         var showGrid: Bool
         var gridLayerNames: [String]
         var selectedGridLayerIndex: Int?
         var gridMaterials: [String]
     }
     private var shownLegendContents: LegendContents?
+
+    private func componentsLegendRow(back: Bool) -> NSView {
+        let swatch = NSBox()
+        swatch.boxType = .custom
+        // STEP models can contain many material colors; neutral grey represents the category
+        // without falsely implying that every component is rendered with one fixed material.
+        swatch.fillColor = NSColor(deviceWhite: 0.65, alpha: 1)
+        swatch.translatesAutoresizingMaskIntoConstraints = false
+        swatch.widthAnchor.constraint(equalToConstant: 10).isActive = true
+        swatch.heightAnchor.constraint(equalToConstant: 10).isActive = true
+
+        let label = NSTextField(labelWithString: back ? "B.Components" : "F.Components")
+        label.font = .systemFont(ofSize: 11)
+        label.textColor = .white
+
+        let checkbox = Self.makeVisibilityCheckbox(
+            hidden: back ? hideBackComponents : hideFrontComponents,
+            tag: back ? Self.backComponentsTag : Self.frontComponentsTag,
+            target: self, action: #selector(toggleLayerVisibility(_:)))
+        let row = NSStackView(views: [checkbox, swatch, label])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 6
+        return row
+    }
 
     private func rebuildLegend() {
         let contents = preview.map { preview in
@@ -3159,10 +3379,12 @@ final class GeometryView: MTKView, MTKViewDelegate {
                 hiddenLayerIndices: hiddenLayerIndices,
                 hasTopSolderMask: preview.topSolderMask != nil,
                 hasBottomSolderMask: preview.bottomSolderMask != nil,
-                hasComponents: !preview.componentMeshTriangles.isEmpty,
+                hasFrontComponents: componentSides().hasFront,
+                hasBackComponents: componentSides().hasBack,
                 hideTopSolderMask: hideTopSolderMask,
                 hideBottomSolderMask: hideBottomSolderMask,
-                hideComponents: hideComponents,
+                hideFrontComponents: hideFrontComponents,
+                hideBackComponents: hideBackComponents,
                 showGrid: showGrid,
                 gridLayerNames: preview.gridLayers.map(\.name),
                 selectedGridLayerIndex: selectedGridLayerIndex,
@@ -3229,27 +3451,19 @@ final class GeometryView: MTKView, MTKViewDelegate {
             row.spacing = 6
             legendStack.addArrangedSubview(row)
         }
-        if !preview.componentMeshTriangles.isEmpty {
-            let swatch = NSBox()
-            swatch.boxType = .custom
-            // STEP models can contain many material colors; neutral grey represents the category
-            // without falsely implying that every component is rendered with one fixed material.
-            swatch.fillColor = NSColor(deviceWhite: 0.65, alpha: 1)
-            swatch.translatesAutoresizingMaskIntoConstraints = false
-            swatch.widthAnchor.constraint(equalToConstant: 10).isActive = true
-            swatch.heightAnchor.constraint(equalToConstant: 10).isActive = true
-
-            let label = NSTextField(labelWithString: "Components")
-            label.font = .systemFont(ofSize: 11)
-            label.textColor = .white
-
-            let checkbox = Self.makeVisibilityCheckbox(hidden: hideComponents, tag: Self.componentsTag,
-                                                          target: self, action: #selector(toggleLayerVisibility(_:)))
-            let row = NSStackView(views: [checkbox, swatch, label])
-            row.orientation = .horizontal
-            row.alignment = .centerY
-            row.spacing = 6
-            legendStack.addArrangedSubview(row)
+        // F.Components heads the list; B.Components sits directly under B.Cu (or after the
+        // layers if there is no B.Cu).
+        let sides = componentSides()
+        if sides.hasBack {
+            let bCuIndex = preview.layers.firstIndex { $0.name == "B.Cu" }
+            legendStack.insertArrangedSubview(componentsLegendRow(back: true),
+                                              at: bCuIndex.map { $0 + 1 } ?? preview.layers.count)
+        }
+        if sides.hasFront {
+            legendStack.insertArrangedSubview(componentsLegendRow(back: false), at: 0)
+        }
+        if let legendFooterView {
+            legendStack.addArrangedSubview(legendFooterView)
         }
         if showGrid {
             if !preview.gridLayers.isEmpty {
@@ -3314,8 +3528,10 @@ final class GeometryView: MTKView, MTKViewDelegate {
             hideTopSolderMask = !visible
         case Self.bottomSolderMaskTag:
             hideBottomSolderMask = !visible
-        case Self.componentsTag:
-            hideComponents = !visible
+        case Self.frontComponentsTag:
+            hideFrontComponents = !visible
+        case Self.backComponentsTag:
+            hideBackComponents = !visible
         default:
             if visible {
                 hiddenLayerIndices.remove(sender.tag)

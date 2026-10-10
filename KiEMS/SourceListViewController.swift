@@ -276,9 +276,11 @@ final class SourceListViewController: NSViewController {
     // One instance each -- see MicrometerValueFormatter's doc comment on why (sticky per-instance
     // unit state; startTime/duration share a unit that never varies, but phase's does).
     private let startTimeFormatter = UnitSuffixValueFormatter(
-        displaySuffix: "s", acceptedSuffixes: ["seconds", "second", "secs", "sec", "s"])
+        displaySuffix: "s", acceptedSuffixes: ["seconds", "second", "secs", "sec", "s"],
+        autoSelectsSIPrefix: true)
     private let durationFormatter = UnitSuffixValueFormatter(
-        displaySuffix: "s", acceptedSuffixes: ["seconds", "second", "secs", "sec", "s"])
+        displaySuffix: "s", acceptedSuffixes: ["seconds", "second", "secs", "sec", "s"],
+        autoSelectsSIPrefix: true)
     private let frequencyFormatter = UnitSuffixValueFormatter(
         displaySuffix: "Hz", acceptedSuffixes: ["hertz", "hz"], autoSelectsSIPrefix: true)
     private let phaseFormatter = PhaseValueFormatter()

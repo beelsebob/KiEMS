@@ -62,30 +62,48 @@ NSArray<NSString*>* toNSStringArray(const std::vector<std::string>& values) {
 @end
 
 @implementation KicadComponentSimModel
-- (instancetype)initWithReference:(NSString*)reference supported:(BOOL)supported reason:(NSString*)reason {
+- (instancetype)initWithReference:(NSString*)reference
+                        supported:(BOOL)supported
+                           reason:(NSString*)reason
+                       branchPins:(NSArray<NSArray<NSString*>*>*)branchPins {
     self = [super init];
     if (self) {
         _reference = [reference copy];
         _supported = supported;
         _reason = [reason copy];
+        _branchPins = [branchPins copy];
     }
     return self;
 }
 @end
 
-@implementation KicadStitchingViaPlan
+@implementation KicadStitchingViaPlan {
+    std::vector<kiems::HullCut> _hullCuts;
+}
 - (instancetype)initWithPlacedPositions:(NSArray<NSValue*>*)placedPositions
                        rejectedPositions:(NSArray<NSValue*>*)rejectedPositions
                      annularRingDiameter:(double)annularRingDiameter
-                      hullCutTracePoints:(NSArray<KicadHullCutTracePoint*>*)hullCutTracePoints {
+                      hullCutTracePoints:(NSArray<KicadHullCutTracePoint*>*)hullCutTracePoints
+                                hullCuts:(std::vector<kiems::HullCut>)hullCuts {
     self = [super init];
     if (self) {
         _placedPositions = [placedPositions copy];
         _rejectedPositions = [rejectedPositions copy];
         _annularRingDiameter = annularRingDiameter;
         _hullCutTracePoints = [hullCutTracePoints copy];
+        _hullCuts = std::move(hullCuts);
     }
     return self;
+}
+
+- (BOOL)reconcileHullCutPortsOfSimulation:(EMSSimulationBridge*)simulation {
+    kiems::SimulationConfig& sim = simulation.cxxSim;
+    const auto snapshot = [&] {
+        return nlohmann::json{{"ports", sim.hullCutPorts()}, {"excitations", sim.excitations()}};
+    };
+    const nlohmann::json before = snapshot();
+    kiems::reconcileHullCutPorts(sim, _hullCuts);
+    return snapshot() != before;
 }
 @end
 
@@ -158,8 +176,7 @@ std::string stitchingViaPlanInputsKey(const kiems::EMSConfig& config, const kiem
 - (nullable KicadStitchingViaPlan*)computeWithBoard:(KicadBoardBridge*)boardBridge error:(NSError**)error {
     try {
         kiems::EMSConfig config = *static_cast<const kiems::EMSConfig*>(self.configurationPointer.pointerValue);
-        if (self.simulationIndex < 0 ||
-            static_cast<std::size_t>(self.simulationIndex) >= config.simulations().size()) {
+        if (self.simulationIndex < 0) {
             if (error != nil) *error = makeError("The selected simulation no longer exists");
             return nil;
         }
@@ -173,101 +190,35 @@ std::string stitchingViaPlanInputsKey(const kiems::EMSConfig& config, const kiem
             if (error != nil) *error = makeError(imported.error());
             return nil;
         }
-        config = config.scaledToSimulationUnits();
-        const kiems::SimulationConfig& simulation =
-            config.simulations()[static_cast<std::size_t>(self.simulationIndex)];
-        auto geometry = board.boardGeometry();
-        if (!geometry) {
-            if (error != nil) *error = makeError(geometry.error());
+        auto hullPlan = kiems::planHullCuts(config, static_cast<std::size_t>(self.simulationIndex), board);
+        if (!hullPlan) {
+            if (error != nil) *error = makeError(hullPlan.error());
             return nil;
         }
-        auto copper = kiems::classifyCopperForSimulation(simulation, *geometry, board);
-        if (!copper) {
-            if (error != nil) *error = makeError(copper.error());
-            return nil;
-        }
-        auto origin = kiems::boardBoundsInSimulationUnits(*geometry);
-        if (!origin) {
-            if (error != nil) *error = makeError(origin.error());
-            return nil;
-        }
-        std::vector<kiems::ViaHole> existingVias;
-        if (auto vias = kiems::getVias(board, origin->xMin, origin->yMin); vias) {
-            existingVias = std::move(*vias);
-        }
-        const kiems::SlicingConfig slicing = kiems::SlicingConfig::from(simulation, config);
-        // Only the cut and the stitching-via placement are shown here -- the full slice's per-layer
-        // Booleans, solder mask preparation and triangulation are geometry-stage-only work.
-        auto sliced = kiems::planSlicedBoardForSimulation(
-            slicing, *geometry, copper->involved, copper->ground, copper->hullContributions, existingVias);
-        if (!sliced) {
-            if (error != nil) *error = makeError(sliced.error());
-            return nil;
-        }
-        NSMutableArray<NSValue*>* placed = [NSMutableArray arrayWithCapacity:sliced->stitchingVias.size()];
-        for (const kiems::StitchingVia& via : sliced->stitchingVias) {
+        const kiems::SlicedBoardPlan& sliced = hullPlan->plan;
+        NSMutableArray<NSValue*>* placed = [NSMutableArray arrayWithCapacity:sliced.stitchingVias.size()];
+        for (const kiems::StitchingVia& via : sliced.stitchingVias) {
             [placed addObject:[NSValue valueWithPoint:NSMakePoint(via.x, via.y)]];
         }
         NSMutableArray<NSValue*>* rejected =
-            [NSMutableArray arrayWithCapacity:sliced->failedStitchingViaAttempts.size()];
-        for (const kiems::Position& position : sliced->failedStitchingViaAttempts) {
+            [NSMutableArray arrayWithCapacity:sliced.failedStitchingViaAttempts.size()];
+        for (const kiems::Position& position : sliced.failedStitchingViaAttempts) {
             [rejected addObject:[NSValue valueWithPoint:NSMakePoint(position.x(), position.y())]];
         }
-        std::unordered_set<kiems::NetName, kiems::NetNameHash> includedNets;
-        for (const kiems::InvolvedNetConfig& entry : simulation.involvedNets()) {
-            auto names = kiems::resolveInvolvedNetNames(board, entry);
-            if (!names) {
-                if (error != nil) *error = makeError(names.error());
-                return nil;
-            }
-            for (const std::string& name : *names) {
-                includedNets.insert(kiems::NetName(name));
-            }
-        }
-        auto groundNames = kiems::resolveGroundNetNames(board, simulation.groundNet());
-        if (!groundNames) {
-            if (error != nil) *error = makeError(groundNames.error());
-            return nil;
-        }
-        std::unordered_set<kiems::NetName, kiems::NetNameHash> groundNets;
-        for (const std::string& name : *groundNames) {
-            groundNets.insert(kiems::NetName(name));
-        }
-        auto tracks = board.allTracks();
-        if (!tracks) {
-            if (error != nil) *error = makeError(tracks.error());
-            return nil;
-        }
-        std::vector<kiems::grid_detail::HullCutTrace> traceInputs;
-        for (const auto& [netName, track] : *tracks) {
-            const kiems::NetName normalizedNet(netName);
-            if (!includedNets.contains(normalizedNet) || groundNets.contains(normalizedNet)) continue;
-            auto point = [&](double xMm, double yMm) {
-                return Cu::Position(xMm * 10000.0 - origin->xMin, yMm * 10000.0 - origin->yMin);
-            };
-            traceInputs.push_back({kiems::TraceSegment(point(track.startXMm, track.startYMm),
-                                                       point(track.endXMm, track.endYMm), "",
-                                                       track.widthMm * 10000.0),
-                                   netName, track.copperLayerName});
-        }
-        const auto cutPoints = kiems::grid_detail::hullCutTracePoints(traceInputs, sliced->cutoutLoops, 10.0);
         NSMutableArray<KicadHullCutTracePoint*>* bridgedCutPoints =
-            [NSMutableArray arrayWithCapacity:cutPoints.size()];
-        for (const auto& point : cutPoints) {
-            const long long roundedX = std::llround(point.position.x());
-            const long long roundedY = std::llround(point.position.y());
-            const std::string identifier = point.netName + "|" + point.layerName + "|" +
-                std::to_string(roundedX) + "|" + std::to_string(roundedY);
+            [NSMutableArray arrayWithCapacity:hullPlan->hullCuts.size()];
+        for (const kiems::HullCut& cut : hullPlan->hullCuts) {
             [bridgedCutPoints addObject:[[KicadHullCutTracePoint alloc]
-                initWithIdentifier:@(identifier.c_str()) netName:@(point.netName.c_str())
-                layerName:@(point.layerName.c_str())
-                position:NSMakePoint(point.position.x(), point.position.y())
-                inwardDirection:point.inwardDirectionDegrees traceWidth:point.width]];
+                initWithIdentifier:@(cut.identifier.c_str()) netName:@(cut.netName.c_str())
+                layerName:@(cut.layerName.c_str())
+                position:NSMakePoint(cut.position.x(), cut.position.y())
+                inwardDirection:cut.inwardDirectionDegrees traceWidth:cut.width]];
         }
         return [[KicadStitchingViaPlan alloc]
             initWithPlacedPositions:placed rejectedPositions:rejected
-            annularRingDiameter:slicing.stitchingViaAnnularRingDiameter
-            hullCutTracePoints:bridgedCutPoints];
+            annularRingDiameter:hullPlan->slicing.stitchingViaAnnularRingDiameter
+            hullCutTracePoints:bridgedCutPoints
+                      hullCuts:std::move(hullPlan->hullCuts)];
     } catch (const std::exception& exception) {
         if (error != nil) *error = makeError(exception.what());
         return nil;
@@ -405,10 +356,15 @@ std::string stitchingViaPlanInputsKey(const kiems::EMSConfig& config, const kiem
     }
     NSMutableArray<KicadComponentSimModel*>* models = [NSMutableArray arrayWithCapacity:result->size()];
     for (const auto& model : *result) {
-        const kiems::ComponentSimModelSupport support = kiems::assessComponentSimModel(model);
+        const kiems::ComponentSimNetwork network = kiems::componentSimNetwork(model);
+        NSMutableArray<NSArray<NSString*>*>* branchPins = [NSMutableArray arrayWithCapacity:network.branches.size()];
+        for (const kiems::ComponentSimBranch& branch : network.branches) {
+            [branchPins addObject:@[@(branch.pin1.c_str()), @(branch.pin2.c_str())]];
+        }
         [models addObject:[[KicadComponentSimModel alloc] initWithReference:@(model.reference.c_str())
-                                                                    supported:support.supported
-                                                                       reason:@(support.reason.c_str())]];
+                                                                    supported:network.supported
+                                                                       reason:@(network.reason.c_str())
+                                                                   branchPins:branchPins]];
     }
     return models;
 }

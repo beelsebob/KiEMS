@@ -18,5 +18,8 @@ enum PhaseState: Equatable {
     /// moment a phase is known to have started but hasn't reported real progress yet.
     case inProgress(fraction: Double)
     case succeeded
+    /// Succeeded once, but a config edit (or the linked board changing) has since invalidated it --
+    /// the previous output is still kept and shown, flagged as out of date, until the phase re-runs.
+    case outOfDate
     case failed
 }

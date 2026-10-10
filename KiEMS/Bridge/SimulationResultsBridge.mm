@@ -203,13 +203,11 @@ private:
 
 @implementation EMSResultsProbeCurve
 - (instancetype)initWithExcitedPort:(NSInteger)excitedPort
-                    voltageMagnitude:(NSArray<NSNumber*>*)voltageMagnitude
-                    currentMagnitude:(NSArray<NSNumber*>*)currentMagnitude {
+                   transferMagnitude:(NSArray<NSNumber*>*)transferMagnitude {
     self = [super init];
     if (self) {
         _excitedPort = excitedPort;
-        _voltageMagnitude = [voltageMagnitude copy];
-        _currentMagnitude = [currentMagnitude copy];
+        _transferMagnitude = [transferMagnitude copy];
     }
     return self;
 }
@@ -509,28 +507,24 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
 
     NSMutableArray<EMSResultsProbe*>* probes = [NSMutableArray array];
     for (std::int32_t i = 0; i < portCount; ++i) {
-        if (simConfig.ports()[static_cast<std::size_t>(i)].absorbSignal()) {
-            continue;
+        const auto& candidate = simConfig.ports()[static_cast<std::size_t>(i)];
+        if (candidate.absorbSignal() || !candidate.probe()) {
+            continue; // not a passive probe, or not reportable -- see the ports array's own comment above
         }
         NSMutableArray<EMSResultsProbeCurve*>* curves = [NSMutableArray array];
         for (std::int32_t exc = 0; exc < portCount; ++exc) {
-            const auto voltage = postprocessor.getProbeVoltage(i, exc);
-            const auto current = postprocessor.getProbeCurrent(i, exc);
+            const auto transfer = postprocessor.getProbeTransfer(i, exc);
             // A probe needs a complete curve over the preview's frequency axis. Empty/mismatched
             // arrays represent absent probe output, not a chart whose values happen to be zero.
-            if (!voltage.has_value() || !current.has_value() || voltage->empty() ||
-                voltage->size() != postprocessor.frequencies().size() || current->size() != voltage->size()) {
+            if (!transfer.has_value() || transfer->empty() || transfer->size() != postprocessor.frequencies().size()) {
                 continue;
             }
-            std::vector<double> vMag(voltage->size());
-            std::vector<double> iMag(current->size());
-            for (std::size_t f = 0; f < voltage->size(); ++f) {
-                vMag[f] = std::abs((*voltage)[f]);
-                iMag[f] = std::abs((*current)[f]);
+            std::vector<double> magnitude(transfer->size());
+            for (std::size_t f = 0; f < transfer->size(); ++f) {
+                magnitude[f] = std::abs((*transfer)[f]);
             }
             [curves addObject:[[EMSResultsProbeCurve alloc] initWithExcitedPort:exc
-                                                                 voltageMagnitude:toNSArray(vMag)
-                                                                 currentMagnitude:toNSArray(iMag)]];
+                                                                transferMagnitude:toNSArray(magnitude)]];
         }
         if (curves.count == 0) {
             continue;
@@ -627,6 +621,15 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
     noiseOptions.drawCount = simConfig.eyeDrawCount();
     noiseOptions.sharedClock = simConfig.adversarialSharedClock();
 
+    // The channel from `input` to the voltage at `output`, per unit incident voltage at `input`: the
+    // S-parameter for an absorbing output, the equivalent probe transfer for a passive one (see
+    // Postprocessor::getProbeTransfer()), so both kinds of receiver produce eyes on the same scale.
+    const auto receivedTransfer = [&](std::int32_t output, std::int32_t input) {
+        return simConfig.ports()[static_cast<std::size_t>(output)].absorbSignal()
+                   ? postprocessor.getSParam(output, input)
+                   : postprocessor.getProbeTransfer(output, input);
+    };
+
     // `inputs` are the eye's own driven ports, never treated as aggressors on it. The received
     // quantity is the voltage at `positiveOutput`, minus `negativeOutput`'s for a differential eye,
     // so an aggressor's transfer to it is S(positiveOutput, a) - S(negativeOutput, a).
@@ -641,12 +644,12 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
                 continue;
             }
             const std::int32_t port = *excitation.drivenPortIndex();
-            auto aggressorTransfer = postprocessor.getSParam(positiveOutput, port);
+            auto aggressorTransfer = receivedTransfer(positiveOutput, port);
             if (!aggressorTransfer.has_value() || aggressorTransfer->size() != postprocessor.frequencies().size()) {
                 continue;
             }
             if (negativeOutput.has_value()) {
-                const auto negative = postprocessor.getSParam(*negativeOutput, port);
+                const auto negative = receivedTransfer(*negativeOutput, port);
                 if (!negative.has_value() || negative->size() != aggressorTransfer->size()) {
                     continue;
                 }
@@ -698,10 +701,10 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
         differentialPorts.insert(ep);
         differentialPorts.insert(en);
 
-        const auto sEpSp = postprocessor.getSParam(ep, sp);
-        const auto sEpSn = postprocessor.getSParam(ep, sn);
-        const auto sEnSp = postprocessor.getSParam(en, sp);
-        const auto sEnSn = postprocessor.getSParam(en, sn);
+        const auto sEpSp = receivedTransfer(ep, sp);
+        const auto sEpSn = receivedTransfer(ep, sn);
+        const auto sEnSp = receivedTransfer(en, sp);
+        const auto sEnSn = receivedTransfer(en, sn);
         if (!sEpSp.has_value() || !sEpSn.has_value() || !sEnSp.has_value() || !sEnSn.has_value() ||
             sEpSp->size() != postprocessor.frequencies().size() || sEpSn->size() != sEpSp->size() ||
             sEnSp->size() != sEpSp->size() || sEnSn->size() != sEpSp->size()) {
@@ -728,11 +731,13 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
         }
         for (std::int32_t output = 0; output < portCount; ++output) {
             const PortConfig& outputPort = simConfig.ports()[static_cast<std::size_t>(output)];
-            if (outputPort.excite() || !outputPort.absorbSignal() || outputPort.isTraceProbe() ||
+            // One eye per probed receiver, absorbing or passive: an absorb-only termination
+            // (probe() false) isn't something the user asked to look at -- see PortConfig::probe().
+            if (outputPort.excite() || !outputPort.probe() || outputPort.isTraceProbe() ||
                 differentialPorts.contains(output)) {
                 continue;
             }
-            const auto transfer = postprocessor.getSParam(output, input);
+            const auto transfer = receivedTransfer(output, input);
             if (!transfer.has_value() || transfer->size() != postprocessor.frequencies().size()) {
                 continue;
             }

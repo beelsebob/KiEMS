@@ -38,6 +38,9 @@ final class DocumentWindowController: NSWindowController {
     /// editing, which is always this one).
     private var currentSimulationIndex: Int?
     private var isLoadingBoard = false
+    /// Set when the linked KiCad files changed on disk; the board-derived views are reloaded only
+    /// once geometry is next regenerated -- see handleLinkedKicadFilesChanged().
+    private var hasPendingBoardReload = false
 
     private var boardCandidates: [URL] = []
     private let kicadFileWatcher = KicadFileWatcher()
@@ -275,21 +278,17 @@ final class DocumentWindowController: NSWindowController {
         // worst case is one avoidable re-run next time Geometry is opened.)
         let simulationResultsVC = SimulationResultsViewController(document: ownerDocument)
         simulationResultsViewController = simulationResultsVC
-        let configurationChanged = { [weak geometryVC, weak simulationResultsVC, weak self] in
-            if let index = self?.currentSimulationIndex {
-                geometryVC?.invalidateCache(forSimulationIndex: index)
-                simulationResultsVC?.invalidateCache(forSimulationIndex: index)
-                // A stale "succeeded" dot must not keep showing once the cache it was reporting on is
-                // gone -- see PhaseState.invalid's own doc comment. All 3 rows: an involved-nets edit
-                // can change the geometry step's own output (port placement, hull extent), which
-                // invalidates .simulation (and therefore .fieldPostProcessing, which has no cache of
-                // its own -- see JobKind's own doc comment) too. Read via the `self.simulationListViewController`
-                // property (not a captured local) since simulationListVC itself isn't declared until
-                // later in this same setup function.
-                for kind in JobKind.allCases {
-                    self?.simulationListViewController?.setInvalid(forSimulationIndex: index, kind: kind)
-                }
+        let configurationChanged = { [weak self] in
+            if let self, let index = self.currentSimulationIndex {
+                // All 3 rows: an involved-nets edit can change the geometry step's own output (port
+                // placement, hull extent), which invalidates .simulation (and therefore
+                // .fieldPostProcessing, which has no cache of its own -- see JobKind's own doc
+                // comment) too.
+                self.invalidate(simulationIndex: index, reason: "Simulated nets changed", includingGeometry: true)
             }
+            // Excitations may have been added/removed/edited, which changes the panel's
+            // main-excitation duration.
+            self?.propertiesViewController?.excitationsEditedElsewhere()
         }
         sourceListVC.onInvolvedNetsChanged = configurationChanged
         wholeBoardVC.onConfigurationChanged = configurationChanged
@@ -350,14 +349,9 @@ final class DocumentWindowController: NSWindowController {
         }
         // See SimulationPropertiesViewController.onGeometryParametersChanged's own doc comment --
         // a hull-padding/via/ground-net edit invalidates whichever simulation it belongs to.
-        propertiesVC.onGeometryParametersChanged = { [weak geometryVC, weak simulationResultsVC,
-                                                       weak simulationListVC, weak wholeBoardVC] index in
-            geometryVC?.invalidateCache(forSimulationIndex: index)
-            simulationResultsVC?.invalidateCache(forSimulationIndex: index)
+        propertiesVC.onGeometryParametersChanged = { [weak self, weak wholeBoardVC] index, reason in
             // See onInvolvedNetsChanged's identical comment on why all 3 rows.
-            for kind in JobKind.allCases {
-                simulationListVC?.setInvalid(forSimulationIndex: index, kind: kind)
-            }
+            self?.invalidate(simulationIndex: index, reason: reason, includingGeometry: true)
             // Hull padding changes the fast region highlight, while padding/inset/spacing all
             // change Setup's asynchronous stitching-via plan -- see
             // WholeBoardViewController.refreshActivityHighlight().
@@ -367,15 +361,13 @@ final class DocumentWindowController: NSWindowController {
         // onGeometryParametersChanged above, this only touches simulation results (max. timesteps
         // doesn't affect the geometry step's output at all), and for every simulation in the document
         // at once, since it's a document-level setting rather than a per-simulation one.
-        propertiesVC.onFDTDParametersChanged = { [weak simulationResultsVC, weak simulationListVC, weak self] in
-            guard let simulationCount = self?.ownerDocument.config.simulations.count else { return }
-            for index in 0..<simulationCount {
-                simulationResultsVC?.invalidateCache(forSimulationIndex: index)
+        propertiesVC.onFDTDParametersChanged = { [weak self] reason in
+            guard let self else { return }
+            for index in self.ownerDocument.config.simulations.indices {
                 // Geometry itself is untouched by an FDTD-only parameter -- only .simulation/
                 // .fieldPostProcessing go invalid (see onInvolvedNetsChanged's identical comment on
                 // why the latter tags along with the former).
-                simulationListVC?.setInvalid(forSimulationIndex: index, kind: .simulation)
-                simulationListVC?.setInvalid(forSimulationIndex: index, kind: .fieldPostProcessing)
+                self.invalidate(simulationIndex: index, reason: reason, includingGeometry: false)
             }
         }
         propertiesVC.onResultsParametersChanged = { [weak simulationResultsVC] index in
@@ -384,7 +376,8 @@ final class DocumentWindowController: NSWindowController {
         // See GeometryViewController.onRunStateChanged's doc comment -- the spinner next to a
         // simulation's "Geometry" row has no other way to know a background pipeline run started/
         // finished for it.
-        geometryVC.onRunStateChanged = { [weak simulationListVC] index, isRunning in
+        geometryVC.onRunStateChanged = { [weak self, weak simulationListVC] index, isRunning in
+            if isRunning { self?.applyPendingBoardReload() }
             simulationListVC?.setBusy(isRunning, forSimulationIndex: index, kind: .geometryGeneration)
         }
         // Deliberately no equivalent relay of simulationResultsVC.onRunStateChanged here -- that
@@ -404,9 +397,10 @@ final class DocumentWindowController: NSWindowController {
         // "Geometry" row to show that part of the same run too, then switch to the "Simulation
         // Results" row's own progress once the FDTD phase begins. Since geometryVC itself isn't the
         // one running here, its row's busy state is driven directly rather than via onRunStateChanged.
-        simulationResultsVC.onProgressChanged = { [weak simulationListVC] index, progress in
+        simulationResultsVC.onProgressChanged = { [weak self, weak simulationListVC] index, progress in
             switch progress.phase {
             case .geometry:
+                self?.applyPendingBoardReload()
                 simulationListVC?.setBusy(true, forSimulationIndex: index, kind: .geometryGeneration)
                 simulationListVC?.setProgress(progress.fraction, forSimulationIndex: index, kind: .geometryGeneration)
             case .settingUp, .simulation:
@@ -437,6 +431,11 @@ final class DocumentWindowController: NSWindowController {
             case .settingUp, .simulation:
                 simulationListVC?.setCompleted(true, forSimulationIndex: index, kind: .geometryGeneration)
                 simulationListVC?.setCompleted(success, forSimulationIndex: index, kind: .simulation)
+                // Field post-processing is near-instant once .results exists (see JobKind's own doc
+                // comment), so a finished simulation means the Field Viewer is ready too.
+                if success {
+                    simulationListVC?.setCompleted(true, forSimulationIndex: index, kind: .fieldPostProcessing)
+                }
             @unknown default:
                 break
             }
@@ -445,18 +444,19 @@ final class DocumentWindowController: NSWindowController {
         // row(s) were showing progress back to "invalid" instead of the yellow failed state
         // onRunFinished(_:_:false) would otherwise show. See GeometryViewController.onRunCancelled's
         // own doc comment.
-        geometryVC.onRunCancelled = { [weak simulationListVC] index in
-            simulationListVC?.setInvalid(forSimulationIndex: index, kind: .geometryGeneration)
+        geometryVC.onRunCancelled = { [weak self] index in
+            self?.resetRow(forSimulationIndex: index, kind: .geometryGeneration)
         }
-        simulationResultsVC.onRunCancelled = { [weak simulationListVC] index, reachedPhase in
+        simulationResultsVC.onRunCancelled = { [weak self, weak simulationListVC] index, reachedPhase in
             switch reachedPhase {
             case .geometry:
-                simulationListVC?.setInvalid(forSimulationIndex: index, kind: .geometryGeneration)
+                self?.resetRow(forSimulationIndex: index, kind: .geometryGeneration)
+                self?.resetRow(forSimulationIndex: index, kind: .simulation)
             case .settingUp, .simulation:
                 // Geometry genuinely finished before the .settingUp/.simulation-phase job was
                 // cancelled -- leave that row showing "succeeded", only reset the Simulation Results one.
                 simulationListVC?.setCompleted(true, forSimulationIndex: index, kind: .geometryGeneration)
-                simulationListVC?.setInvalid(forSimulationIndex: index, kind: .simulation)
+                self?.resetRow(forSimulationIndex: index, kind: .simulation)
             @unknown default:
                 break
             }
@@ -484,6 +484,17 @@ final class DocumentWindowController: NSWindowController {
         fieldViewerVC.onRunFinished = { [weak simulationListVC] index, kind, success in
             guard kind == .fieldPostProcessing else { return }
             simulationListVC?.setCompleted(success, forSimulationIndex: index, kind: kind)
+        }
+        simulationListVC.onGenerateGeometry = { [weak geometryVC] index in
+            geometryVC?.generateGeometry(forSimulationIndex: index)
+        }
+        simulationListVC.onRunSimulation = { [weak simulationResultsVC] index in
+            simulationResultsVC?.runSimulation(forSimulationIndex: index)
+        }
+        // Same as File > Regenerate Geometry / Reset Results, but for just the clicked simulation.
+        simulationListVC.onInvalidate = { [weak self] index, includingGeometry in
+            self?.invalidate(simulationIndex: index, reason: nil, includingGeometry: includingGeometry)
+            self?.fieldViewerViewController?.invalidateCache(forSimulationIndex: index)
         }
         simulationListVC.onSelectionChanged = { [weak self] selection in
             guard let self else { return }
@@ -887,26 +898,61 @@ final class DocumentWindowController: NSWindowController {
     }
 
     /// Called whenever KicadFileWatcher notices the linked board (or its sibling project file) has
-    /// changed on disk -- typically the user editing/saving in KiCad itself while this document is
-    /// open. Refreshes the net/footprint pickers immediately (cheap, and this app owns their display
-    /// directly), but deliberately doesn't force geometry/simulation results to re-run: those are
-    /// expensive (an FDTD run can take minutes to hours) and GeometryViewController/
-    /// SimulationResultsViewController already re-run lazily, on next selection, once their cache is
-    /// cleared -- exactly the same deferred pattern used for an in-app involved-nets/properties edit
-    /// (see onInvolvedNetsChanged/onGeometryParametersChanged below).
+    /// changed on disk -- typically the user saving in KiCad while this document is open. Nothing is
+    /// reloaded here: every simulation is just marked out of date (yellow row and banner), keeping
+    /// what was already computed on screen. The board-derived views (whole board, net/footprint
+    /// pickers) catch up once geometry is next regenerated -- see applyPendingBoardReload().
     private func handleLinkedKicadFilesChanged() {
         guard ownerDocument.config.kicadPcbPath != nil else { return }
+        hasPendingBoardReload = true
+        for index in ownerDocument.config.simulations.indices {
+            // See onInvolvedNetsChanged's identical comment on why all 3 rows.
+            invalidate(simulationIndex: index, reason: "Board changed in KiCad", includingGeometry: true)
+        }
+    }
+
+    /// Reloads the board-derived views deferred by handleLinkedKicadFilesChanged(), once the user
+    /// asks for geometry to be regenerated from the changed board.
+    private func applyPendingBoardReload() {
+        guard hasPendingBoardReload else { return }
+        hasPendingBoardReload = false
         propertiesViewController?.refreshNetLists()
         sourceListViewController?.refreshBoardData()
         wholeBoardViewController?.invalidate()
         wholeBoardViewController?.refresh()
-        for index in ownerDocument.config.simulations.indices {
-            geometryViewController?.invalidateCache(forSimulationIndex: index)
-            simulationResultsViewController?.invalidateCache(forSimulationIndex: index)
-            // See onInvolvedNetsChanged's identical comment on why all 3 rows.
-            for kind in JobKind.allCases {
-                simulationListViewController?.setInvalid(forSimulationIndex: index, kind: kind)
-            }
+    }
+
+    /// Invalidates `index`'s cached results (and, if `includingGeometry`, its geometry) after an
+    /// edit described by `reason`. Whatever was already computed stays visible as out of date (a
+    /// yellow row and banner) until re-run; a nil `reason` discards it outright instead.
+    private func invalidate(simulationIndex index: Int, reason: String?, includingGeometry: Bool) {
+        // Results first: invalidating geometry drops the pipeline's results along with it, so the
+        // results VC has to keep its out-of-date copy before that happens.
+        simulationResultsViewController?.invalidateCache(forSimulationIndex: index, reason: reason)
+        if includingGeometry {
+            geometryViewController?.invalidateCache(forSimulationIndex: index, reason: reason)
+            resetRow(forSimulationIndex: index, kind: .geometryGeneration)
+        }
+        resetRow(forSimulationIndex: index, kind: .simulation)
+        resetRow(forSimulationIndex: index, kind: .fieldPostProcessing)
+    }
+
+    /// Puts `kind`'s sidebar row back to whatever its view controller has left to show once nothing
+    /// current is cached: out of date (yellow) if it kept a previous result, otherwise not run.
+    private func resetRow(forSimulationIndex index: Int, kind: JobKind) {
+        let hasStale: Bool
+        switch kind {
+        case .geometryGeneration:
+            hasStale = geometryViewController?.hasStaleGeometry(forSimulationIndex: index) ?? false
+        case .simulation:
+            hasStale = simulationResultsViewController?.hasStaleResults(forSimulationIndex: index) ?? false
+        case .fieldPostProcessing:
+            hasStale = false
+        }
+        if hasStale {
+            simulationListViewController?.setOutOfDate(forSimulationIndex: index, kind: kind)
+        } else {
+            simulationListViewController?.setInvalid(forSimulationIndex: index, kind: kind)
         }
     }
 
@@ -923,13 +969,25 @@ final class DocumentWindowController: NSWindowController {
     /// whole lifetime otherwise (see that method's own doc comment).
     @objc func regenerateGeometry(_ sender: Any?) {
         for index in ownerDocument.config.simulations.indices {
-            geometryViewController?.invalidateCache(forSimulationIndex: index)
-            simulationResultsViewController?.invalidateCache(forSimulationIndex: index)
+            invalidate(simulationIndex: index, reason: nil, includingGeometry: true)
             fieldViewerViewController?.invalidateCache(forSimulationIndex: index)
-            // See onInvolvedNetsChanged's identical comment on why all 3 rows.
-            for kind in JobKind.allCases {
-                simulationListViewController?.setInvalid(forSimulationIndex: index, kind: kind)
-            }
+        }
+    }
+
+    /// File > Reset Results -- like regenerateGeometry(_:) but discards only the simulation results
+    /// (FDTD run and its field post-processing) for every simulation, keeping the resolved geometry.
+    @objc func resetResults(_ sender: Any?) {
+        for index in ownerDocument.config.simulations.indices {
+            invalidate(simulationIndex: index, reason: nil, includingGeometry: false)
+            fieldViewerViewController?.invalidateCache(forSimulationIndex: index)
+        }
+    }
+
+    /// File > Rerun Postprocessing -- recomputes S-parameters/impedance/eye data for every
+    /// simulation from its existing FDTD run, without re-running FDTD or touching geometry/fields.
+    @objc func rerunPostprocessing(_ sender: Any?) {
+        for index in ownerDocument.config.simulations.indices {
+            simulationResultsViewController?.rerunPostprocessing(forSimulationIndex: index)
         }
     }
 

@@ -309,6 +309,21 @@ final class JobScheduler {
         notifyObservers()
     }
 
+    /// Discards only `simulationName`'s postprocessed results so the next .simulation request
+    /// recomputes them from the existing FDTD data (see EMSSimulationPipelineBridge's
+    /// -invalidatePostprocessing). Skipped while a .simulation/.fieldPostProcessing job is running
+    /// for it: that job is about to produce freshly postprocessed results anyway.
+    func invalidatePostprocessing(document: Document, simulationName: String) {
+        if jobs.contains(where: {
+            $0.document === document && $0.simulationName == simulationName && $0.status == .running
+                && $0.kind.rawValue >= JobKind.simulation.rawValue
+        }) {
+            return
+        }
+        document.pipeline(forSimulationNamed: simulationName).invalidatePostprocessing()
+        notifyObservers()
+    }
+
     /// Called from Document.close() -- cancels and drops every job belonging to a document that's
     /// about to go away, rather than leaving them to either run pointlessly (their own result will
     /// never be shown by anything) or hang around in the Jobs window referencing a closed document.

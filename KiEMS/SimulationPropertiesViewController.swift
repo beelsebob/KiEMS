@@ -21,16 +21,18 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
     /// itself. DocumentWindowController wires this to GeometryViewController.invalidateCache(
     /// forSimulationIndex:), so a stale cached geometry/error from before the edit doesn't keep
     /// being shown. Deliberately not fired for platingThickness/fillingEpsilon/frequency fields --
-    /// those affect the FDTD run itself, not the geometry step's own output.
-    var onGeometryParametersChanged: ((Int) -> Void)?
+    /// those affect the FDTD run itself, not the geometry step's own output. The String is a short,
+    /// user-facing description of what changed, listed in the results' "out of date" banner.
+    var onGeometryParametersChanged: ((Int, String) -> Void)?
 
-    /// Fired whenever maxStepsField changes -- unlike onGeometryParametersChanged, this doesn't
+    /// Fired whenever maxStepsField, the frequency range or the via plating/filling fields change -- unlike onGeometryParametersChanged, this doesn't
     /// affect geometry at all (it's a pure FDTD-run setting, document-level like frequency/via
     /// plating above it), so it only needs to invalidate simulation *results*, and for every
     /// simulation in the document at once (maxSteps isn't per-simulation). Too low a value truncates
     /// the FDTD run before its energy has decayed, which is exactly the bug this field exists to let
     /// the user fix -- so a stale cached result from before raising it would defeat the point.
-    var onFDTDParametersChanged: (() -> Void)?
+    /// The String is a short, user-facing description of what changed -- see onGeometryParametersChanged.
+    var onFDTDParametersChanged: ((String) -> Void)?
     var onResultsParametersChanged: ((Int) -> Void)?
     /// Called when the Differential Pair checkbox is ticked, so nets/pins/excitations added before
     /// it was ticked get the same partner mirroring WholeBoardViewController applies to ones added
@@ -75,6 +77,10 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
     // whether a simulation is selected (see reload()/setPerSimulationFieldsEnabled()).
     private let frequencyStartField = NSTextField(string: "")
     private let frequencyStopField = NSTextField(string: "")
+    // Per-simulation: the pulse window of every main excitation in the selected simulation (each
+    // ExcitationConfig carries its own duration; this sets them all at once). Shows "Mixed" as a
+    // placeholder if they've been given different values individually in the source list.
+    private let excitationDurationField = NSTextField(string: "")
     private let eyeBitRateField = NSTextField(string: "")
     private let eyeDrawCountField = NSTextField(string: "")
     private let sharedClockCheckbox = NSButton(checkboxWithTitle: "Adversarial Signals Share a Clock",
@@ -91,6 +97,9 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
         displaySuffix: "Hz", acceptedSuffixes: ["hertz", "hz"], autoSelectsSIPrefix: true)
     private let frequencyStopFormatter = UnitSuffixValueFormatter(
         displaySuffix: "Hz", acceptedSuffixes: ["hertz", "hz"], autoSelectsSIPrefix: true)
+    private let excitationDurationFormatter = UnitSuffixValueFormatter(
+        displaySuffix: "s", acceptedSuffixes: ["seconds", "second", "secs", "sec", "s"],
+        autoSelectsSIPrefix: true)
     private let eyeBitRateFormatter = UnitSuffixValueFormatter(
         displaySuffix: "bit/s", acceptedSuffixes: ["bit/s", "bps"],
         scaledSuffixes: SIPrefix.allCases.flatMap { prefix in
@@ -230,6 +239,7 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
         fillingEpsilonField.formatter = Self.plainNumberFormatter
         frequencyStartField.formatter = frequencyStartFormatter
         frequencyStopField.formatter = frequencyStopFormatter
+        excitationDurationField.formatter = excitationDurationFormatter
         eyeBitRateField.formatter = eyeBitRateFormatter
         eyeDrawCountField.formatter = eyeDrawCountFormatter
         maxStepsField.formatter = maxStepsFormatter
@@ -238,7 +248,7 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
 
         for field in [viaEdgeDistanceField, viaSpacingField, platingThicknessField,
                       fillingEpsilonField, frequencyStartField, frequencyStopField, maxStepsField,
-                      gridDensityField, absorbingBoundaryField, eyeBitRateField, eyeDrawCountField] {
+                      gridDensityField, absorbingBoundaryField, excitationDurationField, eyeBitRateField, eyeDrawCountField] {
             field.controlSize = .small
             field.font = Self.formFont
             field.alignment = .right
@@ -287,6 +297,7 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
                 labeled("Max Timesteps:", maxStepsField),
                 labeled("Sim Real Time:", simulationRealTimeValueLabel),
                 labeled("Frequency Range:", frequencyRange),
+                labeled("Excitation Duration:", excitationDurationField),
                 labeled("Digital Bitrate:", eyeBitRateField),
                 labeled("Adversarial Draws:", eyeDrawCountField),
                 labeled("", sharedClockCheckbox),
@@ -457,7 +468,7 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
     func simulationEditedElsewhere() {
         reload()
         if let selectedIndex {
-            onGeometryParametersChanged?(selectedIndex)
+            onGeometryParametersChanged?(selectedIndex, "Ground or edge-terminated nets changed")
         }
     }
 
@@ -486,6 +497,8 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
             nameField.stringValue = ""
             viaEdgeDistanceField.stringValue = ""
             viaSpacingField.stringValue = ""
+            excitationDurationField.stringValue = ""
+            excitationDurationField.placeholderString = nil
             eyeBitRateField.stringValue = ""
             eyeDrawCountField.stringValue = ""
             sharedClockCheckbox.state = .off
@@ -504,6 +517,7 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
         differentialPairCheckbox.state = sim.isDifferentialPair ? .on : .off
         viaEdgeDistanceField.doubleValue = sim.viaEdgeDistance
         viaSpacingField.doubleValue = sim.viaSpacing
+        reloadExcitationDuration(for: sim)
         eyeBitRateField.doubleValue = sim.eyeBitRate
         eyeDrawCountField.integerValue = sim.eyeDrawCount
         sharedClockCheckbox.state = sim.adversarialSharedClock ? .on : .off
@@ -529,6 +543,25 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
         if sim.groundNetName?.isEmpty ?? true {
             let names = sim.groundNetKind == .net ? groundNetNames : groundNetClassNames
             applyGroundSelection(GroundNetHeuristic.bestGuess(among: names), to: sim)
+        }
+    }
+
+    /// Called after the source list adds, removes or edits an excitation, so the main-excitation
+    /// duration shown here doesn't go stale.
+    func excitationsEditedElsewhere() {
+        guard let sim = selectedSimulation else { return }
+        reloadExcitationDuration(for: sim)
+    }
+
+    private func reloadExcitationDuration(for sim: EMSSimulationBridge) {
+        let durations = sim.excitations.filter(\.isMain).map(\.duration)
+        excitationDurationField.isEnabled = !durations.isEmpty
+        if let first = durations.first, durations.allSatisfy({ $0 == first }) {
+            excitationDurationField.doubleValue = first
+            excitationDurationField.placeholderString = nil
+        } else {
+            excitationDurationField.stringValue = ""
+            excitationDurationField.placeholderString = durations.isEmpty ? "No main excitation" : "Mixed"
         }
     }
 
@@ -594,7 +627,7 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
         }
         document?.updateChangeCount(.changeDone)
         if let selectedIndex {
-            onGeometryParametersChanged?(selectedIndex)
+            onGeometryParametersChanged?(selectedIndex, "Differential pair setting changed")
         }
     }
 
@@ -602,7 +635,7 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
         sim.groundNetName = name
         document?.updateChangeCount(.changeDone)
         if let selectedIndex {
-            onGeometryParametersChanged?(selectedIndex)
+            onGeometryParametersChanged?(selectedIndex, "Ground net changed")
         }
         updateGroundNameComboBox()
     }
@@ -633,7 +666,7 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
         sim.groundNetName = name
         document?.updateChangeCount(.changeDone)
         if let selectedIndex {
-            onGeometryParametersChanged?(selectedIndex)
+            onGeometryParametersChanged?(selectedIndex, "Ground net changed")
         }
         updateGroundNameComboBox()
     }
@@ -735,7 +768,7 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
         sim.edgeTerminatedNets = edgeTerminatedNetRows
         document?.updateChangeCount(.changeDone)
         if let selectedIndex {
-            onGeometryParametersChanged?(selectedIndex)
+            onGeometryParametersChanged?(selectedIndex, "Edge-terminated nets changed")
         }
     }
 
@@ -745,33 +778,61 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
         var affectsAllGeometry = false
         var affectsFDTD = false
         var affectsResults = false
+        var reason = ""
         switch sender {
         case viaEdgeDistanceField:
+            reason = "Via stitching changed"
             selectedSimulation?.viaEdgeDistance = sender.doubleValue
             affectsGeometry = true
         case viaSpacingField:
+            reason = "Via stitching changed"
             selectedSimulation?.viaSpacing = sender.doubleValue
             affectsGeometry = true
         case eyeBitRateField:
             selectedSimulation?.eyeBitRate = sender.doubleValue
             affectsResults = true
+        case excitationDurationField:
+            // Only the postprocessed stimulus (see ExcitationPostprocessor) uses a main
+            // excitation's duration, so this invalidates results, not the FDTD run.
+            for excitation in selectedSimulation?.excitations ?? [] where excitation.isMain {
+                excitation.duration = sender.doubleValue
+            }
+            affectsResults = true
         case eyeDrawCountField:
             selectedSimulation?.eyeDrawCount = sender.integerValue
             affectsResults = true
-        case platingThicknessField: document.config.viaPlatingThickness = sender.doubleValue
-        case fillingEpsilonField: document.config.viaFillingEpsilon = sender.doubleValue
-        case frequencyStartField: document.config.frequencyStart = sender.doubleValue
-        case frequencyStopField: document.config.frequencyStop = sender.doubleValue
+        // Document-level FDTD-run settings, like maxSteps: the sweep range sets the frequencies the
+        // ports transform to, and the via plating/filling set the materials the run uses -- none of
+        // them change the geometry step's output, but every simulation's results go stale.
+        case platingThicknessField:
+            reason = "Via materials changed"
+            document.config.viaPlatingThickness = sender.doubleValue
+            affectsFDTD = true
+        case fillingEpsilonField:
+            reason = "Via materials changed"
+            document.config.viaFillingEpsilon = sender.doubleValue
+            affectsFDTD = true
+        case frequencyStartField:
+            reason = "Frequency range changed"
+            document.config.frequencyStart = sender.doubleValue
+            affectsFDTD = true
+        case frequencyStopField:
+            reason = "Frequency range changed"
+            document.config.frequencyStop = sender.doubleValue
+            affectsFDTD = true
         case maxStepsField:
+            reason = "Maximum timesteps changed"
             document.config.maxSteps = sender.integerValue
             affectsFDTD = true
         case gridDensityField:
+            reason = "Grid density changed"
             // Document-level, like maxSteps, but unlike maxSteps it genuinely changes the Grid
             // pipeline stage's own output (mesh line placement) -- every simulation's cached
             // geometry needs invalidating, not just whichever one happens to be selected right now.
             document.config.gridDensity = sender.doubleValue
             affectsAllGeometry = true
         case absorbingBoundaryField:
+            reason = "Absorbing boundary changed"
             // Document-level and geometry-changing, exactly like gridDensityField.
             document.config.absorbingBoundaryCells = sender.integerValue
             affectsAllGeometry = true
@@ -780,13 +841,13 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
         document.updateChangeCount(.changeDone)
         if affectsAllGeometry {
             for index in document.config.simulations.indices {
-                onGeometryParametersChanged?(index)
+                onGeometryParametersChanged?(index, reason)
             }
         } else if affectsGeometry, let selectedIndex {
-            onGeometryParametersChanged?(selectedIndex)
+            onGeometryParametersChanged?(selectedIndex, reason)
         }
         if affectsFDTD {
-            onFDTDParametersChanged?()
+            onFDTDParametersChanged?(reason)
         }
         if affectsResults, let selectedIndex {
             onResultsParametersChanged?(selectedIndex)

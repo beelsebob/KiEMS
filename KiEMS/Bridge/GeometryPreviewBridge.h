@@ -99,6 +99,10 @@ typedef NS_ENUM(NSInteger, EMSGeometryTriangleKind) {
 /// libkicad::throughHoles -- this is what lets a via act as a real graph node bridging two copper
 /// layers of the same net (see GeometryView.rebuildActivityBuffers()'s own trace-graph doc comment).
 @property (nonatomic, copy, readonly, nullable) NSString *netName;
+/// IPC-4761 filled: the drill is drawn as a solid cylinder of via filling, not an open tube.
+@property (nonatomic, readonly) BOOL filled;
+/// IPC-4761 type VII (filled and capped): both ends of the drill are closed by copper discs.
+@property (nonatomic, readonly) BOOL capped;
 @end
 
 /// One routed-track centreline segment, real KiCad copper -- unlike EMSGeometryTriangle (its
@@ -226,6 +230,10 @@ typedef NS_ENUM(NSInteger, EMSGeometryTriangleKind) {
 /// whether the export actually found/rendered a model for each one, so "the list is empty/wrong" is
 /// distinguishable from "the export silently failed."
 @property (nonatomic, copy, readonly) NSArray<NSString *> *renderedComponentReferences;
+/// Footprints in componentMeshTriangles whose models are mounted on the bottom of the board,
+/// judged from each model's placement (its local +Z pointing down, or for a model standing on
+/// edge, its origin lying below mid-board). Every other footprint's model is a top one.
+@property (nonatomic, copy, readonly) NSSet<NSString *> *backComponentReferences;
 /// Every diagnostic KiCad's own exporter reported while building renderedComponentReferences' shapes
 /// -- most commonly "Could not add 3D model for <ref>." / "File not found: <path>" pairs, for a
 /// component whose linked 3D model can't be resolved (see

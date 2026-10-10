@@ -125,6 +125,8 @@ final class WholeBoardViewController: NSViewController {
     /// KicadBoardBridge.componentSimModels(). Loaded alongside allFootprints; simModelsLoaded says
     /// whether it has been yet.
     private var unsupportedSimModelReasons: [String: String] = [:]
+    /// The pad pairs each footprint with a usable SPICE model is simulated as, by reference.
+    private var simModelBranchPins: [String: [(String, String)]] = [:]
     private var simModelsLoaded = false
     /// Set when the schematic couldn't be read at all, which leaves every footprint without a
     /// model; updateSimModelReasons() then explains each one with this.
@@ -946,8 +948,11 @@ final class WholeBoardViewController: NSViewController {
     }
 
     /// The warning for an R/L/C part whose Value the simulator can't read, if it can't.
+    /// Only for a part simulated from its Value field: one with a usable SPICE model is simulated
+    /// from the model instead.
     private func valueWarning(for reference: String) -> String? {
-        guard let unit = lumpedComponentUnit(forReference: reference),
+        guard simModelBranchPins[reference] == nil,
+              let unit = lumpedComponentUnit(forReference: reference),
               let footprint = allFootprints.first(where: { $0.reference == reference }),
               !EMSConfigBridge.componentValueIsSensible(footprint.value, unit: unit)
         else { return nil }
@@ -1480,24 +1485,33 @@ final class WholeBoardViewController: NSViewController {
             }
         }
         // Included components are the simulation's lumped parts (port_resolution.cpp's
-        // _resolveLumpedComponents()): each is involved and may grow the hull; a two-pin R/L/C
-        // bridges its two nets in the activity graph, and is flagged if its Value is unusable,
-        // because the simulator will skip it.
+        // _resolveLumpedComponents()): each is involved and may grow the hull, and each of its
+        // lumped elements -- one per pad pair its SPICE model connects, or for a part without one a
+        // two-pin R/L/C's own pads -- bridges two nets in the activity graph.
         for component in simulation.includedComponents {
             let reference = component.reference
             highlight.involvedComponentReferences.insert(reference)
             if component.contributesToHull {
                 highlight.hullPaddingByComponent[reference] = component.hullPadding
             }
-            guard let footprint = footprintByReference[reference], footprint.pins.count == 2,
-                  isPassive(reference: reference)
-            else { continue }
-            let first = footprint.pins[0]
-            let second = footprint.pins[1]
-            guard !first.netName.isEmpty, !second.netName.isEmpty, first.netName != second.netName else { continue }
-            highlight.passiveBridges.append(BoardActivityHighlight.PassiveBridge(
-                reference: reference, firstPad: first.number, firstNet: first.netName,
-                secondPad: second.number, secondNet: second.netName))
+            guard let footprint = footprintByReference[reference] else { continue }
+            let pairs: [(String, String)]
+            if let branches = simModelBranchPins[reference] {
+                pairs = branches
+            } else if footprint.pins.count == 2, isPassive(reference: reference) {
+                pairs = [(footprint.pins[0].number, footprint.pins[1].number)]
+            } else {
+                continue
+            }
+            for (firstPad, secondPad) in pairs {
+                guard let first = footprint.pins.first(where: { $0.number == firstPad }),
+                      let second = footprint.pins.first(where: { $0.number == secondPad }),
+                      !first.netName.isEmpty, !second.netName.isEmpty, first.netName != second.netName
+                else { continue }
+                highlight.passiveBridges.append(BoardActivityHighlight.PassiveBridge(
+                    reference: reference, firstPad: first.number, firstNet: first.netName,
+                    secondPad: second.number, secondNet: second.netName))
+            }
             if let unit = lumpedComponentUnit(forReference: reference),
                !EMSConfigBridge.componentValueIsSensible(footprint.value, unit: unit) {
                 highlight.invalidComponentReferences.insert(reference)
@@ -1584,6 +1598,11 @@ final class WholeBoardViewController: NSViewController {
                 self.rejectedStitchingViaPositions = plan?.rejectedPositions.map(\.pointValue) ?? []
                 self.plannedStitchingViaDiameter = CGFloat(plan?.annularRingDiameter ?? 0)
                 self.hullCutTracePoints = plan?.hullCutTracePoints ?? []
+                // Hull-cut ports follow their track's cut as the hull moves, and go once it's gone.
+                if let plan, let simulation = self.selectedSimulation,
+                   plan.reconcileHullCutPorts(ofSimulation: simulation) {
+                    self.configurationChanged()
+                }
                 self.boardView.activity = self.computeActivityHighlight()
             }
         }
@@ -2508,6 +2527,7 @@ final class WholeBoardViewController: NSViewController {
         stitchingViaPlanInputsKey = nil
         // References are only meaningful on the board they came from.
         unsupportedSimModelReasons = [:]
+        simModelBranchPins = [:]
         simModelLoadError = nil
         simModelsLoaded = false
         layerGeometryLoader?.cancel()
@@ -2577,19 +2597,27 @@ final class WholeBoardViewController: NSViewController {
         // shown without waiting for it.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let reasons: [String: String]
+            let branchPins: [String: [(String, String)]]
             let loadError: String?
             do {
                 let models = try board.componentSimModels()
                 reasons = Dictionary(models.filter { !$0.supported }.map { ($0.reference, $0.reason) },
                                      uniquingKeysWith: { first, _ in first })
+                branchPins = Dictionary(models.filter(\.supported).map { model in
+                    (model.reference, model.branchPins.compactMap { pair in
+                        pair.count == 2 ? (pair[0], pair[1]) : nil
+                    })
+                }, uniquingKeysWith: { first, _ in first })
                 loadError = nil
             } catch {
                 reasons = [:]
+                branchPins = [:]
                 loadError = error.localizedDescription
             }
             DispatchQueue.main.async {
                 guard let self, self.loadedForPath == kicadPcbPath else { return }
                 self.unsupportedSimModelReasons = reasons
+                self.simModelBranchPins = branchPins
                 self.simModelLoadError = loadError
                 self.simModelsLoaded = true
                 self.updateSimModelReasons()

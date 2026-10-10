@@ -9,6 +9,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @class KicadBoardBridge;
 @class KicadHullCutTracePoint;
+@class EMSSimulationBridge;
 
 @interface KicadFootprintPin : NSObject
 @property (nonatomic, copy, readonly) NSString* number;
@@ -34,6 +35,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) BOOL supported;
 /// Empty when supported; otherwise why not, for display.
 @property (nonatomic, copy, readonly) NSString* reason;
+/// When supported: the pad-number pairs its lumped elements connect, one two-element array each
+/// (see kiems::componentSimNetwork()).
+@property (nonatomic, copy, readonly) NSArray<NSArray<NSString*>*>* branchPins;
 @end
 
 /// Candidate stitching-via positions computed with the same slicing pass the Geometry stage uses.
@@ -43,6 +47,10 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, readonly) NSArray<NSValue*>* rejectedPositions;
 @property (nonatomic, readonly) double annularRingDiameter;
 @property (nonatomic, copy, readonly) NSArray<KicadHullCutTracePoint*>* hullCutTracePoints;
+/// Applies this plan's cuts to `simulation`'s stored hull-cut ports (see kiems::
+/// reconcileHullCutPorts()): migrates position-keyed ports, re-places kept ones and discards any
+/// whose cut is gone. Returns YES if the simulation changed.
+- (BOOL)reconcileHullCutPortsOfSimulation:(EMSSimulationBridge*)simulation;
 @end
 
 /// A routed trace centreline crossing the simulation hull. Position is the visible/clickable

@@ -88,9 +88,11 @@ final class InvolvedNetsViewController: NSViewController {
     // phaseField -- these are read-only display here (this table doesn't edit excitations), but the
     // displayed text should still read the same way it does in the detail pane.
     private static let startTimeFormatter = UnitSuffixValueFormatter(
-        displaySuffix: "s", acceptedSuffixes: ["seconds", "second", "secs", "sec", "s"])
+        displaySuffix: "s", acceptedSuffixes: ["seconds", "second", "secs", "sec", "s"],
+        autoSelectsSIPrefix: true)
     private static let durationFormatter = UnitSuffixValueFormatter(
-        displaySuffix: "s", acceptedSuffixes: ["seconds", "second", "secs", "sec", "s"])
+        displaySuffix: "s", acceptedSuffixes: ["seconds", "second", "secs", "sec", "s"],
+        autoSelectsSIPrefix: true)
     private static let phaseFormatter = PhaseValueFormatter()
 
     init(document: Document) {

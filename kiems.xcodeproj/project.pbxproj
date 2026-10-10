@@ -14,18 +14,7 @@
 		479136241E9A85AC3E2BFC9B /* RememberRemember.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DEC747CBEC864D957296A740 /* RememberRemember.framework */; };
 		4988C919C7B2E11A4E12652C /* liblibkiems.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 922BA8FA4CD5D8901DCAC9DA /* liblibkiems.a */; };
 		4AE99EF823B18E76EBD8A114 /* libCopperUtils.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 5A1B3A51A30B8BD9D7ACED8B /* libCopperUtils.a */; };
-		5FEE70EE235A62413F9E6A97 /* Copper.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3586812A4F6CE84886F63B2D /* Copper.framework */; };
-		601D00000000000000000001 /* liblibkicad.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */; };
-		601D00000000000000000002 /* liblibkicad.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */; };
-		601D00000000000000000004 /* liblibkicad.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */; };
-		601D00000000000000000005 /* liblibkicad.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */; };
-		601D00000000000000000006 /* liblibkicad.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */; };
-		71AD3CEB302FAAD5006D5847 /* Copper.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3586812A4F6CE84886F63B2D /* Copper.framework */; };
 		71AD3CEC302FAAD5006D5847 /* Copper.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = A6B36F967905F85737C9E377 /* Copper.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
-		71B40FE93042E264002796EC /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 9691133F7B92BAA7BB234B8C /* libCSXCAD.dylib */; };
-		71B40FEA3042E2B5002796EC /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 9691133F7B92BAA7BB234B8C /* libCSXCAD.dylib */; };
-		7E57CB0000000000000000C5 /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 9691133F7B92BAA7BB234B8C /* libCSXCAD.dylib */; };
-		8979779CA20D12908A2A7A0E /* Copper.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3586812A4F6CE84886F63B2D /* Copper.framework */; };
 		9F7176CC53A1D83D4A04FA8F /* liblibkiems.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 922BA8FA4CD5D8901DCAC9DA /* liblibkiems.a */; };
 		ACCE1E0000000000000001 /* Accelerate.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71B40FE73042E24F002796EC /* Accelerate.framework */; };
 		ACCE1E0000000000000002 /* Accelerate.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71B40FE73042E24F002796EC /* Accelerate.framework */; };
@@ -35,9 +24,6 @@
 		AFE0650978A3B78F40AECAFE /* libCopperUtils.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 5A1B3A51A30B8BD9D7ACED8B /* libCopperUtils.a */; };
 		B94544214896E97AAFF83219 /* libCopperUtils.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 5A1B3A51A30B8BD9D7ACED8B /* libCopperUtils.a */; };
 		C0A71A000000000000000001 /* libCopperUtils.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 5A1B3A51A30B8BD9D7ACED8B /* libCopperUtils.a */; };
-		C0A71A000000000000000017 /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 9691133F7B92BAA7BB234B8C /* libCSXCAD.dylib */; };
-		C0FFEE0000000000000005 /* libCSXCAD.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 9691133F7B92BAA7BB234B8C /* libCSXCAD.dylib */; };
-		C0FFEE0000000000000006 /* Copper.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3586812A4F6CE84886F63B2D /* Copper.framework */; };
 		C86C58945CE1F4EA2E769FFE /* libCopperUtils.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 5A1B3A51A30B8BD9D7ACED8B /* libCopperUtils.a */; };
 		E225E6C98F3F2C0B194070BD /* liblibkiems.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 922BA8FA4CD5D8901DCAC9DA /* liblibkiems.a */; };
 		FC1671EFEBFEF5FCCCA74E90 /* RememberRemember.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = DEC747CBEC864D957296A740 /* RememberRemember.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
@@ -64,13 +50,6 @@
 			proxyType = 1;
 			remoteGlobalIDString = 436BD46808618ED0B9E3983D;
 			remoteInfo = CSXCAD;
-		};
-		14DCC5F4016711E0456B25CC /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 7A75E68FFCE0FE7A89A86020 /* Copper.xcodeproj */;
-			proxyType = 2;
-			remoteGlobalIDString = D91EC4B2021EEA20F36C13E8;
-			remoteInfo = Copper;
 		};
 		1540871D4E58EBEB434F4E6A /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -100,13 +79,6 @@
 			remoteGlobalIDString = 52E3E3000000000000000010;
 			remoteInfo = RememberRemember;
 		};
-		4C1CAD000000000000010003 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 4C1CAD000000000000010001 /* libkicad.xcodeproj */;
-			proxyType = 2;
-			remoteGlobalIDString = 4C1CAD00000000000000000C;
-			remoteInfo = libkicad;
-		};
 		68230F1D42F0B9E29C659103 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 71AD228A30263515006D5847 /* Project object */;
@@ -135,12 +107,12 @@
 			remoteGlobalIDString = 3818463DDAC498C89C93C21E;
 			remoteInfo = Copper;
 		};
-		BA30C0C289CFA4DD40B51E05 /* PBXContainerItemProxy */ = {
+		BACB4CAE18E04FC816AC3BC0 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
-			containerPortal = 7A75E68FFCE0FE7A89A86020 /* Copper.xcodeproj */;
-			proxyType = 2;
-			remoteGlobalIDString = 3B5FA5D05688308C3CEF94DD;
-			remoteInfo = CSXCAD;
+			containerPortal = 71AD228A30263515006D5847 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 0E08621C93A1CC737D3F6A93;
+			remoteInfo = libkiems;
 		};
 		C0DEC0DE0000000000000001 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -169,13 +141,6 @@
 			proxyType = 1;
 			remoteGlobalIDString = 4C1CAD00000000000000000B;
 			remoteInfo = libkicad;
-		};
-		BACB4CAE18E04FC816AC3BC0 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 71AD228A30263515006D5847 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 0E08621C93A1CC737D3F6A93;
-			remoteInfo = libkiems;
 		};
 		D56C45F6411D0E5C8C32B009 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -233,13 +198,6 @@
 			remoteGlobalIDString = 3818463DDAC498C89C93C21E;
 			remoteInfo = Copper;
 		};
-		52E3E30000000000000000A003 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 52E3E30000000000000000A001 /* RememberRemember.xcodeproj */;
-			proxyType = 2;
-			remoteGlobalIDString = 52E3E3000000000000000003;
-			remoteInfo = RememberRemember;
-		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -282,6 +240,7 @@
 		27FC500F5EC82E42F046FEF3 /* libkiems_tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = libkiems_tests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		47611C745FA02E5BA7871B3D /* copper_fdtd_worker */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = copper_fdtd_worker; sourceTree = BUILT_PRODUCTS_DIR; };
 		4C1CAD000000000000010001 /* libkicad.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; name = libkicad.xcodeproj; path = submodules/libkicad/libkicad.xcodeproj; sourceTree = SOURCE_ROOT; };
+		52E3E30000000000000000A001 /* RememberRemember.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; name = RememberRemember.xcodeproj; path = submodules/RememberRemember/RememberRemember.xcodeproj; sourceTree = SOURCE_ROOT; };
 		5653046AD79D4C9071AF237F /* KiEMS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = KiEMS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		601D10000000000000000000 /* Config/BuildPaths.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config/BuildPaths.xcconfig; sourceTree = SOURCE_ROOT; };
 		601D10000000000000000001 /* Config/KiCadLink.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config/KiCadLink.xcconfig; sourceTree = SOURCE_ROOT; };
@@ -298,7 +257,6 @@
 		A6B36F967905F85737C9E377 /* Copper.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Copper.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		CE532C213E2D6E98AA310B22 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
 		DEC747CBEC864D957296A740 /* RememberRemember.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = RememberRemember.framework; sourceTree = BUILT_PRODUCTS_DIR; };
-		52E3E30000000000000000A001 /* RememberRemember.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; name = RememberRemember.xcodeproj; path = submodules/RememberRemember/RememberRemember.xcodeproj; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -340,9 +298,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				9F7176CC53A1D83D4A04FA8F /* liblibkiems.a in Frameworks */,
-				601D00000000000000000001 /* liblibkicad.a in Frameworks */,
 				ACCE1E0000000000000001 /* Accelerate.framework in Frameworks */,
-				7E57CB0000000000000000C5 /* libCSXCAD.dylib in Frameworks */,
 				AFE0650978A3B78F40AECAFE /* libCopperUtils.a in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -358,12 +314,9 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				71B40FE93042E264002796EC /* libCSXCAD.dylib in Frameworks */,
 				479136241E9A85AC3E2BFC9B /* RememberRemember.framework in Frameworks */,
-				71AD3CEB302FAAD5006D5847 /* Copper.framework in Frameworks */,
 				C0A71A000000000000000001 /* libCopperUtils.a in Frameworks */,
 				4988C919C7B2E11A4E12652C /* liblibkiems.a in Frameworks */,
-				601D00000000000000000002 /* liblibkicad.a in Frameworks */,
 				ACCE1E0000000000000002 /* Accelerate.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -372,10 +325,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				8979779CA20D12908A2A7A0E /* Copper.framework in Frameworks */,
 				E225E6C98F3F2C0B194070BD /* liblibkiems.a in Frameworks */,
-				601D00000000000000000004 /* liblibkicad.a in Frameworks */,
-				C0A71A000000000000000017 /* libCSXCAD.dylib in Frameworks */,
 				ACCE1E0000000000000004 /* Accelerate.framework in Frameworks */,
 				4AE99EF823B18E76EBD8A114 /* libCopperUtils.a in Frameworks */,
 			);
@@ -385,11 +335,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				71B40FEA3042E2B5002796EC /* libCSXCAD.dylib in Frameworks */,
 				3094727E7CECFEFF14791831 /* liblibkiems.a in Frameworks */,
-				601D00000000000000000005 /* liblibkicad.a in Frameworks */,
 				ACCE1E0000000000000005 /* Accelerate.framework in Frameworks */,
-				C0FFEE0000000000000006 /* Copper.framework in Frameworks */,
 				C86C58945CE1F4EA2E769FFE /* libCopperUtils.a in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -399,11 +346,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				3E2C21D20252B9D126B9A44A /* Cocoa.framework in Frameworks */,
-				5FEE70EE235A62413F9E6A97 /* Copper.framework in Frameworks */,
 				08091C43255C7E607DB3203F /* liblibkiems.a in Frameworks */,
-				601D00000000000000000006 /* liblibkicad.a in Frameworks */,
 				ACCE1E0000000000000006 /* Accelerate.framework in Frameworks */,
-				C0FFEE0000000000000005 /* libCSXCAD.dylib in Frameworks */,
 				B94544214896E97AAFF83219 /* libCopperUtils.a in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -415,8 +359,6 @@
 			isa = PBXGroup;
 			children = (
 				5A1B3A51A30B8BD9D7ACED8B /* libCopperUtils.a */,
-				9691133F7B92BAA7BB234B8C /* libCSXCAD.dylib */,
-				3586812A4F6CE84886F63B2D /* Copper.framework */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -424,7 +366,13 @@
 		4C1CAD000000000000010002 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		52E3E30000000000000000A002 /* Products */ = {
+			isa = PBXGroup;
+			children = (
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -512,14 +460,6 @@
 				CE532C213E2D6E98AA310B22 /* Cocoa.framework */,
 			);
 			name = "OS X";
-			sourceTree = "<group>";
-		};
-		52E3E30000000000000000A002 /* Products */ = {
-			isa = PBXGroup;
-			children = (
-				52E3E30000000000000000A004 /* RememberRemember.framework */,
-			);
-			name = Products;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -750,39 +690,11 @@
 /* End PBXProject section */
 
 /* Begin PBXReferenceProxy section */
-		3586812A4F6CE84886F63B2D /* Copper.framework */ = {
-			isa = PBXReferenceProxy;
-			fileType = wrapper.framework;
-			path = Copper.framework;
-			remoteRef = 14DCC5F4016711E0456B25CC /* PBXContainerItemProxy */;
-			sourceTree = BUILT_PRODUCTS_DIR;
-		};
 		5A1B3A51A30B8BD9D7ACED8B /* libCopperUtils.a */ = {
 			isa = PBXReferenceProxy;
 			fileType = archive.ar;
 			path = libCopperUtils.a;
 			remoteRef = E7C02C80F3825C9A77C34060 /* PBXContainerItemProxy */;
-			sourceTree = BUILT_PRODUCTS_DIR;
-		};
-		9691133F7B92BAA7BB234B8C /* libCSXCAD.dylib */ = {
-			isa = PBXReferenceProxy;
-			fileType = "compiled.mach-o.dylib";
-			path = libCSXCAD.dylib;
-			remoteRef = BA30C0C289CFA4DD40B51E05 /* PBXContainerItemProxy */;
-			sourceTree = BUILT_PRODUCTS_DIR;
-		};
-		A2F04DD1DE94C7C82DF16CD5 /* liblibkicad.a */ = {
-			isa = PBXReferenceProxy;
-			fileType = archive.ar;
-			path = liblibkicad.a;
-			remoteRef = 4C1CAD000000000000010003 /* PBXContainerItemProxy */;
-			sourceTree = BUILT_PRODUCTS_DIR;
-		};
-		52E3E30000000000000000A004 /* RememberRemember.framework */ = {
-			isa = PBXReferenceProxy;
-			fileType = wrapper.framework;
-			path = RememberRemember.framework;
-			remoteRef = 52E3E30000000000000000A003 /* PBXContainerItemProxy */;
 			sourceTree = BUILT_PRODUCTS_DIR;
 		};
 /* End PBXReferenceProxy section */
@@ -868,26 +780,6 @@
 			name = libkicad;
 			targetProxy = 7E57CB0000000000000000C7 /* PBXContainerItemProxy */;
 		};
-		C0DEC0DE0000000000000011 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			name = libkicad;
-			targetProxy = C0DEC0DE0000000000000001 /* PBXContainerItemProxy */;
-		};
-		C0DEC0DE0000000000000012 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			name = libkicad;
-			targetProxy = C0DEC0DE0000000000000002 /* PBXContainerItemProxy */;
-		};
-		C0DEC0DE0000000000000013 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			name = libkicad;
-			targetProxy = C0DEC0DE0000000000000003 /* PBXContainerItemProxy */;
-		};
-		C0DEC0DE0000000000000014 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			name = libkicad;
-			targetProxy = C0DEC0DE0000000000000004 /* PBXContainerItemProxy */;
-		};
 		8ABC3E8814A693FEEF5A531C /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			name = CSXCAD;
@@ -928,6 +820,26 @@
 			isa = PBXTargetDependency;
 			name = CSXCAD;
 			targetProxy = 0E8B743A5387CB66D48AB885 /* PBXContainerItemProxy */;
+		};
+		C0DEC0DE0000000000000011 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = libkicad;
+			targetProxy = C0DEC0DE0000000000000001 /* PBXContainerItemProxy */;
+		};
+		C0DEC0DE0000000000000012 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = libkicad;
+			targetProxy = C0DEC0DE0000000000000002 /* PBXContainerItemProxy */;
+		};
+		C0DEC0DE0000000000000013 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = libkicad;
+			targetProxy = C0DEC0DE0000000000000003 /* PBXContainerItemProxy */;
+		};
+		C0DEC0DE0000000000000014 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = libkicad;
+			targetProxy = C0DEC0DE0000000000000004 /* PBXContainerItemProxy */;
 		};
 		C3F4DC29303EF0123F35E8D7 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;

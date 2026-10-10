@@ -12,4 +12,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (kiems::EMSConfig&)cxxConfig;
 @end
 
+@interface EMSSimulationBridge (Private)
+- (kiems::SimulationConfig&)cxxSim;
+@end
+
 NS_ASSUME_NONNULL_END

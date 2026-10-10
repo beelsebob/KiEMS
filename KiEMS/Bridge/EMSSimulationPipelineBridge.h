@@ -69,6 +69,30 @@ typedef NS_ENUM(NSInteger, EMSPipelineProgressPhase) {
 @property (nonatomic, readonly) double excitationFcHz;
 /// Display name of the net driven by this setup/FDTD pass; nil during geometry generation.
 @property (nonatomic, copy, readonly, nullable) NSString *excitedNetName;
+/// The timestep the current port's FDTD pass has reached, and that pass's cap (it may end earlier
+/// on energy decay). Both 0 outside the Simulation phase.
+@property (nonatomic, readonly) NSInteger currentStep;
+@property (nonatomic, readonly) NSInteger totalSteps;
+/// How many excited ports' passes have finished, and how many there are in all. 0 in the Geometry
+/// phase.
+@property (nonatomic, readonly) NSInteger portsCompleted;
+@property (nonatomic, readonly) NSInteger excitedPortCount;
+@end
+
+/// Size of the Yee grid Copper will step, counted the way Copper's engine does: per node, so each
+/// axis's count is its grid-line count. `boundaryCells` is every active cell in an absorbing
+/// region -- the CPML slabs of a rectangular domain, or an irregular domain's XY absorbing rings
+/// plus its Z CPML slabs; `coreCells` is every other active cell. External cells an irregular
+/// domain skips are in neither.
+@interface EMSGridStatistics : NSObject
+@property (nonatomic, readonly) NSInteger countX;
+@property (nonatomic, readonly) NSInteger countY;
+@property (nonatomic, readonly) NSInteger countZ;
+@property (nonatomic, readonly) long long coreCells;
+@property (nonatomic, readonly) long long boundaryCells;
+/// Excited ports, each of which is one FDTD pass of at most `maxTimestepsPerPort` steps.
+@property (nonatomic, readonly) NSInteger excitedPortCount;
+@property (nonatomic, readonly) NSInteger maxTimestepsPerPort;
 @end
 
 typedef void (^EMSPipelineProgressHandler)(EMSPipelineProgress *progress);
@@ -137,6 +161,9 @@ typedef void (^EMSPipelineProgressHandler)(EMSPipelineProgress *progress);
 /// A renderable geometry preview -- nil unless hasStage:EMSPipelineStageGeometry is true.
 - (nullable EMSGeometryPreview *)geometryPreview;
 
+/// The grid's cell counts -- nil unless hasStage:EMSPipelineStageGrid is true.
+- (nullable EMSGridStatistics *)gridStatistics;
+
 /// One display-only KiCad layer, cropped to this simulation's already-built cutout. Nil until the
 /// Geometry stage exists; callers schedule these serially behind the initial preview.
 - (nullable EMSGeometryLayer *)geometryLayerNamed:(NSString *)layerName error:(NSError **)error;
@@ -153,6 +180,13 @@ typedef void (^EMSPipelineProgressHandler)(EMSPipelineProgress *progress);
 /// execution order. The array contains lightweight metadata/lazy frame handles; field grids remain
 /// on disk until a selected frame is displayed.
 - (NSArray<EMSFieldSnapshot *> *)fieldSnapshots;
+
+/// Discards only the postprocessed data (S-parameters, impedance, eye/results preview), keeping
+/// the FDTD run itself -- the next ensureStage:EMSPipelineStageResults call recomputes
+/// postprocessing from the in-memory FDTD results, or, if only the saved postprocessed data was
+/// restored (e.g. after reopening), from the FDTD port data on disk. No new FDTD pass either way.
+/// A no-op if there are no results yet. Cheap, synchronous, main-thread safe.
+- (void)invalidatePostprocessing;
 
 /// Discards this stage and every stage after it (e.g. after an edit that could change the sliced
 /// geometry or FDTD results) -- the next ensureStage: call recomputes from here on. Cheap,

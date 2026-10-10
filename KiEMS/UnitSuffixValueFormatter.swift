@@ -4,8 +4,7 @@ import Cocoa
 /// user input back, tolerates a handful of alternate spellings of that same unit (case-insensitive,
 /// with or without a space before it). Also accepts a single SI-prefix character adjacent to the
 /// unit on input (e.g. "5kHz", "500 ms") -- see SIPrefix -- and, when `autoSelectsSIPrefix` is set,
-/// displays large values with the largest-fitting prefix (kilo/mega/giga/tera) instead of the bare
-/// unit. Beyond that there's no unit *conversion* here (unlike MillimeterValueFormatter/
+/// displays values with the best-fitting prefix (e.g. "6 GHz", "1.2 ns") instead of the bare unit. Beyond that there's no unit *conversion* here (unlike MillimeterValueFormatter/
 /// PhaseValueFormatter) -- these are all single-unit quantities (seconds, hertz, ohms) with no
 /// other unit to convert to/from.
 final class UnitSuffixValueFormatter: Formatter {
@@ -15,9 +14,9 @@ final class UnitSuffixValueFormatter: Formatter {
     /// base unit. This is separate from acceptedSuffixes because case can be semantically
     /// significant: `Gb/s` is gigabits/s, while `GB/s` is gigabytes/s (eight times larger).
     private let scaledSuffixes: [(suffix: String, factor: Double)]
-    // When true, string(for:) picks the largest-fitting SI prefix (kilo/mega/giga/tera) for
-    // display instead of always showing the base unit -- e.g. 6_000_000_000 displays as "6 GHz"
-    // rather than "6,000,000,000 Hz". Parsing an SI-prefixed value back in (see getObjectValue)
+    // When true, string(for:) picks the best-fitting SI prefix (tera down to femto) for display
+    // instead of always showing the base unit -- e.g. 6_000_000_000 displays as "6 GHz" rather
+    // than "6,000,000,000 Hz", and 1.2e-9 as "1.2 ns" rather than rounding to "0 s". Parsing an SI-prefixed value back in (see getObjectValue)
     // always works, regardless of this flag -- it only controls what's shown, not what's accepted.
     private let autoSelectsSIPrefix: Bool
 
@@ -72,7 +71,8 @@ final class UnitSuffixValueFormatter: Formatter {
 
     override func string(for obj: Any?) -> String? {
         guard let number = obj as? NSNumber else { return nil }
-        if autoSelectsSIPrefix, let prefix = SIPrefix.bestFit(for: number.doubleValue) {
+        if autoSelectsSIPrefix,
+           let prefix = SIPrefix.bestFit(for: number.doubleValue) ?? SIPrefix.bestFitSmall(for: number.doubleValue) {
             let scaled = NSNumber(value: number.doubleValue / prefix.factor)
             let numberString = Self.numberFormatter.string(from: scaled) ?? scaled.stringValue
             return "\(numberString) \(prefix.symbol)\(displaySuffix)"

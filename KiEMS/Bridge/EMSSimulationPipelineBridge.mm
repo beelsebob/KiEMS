@@ -39,6 +39,7 @@
 // a separate process -- KiEMS links Copper.framework directly (see the Xcode project's
 // own build settings), while libkiems itself still never does.
 #include "CopperFDTDRunner.h"
+#include "Copper/Internal/CopperDomain.hpp"
 
 using kiems::DifferentialPairConfig;
 using kiems::EMSConfig;
@@ -63,7 +64,11 @@ using kiems::SimulationStage;
       plannedSimulationTimeSeconds:(double)plannedSimulationTimeSeconds
                     excitationF0Hz:(double)excitationF0Hz
                     excitationFcHz:(double)excitationFcHz
-                 excitedNetName:(nullable NSString*)excitedNetName {
+                 excitedNetName:(nullable NSString*)excitedNetName
+                    currentStep:(NSInteger)currentStep
+                     totalSteps:(NSInteger)totalSteps
+                 portsCompleted:(NSInteger)portsCompleted
+               excitedPortCount:(NSInteger)excitedPortCount {
     self = [super init];
     if (self) {
         _phase = phase;
@@ -78,6 +83,32 @@ using kiems::SimulationStage;
         _excitationF0Hz = excitationF0Hz;
         _excitationFcHz = excitationFcHz;
         _excitedNetName = [excitedNetName copy];
+        _currentStep = currentStep;
+        _totalSteps = totalSteps;
+        _portsCompleted = portsCompleted;
+        _excitedPortCount = excitedPortCount;
+    }
+    return self;
+}
+@end
+
+@implementation EMSGridStatistics
+- (instancetype)initWithCountX:(NSInteger)countX
+                        countY:(NSInteger)countY
+                        countZ:(NSInteger)countZ
+                     coreCells:(long long)coreCells
+                 boundaryCells:(long long)boundaryCells
+              excitedPortCount:(NSInteger)excitedPortCount
+           maxTimestepsPerPort:(NSInteger)maxTimestepsPerPort {
+    self = [super init];
+    if (self) {
+        _countX = countX;
+        _countY = countY;
+        _countZ = countZ;
+        _coreCells = coreCells;
+        _boundaryCells = boundaryCells;
+        _excitedPortCount = excitedPortCount;
+        _maxTimestepsPerPort = maxTimestepsPerPort;
     }
     return self;
 }
@@ -202,6 +233,75 @@ std::vector<double> linspace(double start, double stop, std::int32_t num) {
     return result;
 }
 
+/// The irregular-domain inputs Copper classifies the XY grid from (cutout loops, padding, ring cell
+/// size). Shared by the FDTD run and gridStatistics so both see exactly the same active cells.
+void applyDomainConfig(copper::CopperFDTDPortConfig& portConfig, const kiems::SlicedBoard& sliced,
+                       const kiems::ComputedGridLines& gridLines, const EMSConfig& config) {
+    for (const auto& loop : sliced.cutoutLoops) {
+        std::vector<copper::CopperFDTDPortConfig::DomainPoint> out;
+        out.reserve(loop.size());
+        for (const auto& point : loop) out.push_back({point.x(), point.y()});
+        portConfig.domainCutoutLoops.push_back(std::move(out));
+    }
+    const auto& bounds = sliced.bounds;
+    const auto depth = static_cast<std::size_t>(config.grid().absorbingBoundaryCells());
+    if (gridLines.x.size() > 2 * depth && gridLines.y.size() > 2 * depth) {
+        portConfig.domainPadding = std::max({bounds.xMin - gridLines.x[depth],
+                                             gridLines.x[gridLines.x.size() - depth - 1] - bounds.xMax,
+                                             bounds.yMin - gridLines.y[depth],
+                                             gridLines.y[gridLines.y.size() - depth - 1] - bounds.yMax});
+    }
+    portConfig.domainCPMLCellSize = config.grid().max();
+}
+
+/// Counts core/absorbing cells the way Copper's engine dispatches them (see EMSGridStatistics). The
+/// CPML slab extents mirror copper::buildCPML(): `depth` lines at the lower face, `depth + 1` at the
+/// upper, and no CPML at all on an axis too short to hold both.
+EMSGridStatistics* computeGridStatistics(const kiems::SlicedBoard& sliced, const kiems::ComputedGridLines& gridLines,
+                                         const EMSConfig& config, const SimulationConfig& simConfig) {
+    const std::uint64_t lines[3] = {gridLines.x.size(), gridLines.y.size(), gridLines.z.size()};
+    const auto depth = static_cast<std::uint64_t>(std::max(0, config.grid().absorbingBoundaryCells()));
+    const auto slab = [depth](std::uint64_t count) { return count > 2 * depth ? 2 * depth + 1 : 0; };
+
+    copper::CopperFDTDPortConfig domainConfig;
+    applyDomainConfig(domainConfig, sliced, gridLines, config);
+    const copper::CopperDomainMask domain = copper::buildDomainMask(
+        gridLines.x, gridLines.y, domainConfig, static_cast<std::uint32_t>(depth));
+
+    std::uint64_t core = 0;
+    std::uint64_t boundary = 0;
+    if (domain.empty()) {
+        // Rectangular: CPML on all six faces.
+        const std::uint64_t total = lines[0] * lines[1] * lines[2];
+        core = 1;
+        for (const std::uint64_t count : lines) core *= count - slab(count);
+        boundary = total - core;
+    } else {
+        // Irregular: XY absorbing rings span every Z layer; interior columns have only Z slabs.
+        std::uint64_t interiorNodes = 0;
+        std::uint64_t ringNodes = 0;
+        for (const auto& box : domain.dispatchBoxes) {
+            const std::uint64_t nodes = std::uint64_t{box.width} * box.height;
+            (box.region == copper::CopperDomainMask::Region::Interior ? interiorNodes : ringNodes) += nodes;
+        }
+        const std::uint64_t zSlab = slab(lines[2]);
+        core = interiorNodes * (lines[2] - zSlab);
+        boundary = ringNodes * lines[2] + interiorNodes * zSlab;
+    }
+
+    NSInteger excitedPorts = 0;
+    for (const auto& port : simConfig.ports()) {
+        if (port.excite()) ++excitedPorts;
+    }
+    return [[EMSGridStatistics alloc] initWithCountX:static_cast<NSInteger>(lines[0])
+                                              countY:static_cast<NSInteger>(lines[1])
+                                              countZ:static_cast<NSInteger>(lines[2])
+                                           coreCells:static_cast<long long>(core)
+                                       boundaryCells:static_cast<long long>(boundary)
+                                    excitedPortCount:excitedPorts
+                                 maxTimestepsPerPort:static_cast<NSInteger>(config.maxSteps())];
+}
+
 /// The kiems::FDTDPortRunner passed to kiems::generateResults() so the FDTD step runs in
 /// this one process -- mirrors kiems/main.cpp's own runGPUPortInProcess() exactly (see its own
 /// doc comment for why a portRunner has to do the prepareRunDirectory()/runFDTDPortOnGPU()/
@@ -257,7 +357,11 @@ std::expected<std::uint32_t, std::string> runGPUPortInProcess(Simulation& sim, s
                                      plannedSimulationTimeSeconds:0.0
                                                    excitationF0Hz:0.0
                                                    excitationFcHz:0.0
-                                                      excitedNetName:@(excitedNetName.c_str())]);
+                                                      excitedNetName:@(excitedNetName.c_str())
+                                                         currentStep:0
+                                                          totalSteps:0
+                                                      portsCompleted:static_cast<NSInteger>(portsCompleted)
+                                                    excitedPortCount:static_cast<NSInteger>(totalExcitedPorts)]);
     }
     if (auto result = sim.prepareRunDirectory(excitedPortNumber); !result) {
         return std::unexpected(result.error());
@@ -282,22 +386,7 @@ std::expected<std::uint32_t, std::string> runGPUPortInProcess(Simulation& sim, s
     portConfig.f0 = sim.excitationF0();
     portConfig.fc = sim.excitationFc();
     portConfig.maxTimesteps = sim.maxTimesteps();
-    for (const auto& loop : sim.slicedBoard().cutoutLoops) {
-        std::vector<copper::CopperFDTDPortConfig::DomainPoint> out;
-        out.reserve(loop.size());
-        for (const auto& point : loop) out.push_back({point.x(), point.y()});
-        portConfig.domainCutoutLoops.push_back(std::move(out));
-    }
-    const auto gridLines = sim.computedGridLines();
-    const auto& bounds = sim.slicedBoard().bounds;
-    const auto depth = static_cast<std::size_t>(sim.config().grid().absorbingBoundaryCells());
-    if (gridLines.x.size() > 2 * depth && gridLines.y.size() > 2 * depth) {
-        portConfig.domainPadding = std::max({bounds.xMin - gridLines.x[depth],
-                                             gridLines.x[gridLines.x.size() - depth - 1] - bounds.xMax,
-                                             bounds.yMin - gridLines.y[depth],
-                                             gridLines.y[gridLines.y.size() - depth - 1] - bounds.yMax});
-    }
-    portConfig.domainCPMLCellSize = sim.config().grid().max();
+    applyDomainConfig(portConfig, sim.slicedBoard(), sim.computedGridLines(), sim.config());
     copper::CopperFDTDProgressCallback onCopperProgress;
     if (progressHandler) {
         onCopperProgress = [&](const copper::CopperFDTDProgress& p) {
@@ -327,7 +416,11 @@ std::expected<std::uint32_t, std::string> runGPUPortInProcess(Simulation& sim, s
                              plannedSimulationTimeSeconds:p.plannedSimulationTimeSeconds
                                            excitationF0Hz:p.excitationF0Hz
                                            excitationFcHz:p.excitationFcHz
-                                              excitedNetName:@(excitedNetName.c_str())];
+                                              excitedNetName:@(excitedNetName.c_str())
+                                                 currentStep:static_cast<NSInteger>(p.currentStep)
+                                                  totalSteps:static_cast<NSInteger>(p.totalSteps)
+                                              portsCompleted:static_cast<NSInteger>(portsCompleted)
+                                            excitedPortCount:static_cast<NSInteger>(totalExcitedPorts)];
             progressHandler(progress);
         };
     }
@@ -343,7 +436,8 @@ std::expected<std::uint32_t, std::string> runGPUPortInProcess(Simulation& sim, s
     // viewer's resident memory remains bounded independently of the series length.
     const copper::CopperFDTDRunResult gpuResult = copper::runFDTDPortOnGPU(
         sim.csx(), portConfig, onCopperProgress, cpmlAlphaMax,
-        static_cast<std::uint32_t>(depth), [&] { return cancelRequested.load(); }, fieldSeries);
+        static_cast<std::uint32_t>(sim.config().grid().absorbingBoundaryCells()), [&] { return cancelRequested.load(); },
+        fieldSeries);
     // Best-effort restore -- `cwd` no longer existing shouldn't discard an otherwise-successful run's
     // own results (unlike currentPathOrError()'s other two call sites above, both load-bearing).
     std::error_code restoreEc;
@@ -504,12 +598,18 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
     // needed again unless Results is invalidated, at which point both objects are discarded and a
     // fresh run rebuilds them together.
     std::shared_ptr<Postprocessor> _postprocessor;
+    // Set by -invalidatePostprocessing: the next Results-stage run rebuilds _results from the FDTD
+    // port data already on disk (no new FDTD pass) when _results itself isn't in memory -- e.g.
+    // after a reopen, which restores only _postprocessor.
+    BOOL _reloadResultsFromDisk;
 
     // -geometryPreview's own cache -- buildGeometryPreview() now does real work (a libkicad
     // component-model export subprocess, plus via mesh generation), so unlike the flyweight it used
     // to be, it must not be rebuilt on every call. Reset alongside `_geometry`/`_grid` themselves
     // (see -invalidateFromStage:) since it's derived from exactly those two.
     EMSGeometryPreview* _geometryPreviewCache;
+    // -gridStatistics's own cache, reset alongside _geometryPreviewCache.
+    EMSGridStatistics* _gridStatisticsCache;
     EMSResultsPreview* _resultsPreviewCache;
 
     // One file per excited port. The Objective-C snapshots contain only metadata/lazy frame handles,
@@ -762,7 +862,11 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
                                           plannedSimulationTimeSeconds:0
                                                         excitationF0Hz:0
                                                         excitationFcHz:0
-                                                           excitedNetName:nil]);
+                                                           excitedNetName:nil
+                                                              currentStep:0
+                                                               totalSteps:0
+                                                           portsCompleted:0
+                                                         excitedPortCount:0]);
         }
     };
     auto reportGeometryProcessingProgress = [&](const kiems::GeometryProcessingProgress& progress) {
@@ -824,6 +928,7 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
         // still empty) would otherwise keep serving that stale, grid-less snapshot forever now that
         // grid lines actually exist.
         _geometryPreviewCache = nil;
+        _gridStatisticsCache = nil;
         // Written to disk too (matching `kiems -g`) so a later CLI invocation against this same
         // saved package (e.g. `kiems -s`) can pick up straight from here without redoing any of
         // this work itself -- see GeometryResult::load()'s own doc comment. Unlike GeometryResult::
@@ -860,6 +965,26 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
 
     std::vector<double> frequencies =
         linspace(_scaledConfig->frequency().start(), _scaledConfig->frequency().stop(), kiems::constants::frequencySampleCount);
+
+    if (!_results.has_value() && _reloadResultsFromDisk) {
+        // No-op runner: generateResults() still sets up each port and then reads that port's
+        // already-written probe files via getPortParameters(), it just never runs FDTD.
+        auto loadOnlyRunner = [](Simulation&, std::int32_t) -> std::expected<std::uint32_t, std::string> {
+            return std::uint32_t{0};
+        };
+        auto resultsResult =
+            kiems::generateResults(*_grid, *_scaledConfig, options, *_paths, *_board, frequencies, loadOnlyRunner);
+        if (!resultsResult) {
+            if (error) *error = makeError("Could not reload FDTD results for postprocessing: " + resultsResult.error());
+            return NO;
+        }
+        if (resultsResult->byExcitedPort.empty()) {
+            if (error) *error = makeError("No port is configured to excite; nothing to simulate.");
+            return NO;
+        }
+        _results.emplace(*_grid, std::move(*resultsResult));
+        _reloadResultsFromDisk = NO;
+    }
 
     if (!_results.has_value()) {
         std::size_t totalExcitedPorts = 0;
@@ -974,6 +1099,17 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
         buildGeometryPreview(_geometry->geometry().slicedBoard, *_simConfig, *_scaledConfig, *_paths, *_board,
                              gridLines);
     return _geometryPreviewCache;
+}
+
+- (nullable EMSGridStatistics*)gridStatistics {
+    if (!_geometry.has_value() || !_grid.has_value()) {
+        return nil;
+    }
+    if (!_gridStatisticsCache) {
+        _gridStatisticsCache = computeGridStatistics(_geometry->geometry().slicedBoard, _grid->grid().gridLines,
+                                                     *_scaledConfig, *_simConfig);
+    }
+    return _gridStatisticsCache;
 }
 
 - (nullable EMSGeometryLayer*)geometryLayerNamed:(NSString*)layerName error:(NSError**)error {
@@ -1231,7 +1367,18 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
     _adversarialFieldSnapshotCache = refreshedCache;
 }
 
+- (void)invalidatePostprocessing {
+    if (_postprocessor == nullptr && !_results.has_value()) {
+        // Nothing has been simulated (or restored) yet -- a normal Results run will postprocess.
+        return;
+    }
+    _postprocessor.reset();
+    _resultsPreviewCache = nil;
+    _reloadResultsFromDisk = !_results.has_value();
+}
+
 - (void)invalidateFromStage:(EMSPipelineStage)stage {
+    _reloadResultsFromDisk = NO;
     // The scratch directory is later copied wholesale back into the document package. Remove the
     // invalidated stage's persisted form as well as its in-memory objects, otherwise saving after a
     // config edit (but before rerunning) would preserve stale files that a future launch could
@@ -1271,6 +1418,7 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
         _grid.reset();
         _geometry.reset();
         _geometryPreviewCache = nil;
+        _gridStatisticsCache = nil;
         _configured.reset();
         _board.reset();
         _paths.reset();
@@ -1291,6 +1439,7 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
         }
         _grid.reset();
         _geometryPreviewCache = nil;
+        _gridStatisticsCache = nil;
         break;
     case EMSPipelineStageResults:
         // Geometry (and the grid lines placed on it) stay valid -- only the FDTD run and its own

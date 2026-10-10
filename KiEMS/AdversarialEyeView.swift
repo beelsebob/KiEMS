@@ -32,6 +32,8 @@ final class AdversarialEyeView: NSStackView {
         for label in [openingLabel, stabilityLabel] {
             label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
             label.isSelectable = true
+            // Nonzero from the start -- zero means automatic wrapping; see layout().
+            label.preferredMaxLayoutWidth = 400
         }
         openingLabel.textColor = .secondaryLabelColor
         statisticsGrid.translatesAutoresizingMaskIntoConstraints = false
@@ -74,6 +76,18 @@ final class AdversarialEyeView: NSStackView {
     @available(*, unavailable)
     required init(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    /// The wrapping labels get an explicit wrap width rather than wrapping automatically to
+    /// whatever width Auto Layout gives them: automatic wrapping makes every label's height (and
+    /// so every following eye's position) a function of the results stack's width, which makes the
+    /// layout engine's rows dense -- switching away from a page of eyes took minutes. See
+    /// SmithChartView's heightConstraint for the same problem.
+    override func layout() {
+        super.layout()
+        for label in [openingLabel, stabilityLabel] where label.preferredMaxLayoutWidth != bounds.width {
+            label.preferredMaxLayoutWidth = bounds.width
+        }
     }
 
     /// The convergence of the noisy eye's height with draws, for a separate disclosure graph; nil

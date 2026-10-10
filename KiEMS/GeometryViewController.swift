@@ -13,9 +13,18 @@ final class GeometryViewController: NSViewController {
 
     private let geometryView = GeometryView()
     private let progressStatus = ProgressStatusView()
+    private let banner = StatusBannerView()
     private let showGridCheckbox = NSButton(checkboxWithTitle: "Show Grid", target: nil, action: nil)
+    /// Grid size and, once StepTimingModel has measured this machine, the predicted step and run
+    /// times -- listed under the "Show Grid" checkbox.
+    private let gridStatisticsLabel = NSTextField(labelWithString: "")
 
     private var errors: [Int: String] = [:]
+    /// The last geometry a simulation built before a config edit invalidated it -- kept and shown
+    /// (under an "out of date" banner listing staleReasons) until it's regenerated. See
+    /// invalidateCache(forSimulationIndex:reason:).
+    private var staleGeometry: [Int: EMSGeometryPreview] = [:]
+    private var staleReasons: [Int: [String]] = [:]
     // Mirrors JobScheduler's own status for this simulation's .geometryGeneration job -- see
     // syncFromScheduler(). Not the source of truth (JobScheduler.jobs is), just this VC's own cached
     // view of it for refreshDisplay() to read synchronously.
@@ -84,6 +93,9 @@ final class GeometryViewController: NSViewController {
         geometryView.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(geometryView)
 
+        banner.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(banner)
+
         progressStatus.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(progressStatus)
 
@@ -93,31 +105,51 @@ final class GeometryViewController: NSViewController {
         // own backgroundColor doc comment) regardless of the app's light/dark appearance, so an
         // adaptive-appearance checkbox needs pinning the same way GeometryView's legend text does.
         showGridCheckbox.appearance = NSAppearance(named: .darkAqua)
-        showGridCheckbox.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(showGridCheckbox)
+        // Listed beneath the layer rows in the view's own legend, below a short divider. Hiding
+        // the checkbox hides the divider with it.
+        let divider = NSBox()
+        divider.boxType = .custom
+        divider.borderWidth = 0
+        divider.fillColor = NSColor(calibratedWhite: 1, alpha: 0.25)
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        divider.heightAnchor.constraint(equalToConstant: 1).isActive = true
+        divider.widthAnchor.constraint(equalToConstant: 80).isActive = true
+        gridStatisticsLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        gridStatisticsLabel.textColor = NSColor(calibratedWhite: 1, alpha: 0.7)
+        gridStatisticsLabel.maximumNumberOfLines = 0
+        let gridFooter = NSStackView(views: [divider, showGridCheckbox, gridStatisticsLabel])
+        gridFooter.orientation = .vertical
+        gridFooter.alignment = .leading
+        gridFooter.spacing = 6
+        gridFooter.edgeInsets = NSEdgeInsets(top: 4, left: 0, bottom: 0, right: 0)
+        showGridCheckbox.font = .systemFont(ofSize: 11)
+        geometryView.legendFooterView = gridFooter
 
         NSLayoutConstraint.activate([
-            geometryView.topAnchor.constraint(equalTo: container.topAnchor),
+            banner.topAnchor.constraint(equalTo: container.topAnchor),
+            banner.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            banner.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+
+            geometryView.topAnchor.constraint(equalTo: banner.bottomAnchor),
             geometryView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             geometryView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             geometryView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
 
-            progressStatus.topAnchor.constraint(equalTo: container.topAnchor),
+            progressStatus.topAnchor.constraint(equalTo: banner.bottomAnchor),
             progressStatus.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             progressStatus.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             progressStatus.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-
-            showGridCheckbox.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
-            showGridCheckbox.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
         ])
 
         view = container
     }
 
     /// Called by DocumentWindowController whenever the user selects a simulation's "Geometry"
-    /// sub-entry (including re-selecting one already showing). Shows a cached result or error
-    /// immediately if there is one; otherwise kicks off the geometry step in the background.
+    /// sub-entry (including re-selecting one already showing). Shows a cached, out-of-date or failed
+    /// result if there is one; never starts the geometry step by itself -- that's left to the
+    /// banner's "Generate Geometry" button.
     func showGeometry(forSimulationIndex index: Int) {
+        if currentIndex != index { banner.hide(force: true) }
         currentIndex = index
         loadLayerCatalogIfNeeded(forSimulationIndex: index)
         refreshDisplay()
@@ -128,12 +160,39 @@ final class GeometryViewController: NSViewController {
         // .geometryGeneration's own job always computes grid lines too, not just the sliced board
         // (see JobKind's own doc comment) -- so hasStage(.grid), not .geometry, is the real "is
         // there nothing left to do" check here.
-        guard !pipeline.hasStage(.grid), errors[index] == nil, !runningIndices.contains(index) else { return }
-        JobScheduler.shared.request(document: document, simulationName: name, target: .geometryGeneration)
+        if pipeline.hasStage(.grid) {
+            // Already built (eg by a Results run) -- make sure the row reflects that.
+            onRunFinished?(index, true)
+        }
+    }
+
+    /// Whether `index` has out-of-date geometry kept for display -- see staleGeometry.
+    func hasStaleGeometry(forSimulationIndex index: Int) -> Bool {
+        staleGeometry[index] != nil
+    }
+
+    /// The banner's "Generate Geometry" button.
+    private func generateGeometry() {
+        guard let currentIndex else { return }
+        generateGeometry(forSimulationIndex: currentIndex)
+    }
+
+    /// Starts (or queues) `index`'s geometry job -- the banner button for the showing simulation, or
+    /// the sidebar's "Generate Geometry" context-menu item for any simulation.
+    func generateGeometry(forSimulationIndex index: Int) {
+        guard let document, index < document.config.simulations.count, !runningIndices.contains(index) else { return }
+        errors[index] = nil
+        JobScheduler.shared.request(document: document, simulationName: document.config.simulations[index].name,
+                                    target: .geometryGeneration)
         // request() may have only queued this job behind another simulation's own in-flight run --
-        // refresh again now (not just the pre-request call above) so the freshly-queued state is
-        // shown immediately instead of a blank content area (see ProgressStatusView.State.queued).
+        // refresh now so the freshly-queued state is shown immediately instead of a blank content
+        // area (see ProgressStatusView.State.queued).
         refreshDisplay()
+    }
+
+    private func isBusy(forSimulationIndex index: Int, name: String, document: Document) -> Bool {
+        runningIndices.contains(index)
+            || JobScheduler.shared.job(document: document, simulationName: name, kind: .geometryGeneration)?.status == .queued
     }
 
     /// Called by DocumentWindowController whenever something that would change this simulation's
@@ -144,9 +203,28 @@ final class GeometryViewController: NSViewController {
     /// this simulation's Geometry entry is the one currently showing: just invalidates the shared
     /// pipeline's cache from the Geometry stage onward (which also drops any cached Results, since
     /// those were built from the now-stale geometry) and clears this VC's own error, so the next
-    /// explicit Geometry selection (showGeometry) is what triggers the real re-run.
-    func invalidateCache(forSimulationIndex index: Int) {
+    /// explicit run is what regenerates it.
+    ///
+    /// `reason` (a short user-facing description of the edit) keeps the geometry being discarded
+    /// around as out of date, listed under that reason in this tab's banner; nil (File > Regenerate
+    /// Geometry) genuinely discards it.
+    func invalidateCache(forSimulationIndex index: Int, reason: String?) {
         errors[index] = nil
+        if let reason, let document, index < document.config.simulations.count {
+            let pipeline = document.pipeline(forSimulationNamed: document.config.simulations[index].name)
+            if let detailed = pipeline.geometryPreview() {
+                // The merged catalog is what was actually on screen (every layer, not just the
+                // detailed preview's own) -- see refreshDisplay().
+                staleGeometry[index] = mergedDetailedPreview.contains(index) ? (layerCatalogs[index] ?? detailed) : detailed
+                staleReasons[index] = []
+            }
+            if staleGeometry[index] != nil, !(staleReasons[index] ?? []).contains(reason) {
+                staleReasons[index, default: []].append(reason)
+            }
+        } else {
+            staleGeometry[index] = nil
+            staleReasons[index] = nil
+        }
         layerLoaders[index]?.cancel()
         layerLoaders[index] = nil
         layerCatalogs[index] = nil
@@ -169,15 +247,21 @@ final class GeometryViewController: NSViewController {
 
     private func refreshDisplay() {
         guard let currentIndex, let document, currentIndex < document.config.simulations.count else {
-            showGridCheckbox.isHidden = true
+            geometryView.legendFooterView?.isHidden = true
+            banner.hide()
             return
         }
         let name = document.config.simulations[currentIndex].name
         let pipeline = document.pipeline(forSimulationNamed: name)
         let wantsGrid = gridOverlayEnabled[currentIndex] ?? false
         showGridCheckbox.state = wantsGrid ? .on : .off
+        let busy = isBusy(forSimulationIndex: currentIndex, name: name, document: document)
+        let generate: () -> Void = { [weak self] in self?.generateGeometry() }
+        banner.hide()
 
         if let detailed = pipeline.geometryPreview() {
+            staleGeometry[currentIndex] = nil
+            staleReasons[currentIndex] = nil
             let preview: EMSGeometryPreview
             if let catalog = layerCatalogs[currentIndex] {
                 if !mergedDetailedPreview.contains(currentIndex) {
@@ -198,24 +282,45 @@ final class GeometryViewController: NSViewController {
             geometryView.showGrid = wantsGrid
             geometryView.isHidden = false
             progressStatus.setState(.hidden)
-            showGridCheckbox.isHidden = false
+            geometryView.legendFooterView?.isHidden = false
+            updateGridStatistics(pipeline.gridStatistics())
+        } else if let stale = staleGeometry[currentIndex] {
+            if geometryView.preview !== stale { geometryView.preview = stale }
+            geometryView.showGrid = false
+            geometryView.isHidden = false
+            progressStatus.setState(.hidden)
+            geometryView.legendFooterView?.isHidden = true
+            if !busy {
+                banner.show(style: .warning, title: "Warning: Geometry is out of date:",
+                            details: staleReasons[currentIndex] ?? [], buttonTitle: "Generate Geometry",
+                            action: generate)
+            }
         } else if let catalog = layerCatalogs[currentIndex] {
             if geometryView.preview !== catalog { geometryView.preview = catalog }
             geometryView.showGrid = false
             geometryView.isHidden = false
             progressStatus.setState(.hidden)
-            showGridCheckbox.isHidden = true
+            geometryView.legendFooterView?.isHidden = true
+            if let error = errors[currentIndex] {
+                banner.show(style: .warning, title: "Geometry generation failed: \(error)",
+                            buttonTitle: "Generate Geometry", action: generate)
+            } else if !busy {
+                banner.show(style: .info, title: "Geometry has not yet been generated.",
+                            buttonTitle: "Generate Geometry", action: generate)
+            }
         } else if let error = errors[currentIndex] {
             geometryView.isHidden = true
             progressStatus.setState(.error(error))
-            showGridCheckbox.isHidden = true
+            geometryView.legendFooterView?.isHidden = true
+            banner.show(style: .warning, title: "Geometry generation failed", buttonTitle: "Generate Geometry",
+                        action: generate)
         } else if runningIndices.contains(currentIndex) {
             geometryView.isHidden = true
             progressStatus.setState(.progress(status: "Processing Geometry…",
                                               fraction: progressFraction[currentIndex] ?? 0,
                                               timeEstimateText: timeEstimateText[currentIndex]
                                                   ?? TimeRemainingFormatter.string(secondsRemaining: nil)))
-            showGridCheckbox.isHidden = true
+            geometryView.legendFooterView?.isHidden = true
         } else if JobScheduler.shared.job(document: document, simulationName: name,
                                           kind: .geometryGeneration)?.status == .queued {
             // A job exists for this simulation but the scheduler hasn't started it yet (waiting
@@ -223,12 +328,35 @@ final class GeometryViewController: NSViewController {
             // own doc comment for why this is shown rather than a blank content area.
             geometryView.isHidden = true
             progressStatus.setState(.queued("Waiting to start…", currentJob: JobScheduler.shared.jobs.first?.progressStatusInfo))
-            showGridCheckbox.isHidden = true
+            geometryView.legendFooterView?.isHidden = true
         } else {
             geometryView.isHidden = true
             progressStatus.setState(.hidden)
-            showGridCheckbox.isHidden = true
+            geometryView.legendFooterView?.isHidden = true
+            banner.show(style: .info, title: "Geometry has not yet been generated.",
+                        buttonTitle: "Generate Geometry", action: generate)
         }
+    }
+
+    private func updateGridStatistics(_ stats: EMSGridStatistics?) {
+        guard let stats else {
+            gridStatisticsLabel.isHidden = true
+            return
+        }
+        let count = StepTimingFormat.cellCount
+        var lines = [
+            "Grid \(stats.countX) × \(stats.countY) × \(stats.countZ)",
+            "Core cells: \(count(stats.coreCells))",
+            "Boundary cells: \(count(stats.boundaryCells))",
+        ]
+        if let rates = StepTimingModel.shared.rates {
+            let step = rates.secondsPerStep(coreCells: stats.coreCells, boundaryCells: stats.boundaryCells)
+            let maxSteps = stats.excitedPortCount * stats.maxTimestepsPerPort
+            lines.append("Predicted step: \(StepTimingFormat.stepDuration(step))")
+            lines.append("Predicted run: up to \(StepTimingFormat.runDuration(step * Double(maxSteps)))")
+        }
+        gridStatisticsLabel.stringValue = lines.joined(separator: "\n")
+        gridStatisticsLabel.isHidden = false
     }
 
     private func loadLayerCatalogIfNeeded(forSimulationIndex index: Int) {
@@ -266,6 +394,9 @@ final class GeometryViewController: NSViewController {
                     runningIndices.insert(index)
                     runStartTime[index] = Date()
                     onRunStateChanged?(index, true)
+                    if currentIndex == index {
+                        banner.showTransient(style: .success, title: "Processing Geometry")
+                    }
                     refreshDisplay()
                 }
                 if let progress = job?.progress {

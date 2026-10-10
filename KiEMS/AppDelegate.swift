@@ -107,8 +107,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // No explicit target -- routed through the responder chain to the frontmost document
         // window's own DocumentWindowController, same as Close/Save above (see
         // DocumentWindowController.regenerateGeometry(_:)'s own doc comment for what this discards).
-        fileMenu.addItem(withTitle: "Regenerate Geometry",
-                         action: #selector(DocumentWindowController.regenerateGeometry(_:)), keyEquivalent: "")
+        let invalidateResultsItem = NSMenuItem(title: "Invalidate Results", action: nil, keyEquivalent: "")
+        let invalidateResultsMenu = NSMenu(title: "Invalidate Results")
+        invalidateResultsItem.submenu = invalidateResultsMenu
+        invalidateResultsMenu.addItem(withTitle: "Regenerate Geometry",
+                                      action: #selector(DocumentWindowController.regenerateGeometry(_:)), keyEquivalent: "")
+        invalidateResultsMenu.addItem(withTitle: "Reset Results",
+                                      action: #selector(DocumentWindowController.resetResults(_:)), keyEquivalent: "")
+        invalidateResultsMenu.addItem(withTitle: "Rerun Postprocessing",
+                                      action: #selector(DocumentWindowController.rerunPostprocessing(_:)), keyEquivalent: "")
+        fileMenu.addItem(invalidateResultsItem)
 
         let editMenuItem = NSMenuItem()
         mainMenu.addItem(editMenuItem)

@@ -115,6 +115,15 @@ final class SimulationListViewController: NSViewController {
     /// this controller wouldn't notice a rename made there without its own onNameChanged callback.
     var onSimulationRenamed: ((Int) -> Void)?
 
+    /// Context-menu actions, each fired with the clicked row's simulation index -- the sidebar has
+    /// no access to the pipeline itself, so DocumentWindowController routes these to
+    /// GeometryViewController/SimulationResultsViewController and its own invalidate(...).
+    var onGenerateGeometry: ((Int) -> Void)?
+    var onRunSimulation: ((Int) -> Void)?
+    /// `includingGeometry` is true for the Geometry row's "Invalidate Geometry" (which takes the
+    /// results built from it along with it), false for every other row's "Invalidate Results".
+    var onInvalidate: ((Int, _ includingGeometry: Bool) -> Void)?
+
     init(document: Document) {
         self.document = document
         super.init(nibName: nil, bundle: nil)
@@ -175,6 +184,11 @@ final class SimulationListViewController: NSViewController {
         outlineView.delegate = self
         outlineView.dataSource = self
         outlineView.onClickOnAlreadySelectedRow = { [weak self] row in self?.beginRenamingIfSimulationRow(row) }
+        // Rebuilt per right-click in menuNeedsUpdate, against outlineView.clickedRow.
+        let contextMenu = NSMenu()
+        contextMenu.autoenablesItems = false
+        contextMenu.delegate = self
+        outlineView.menu = contextMenu
         // .sourceList style used to imply a chunky row height on its own; now that style is .plain
         // (see below), rowSizeStyle no longer has any real effect on this macOS version (measured:
         // still just 17pt with .large set) -- an explicit rowHeight is the only reliable way left to
@@ -417,6 +431,12 @@ final class SimulationListViewController: NSViewController {
         setPhaseState(.invalid, forSimulationIndex: index, kind: kind)
     }
 
+    /// Marks `kind`'s own phase `.outOfDate` for `index` -- a config edit invalidated it, but its
+    /// owning view controller kept the previous output to show (flagged) until it's re-run.
+    func setOutOfDate(forSimulationIndex index: Int, kind: JobKind) {
+        setPhaseState(.outOfDate, forSimulationIndex: index, kind: kind)
+    }
+
     @objc private func selectionChanged() {
         updateButtonEnabledState()
         let row = outlineView.selectedRow
@@ -616,7 +636,7 @@ extension SimulationListViewController: NSOutlineViewDelegate {
     /// so a distinct reuse identifier per symbol (rather than per node) is enough to recycle them.
     /// `status` drives the row's trailing indicator: a determinate circular progress ring while
     /// `.inProgress`, otherwise a small tinted status glyph (blue outline "invalid", green filled
-    /// "succeeded", yellow triangle "failed") -- every child row gets one, including Field Viewer.
+    /// "succeeded", yellow filled "out of date", yellow triangle "failed") -- every child row gets one, including Field Viewer.
     /// Both indicator subviews are built once and reused alongside the rest of the cell, just
     /// re-valued/re-toggled fresh on every call.
     private static func makeChildCell(
@@ -715,6 +735,11 @@ extension SimulationListViewController: NSOutlineViewDelegate {
             statusImageView.isHidden = false
             statusImageView.image = Self.succeededImage
             statusImageView.contentTintColor = .systemGreen
+        case .outOfDate:
+            spinner.isHidden = true
+            statusImageView.isHidden = false
+            statusImageView.image = Self.succeededImage
+            statusImageView.contentTintColor = .systemYellow
         case .failed:
             spinner.isHidden = true
             statusImageView.isHidden = false
@@ -722,6 +747,62 @@ extension SimulationListViewController: NSOutlineViewDelegate {
             statusImageView.contentTintColor = .systemYellow
         }
         return cell
+    }
+}
+
+extension SimulationListViewController: NSMenuDelegate {
+    /// Geometry row: Generate Geometry / Invalidate Geometry. Every other row (the simulation itself,
+    /// Simulation Results, Field Viewer): Run Simulation / Invalidate Results. Run items are greyed
+    /// out while their phase is already current or in flight; invalidate items whenever there's
+    /// nothing (current, out of date or failed) to throw away, or while it's still running.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        guard let node = outlineView.item(atRow: outlineView.clickedRow) as? SimulationListNode else { return }
+        let index = node.kind.simulationIndex
+        let geometry = phaseState(forSimulationIndex: index, kind: .geometryGeneration)
+        let simulation = phaseState(forSimulationIndex: index, kind: .simulation)
+        let isRunning = { (state: PhaseState) -> Bool in
+            if case .inProgress = state { return true }
+            return false
+        }
+
+        let runItem: NSMenuItem
+        let invalidateItem: NSMenuItem
+        if case .geometry = node.kind {
+            runItem = NSMenuItem(title: "Generate Geometry", action: #selector(generateGeometryFromMenu(_:)), keyEquivalent: "")
+            runItem.isEnabled = geometry != .succeeded && !isRunning(geometry)
+            invalidateItem = NSMenuItem(title: "Invalidate Geometry", action: #selector(invalidateFromMenu(_:)),
+                                        keyEquivalent: "")
+            invalidateItem.isEnabled = geometry != .invalid && !isRunning(geometry) && !isRunning(simulation)
+            invalidateItem.representedObject = true
+        } else {
+            let fieldViewer = phaseState(forSimulationIndex: index, kind: .fieldPostProcessing)
+            runItem = NSMenuItem(title: "Run Simulation", action: #selector(runSimulationFromMenu(_:)), keyEquivalent: "")
+            // A results run builds geometry first, which only shows on the Geometry row.
+            runItem.isEnabled = simulation != .succeeded && !isRunning(simulation) && !isRunning(geometry)
+            invalidateItem = NSMenuItem(title: "Invalidate Results", action: #selector(invalidateFromMenu(_:)),
+                                        keyEquivalent: "")
+            invalidateItem.isEnabled = (simulation != .invalid || fieldViewer != .invalid)
+                && !isRunning(simulation) && !isRunning(fieldViewer)
+            invalidateItem.representedObject = false
+        }
+        for item in [runItem, invalidateItem] {
+            item.target = self
+            item.tag = index
+            menu.addItem(item)
+        }
+    }
+
+    @objc private func generateGeometryFromMenu(_ sender: NSMenuItem) {
+        onGenerateGeometry?(sender.tag)
+    }
+
+    @objc private func runSimulationFromMenu(_ sender: NSMenuItem) {
+        onRunSimulation?(sender.tag)
+    }
+
+    @objc private func invalidateFromMenu(_ sender: NSMenuItem) {
+        onInvalidate?(sender.tag, sender.representedObject as? Bool ?? false)
     }
 }
 

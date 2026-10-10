@@ -66,7 +66,8 @@ enum BoardGeometrySlot: Hashable {
     /// Index into the preview's `layers`, matching GeometryView.hiddenLayerIndices.
     case layer(Int)
     case vias
-    case components
+    /// Front (`back == false`) or back STEP models -- see BoardGeometrySnapshot.backComponentReferences.
+    case components(back: Bool)
     case topSolderMask
     case bottomSolderMask
 }
@@ -150,7 +151,7 @@ final class BoardGeometry {
     let pickPriorityRanges: [BoardGeometrySlot: Range<Int>]
     /// STEP-model pick geometry per footprint, drawn with the priority bias whenever component
     /// models are visible.
-    let componentPickRanges: [String: Range<Int>]
+    let componentPickRanges: [String: (slot: BoardGeometrySlot, range: Range<Int>)]
     let targetsByIdentifier: [UInt32: BoardPickTarget]
 
     /// Pick geometry per target, split by the slot it came from so hidden layers can be skipped.
@@ -179,7 +180,7 @@ final class BoardGeometry {
                      pickPositions: MTLBuffer?, pickIdentifiers: MTLBuffer?,
                      pickRanges: [BoardGeometrySlot: Range<Int>],
                      pickPriorityRanges: [BoardGeometrySlot: Range<Int>],
-                     componentPickRanges: [String: Range<Int>],
+                     componentPickRanges: [String: (slot: BoardGeometrySlot, range: Range<Int>)],
                      targetsByIdentifier: [UInt32: BoardPickTarget],
                      positionsByTarget: [BoardPickTarget: [(slot: BoardGeometrySlot, positions: [Position3])]],
                      pinTargets: [String: BoardPickTarget],
@@ -212,12 +213,16 @@ final class BoardGeometry {
     }
 
     /// The ranges of `ranges` whose slot is visible, in buffer order with adjacent runs merged, so
-    /// an all-visible board is still one draw call.
-    static func drawRanges(_ ranges: [BoardGeometrySlot: Range<Int>],
+    /// an all-visible board is still one draw call. `reversed` returns them last-slot-first and
+    /// unmerged instead -- the translucent streams are stored bottom-to-top, which is only
+    /// back-to-front when the camera is above the board.
+    static func drawRanges(_ ranges: [BoardGeometrySlot: Range<Int>], reversed: Bool = false,
                            isVisible: (BoardGeometrySlot) -> Bool) -> [Range<Int>] {
+        let visible = ranges.compactMap({ isVisible($0.key) && !$0.value.isEmpty ? $0.value : nil })
+            .sorted(by: { $0.lowerBound < $1.lowerBound })
+        if reversed { return visible.reversed() }
         var merged: [Range<Int>] = []
-        for range in ranges.compactMap({ isVisible($0.key) && !$0.value.isEmpty ? $0.value : nil })
-            .sorted(by: { $0.lowerBound < $1.lowerBound }) {
+        for range in visible {
             if let last = merged.last, last.upperBound == range.lowerBound {
                 merged[merged.count - 1] = last.lowerBound..<range.upperBound
             } else {
@@ -249,6 +254,8 @@ struct BoardGeometrySnapshot {
     let layers: [Layer]
     let viaMeshTriangles: [EMSGeometryComponentTriangle]
     let componentMeshTriangles: [EMSGeometryComponentTriangle]
+    /// Footprints whose models sit on the bottom of the board; every other model is a front one.
+    let backComponentReferences: Set<String>
     let outline: [CGPoint]
     let markerZ: Float
     let outlineColor: SIMD4<Float>
@@ -363,11 +370,11 @@ private final class BoardGeometryChunk {
             if triangle.opacity < 1 {
                 var translucentColor = color
                 translucentColor.w = Float(triangle.opacity)
-                // One simulation unit (0.1 micron) behind this layer's opaque copper: enough to
-                // make tracks/pads win the depth test without visibly separating the pour.
-                let zoneA = Position3(a.x, a.y, z - 1)
-                let zoneB = Position3(b.x, b.y, z - 1)
-                let zoneC = Position3(c.x, c.y, z - 1)
+                // Coplanar with this layer's opaque copper; GeometryView draws the stream with a
+                // depth bias away from the camera so tracks/pads win from either side of the board.
+                let zoneA = Position3(a.x, a.y, z)
+                let zoneB = Position3(b.x, b.y, z)
+                let zoneC = Position3(c.x, c.y, z)
                 chunk.zone.appendTriangle(zoneA, zoneB, zoneC, color: translucentColor, key: key)
                 if let pickTarget { chunk.addPick([zoneA, zoneB, zoneC], target: pickTarget) }
             } else {
@@ -440,7 +447,8 @@ final class BoardGeometryBuilder {
     }
     private var layerCache: [ObjectIdentifier: LayerCacheEntry] = [:]
     private var meshCache: (preview: EMSGeometryPreview, revision: UInt,
-                            vias: BoardGeometryChunk, components: BoardGeometryChunk)?
+                            vias: BoardGeometryChunk, frontComponents: BoardGeometryChunk,
+                            backComponents: BoardGeometryChunk)?
 
     init(device: MTLDevice) {
         self.device = device
@@ -495,7 +503,7 @@ final class BoardGeometryBuilder {
         // immutable inputs into fresh chunks. On a first load that is every layer, so convert
         // them concurrently; only the cache updates afterwards touch builder state.
         let staleLayers = snapshot.layers.indices.filter { cachedChunk(for: snapshot.layers[$0]) == nil }
-        let jobCount = staleLayers.count + (meshesCached ? 0 : 2)
+        let jobCount = staleLayers.count + (meshesCached ? 0 : 3)
         var built = [BoardGeometryChunk?](repeating: nil, count: jobCount)
         built.withUnsafeMutableBufferPointer { results in
             DispatchQueue.concurrentPerform(iterations: jobCount) { job in
@@ -504,7 +512,10 @@ final class BoardGeometryBuilder {
                 } else if job == staleLayers.count {
                     results[job] = BoardGeometryChunk.vias(snapshot.viaMeshTriangles)
                 } else {
-                    results[job] = BoardGeometryChunk.components(snapshot.componentMeshTriangles)
+                    let back = job == staleLayers.count + 2
+                    results[job] = BoardGeometryChunk.components(snapshot.componentMeshTriangles.filter {
+                        snapshot.backComponentReferences.contains($0.footprintReference ?? "") == back
+                    })
                 }
             }
         }
@@ -515,13 +526,14 @@ final class BoardGeometryBuilder {
         }
         if !meshesCached {
             meshCache = (snapshot.preview, snapshot.previewRevision,
-                         built[staleLayers.count]!, built[staleLayers.count + 1]!)
+                         built[staleLayers.count]!, built[staleLayers.count + 1]!, built[staleLayers.count + 2]!)
         }
-        let meshes = (vias: meshCache!.vias, components: meshCache!.components)
+        let meshes = meshCache!
         var chunks: [(slot: BoardGeometrySlot, chunk: BoardGeometryChunk)] =
             snapshot.layers.map { ($0.slot, cachedChunk(for: $0)!) }
         chunks.append((.vias, meshes.vias))
-        chunks.append((.components, meshes.components))
+        chunks.append((.components(back: false), meshes.frontComponents))
+        chunks.append((.components(back: true), meshes.backComponents))
 
         signposter.endInterval("Geometry chunks", chunksTiming)
         let mergeTiming = signposter.beginInterval("Geometry merge and remap", id: signposter.makeSignpostID())
@@ -540,7 +552,7 @@ final class BoardGeometryBuilder {
         var priorityPositions: [Position3] = [], priorityIdentifiers: [UInt32] = []
         var normalPickRanges: [BoardGeometrySlot: Range<Int>] = [:]
         var priorityPickRanges: [BoardGeometrySlot: Range<Int>] = [:]
-        var componentPickRanges: [String: Range<Int>] = [:]
+        var componentPickRanges: [String: (slot: BoardGeometrySlot, range: Range<Int>)] = [:]
 
         func identifier(for target: BoardPickTarget) -> UInt32 {
             if let existing = identifierByTarget[target] { return existing }
@@ -588,7 +600,7 @@ final class BoardGeometryBuilder {
                 let start = priorityPositions.count
                 priorityPositions.append(contentsOf: positions)
                 priorityIdentifiers.append(contentsOf: repeatElement(id, count: positions.count))
-                componentPickRanges[reference] = start..<priorityPositions.count
+                componentPickRanges[reference] = (slot, start..<priorityPositions.count)
                 positionsByTarget[target, default: []].append((slot, positions))
             }
             for (localTarget, positions) in chunk.positionsByTarget {
@@ -609,7 +621,7 @@ final class BoardGeometryBuilder {
         pickIdentifiers.append(contentsOf: priorityIdentifiers)
         let shift = { (range: Range<Int>) in (range.lowerBound + priorityOffset)..<(range.upperBound + priorityOffset) }
         priorityPickRanges = priorityPickRanges.mapValues(shift)
-        componentPickRanges = componentPickRanges.mapValues(shift)
+        componentPickRanges = componentPickRanges.mapValues { ($0.slot, shift($0.range)) }
 
         var pinTargets: [String: BoardPickTarget] = [:]
         for target in positionsByTarget.keys {

@@ -68,14 +68,13 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, readonly, nullable) NSArray<NSNumber *> *pDelayNs;
 @end
 
-/// One passive probe's voltage or current magnitude vs. frequency, measured while `excitedPort`
-/// was driven -- mirrors EMSResultsSParamCurve's shape, but for a probe with absorbSignal()==false
-/// (see kiems::PortConfig::absorbSignal()'s own doc comment), which has no S-parameter of its
-/// own to show (no characteristic impedance to normalize against), only raw magnitude vs. frequency.
+/// One passive probe's |V_probe / V_incident| vs. frequency while `excitedPort` was driven (see
+/// kiems::Postprocessor::getProbeTransfer()) -- the passive-probe counterpart of
+/// EMSResultsSParamCurve. Dimensionless: the probe's raw voltage spectrum is V/Hz (the pulse DFT
+/// carries a dt factor), so only this ratio to the excitation is meaningful.
 @interface EMSResultsProbeCurve : NSObject
 @property (nonatomic, readonly) NSInteger excitedPort;
-@property (nonatomic, copy, readonly) NSArray<NSNumber *> *voltageMagnitude;
-@property (nonatomic, copy, readonly) NSArray<NSNumber *> *currentMagnitude;
+@property (nonatomic, copy, readonly) NSArray<NSNumber *> *transferMagnitude;
 @end
 
 /// One passive probe's data across every excited port -- mirrors EMSResultsSParamSet's shape,

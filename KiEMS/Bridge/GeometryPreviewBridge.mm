@@ -292,7 +292,21 @@ struct ComponentExportOutcome {
     // own doc comment. 0 (a no-op offset) whenever `triangles` is empty too, so a caller doesn't
     // need to separately guard against using a meaningless default.
     double topCopperZMm = 0;
+    std::vector<libkicad::ComponentPlacement> placements;
 };
+
+// See EMSGeometryPreview.backComponentReferences. A footprint with several models is back if any
+// of them is.
+NSSet<NSString*>* backComponentReferences(const ComponentExportOutcome& outcome) {
+    NSMutableSet<NSString*>* back = [NSMutableSet set];
+    // libkicad's Z=0 is bottom copper, so mid-board is half the top-copper Z.
+    const double midZ = outcome.topCopperZMm / 2;
+    for (const auto& placement : outcome.placements) {
+        const bool isBack = std::abs(placement.nz) > 0.5 ? placement.nz < 0 : placement.oz < midZ;
+        if (isBack) [back addObject:@(placement.footprintReference.c_str())];
+    }
+    return back;
+}
 
 // Exports (via libkicad's in-process exportComponentModels(), no board body, just the named
 // footprints' own real 3D models, already placed/rotated/offset exactly as KiCad itself would show
@@ -343,6 +357,7 @@ ComponentExportOutcome exportComponentTriangles(const libkicad::Board& board, co
     outcome.messages = exportResult->messages;
     outcome.triangles = std::move(exportResult->triangles);
     outcome.topCopperZMm = exportResult->topCopperZMm;
+    outcome.placements = std::move(exportResult->placements);
     return outcome;
 }
 
@@ -426,9 +441,13 @@ ComponentExportOutcome exportComponentTriangles(const libkicad::Board& board, co
                     ringPosition2:(CGPoint)ringPosition2
                          diameter:(double)diameter
               annularRingDiameter:(double)annularRingDiameter
-                          netName:(NSString* _Nullable)netName {
+                          netName:(NSString* _Nullable)netName
+                           filled:(BOOL)filled
+                           capped:(BOOL)capped {
     self = [super init];
     if (self) {
+        _filled = filled;
+        _capped = capped;
         _position = position;
         _position2 = position2;
         _ringPosition = ringPosition;
@@ -549,6 +568,7 @@ ComponentExportOutcome exportComponentTriangles(const libkicad::Board& board, co
                 viaMeshTriangles:(NSArray<EMSGeometryComponentTriangle*>*)viaMeshTriangles
          componentMeshTriangles:(NSArray<EMSGeometryComponentTriangle*>*)componentMeshTriangles
    renderedComponentReferences:(NSArray<NSString*>*)renderedComponentReferences
+       backComponentReferences:(NSSet<NSString*>*)backComponentReferences
      componentModelExportMessages:(NSArray<NSString*>*)componentModelExportMessages
                      gridLinesX:(NSArray<NSNumber*>*)gridLinesX
                      gridLinesY:(NSArray<NSNumber*>*)gridLinesY
@@ -582,6 +602,7 @@ ComponentExportOutcome exportComponentTriangles(const libkicad::Board& board, co
         _viaMeshTriangles = [viaMeshTriangles copy];
         _componentMeshTriangles = [componentMeshTriangles copy];
         _renderedComponentReferences = [renderedComponentReferences copy];
+        _backComponentReferences = [backComponentReferences copy];
         _componentModelExportMessages = [componentModelExportMessages copy];
         _gridLinesX = [gridLinesX copy];
         _gridLinesY = [gridLinesY copy];
@@ -624,6 +645,7 @@ ComponentExportOutcome exportComponentTriangles(const libkicad::Board& board, co
     _viaMeshTriangles = [preview.viaMeshTriangles copy];
     _componentMeshTriangles = [preview.componentMeshTriangles copy];
     _renderedComponentReferences = [preview.renderedComponentReferences copy];
+    _backComponentReferences = [preview.backComponentReferences copy];
     _componentModelExportMessages = [preview.componentModelExportMessages copy];
     _gridLinesX = [preview.gridLinesX copy];
     _gridLinesY = [preview.gridLinesY copy];
@@ -666,6 +688,14 @@ namespace {
 constexpr double kViaCopperR = 0xC6 / 255.0;
 constexpr double kViaCopperG = 0x9B / 255.0;
 constexpr double kViaCopperB = 0x3C / 255.0;
+
+// Via filling, matching the material grid's own "Via filling" swatch (GridMaterialColors).
+constexpr double kViaFillingR = 0.0;
+constexpr double kViaFillingG = 0.50;
+constexpr double kViaFillingB = 0.50;
+
+// The filling cylinder sits just inside the barrel so the two coincident surfaces don't z-fight.
+constexpr double kViaFillingInset = 0.97;
 
 // How finely a via's own round/capsule cross-section is tessellated -- matches GeometryView.swift's
 // own circleSegments (20) for a plain round via (segmentsPerHalf*2 total boundary points).
@@ -907,10 +937,44 @@ void appendViaMesh(const EMSGeometryVia* via, const std::vector<double>& metalOf
                                kViaBoundarySegmentsPerHalf);
     const std::size_t n = holeBoundary.size();
 
-    // Open (uncapped) barrel tube at the drilled hole diameter, spanning the board's full Z extent.
+    // Barrel tube at the drilled hole diameter, spanning the board's full Z extent.
     for (std::size_t i = 0; i < n; ++i) {
         appendTubeQuad(holeBoundary[i], holeBoundary[(i + 1) % n], zTop, zBottom, color,
                        via.netName, triangles);
+    }
+
+    // Flat disc over a capsule boundary: a fan from its centre, valid since a capsule is convex.
+    const CGPoint centre = CGPointMake((via.position.x + via.position2.x) / 2, (via.position.y + via.position2.y) / 2);
+    auto appendDisc = [&](const std::vector<CGPoint>& boundary, double z, simd_double4 discColor) {
+        const simd_double3 c = simd_make_double3(centre.x, centre.y, z);
+        for (std::size_t i = 0; i < boundary.size(); ++i) {
+            const CGPoint a = boundary[i];
+            const CGPoint b = boundary[(i + 1) % boundary.size()];
+            [triangles addObject:[[EMSGeometryComponentTriangle alloc]
+                                     initWithA:c
+                                             b:simd_make_double3(a.x, a.y, z)
+                                             c:simd_make_double3(b.x, b.y, z)
+                                         color:discColor
+                                       netName:via.netName]];
+        }
+    };
+
+    if (via.filled) {
+        const simd_double4 fillColor = simd_make_double4(kViaFillingR, kViaFillingG, kViaFillingB, 1.0);
+        const std::vector<CGPoint> fillBoundary =
+            capsuleBoundaryPoints(via.position.x, via.position.y, via.position2.x, via.position2.y,
+                                   holeRadius * kViaFillingInset, kViaBoundarySegmentsPerHalf);
+        for (std::size_t i = 0; i < fillBoundary.size(); ++i) {
+            appendTubeQuad(fillBoundary[i], fillBoundary[(i + 1) % fillBoundary.size()], zTop, zBottom, fillColor,
+                           via.netName, triangles);
+        }
+        appendDisc(fillBoundary, zTop, fillColor);
+        appendDisc(fillBoundary, zBottom, fillColor);
+    }
+    if (via.capped) {
+        // Outside the filling's end faces, on the same side as each outer copper layer.
+        appendDisc(holeBoundary, zTop + kViaRingZEpsilonSimUnits, color);
+        appendDisc(holeBoundary, zBottom - kViaRingZEpsilonSimUnits, color);
     }
 
     // Annular-ring washer at every metal layer -- skipped entirely if the ring isn't actually wider
@@ -984,7 +1048,7 @@ public:
         if (name == "SolderMaskTop" || name == "SolderMaskBottom")
             return remember("Solder mask", {0.1f, 0.78f, 0.32f, 1.0f});
         if (name == "NPTHVoid") return remember("Vacuum / opening", {0.78f, 0.80f, 0.84f, 1.0f});
-        if (name == "ViaFilling") return remember("Via filling", {0.72f, 0.38f, 0.90f, 1.0f});
+        if (name == "ViaFilling") return remember("Via filling", {0.0f, 0.50f, 0.50f, 1.0f});
 
         constexpr std::string_view prefix = "Substrate_";
         if (name.rfind(prefix, 0) == 0) {
@@ -1301,7 +1365,9 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
                                                        ringPosition2:point
                                                             diameter:via.diameter
                                                 annularRingDiameter:via.annularRingDiameter
-                                                             netName:nil]];
+                                                             netName:nil
+                                                              filled:NO
+                                                              capped:NO]];
     }
 
     // Real board vias (from the KiCad board) -- kept only where they still overlap this
@@ -1359,7 +1425,9 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
                                                                ringPosition2:ringPos2
                                                                     diameter:via.diameter
                                                         annularRingDiameter:outerDiameter
-                                                                     netName:nil]];
+                                                                     netName:nil
+                                                                      filled:via.filled
+                                                                      capped:via.capped]];
             }
         }
     }
@@ -1404,6 +1472,7 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
     // whole geometry preview.
     NSMutableArray<NSString*>* renderedRefs = [NSMutableArray array];
     NSMutableArray<EMSGeometryComponentTriangle*>* componentTriangles = [NSMutableArray array];
+    NSSet<NSString*>* backComponents = [NSSet set];
     NSMutableArray<NSString*>* componentModelExportMessages = [NSMutableArray array];
     {
         const std::vector<std::string> refs = includedFootprintReferences(simConfig);
@@ -1418,6 +1487,7 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
                 [componentModelExportMessages addObject:@(message.c_str())];
             }
             componentTriangles = [NSMutableArray arrayWithCapacity:outcome.triangles.size()];
+            backComponents = backComponentReferences(outcome);
             // Z is deliberately NOT offset by originResult -- Z has no separate per-axis local
             // origin anywhere else in this preview (see the pmlInnerZMin/ZMax property's own doc
             // comment), only X/Y are. libkicad's own STEP/STL Z=0 does NOT line up with this
@@ -1545,6 +1615,7 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
                                        viaMeshTriangles:viaTriangles
                                  componentMeshTriangles:componentTriangles
                            renderedComponentReferences:renderedRefs
+                               backComponentReferences:backComponents
                           componentModelExportMessages:componentModelExportMessages
                                              gridLinesX:gridLinesX
                                              gridLinesY:gridLinesY
@@ -1730,7 +1801,7 @@ std::expected<EMSGeometryPreview*, std::string> buildBoardLayerCatalogPreview(
     return [[EMSGeometryPreview alloc] initWithLayers:layers wholeBoard:wholeBoard
         topSolderMask:nil bottomSolderMask:nil outline:frame.points vias:@[] trackSegments:@[]
         failedViaAttempts:@[] ports:@[] viaMeshTriangles:@[] componentMeshTriangles:@[]
-        renderedComponentReferences:@[] componentModelExportMessages:@[] gridLinesX:@[] gridLinesY:@[]
+        renderedComponentReferences:@[] backComponentReferences:[NSSet set] componentModelExportMessages:@[] gridLinesX:@[] gridLinesY:@[]
         gridLinesZ:@[] gridPlaneExcludingX:nil gridPlaneExcludingY:nil gridPlaneExcludingZ:nil
         gridMaterials:@[] gridLayers:@[] pmlInnerXMin:0 pmlInnerXMax:0 pmlInnerYMin:0 pmlInnerYMax:0
         pmlInnerZMin:0 pmlInnerZMax:0 xMin:0 yMin:0 width:frame.width height:frame.height];
@@ -1902,7 +1973,10 @@ std::expected<EMSGeometryPreview*, std::string> buildWholeBoardPreview(const lib
                                                         annularRingDiameter:padShort
                                                                      netName:hole.netName.empty()
                                                                          ? nil
-                                                                         : @(hole.netName.c_str())];
+                                                                         : @(hole.netName.c_str())
+                                                                     filled:hole.protection.filled
+                                                                     capped:hole.protection.filled &&
+                                                                            hole.protection.capped];
             [vias addObject:via];
         }
         allPlatedHoleCutouts = unionDisjointSubsets(allPlatedHoleCutouts);
@@ -2207,6 +2281,7 @@ std::expected<EMSGeometryPreview*, std::string> buildWholeBoardPreview(const lib
     // buildGeometryPreview's own identically-shaped block: a query/export failure just leaves these
     // three arrays empty rather than failing the whole whole-board preview.
     NSMutableArray<EMSGeometryComponentTriangle*>* componentTriangles = [NSMutableArray array];
+    NSSet<NSString*>* backComponents = [NSSet set];
     NSMutableArray<NSString*>* componentModelExportMessages = [NSMutableArray array];
     {
         // Started above, alongside the copper work.
@@ -2219,6 +2294,7 @@ std::expected<EMSGeometryPreview*, std::string> buildWholeBoardPreview(const lib
             [componentModelExportMessages addObject:@(message.c_str())];
         }
         componentTriangles = [NSMutableArray arrayWithCapacity:outcome.triangles.size()];
+        backComponents = backComponentReferences(outcome);
         // Same re-basing as buildGeometryPreview's own identical block -- see its doc comment for
         // why Z needs topCopperZMm subtracted (libkicad's own Z=0 is board-bottom-copper, not this
         // preview's "board top always 0" convention) while X/Y only need originX/originY.
@@ -2274,6 +2350,7 @@ std::expected<EMSGeometryPreview*, std::string> buildWholeBoardPreview(const lib
                                        viaMeshTriangles:viaTriangles
                                  componentMeshTriangles:componentTriangles
                            renderedComponentReferences:renderedRefs
+                               backComponentReferences:backComponents
                           componentModelExportMessages:componentModelExportMessages
                                              gridLinesX:@[]
                                              gridLinesY:@[]
