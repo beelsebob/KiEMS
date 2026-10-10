@@ -4,3 +4,10 @@
 
 LIBKICAD_ROOT = $(SRCROOT)/submodules/libkicad
 #include "../submodules/libkicad/Config/KiCadLink.xcconfig"
+
+// Copper, CSXCAD and libkicad are built by PBXLegacyTarget (CMake) targets, which have no product
+// reference, so Xcode prunes any Frameworks-phase entry for them whenever it rewrites the project.
+// Link them by flag instead; the target dependencies still order the build.
+FRAMEWORK_SEARCH_PATHS = $(inherited) $(BUILT_PRODUCTS_DIR)
+LIBRARY_SEARCH_PATHS = $(inherited) $(BUILT_PRODUCTS_DIR)
+OTHER_LDFLAGS = $(inherited) -framework Copper -lCSXCAD -llibkicad
