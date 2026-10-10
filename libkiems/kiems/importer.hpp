@@ -45,6 +45,12 @@ struct ViaHole : Hole {
     double y = 0;
     double x2 = 0;
     double y2 = 0;
+    /// IPC-4761 type VII (filled and capped): the hole is plated over on both outer copper layers,
+    /// so each end of the barrel is closed by a copper disc rather than open to the outside.
+    bool capped = false;
+    /// IPC-4761 filled (types V-VII): the barrel's interior is the via filling material
+    /// (Via::fillingEpsilon) rather than air.
+    bool filled = false;
 
     Cu::Polygon path() const override {
         return {{x, y}, {x2, y2}};

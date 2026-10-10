@@ -55,6 +55,10 @@ std::expected<PostprocessResult, std::string> PostprocessResult::compute(const S
                 if (voltage.has_value() && current.has_value()) {
                     post->addProbeData(probe, excitedPort, *voltage, *current);
                 }
+                if (auto transfer = simulation.getProbeTransfer(simConfig.name(), probe, excitedPort);
+                    transfer.has_value()) {
+                    post->setProbeTransfer(probe, excitedPort, std::move(*transfer));
+                }
                 if (simConfig.ports()[static_cast<std::size_t>(probe)].isTraceProbe()) {
                     if (auto impedance = simulation.getProbeImpedance(simConfig.name(), probe, excitedPort);
                         impedance.has_value()) {

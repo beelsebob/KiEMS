@@ -65,6 +65,16 @@ std::optional<std::vector<std::complex<double>>> SimulationResult::getProbeVolta
     return post->getProbeVoltage(probe, excitedPort);
 }
 
+std::optional<std::vector<std::complex<double>>> SimulationResult::getProbeTransfer(const std::string& simulationName,
+                                                                                       std::int32_t probe,
+                                                                                       std::int32_t inputPort) const {
+    const Postprocessor* post = _postprocessorFor(simulationName);
+    if (post == nullptr) {
+        return std::nullopt;
+    }
+    return post->getProbeTransfer(probe, inputPort);
+}
+
 std::optional<std::vector<std::complex<double>>> SimulationResult::getProbeCurrent(const std::string& simulationName,
                                                                                       std::int32_t probe,
                                                                                       std::int32_t excitedPort) const {

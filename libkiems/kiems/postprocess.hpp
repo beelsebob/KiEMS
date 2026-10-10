@@ -104,6 +104,16 @@ public:
     std::optional<std::vector<std::complex<double>>> getProbeImpedance(std::int32_t probe,
                                                                           std::int32_t excitedPort) const;
 
+    /// A passive probe's voltage per unit incident voltage at `inputPort` -- the passive-probe
+    /// counterpart of getSParam(output, input), which is likewise a ratio of voltage waves
+    /// (reflected at the output / incident at the input). Computed by calculateSparams() from
+    /// addProbeData()'s voltage and `inputPort`'s own incident wave, so it needs that port's
+    /// addPortData(); nullopt otherwise, or for a probe that has no data at `inputPort`.
+    std::optional<std::vector<std::complex<double>>> getProbeTransfer(std::int32_t probe, std::int32_t inputPort) const;
+    /// Injects an already-computed probe transfer, the getProbeTransfer() counterpart of
+    /// setSParam().
+    void setProbeTransfer(std::int32_t probe, std::int32_t inputPort, std::vector<std::complex<double>> value);
+
     void renderSParams(bool plotPhase, bool transparent, const std::filesystem::path& outputDir) const;
     void renderDiffPairSParams(bool transparent, const std::filesystem::path& outputDir) const;
     void renderDiffImpedance(bool transparent, const std::filesystem::path& outputDir) const;
@@ -146,6 +156,8 @@ private:
     // Same shape again, only ever populated at trace-impedance-probe row indices (a strict subset
     // of _probeVoltage/_probeCurrent's own non-absorbing-port rows).
     std::vector<std::vector<std::vector<std::complex<double>>>> _probeImpedance;
+    // Same shape as _probeVoltage -- see getProbeTransfer().
+    std::vector<std::vector<std::vector<std::complex<double>>>> _probeTransfer;
 
     // [output_port][input_port][frequency]
     std::vector<std::vector<std::vector<std::complex<double>>>> _sParams;

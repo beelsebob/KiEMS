@@ -111,6 +111,7 @@ Postprocessor::Postprocessor(std::vector<double> frequencies, const SimulationCo
     _probeVoltage = make3(kComplexNaN);
     _probeCurrent = make3(kComplexNaN);
     _probeImpedance = make3(kComplexNaN);
+    _probeTransfer = make3(kComplexNaN);
     _sParams = make3(kComplexNaN);
     _delays = std::vector<std::vector<std::vector<double>>>(
         static_cast<std::size_t>(_count),
@@ -200,7 +201,31 @@ void Postprocessor::calculateSparams() {
                     _incident[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)][f];
             }
         }
+        for (std::int32_t probe = 0; probe < _count; ++probe) {
+            const auto& voltage = _probeVoltage[static_cast<std::size_t>(probe)][static_cast<std::size_t>(i)];
+            if (!isValid(voltage)) {
+                continue;
+            }
+            auto& transfer = _probeTransfer[static_cast<std::size_t>(probe)][static_cast<std::size_t>(i)];
+            for (std::size_t f = 0; f < _frequencies.size(); ++f) {
+                transfer[f] = voltage[f] / _incident[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)][f];
+            }
+        }
     }
+}
+
+std::optional<std::vector<std::complex<double>>> Postprocessor::getProbeTransfer(std::int32_t probe,
+                                                                                    std::int32_t inputPort) const {
+    if (probe >= _count || inputPort >= _count) {
+        return std::nullopt;
+    }
+    const auto& t = _probeTransfer[static_cast<std::size_t>(probe)][static_cast<std::size_t>(inputPort)];
+    return isValid(t) ? std::optional(t) : std::nullopt;
+}
+
+void Postprocessor::setProbeTransfer(std::int32_t probe, std::int32_t inputPort,
+                                      std::vector<std::complex<double>> value) {
+    _probeTransfer[static_cast<std::size_t>(probe)][static_cast<std::size_t>(inputPort)] = std::move(value);
 }
 
 void Postprocessor::processData() {
@@ -801,7 +826,7 @@ void Postprocessor::probePortToFile(std::int32_t probeNumber, const std::filesys
     for (std::int32_t i = 0; i < _count; ++i) {
         header += "re(V-" + std::to_string(i) + "), im(V-" + std::to_string(i) + "), re(I-" + std::to_string(i) +
                   "), im(I-" + std::to_string(i) + "), re(Z-" + std::to_string(i) + "), im(Z-" + std::to_string(i) +
-                  "), ";
+                  "), re(T-" + std::to_string(i) + "), im(T-" + std::to_string(i) + "), ";
     }
 
     std::ofstream file(path / _probePath(probeNumber));
@@ -812,7 +837,8 @@ void Postprocessor::probePortToFile(std::int32_t probeNumber, const std::filesys
             const auto ii = static_cast<std::size_t>(i);
             file << ", " << _probeVoltage[p][ii][f].real() << ", " << _probeVoltage[p][ii][f].imag() << ", "
                  << _probeCurrent[p][ii][f].real() << ", " << _probeCurrent[p][ii][f].imag() << ", "
-                 << _probeImpedance[p][ii][f].real() << ", " << _probeImpedance[p][ii][f].imag();
+                 << _probeImpedance[p][ii][f].real() << ", " << _probeImpedance[p][ii][f].imag() << ", "
+                 << _probeTransfer[p][ii][f].real() << ", " << _probeTransfer[p][ii][f].imag();
         }
         file << "\n";
     }
@@ -992,7 +1018,7 @@ std::expected<void, std::string> Postprocessor::loadProbes(const std::filesystem
         const std::vector<std::string> header = _splitCsvLine(headerLine);
 
         // 'v'/'i'/'z' -- voltage, current, and (trace-impedance probes only) measured impedance.
-        static const std::regex viPattern(R"(([viz])-([0-9]+))");
+        static const std::regex viPattern(R"(([vizt])-([0-9]+))");
         std::map<std::pair<char, std::int32_t>, std::size_t> reCol, imCol;
         for (std::size_t colNum = 0; colNum < header.size(); ++colNum) {
             const std::string lcell = _lower(_trim(header[colNum]));
@@ -1032,7 +1058,10 @@ std::expected<void, std::string> Postprocessor::loadProbes(const std::filesystem
             for (std::size_t r = 0; r < rows.size(); ++r) {
                 series[r] = std::complex<double>(rows[r][col], rows[r][imIt->second]);
             }
-            auto& dest = key.first == 'v' ? _probeVoltage : key.first == 'i' ? _probeCurrent : _probeImpedance;
+            auto& dest = key.first == 'v'   ? _probeVoltage
+                         : key.first == 'i' ? _probeCurrent
+                         : key.first == 't' ? _probeTransfer
+                                            : _probeImpedance;
             dest[idx][static_cast<std::size_t>(key.second)] = std::move(series);
         }
     }

@@ -6,10 +6,12 @@
 #include <dispatch/dispatch.h>
 #endif
 #include <cmath>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "config.hpp"
 #include "constants.hpp"
+#include "grid_gen.hpp"
 #include "libkicad/libkicad.hpp"
 #include "logging.hpp"
 #include "polygon_geometry.hpp"
@@ -482,6 +484,24 @@ std::expected<CutoutStage, std::string> computeCutoutStage(
         }
     }
     cutoutSource = unionPolygons(cutoutSource);
+    // KiCad's zone fill knocks out every drill, so a filled through hole inside the hull leaves a
+    // hole loop in the cutout -- which the irregular domain mask then reads as outside the board
+    // and rings with CPML. A filled drill is solid board (its filling is modeled by
+    // Simulation::addVia()), so refill it, limited to holes already enclosed by an outer loop.
+    std::vector<ViaHole> filledVias;
+    std::copy_if(existingVias.begin(), existingVias.end(), std::back_inserter(filledVias),
+                 [](const ViaHole& via) { return via.filled; });
+    if (!filledVias.empty()) {
+        PolygonSet outerLoops;
+        for (const Polygon& loop : cutoutSource) {
+            if (signedArea(loop) > 0) outerLoops.push_back(loop);
+        }
+        PolygonSet plugs = intersectPolygons(tessellateHoles(filledVias, tessellationTolerance), outerLoops);
+        if (!plugs.empty()) {
+            plugs.insert(plugs.end(), cutoutSource.begin(), cutoutSource.end());
+            cutoutSource = unionPolygons(plugs);
+        }
+    }
     polygonPrimitiveDone();
     stage.cutout = intersectPolygons(cutoutSource, realOutline);
     polygonPrimitiveDone();
@@ -773,6 +793,125 @@ void restrictLumpedComponentsToCutout(SimulationConfig& simulation, const Sliced
                 std::to_string(before - components.size()) +
                 " lumped component(s) with both pins outside the sliced cutout");
     }
+}
+
+std::expected<HullCutPlan, std::string> planHullCuts(const EMSConfig& fileConfig, std::size_t simulationIndex,
+                                                     const libkicad::Board& board) {
+    if (simulationIndex >= fileConfig.simulations().size()) {
+        return std::unexpected("The selected simulation no longer exists");
+    }
+    const EMSConfig config = fileConfig.scaledToSimulationUnits();
+    const SimulationConfig& simulation = config.simulations()[simulationIndex];
+    auto geometry = board.boardGeometry();
+    if (!geometry) return std::unexpected(std::move(geometry).error());
+    auto copper = classifyCopperForSimulation(simulation, *geometry, board);
+    if (!copper) return std::unexpected(std::move(copper).error());
+    auto origin = boardBoundsInSimulationUnits(*geometry);
+    if (!origin) return std::unexpected(std::move(origin).error());
+    std::vector<ViaHole> existingVias;
+    if (auto vias = getVias(board, origin->xMin, origin->yMin); vias) {
+        existingVias = std::move(*vias);
+    }
+
+    HullCutPlan result;
+    result.slicing = SlicingConfig::from(simulation, config);
+    auto plan = planSlicedBoardForSimulation(result.slicing, *geometry, copper->involved, copper->ground,
+                                             copper->hullContributions, existingVias);
+    if (!plan) return std::unexpected(std::move(plan).error());
+    result.plan = std::move(*plan);
+
+    std::unordered_set<NetName, NetNameHash> includedNets;
+    for (const InvolvedNetConfig& entry : simulation.involvedNets()) {
+        auto names = resolveInvolvedNetNames(board, entry);
+        if (!names) return std::unexpected(std::move(names).error());
+        for (const std::string& name : *names) includedNets.insert(NetName(name));
+    }
+    auto groundNames = resolveGroundNetNames(board, simulation.groundNet());
+    if (!groundNames) return std::unexpected(std::move(groundNames).error());
+    std::unordered_set<NetName, NetNameHash> groundNets;
+    for (const std::string& name : *groundNames) groundNets.insert(NetName(name));
+
+    auto tracks = board.allTracks();
+    if (!tracks) return std::unexpected(std::move(tracks).error());
+    std::vector<grid_detail::HullCutTrace> traceInputs;
+    for (const auto& [netName, track] : *tracks) {
+        const NetName normalizedNet(netName);
+        if (!includedNets.contains(normalizedNet) || groundNets.contains(normalizedNet)) continue;
+        auto point = [&](double xMm, double yMm) {
+            return Position(xMm * 10000.0 - origin->xMin, yMm * 10000.0 - origin->yMin);
+        };
+        traceInputs.push_back({TraceSegment(point(track.startXMm, track.startYMm), point(track.endXMm, track.endYMm),
+                                            "", track.widthMm * 10000.0),
+                               netName, track.copperLayerName, track.uuid});
+    }
+    // A track can cross the hull more than once (a length-tuning serpentine, especially one built
+    // from arcs), so each crossing is numbered among its track's crossings that keep the same side,
+    // counted from the track's start.
+    auto points = grid_detail::hullCutTracePoints(traceInputs, result.plan.cutoutLoops, 10.0);
+    std::stable_sort(points.begin(), points.end(), [](const auto& a, const auto& b) {
+        return a.trackParameter < b.trackParameter;
+    });
+    std::unordered_map<std::string, int> crossingCounts;
+    for (const auto& point : points) {
+        const std::string legacyIdentifier = point.netName + "|" + point.layerName + "|" +
+                                             std::to_string(std::llround(point.position.x())) + "|" +
+                                             std::to_string(std::llround(point.position.y()));
+        std::string identifier = legacyIdentifier;
+        if (!point.trackUUID.empty()) {
+            const std::string side = point.trackUUID + (point.keepsTrackEnd ? "|end" : "|start");
+            identifier = side + "|" + std::to_string(crossingCounts[side]++);
+        }
+        result.hullCuts.push_back({identifier, legacyIdentifier, point.netName, point.layerName, point.position,
+                                   point.inwardDirectionDegrees, point.width});
+    }
+    return result;
+}
+
+void reconcileHullCutPorts(SimulationConfig& simulation, const std::vector<HullCut>& hullCuts) {
+    std::unordered_set<std::string> current;
+    std::unordered_map<std::string, std::string> renamed;
+    for (const HullCut& cut : hullCuts) {
+        current.insert(cut.identifier);
+        if (cut.legacyIdentifier != cut.identifier) renamed.emplace(cut.legacyIdentifier, cut.identifier);
+    }
+    std::unordered_map<std::string, const HullCut*> byIdentifier;
+    for (const HullCut& cut : hullCuts) byIdentifier.emplace(cut.identifier, &cut);
+    for (HullCutPortConfig& port : simulation.hullCutPorts()) {
+        if (const auto it = renamed.find(port.id()); it != renamed.end()) port.setID(it->second);
+        const auto cut = byIdentifier.find(port.id());
+        if (cut == byIdentifier.end()) continue;
+        // The cut slides along its track as the hull moves, so place the port where it is now:
+        // inset by half its square footprint so it lies on retained copper (simulation units in,
+        // configuration micrometres stored), exactly as the board view first placed it.
+        const HullCut& placed = *cut->second;
+        const double lengthSim = std::max(placed.width, 1.0);
+        const double radians = placed.inwardDirectionDegrees * M_PI / 180.0;
+        port.setNet(placed.netName);
+        port.setLayer(placed.layerName);
+        port.setX((placed.position.x() + std::cos(radians) * lengthSim / 2) / constants::unitMultiplier);
+        port.setY((placed.position.y() + std::sin(radians) * lengthSim / 2) / constants::unitMultiplier);
+        port.setDirection(placed.inwardDirectionDegrees);
+        port.setWidth(placed.width / constants::unitMultiplier);
+        port.setLength(lengthSim / constants::unitMultiplier);
+    }
+    for (ExcitationConfig& excitation : simulation.excitations()) {
+        if (!excitation.hullCutPortID().has_value()) continue;
+        if (const auto it = renamed.find(*excitation.hullCutPortID()); it != renamed.end()) {
+            excitation.setHullCutPortID(it->second);
+        }
+    }
+    // A cut renamed onto an identifier another port already had would leave two markers for one
+    // cut; keep the first.
+    std::unordered_set<std::string> kept;
+    std::erase_if(simulation.hullCutPorts(), [&](const HullCutPortConfig& port) {
+        if (current.contains(port.id()) && kept.insert(port.id()).second) return false;
+        logInfo("Simulation \"" + simulation.name() + "\": discarding hull-cut port \"" + port.id() +
+                "\" -- the hull no longer cuts that track");
+        return true;
+    });
+    std::erase_if(simulation.excitations(), [&](const ExcitationConfig& excitation) {
+        return excitation.hullCutPortID().has_value() && !current.contains(*excitation.hullCutPortID());
+    });
 }
 
 } // namespace kiems

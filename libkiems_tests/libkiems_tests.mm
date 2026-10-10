@@ -34,6 +34,7 @@
 #include "kiems/ports.hpp"
 #include "kiems/via_stitching.hpp"
 #include "libkicad/libkicad.hpp"
+#include "libkicad/spice_expression.hpp"
 #include "libkicad/spice_subcircuit.hpp"
 #include "logging.hpp"
 #include "polygon_geometry.hpp"
@@ -2382,6 +2383,19 @@ static kiems::EyeAggressor eyeTestTone(const std::vector<double>& frequencies, d
     XCTAssertFalse(kiems::geometryOnlyPinNeedsAbsorbingPort(involved, "U1", "3"));
 }
 
+- (void)testBottomLayerPortsUseTheMirroredReferencePlane {
+    // 8 metals: F.Cu=0, In1..In6=1..6, B.Cu=7.
+    XCTAssertEqual(kiems::referencePlaneForPortLayer(0, 1, 8), 1);
+    XCTAssertEqual(kiems::referencePlaneForPortLayer(7, 1, 8), 6);
+    XCTAssertEqual(kiems::referencePlaneForPortLayer(7, 2, 8), 5);
+    // Inner layers, and a plane already on the bottom side, are left alone.
+    XCTAssertEqual(kiems::referencePlaneForPortLayer(3, 1, 8), 1);
+    XCTAssertEqual(kiems::referencePlaneForPortLayer(7, 6, 8), 6);
+    // Two-layer board: the only other layer is the plane for both sides.
+    XCTAssertEqual(kiems::referencePlaneForPortLayer(1, 0, 2), 0);
+    XCTAssertEqual(kiems::referencePlaneForPortLayer(0, 1, 2), 1);
+}
+
 - (void)testReceivingPinTypesDefaultToAbsorbingUnlessTheyAreGrounded {
     XCTAssertTrue(kiems::pinTypeAbsorbsByDefault("input", false));
     XCTAssertTrue(kiems::pinTypeAbsorbsByDefault("bidirectional", false));
@@ -3158,8 +3172,10 @@ L1 n1 b 10n
     } else {
         XCTFail(@"U1.X1.L1 missing or malformed");
     }
-    XCTAssertTrue(kiems::assessComponentSimModel(u1).supported, @"%s",
-                  kiems::assessComponentSimModel(u1).reason.c_str());
+    // Every element is an R, L or C, but the RC sections shunt to ground.
+    const auto support = kiems::assessComponentSimModel(u1);
+    XCTAssertNotEqual(support.reason.find("to ground (SPICE node 0)"), std::string::npos, @"%s",
+                      support.reason.c_str());
 }
 
 - (void)testComponentSimModelsLoadMultiRootProjects {
@@ -3239,9 +3255,11 @@ Xlib OUT gnd_ref from_library
     XCTAssertTrue(isSimNode(rin.nodes[0], Kind::Pin, "1"));
     XCTAssertTrue(isSimNode(rin.nodes[1], Kind::Internal, "C1.mid"));
     XCTAssertTrue(rin.value == "{scale * 10}");
+    XCTAssertTrue(rin.numericValue == 20.0);
     const auto& capacitor = model.elements[1];
     XCTAssertTrue(isSimNode(capacitor.nodes[0], Kind::Internal, "C1.mid"));
     XCTAssertTrue(isSimNode(capacitor.nodes[1], Kind::Pin, "2"));
+    XCTAssertTrue(capacitor.numericValue.has_value() && std::abs(*capacitor.numericValue - 1e-9) < 1e-21);
     const auto& shunt = model.elements[2];
     XCTAssertTrue(isSimNode(shunt.nodes[1], Kind::Ground, "0"));
     XCTAssertTrue(shunt.value == "1u");
@@ -3276,8 +3294,168 @@ Xlib OUT gnd_ref from_library
     model.status = Status::Resolved;
     model.message.clear();
     XCTAssertFalse(kiems::assessComponentSimModel(model).supported); // no elements at all
-    model.elements.push_back({'L', "L1", {}, "1u"});
+    using Kind = libkicad::ComponentSimNode::Kind;
+    model.elements.push_back({'L', "L1", {{Kind::Pin, "1"}, {Kind::Pin, "2"}}, "1u", 1e-6});
     XCTAssertTrue(kiems::assessComponentSimModel(model).supported);
+    model.elements[0].numericValue.reset();
+    XCTAssertNotEqual(kiems::assessComponentSimModel(model).reason.find("L1's value \"1u\" couldn't be evaluated"),
+                      std::string::npos);
+}
+
+- (void)testSpiceExpressionsEvaluateSuffixesParametersAndArithmetic {
+    using libkicad::detail::evaluateSpiceExpression;
+    const libkicad::detail::SpiceParameters parameters{{"r", 49.9}, {"cnom", 1e-7}};
+    auto near = [](std::optional<double> value, double expected) {
+        return value.has_value() && std::abs(*value - expected) <= 1e-12 * std::abs(expected);
+    };
+    XCTAssertTrue(near(evaluateSpiceExpression("10k", {}), 1e4));
+    XCTAssertTrue(near(evaluateSpiceExpression("4.7uF", {}), 4.7e-6));
+    XCTAssertTrue(near(evaluateSpiceExpression("2Meg", {}), 2e6));
+    XCTAssertTrue(near(evaluateSpiceExpression("1m", {}), 1e-3));
+    XCTAssertTrue(near(evaluateSpiceExpression("4k7", {}), 4700));
+    XCTAssertTrue(near(evaluateSpiceExpression("1e-9", {}), 1e-9));
+    XCTAssertTrue(near(evaluateSpiceExpression("100\xC2\xB5", {}), 1e-4));
+    XCTAssertTrue(near(evaluateSpiceExpression("{R}", parameters), 49.9));
+    XCTAssertTrue(near(evaluateSpiceExpression("{Cnom*1.1}", parameters), 1.1e-7));
+    XCTAssertTrue(near(evaluateSpiceExpression("'(r + 0.1) * 2 ** 2 - 1k'", parameters), -800));
+    XCTAssertTrue(near(evaluateSpiceExpression("{-2^2}", {}), -4));
+    XCTAssertTrue(near(evaluateSpiceExpression("{sqrt(4) + max(1, 3)}", {}), 5));
+    XCTAssertFalse(evaluateSpiceExpression("{unknown}", parameters).has_value());
+    XCTAssertFalse(evaluateSpiceExpression("{1/0}", {}).has_value());
+    XCTAssertFalse(evaluateSpiceExpression("10k 20k", {}).has_value());
+    XCTAssertFalse(evaluateSpiceExpression("", {}).has_value());
+
+    using libkicad::detail::evaluateElementValue;
+    XCTAssertTrue(near(evaluateElementValue('R', "{R} tc1=0.001", parameters), 49.9));
+    XCTAssertTrue(near(evaluateElementValue('C', "c={Cnom} m=2", parameters), 1e-7));
+    XCTAssertTrue(near(evaluateElementValue('L', "1u IC=0", {}), 1e-6));
+}
+
+- (void)testSubcircuitParametersComeFromDefaultsOverridesAndParamCards {
+    const std::string code = R"(.subckt RPACK4 1 2 3 4 5 6 7 8 params: R=49.9 scale=1
+.param Rhalf={R/2}
+R1 1 8 {R*scale}
+R2 2 7 {Rhalf}
+X3 3 6 half params: value={R}
+R4 4 5 {missing}
+.subckt half a b params: value=1
+Ra a b {value/2}
+.ends half
+.ends RPACK4
+)";
+    using Kind = libkicad::ComponentSimNode::Kind;
+    std::vector<libkicad::ComponentSimNode> ports;
+    for (int pin = 1; pin <= 8; ++pin) ports.push_back({Kind::Pin, std::to_string(pin)});
+    std::string error;
+    const auto elements = libkicad::detail::expandSubcircuit(code, "RN1", ports, {}, error, {{"r", 100.0}});
+    XCTAssertTrue(elements.has_value(), @"%s", error.c_str());
+    if (!elements || elements->size() != 4) return XCTFail(@"expected four elements");
+    XCTAssertTrue(elements->at(0).numericValue == 100.0); // the instance overrides the default R
+    XCTAssertTrue(elements->at(1).numericValue == 50.0);  // .param cards see the override
+    XCTAssertTrue(elements->at(2).name == "RN1.X3.Ra");
+    XCTAssertTrue(elements->at(2).numericValue == 50.0);  // nested instances pass their values down
+    XCTAssertFalse(elements->at(3).numericValue.has_value());
+}
+
+namespace {
+
+libkicad::ComponentSimModel simModel(std::vector<std::tuple<char, std::string, std::string, std::string, double>> parts) {
+    using Kind = libkicad::ComponentSimNode::Kind;
+    auto node = [](const std::string& name) -> libkicad::ComponentSimNode {
+        if (name == "0") return {Kind::Ground, "0"};
+        if (std::isdigit(static_cast<unsigned char>(name[0]))) return {Kind::Pin, name};
+        return {Kind::Internal, name};
+    };
+    libkicad::ComponentSimModel model;
+    model.status = libkicad::ComponentSimModelStatus::Resolved;
+    for (const auto& [kind, name, a, b, value] : parts) {
+        model.elements.push_back({kind, name, {node(a), node(b)}, std::to_string(value), value});
+    }
+    return model;
+}
+
+} // namespace
+
+- (void)testComponentSimNetworkSplitsResistorArraysIntoBranches {
+    const auto network = kiems::componentSimNetwork(simModel({{'R', "RN1.R1", "1", "8", 49.9},
+                                                              {'R', "RN1.R2", "2", "7", 49.9},
+                                                              {'R', "RN1.R3", "3", "6", 49.9},
+                                                              {'R', "RN1.R4", "4", "5", 49.9}}));
+    XCTAssertTrue(network.supported, @"%s", network.reason.c_str());
+    if (network.branches.size() != 4) return XCTFail(@"expected four branches");
+    const std::vector<std::pair<std::string, std::string>> pins{{"1", "8"}, {"2", "7"}, {"3", "6"}, {"4", "5"}};
+    for (std::size_t i = 0; i < pins.size(); ++i) {
+        const auto& branch = network.branches[i];
+        XCTAssertTrue(branch.pin1 == pins[i].first && branch.pin2 == pins[i].second);
+        XCTAssertTrue(branch.topology == kiems::LumpedComponentTopology::Series);
+        XCTAssertEqualWithAccuracy(branch.resistance, 49.9, 1e-9);
+        XCTAssertTrue(std::isnan(branch.inductance) && std::isnan(branch.capacitance));
+    }
+}
+
+- (void)testComponentSimNetworkReducesSeriesAndParallelCombinations {
+    // A capacitor with ESR and ESL, as vendor models write it: a series chain through internal nodes.
+    auto network = kiems::componentSimNetwork(simModel({{'C', "C1.C", "1", "a", 100e-9},
+                                                        {'R', "C1.ESR", "a", "b", 0.02},
+                                                        {'L', "C1.ESL", "b", "2", 0.5e-9},
+                                                        {'R', "C1.Rdead", "b", "stub", 1e3}})); // a dead end
+    XCTAssertTrue(network.supported, @"%s", network.reason.c_str());
+    if (network.branches.size() != 1) return XCTFail(@"expected one branch");
+    auto branch = network.branches[0];
+    XCTAssertTrue(branch.topology == kiems::LumpedComponentTopology::Series);
+    XCTAssertEqualWithAccuracy(branch.resistance, 0.02, 1e-15);
+    XCTAssertEqualWithAccuracy(branch.inductance, 0.5e-9, 1e-21);
+    XCTAssertEqualWithAccuracy(branch.capacitance, 100e-9, 1e-20);
+
+    // Two capacitors in series and a resistor in parallel with the pair: a parallel R||C.
+    network = kiems::componentSimNetwork(simModel({{'C', "C1", "1", "m", 2e-9},
+                                                   {'C', "C2", "m", "2", 2e-9},
+                                                   {'R', "R1", "2", "1", 1e6}}));
+    XCTAssertTrue(network.supported, @"%s", network.reason.c_str());
+    if (network.branches.size() != 1) return XCTFail(@"expected one branch");
+    branch = network.branches[0];
+    XCTAssertTrue(branch.topology == kiems::LumpedComponentTopology::Parallel);
+    XCTAssertEqualWithAccuracy(branch.resistance, 1e6, 1e-6);
+    XCTAssertEqualWithAccuracy(branch.capacitance, 1e-9, 1e-21);
+
+    // Parallel inductors are one inductor; a zero-ohm link merges its internal node away.
+    network = kiems::componentSimNetwork(simModel({{'L', "L1", "1", "m", 2e-6},
+                                                   {'L', "L2", "1", "m", 2e-6},
+                                                   {'R', "R0", "m", "2", 0}}));
+    XCTAssertTrue(network.supported, @"%s", network.reason.c_str());
+    if (network.branches.size() != 1) return XCTFail(@"expected one branch");
+    XCTAssertEqualWithAccuracy(network.branches[0].inductance, 1e-6, 1e-18);
+    XCTAssertTrue(std::isnan(network.branches[0].resistance));
+}
+
+- (void)testComponentSimNetworkExplainsUnrepresentableNetworks {
+    auto reason = [](libkicad::ComponentSimModel model) {
+        const auto network = kiems::componentSimNetwork(model);
+        return network.supported ? std::string("supported") : network.reason;
+    };
+    // A ferrite bead's R||L can't be one lumped element in the engine.
+    XCTAssertNotEqual(reason(simModel({{'R', "FB1.R", "1", "2", 600}, {'L', "FB1.L", "1", "2", 1e-6}}))
+                          .find("inductor in parallel"),
+                      std::string::npos);
+    // Nor can L in series with R||C.
+    XCTAssertNotEqual(reason(simModel({{'L', "L", "1", "m", 1e-9},
+                                       {'R', "R", "m", "2", 10},
+                                       {'C', "C", "m", "2", 1e-12}}))
+                          .find("series combination"),
+                      std::string::npos);
+    // A branch to SPICE ground.
+    XCTAssertNotEqual(reason(simModel({{'R', "R1", "1", "2", 10}, {'C', "Cp", "1", "0", 1e-12}})).find("ground"),
+                      std::string::npos);
+    // A bridge doesn't reduce.
+    XCTAssertNotEqual(reason(simModel({{'R', "Ra", "1", "a", 1},
+                                       {'R', "Rb", "1", "b", 2},
+                                       {'R', "Rc", "a", "2", 3},
+                                       {'R', "Rd", "b", "2", 4},
+                                       {'R', "Re", "a", "b", 5}}))
+                          .find("doesn't simplify"),
+                      std::string::npos);
+    // A zero-ohm link straight between pins.
+    XCTAssertNotEqual(reason(simModel({{'R', "R0", "1", "2", 0}})).find("shorts pin 1 to pin 2"), std::string::npos);
 }
 
 @end

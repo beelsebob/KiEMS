@@ -204,9 +204,12 @@ public:
     /// *reaches* the cutout boundary (see _viaIntersectsOutline's own doc comment), this prevents
     /// its geometry from extending past the simulation's own domain. A freshly-placed stitching via
     /// is always positioned viaEdgeDistance() inward of the boundary by construction, so it never
-    /// needs this -- callers only set it for real board vias.
+    /// needs this -- callers only set it for real board vias. `capped` (IPC-4761 type VII) closes
+    /// both ends of the barrel with a zero-thickness copper disc of `outerDiameter` on the outer
+    /// copper planes, above the filling's priority so the drill no longer reads as open there.
+    /// `filled` makes the drill a cylinder of Via::fillingEpsilon dielectric; otherwise it's air.
     void addVia(double xPos, double yPos, double x2Pos, double y2Pos, double diameter, double outerDiameter,
-                bool cropToOutline = false);
+                bool cropToOutline = false, bool capped = false, bool filled = false);
     /// Cuts every non-plated through-hole (see SlicedBoard::npthHoleLoops) out of the substrate
     /// model: an explicit vacuum-epsilon material, extruded through the full substrate stack depth
     /// at a priority above every substrate layer's, so it overrides them wherever it overlaps --

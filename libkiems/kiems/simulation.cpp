@@ -427,6 +427,15 @@ void Simulation::addPortGrid() {
     }
 }
 
+namespace {
+
+CSPropLumpedElement::LEtype _lumpedType(const LumpedComponentConfig& component) {
+    return component.topology() == LumpedComponentTopology::Series ? CSPropLumpedElement::SERIES
+                                                                   : CSPropLumpedElement::PARALLEL;
+}
+
+} // namespace
+
 // A diagonal 2-pin component's corner-bridge (see LumpedComponentConfig::cornerBridge()'s own doc
 // comment) is real 3D CSX geometry -- two short vertical pillars plus a small elevated horizontal
 // bridge -- built later, in addLumpedComponents(). But grid generation runs *before* that (see
@@ -453,7 +462,7 @@ void Simulation::addLumpedComponentGrid() {
         // grid generation for every other component/port over one that's already about to fail anyway.
         const auto zResult = getMetalLayerOffset(component.layer());
         if (!zResult) {
-            logWarning("Simulation: couldn't resolve corner-bridge component " + component.reference() +
+            logWarning("Simulation: couldn't resolve corner-bridge component " + component.name() +
                        "'s own metal layer for grid density -- skipping its density hints: " + zResult.error());
             continue;
         }
@@ -960,7 +969,8 @@ std::expected<void, std::string> Simulation::addVias() {
             // that boundary, not because it's fully inside it -- left uncropped, it would extend
             // past the hull-padding trim line into the simulation's own PML/boundary region.
             const double outerDiameter = via.diameter + 2 * _config.via().platingThickness();
-            addVia(via.x, via.y, via.x2, via.y2, via.diameter, outerDiameter, /*cropToOutline=*/true);
+            addVia(via.x, via.y, via.x2, via.y2, via.diameter, outerDiameter, /*cropToOutline=*/true, via.capped,
+                   via.filled);
         }
     }
 
@@ -978,7 +988,7 @@ std::expected<void, std::string> Simulation::addVias() {
 }
 
 void Simulation::addVia(double xPos, double yPos, double x2Pos, double y2Pos, double diameter, double outerDiameter,
-                          bool cropToOutline) {
+                          bool cropToOutline, bool capped, bool filled) {
     double thickness = 0;
     for (const auto& layer : _config.getSubstrates()) {
         thickness += layer.thickness();
@@ -1002,10 +1012,30 @@ void Simulation::addVia(double xPos, double yPos, double x2Pos, double y2Pos, do
     };
 
     auto [fillXs, fillYs] = _viaPolygon(xPos, yPos, x2Pos, y2Pos, diameter, false);
-    addCrossSection(*_viaFillingMaterial, fillXs, fillYs, 51);
+    // An unfilled drill is air, which still has to override the substrate it passes through.
+    addCrossSection(filled ? *_viaFillingMaterial : *_npthVoidMaterial, fillXs, fillYs, 51);
 
     auto [outerXs, outerYs] = _viaPolygon(xPos, yPos, x2Pos, y2Pos, outerDiameter, true);
     addCrossSection(*_viaMaterial, outerXs, outerYs, 50);
+
+    if (capped) {
+        // Plated-over caps on F.Cu (z=0) and the last copper layer (z=-thickness). Priority 52
+        // outranks the drill's own 51, which otherwise reads it as open at both planes.
+        auto addCap = [&](const std::vector<double>& xs, const std::vector<double>& ys) {
+            for (const double z : {0.0, -thickness}) {
+                addPolygon(*_viaMaterial, xs, ys, axisIndex("z"), z, 52);
+            }
+        };
+        if (!cropToOutline) {
+            addCap(outerXs, outerYs);
+        } else {
+            for (const auto& [loopXs, loopYs] : _clipPolygonToOutline(outerXs, outerYs, _slicedBoard.outline)) {
+                if (loopXs.size() >= 3) {
+                    addCap(loopXs, loopYs);
+                }
+            }
+        }
+    }
 }
 
 void Simulation::addNPTHHoles() {
@@ -1258,7 +1288,7 @@ std::expected<void, std::string> Simulation::addLumpedComponents() {
             }
             const double padZ = std::round(*zResult);
             const double bridgeZ = _cornerBridgeZ(padZ, component.layer());
-            logInfo("Simulation: corner-bridge for " + component.reference() + ": layer=" +
+            logInfo("Simulation: corner-bridge for " + component.name() + ": layer=" +
                      std::to_string(component.layer()) + " padZ=" + std::to_string(padZ) +
                      " bridgeZ=" + std::to_string(bridgeZ) + " pos1=(" + std::to_string(component.position1().first) +
                      "," + std::to_string(component.position1().second) + ") pos2=(" +
@@ -1272,7 +1302,7 @@ std::expected<void, std::string> Simulation::addLumpedComponents() {
                                         std::min(padZ, bridgeZ)};
                 const Point3 stop = {std::round(at.first + width / 2.0), std::round(at.second + width / 2.0),
                                        std::max(padZ, bridgeZ)};
-                CSPropMetal* wire = addMetal(*_csx, "LumpedBridgePillar_" + component.reference() + "_" + suffix);
+                CSPropMetal* wire = addMetal(*_csx, "LumpedBridgePillar_" + component.name() + "_" + suffix);
                 addBox(*wire, start, stop, 100);
             };
             const auto buildLeg = [&](std::pair<double, double> from, std::pair<double, double> to, double direction,
@@ -1283,7 +1313,7 @@ std::expected<void, std::string> Simulation::addLumpedComponents() {
                 }
                 const auto dirIt = dirMap.find(dir);
                 if (dirIt == dirMap.end()) {
-                    return std::unexpected("Lumped component " + component.reference() +
+                    return std::unexpected("Lumped component " + component.name() +
                                             "'s corner-bridge leg direction is not a multiple of 90 degrees");
                 }
                 const std::int32_t axisIndex = dirIt->second == "x" ? 0 : 1;
@@ -1306,12 +1336,12 @@ std::expected<void, std::string> Simulation::addLumpedComponents() {
                 };
                 if (carriesComponent) {
                     CSPropLumpedElement* prop =
-                        addLumpedElement(*_csx, "Lumped_" + component.reference(), axisIndex,
-                                          /*caps=*/false, component.resistance(), CSPropLumpedElement::SERIES,
+                        addLumpedElement(*_csx, "Lumped_" + component.name(), axisIndex,
+                                          /*caps=*/false, component.resistance(), _lumpedType(component),
                                           component.inductance(), component.capacitance());
                     addBox(*prop, start, stop, 100);
                 } else {
-                    CSPropMetal* wire = addMetal(*_csx, "LumpedBridgeWire_" + component.reference());
+                    CSPropMetal* wire = addMetal(*_csx, "LumpedBridgeWire_" + component.name());
                     addBox(*wire, start, stop, 100);
                 }
                 return {};
@@ -1337,7 +1367,7 @@ std::expected<void, std::string> Simulation::addLumpedComponents() {
         }
         const auto dirIt = dirMap.find(direction);
         if (dirIt == dirMap.end()) {
-            logError("Lumped component " + component.reference() + "'s direction is not a multiple of 90 degrees, skipping");
+            logError("Lumped component " + component.name() + "'s direction is not a multiple of 90 degrees, skipping");
             continue;
         }
         const std::int32_t axisIndex = dirIt->second == "x" ? 0 : 1;
@@ -1375,13 +1405,12 @@ std::expected<void, std::string> Simulation::addLumpedComponents() {
         double inductance = component.inductance();
         double capacitance = component.capacitance();
         logDebug("Adding lumped " +
-                 std::string(component.type() == LumpedComponentType::Resistor   ? "resistor"
-                             : component.type() == LumpedComponentType::Inductor ? "inductor"
-                                                                                  : "capacitor") +
-                 " " + component.reference() + " at start: " + _point3ToString(start) +
-                 " end: " + _point3ToString(stop));
-        CSPropLumpedElement* prop = addLumpedElement(*_csx, "Lumped_" + component.reference(), axisIndex,
-                                                       /*caps=*/false, resistance, CSPropLumpedElement::SERIES,
+                 std::string(component.topology() == LumpedComponentTopology::Series ? "series" : "parallel") +
+                 " element " + component.name() + " (R=" + std::to_string(resistance) +
+                 " L=" + std::to_string(inductance) + " C=" + std::to_string(capacitance) +
+                 ") at start: " + _point3ToString(start) + " end: " + _point3ToString(stop));
+        CSPropLumpedElement* prop = addLumpedElement(*_csx, "Lumped_" + component.name(), axisIndex,
+                                                       /*caps=*/false, resistance, _lumpedType(component),
                                                        inductance, capacitance);
         addBox(*prop, start, stop, 100);
     }

@@ -21,6 +21,7 @@ struct HullCutTrace {
     TraceSegment segment;
     std::string netName;
     std::string layerName;
+    std::string trackUUID; // the KiCad track this segment is (part of)
 };
 
 struct HullCutPoint {
@@ -29,6 +30,12 @@ struct HullCutPoint {
     std::string layerName;
     double inwardDirectionDegrees = 0;
     double width = 0;
+    std::string trackUUID;
+    /// True when the hull keeps the track's end side of the cut, false when it keeps its start.
+    bool keepsTrackEnd = false;
+    /// Orders cuts along their track from its start: the index of the input trace the cut lies on
+    /// (a flattened arc's pieces are consecutive, in order) plus its fraction along that piece.
+    double trackParameter = 0;
 };
 
 /// Converts the authoritative post-cut copper loops into density segments without introducing the

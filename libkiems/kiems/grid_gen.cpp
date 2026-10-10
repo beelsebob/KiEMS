@@ -1015,7 +1015,8 @@ std::vector<grid_detail::HullCutPoint> grid_detail::hullCutTracePoints(
     auto distance = [](const Position& a, const Position& b) {
         return std::hypot(a.x() - b.x(), a.y() - b.y());
     };
-    auto append = [&](const HullCutTrace& trace, const Position& boundary, const Position& inside) {
+    auto append = [&](std::size_t traceIndex, const Position& boundary, const Position& inside) {
+        const HullCutTrace& trace = traces[traceIndex];
         for (const HullCutPoint& existing : result) {
             if (existing.netName == trace.netName && existing.layerName == trace.layerName &&
                 distance(existing.position, boundary) <= comparisonTolerance) {
@@ -1023,8 +1024,20 @@ std::vector<grid_detail::HullCutPoint> grid_detail::hullCutTracePoints(
             }
         }
         const double direction = std::atan2(inside.y() - boundary.y(), inside.x() - boundary.x()) * 180.0 / M_PI;
+        const Position& start = trace.segment.start();
+        const Position& stop = trace.segment.stop();
+        const double alongX = stop.x() - start.x();
+        const double alongY = stop.y() - start.y();
+        const bool keepsTrackEnd = (inside.x() - boundary.x()) * alongX + (inside.y() - boundary.y()) * alongY > 0;
+        const double lengthSquared = alongX * alongX + alongY * alongY;
+        const double fraction =
+            lengthSquared > 0
+                ? std::clamp(((boundary.x() - start.x()) * alongX + (boundary.y() - start.y()) * alongY) / lengthSquared,
+                             0.0, 1.0)
+                : 0.0;
         result.push_back({boundary, trace.netName, trace.layerName,
-                          direction < 0 ? direction + 360.0 : direction, trace.segment.width()});
+                          direction < 0 ? direction + 360.0 : direction, trace.segment.width(), trace.trackUUID,
+                          keepsTrackEnd, static_cast<double>(traceIndex) + fraction});
     };
     auto onBoundary = [&](const Position& p) {
         for (const std::vector<Position>& loop : cutoutLoops) {
@@ -1064,8 +1077,8 @@ std::vector<grid_detail::HullCutPoint> grid_detail::hullCutTracePoints(
             return !original || (onBoundary(end) && !continuesInside(index, end));
         };
         for (const TraceSegment& piece : piecesByTrace[index]) {
-            if (isCut(piece.start())) append(trace, piece.start(), piece.stop());
-            if (isCut(piece.stop())) append(trace, piece.stop(), piece.start());
+            if (isCut(piece.start())) append(index, piece.start(), piece.stop());
+            if (isCut(piece.stop())) append(index, piece.stop(), piece.start());
         }
     }
     return result;

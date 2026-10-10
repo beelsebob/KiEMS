@@ -145,13 +145,15 @@ struct PortGridFootprint {
 
 PortGridFootprint portGridFootprint(const PortConfig& port);
 
-/// Which of a LumpedComponentConfig's R/L/C fields are physically present -- mirrors how
-/// CSPropLumpedElement/Operator_Ext_LumpedRLC themselves distinguish "absent" (NaN) from "present,
-/// value zero" (see operator_ext_lumpedRLC.cpp's own doc comment on this), just narrowed to the
-/// three single-quantity component kinds resolveSimulationPorts() ever models.
-enum class LumpedComponentType { Resistor, Inductor, Capacitor };
+/// How a LumpedComponentConfig's R, L and C are connected between its two pads -- the two forms
+/// CSPropLumpedElement/Operator_Ext_LumpedRLC support. NaN marks an absent quantity in either: a
+/// series element without a C conducts at DC, a parallel one without an R doesn't. Copper's
+/// parallel elements carry R and C only.
+enum class LumpedComponentTopology { Series, Parallel };
 
-/// One included 2-pin R/L/C component, resolved to real board geometry -- populated entirely by
+/// One lumped element between two pads of an included component -- the whole of a 2-pin R/L/C, or
+/// one branch of a component whose SPICE model connects several pin pairs (see
+/// componentSimNetwork()) -- resolved to real board geometry, populated entirely by
 /// resolveSimulationPorts() (never (de)serialized, same as PortConfig; see
 /// SimulationConfig::_lumpedComponents' own comment). A component only ever gets one of these if
 /// the user included it (SimulationConfig::includedComponents()) and at least one pad centre
@@ -162,8 +164,13 @@ public:
     const std::string& reference() const { return _reference; }
     void setReference(std::string value) { _reference = std::move(value); }
 
-    LumpedComponentType type() const { return _type; }
-    void setType(LumpedComponentType value) { _type = value; }
+    /// Unique among this simulation's lumped components, for naming the element's geometry:
+    /// the reference, plus the two pins for a component modelled as several branches ("RN1_1_8").
+    const std::string& name() const { return _name.empty() ? _reference : _name; }
+    void setName(std::string value) { _name = std::move(value); }
+
+    LumpedComponentTopology topology() const { return _topology; }
+    void setTopology(LumpedComponentTopology value) { _topology = value; }
 
     /// Display-form net names at the two terminals. These are retained alongside the geometry so
     /// result presentation can identify every net electrically reachable through the passives
@@ -264,7 +271,8 @@ private:
     std::string _net1;
     std::string _net2;
     std::string _reference;
-    LumpedComponentType _type = LumpedComponentType::Resistor;
+    std::string _name;
+    LumpedComponentTopology _topology = LumpedComponentTopology::Series;
     double _resistance = std::numeric_limits<double>::quiet_NaN();
     double _inductance = std::numeric_limits<double>::quiet_NaN();
     double _capacitance = std::numeric_limits<double>::quiet_NaN();

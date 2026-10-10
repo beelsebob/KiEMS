@@ -18,6 +18,13 @@ namespace kiems {
 /// when they do not use a recognised complementary suffix.
 std::string differentialPairBaseName(std::string_view positiveNet, std::string_view negativeNet);
 
+/// A net's reference plane is one metal index counted from F.Cu, so it names the plane under the
+/// top-side pads. A port on B.Cu gets the plane at the same depth from B.Cu instead: referenced to
+/// the configured one, its z-directed box would run through the whole stack, and Copper's lumped
+/// elements override PEC, so every via barrel inside it (a via-in-pad decoupling cap, say) would
+/// become the port's resistor. Inner-layer ports keep the configured plane.
+std::int32_t referencePlaneForPortLayer(std::int32_t layer, std::int32_t plane, std::int32_t metalCount);
+
 /// The schematic pin types which represent a receiving/load-capable endpoint get a real 45-ohm
 /// termination by default. Ground pins never do; explicit per-pin configuration can still override
 /// this default in either direction.

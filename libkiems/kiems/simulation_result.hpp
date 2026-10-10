@@ -75,6 +75,9 @@ public:
                                                                        std::int32_t probe, std::int32_t excitedPort) const;
     std::optional<std::vector<std::complex<double>>> getProbeCurrent(const std::string& simulationName,
                                                                        std::int32_t probe, std::int32_t excitedPort) const;
+    /// See Postprocessor::getProbeTransfer().
+    std::optional<std::vector<std::complex<double>>> getProbeTransfer(const std::string& simulationName,
+                                                                        std::int32_t probe, std::int32_t inputPort) const;
     /// Measured characteristic impedance for a trace-impedance probe only (PortConfig::
     /// isTraceProbe()==true, a strict subset of the non-absorbing ports above) -- nullopt for any
     /// other port, or an unsimulated pair.

@@ -83,6 +83,8 @@ std::expected<std::vector<ViaHole>, std::string> getVias(const libkicad::Board& 
         via.x2 = capsule.x2;
         via.y2 = capsule.y2;
         via.diameter = capsule.diameter;
+        via.filled = hole.protection.filled;
+        via.capped = hole.protection.filled && hole.protection.capped;
         vias.push_back(via);
     }
     logDebug("Found " + std::to_string(vias.size()) + " vias");

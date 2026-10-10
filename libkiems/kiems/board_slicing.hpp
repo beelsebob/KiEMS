@@ -392,6 +392,40 @@ std::expected<SlicedBoardPlan, std::string> planSlicedBoardForSimulation(
     const std::vector<ClassifiedCopper::HullContribution>& hullContributions,
     const std::vector<ViaHole>& existingVias);
 
+/// One place where a routed trace of a simulated net crosses the current hull. `identifier` is what
+/// a HullCutPortConfig persists, "<uuid>|<start|end>|<n>": the KiCad track's UUID, which end of that
+/// track the hull keeps, and which of the track's crossings keeping that end this is (0 nearest
+/// the track's start). It survives the hull moving along the track.
+/// `legacyIdentifier` is the older position-based form (net|layer|x|y, rounded in simulation
+/// units), kept only to migrate documents that stored it.
+struct HullCut {
+    std::string identifier;
+    std::string legacyIdentifier;
+    std::string netName;
+    std::string layerName;
+    Position position;
+    double inwardDirectionDegrees = 0;
+    double width = 0;
+};
+
+/// The setup-time hull plan for one simulation: planSlicedBoardForSimulation()'s result, the
+/// SlicingConfig it was planned with, and every trace crossing of that hull.
+struct HullCutPlan {
+    SlicingConfig slicing;
+    SlicedBoardPlan plan;
+    std::vector<HullCut> hullCuts;
+};
+
+/// Plans `config.simulations()[simulationIndex]`'s hull and finds its trace crossings. `config` is
+/// in file units with its stackup already imported (importStackup()); it is scaled on a copy.
+std::expected<HullCutPlan, std::string> planHullCuts(const EMSConfig& config, std::size_t simulationIndex,
+                                                     const libkicad::Board& board);
+
+/// Brings `simulation`'s stored hull-cut ports in line with `hullCuts`: a port still stored under
+/// its cut's legacy position-based identifier is renamed to the track-based one (and so is any
+/// excitation driving it); a port matching no current cut is discarded with its excitations.
+void reconcileHullCutPorts(SimulationConfig& simulation, const std::vector<HullCut>& hullCuts);
+
 /// Low-level compatibility overload for geometry fixtures that provide one flat contributing
 /// copper set. Production callers pass ClassifiedCopper::hullContributions to the overload above.
 std::expected<SlicedBoard, std::string> sliceBoardForSimulation(

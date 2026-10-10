@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <expected>
+#include <filesystem>
 #include <iomanip>
 #include <limits>
 #include <map>
@@ -19,6 +20,7 @@
 #include <utility>
 #include <vector>
 
+#include "component_sim_model.hpp"
 #include "component_value.hpp"
 #include "config.hpp"
 #include "constants.hpp"
@@ -54,6 +56,13 @@ std::string differentialPairBaseName(std::string_view positiveNet, std::string_v
     return std::string(positiveNet) + " / " + std::string(negativeNet);
 }
 
+std::int32_t referencePlaneForPortLayer(std::int32_t layer, std::int32_t plane, std::int32_t metalCount) {
+    const std::int32_t bottom = metalCount - 1;
+    // Only a plane nearer F.Cu than B.Cu belongs to the top side.
+    if (layer != bottom || plane < 0 || bottom - plane <= plane || bottom - plane >= layer) return plane;
+    return bottom - plane;
+}
+
 bool pinTypeAbsorbsByDefault(std::string_view pinType, bool directlyConnectedToGround) {
     if (directlyConnectedToGround) return false;
     return pinType == "input" || pinType == "bidirectional" || pinType == "power_in";
@@ -84,6 +93,10 @@ std::string _unescapeForDisplay(std::string name) {
         pos += 1;
     }
     return name;
+}
+
+std::int32_t _planeForPortLayer(const EMSConfig& config, std::int32_t layer, std::int32_t plane) {
+    return referencePlaneForPortLayer(layer, plane, static_cast<std::int32_t>(config.getMetals().size()));
 }
 
 double _mmToSimUnits(double mm);
@@ -348,24 +361,79 @@ std::string _letterPrefix(const std::string& reference) {
 // Exact match only (not a prefix match) -- "RN"/"RT"/"RV"/"CN"/"CR"/etc. are deliberately excluded,
 // matching KiEMS/ComponentCategory.swift's effective behavior for these three single-
 // letter designators, without porting its whole IEEE-315 category table.
-std::optional<std::pair<LumpedComponentType, ComponentUnit>> _lumpedComponentKind(const std::string& letterPrefix) {
-    if (letterPrefix == "R") {
-        return std::make_pair(LumpedComponentType::Resistor, ComponentUnit::Resistance);
-    }
-    if (letterPrefix == "L") {
-        return std::make_pair(LumpedComponentType::Inductor, ComponentUnit::Inductance);
-    }
-    if (letterPrefix == "C") {
-        return std::make_pair(LumpedComponentType::Capacitor, ComponentUnit::Capacitance);
-    }
+std::optional<ComponentUnit> _lumpedComponentKind(const std::string& letterPrefix) {
+    if (letterPrefix == "R") return ComponentUnit::Resistance;
+    if (letterPrefix == "L") return ComponentUnit::Inductance;
+    if (letterPrefix == "C") return ComponentUnit::Capacitance;
     return std::nullopt;
 }
 
-// Models every component the user included in `sim` (IncludedComponentConfig) that is a 2-pin
-// R/L/C as a LumpedComponentConfig -- see that type's own doc comment. Nothing is modelled unless
-// it was included; an included component that can't be modelled (not an R/L/C designator, not
-// exactly 2 connected pins, unusable value, pins on different/unknown layers) is logged and
-// skipped.
+// A component without a schematic symbol, modelled from its designator and Value field alone: a
+// 2-pin R, L or C. nullopt (logged) when it isn't one.
+std::optional<ComponentSimBranch> _valueBranch(const libkicad::FootprintInfo& footprint, const std::string& simName) {
+    const std::optional<ComponentUnit> unit = _lumpedComponentKind(_letterPrefix(footprint.reference));
+    if (!unit.has_value()) {
+        logWarning("Simulation \"" + simName + "\": included component " + footprint.reference +
+                   " has no SPICE model and isn't an R, L or C -- skipping");
+        return std::nullopt;
+    }
+    if (footprint.pins.size() != 2) {
+        logWarning("Simulation \"" + simName + "\": included component " + footprint.reference + " has " +
+                   std::to_string(footprint.pins.size()) + " pin(s), not 2 -- skipping (not a supported R/L/C shape)");
+        return std::nullopt;
+    }
+    const std::optional<double> value = parseSensibleComponentValue(footprint.value, *unit);
+    if (!value.has_value()) {
+        logWarning("Simulation \"" + simName + "\": included component " + footprint.reference + "'s value \"" +
+                   footprint.value + "\" isn't a usable finite value -- skipping");
+        return std::nullopt;
+    }
+    ComponentSimBranch branch;
+    branch.pin1 = footprint.pins[0].number;
+    branch.pin2 = footprint.pins[1].number;
+    switch (*unit) {
+    case ComponentUnit::Resistance: branch.resistance = *value; break;
+    case ComponentUnit::Inductance: branch.inductance = *value; break;
+    case ComponentUnit::Capacitance: branch.capacitance = *value; break;
+    }
+    return branch;
+}
+
+// "series R=49.9 L=1e-09", for logs.
+std::string _describeBranch(const ComponentSimBranch& branch) {
+    std::ostringstream text;
+    text << (branch.topology == LumpedComponentTopology::Series ? "series" : "parallel");
+    for (const auto& [name, value] : {std::pair{"R", branch.resistance}, std::pair{"L", branch.inductance},
+                                      std::pair{"C", branch.capacitance}}) {
+        if (!std::isnan(value)) text << " " << name << "=" << value;
+    }
+    return text.str();
+}
+
+// The SPICE models of `board`'s components. `board` is normally the snapshot in fab/, which has
+// the board and project files but not the schematic or the model libraries it names (relative to
+// the project), so the models are read from the original project config.kicadPcbPath() names
+// whenever it still exists.
+std::expected<std::vector<libkicad::ComponentSimModel>, std::string> _componentSimModels(const EMSConfig& config,
+                                                                                         const libkicad::Board& board) {
+    if (config.kicadPcbPath().has_value()) {
+        const std::filesystem::path boardPath = *config.kicadPcbPath();
+        const std::filesystem::path projectPath = std::filesystem::path(boardPath).replace_extension(".kicad_pro");
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(boardPath, ec) && std::filesystem::is_regular_file(projectPath, ec) &&
+            boardPath != board.paths().boardPath) {
+            const libkicad::Board source(board.runtime(), projectPath.string(), boardPath.string());
+            return source.componentSimModels();
+        }
+    }
+    return board.componentSimModels();
+}
+
+// Models every component the user included in `sim` (IncludedComponentConfig) as one
+// LumpedComponentConfig per branch of its SPICE model (componentSimNetwork()) -- see that type's
+// own doc comment. Nothing is modelled unless it was included; a component whose model isn't
+// supported is skipped, and so is any branch that can't be placed (unconnected pin, pins on
+// different/unknown layers), each logged.
 std::expected<void, std::string> _resolveLumpedComponents(const EMSConfig& config, SimulationConfig& sim,
                                                             const libkicad::Board& board, const Position& edgeCutsOrigin,
                                                             const std::vector<std::string>& orderedNets) {
@@ -399,31 +467,30 @@ std::expected<void, std::string> _resolveLumpedComponents(const EMSConfig& confi
         footprintsByReference.emplace(footprint.reference, &footprint);
     }
 
-    for (const IncludedComponentConfig& included : sim.includedComponents()) {
-        const auto found = footprintsByReference.find(included.reference);
-        if (found == footprintsByReference.end()) {
-            logWarning("Simulation \"" + sim.name() + "\": included component " + included.reference +
-                       " is not on the board -- skipping");
-            continue;
+    // One lumped element between two of `footprint`'s pins; a branch that can't be placed is
+    // logged and skipped.
+    auto addBranch = [&](const libkicad::FootprintInfo& footprint, const ComponentSimBranch& branch,
+                         const std::vector<ComponentSimBranch>& branches) -> std::expected<void, std::string> {
+        const std::string label = branches.size() > 1
+                                      ? footprint.reference + " (pins " + branch.pin1 + "-" + branch.pin2 + ")"
+                                      : footprint.reference;
+        const auto findPin = [&](const std::string& number) -> const libkicad::FootprintPin* {
+            const auto pin = std::ranges::find(footprint.pins, number, &libkicad::FootprintPin::number);
+            return pin == footprint.pins.end() ? nullptr : &*pin;
+        };
+        const libkicad::FootprintPin* pin1Pointer = findPin(branch.pin1);
+        const libkicad::FootprintPin* pin2Pointer = findPin(branch.pin2);
+        if (pin1Pointer == nullptr || pin2Pointer == nullptr) {
+            logWarning("Simulation \"" + sim.name() + "\": included component " + label +
+                       ": its SPICE model names a pin the footprint doesn't have -- skipping");
+            return {};
         }
-        const libkicad::FootprintInfo& footprint = *found->second;
-        const auto kind = _lumpedComponentKind(_letterPrefix(footprint.reference));
-        if (!kind.has_value()) {
-            logWarning("Simulation \"" + sim.name() + "\": included component " + footprint.reference +
-                       " isn't an R, L or C, the only components that can be simulated yet -- skipping");
-            continue;
-        }
-        if (footprint.pins.size() != 2) {
-            logWarning("Simulation \"" + sim.name() + "\": included component " + footprint.reference + " has " +
-                       std::to_string(footprint.pins.size()) + " pin(s), not 2 -- skipping (not a supported R/L/C shape)");
-            continue;
-        }
-        const auto& pin1 = footprint.pins[0];
-        const auto& pin2 = footprint.pins[1];
+        const libkicad::FootprintPin& pin1 = *pin1Pointer;
+        const libkicad::FootprintPin& pin2 = *pin2Pointer;
         if (pin1.netName.empty() || pin2.netName.empty()) {
-            logWarning("Simulation \"" + sim.name() + "\": included component " + footprint.reference +
+            logWarning("Simulation \"" + sim.name() + "\": included component " + label +
                        " has an unconnected pin -- skipping");
-            continue;
+            return {};
         }
         for (const auto* pin : {&pin1, &pin2}) {
             if (membership.find(pin->netName) == membership.end()) {
@@ -431,14 +498,6 @@ std::expected<void, std::string> _resolveLumpedComponents(const EMSConfig& confi
                            pin->number + " is on \"" + _unescapeForDisplay(pin->netName) +
                            "\", which isn't included in this simulation -- that end connects to nothing");
             }
-        }
-
-        const auto [type, unit] = *kind;
-        const std::optional<double> parsedValue = parseSensibleComponentValue(footprint.value, unit);
-        if (!parsedValue.has_value()) {
-            logWarning("Simulation \"" + sim.name() + "\": included component " + footprint.reference +
-                       "'s value \"" + footprint.value + "\" isn't a usable finite value -- skipping");
-            continue;
         }
 
         auto pad1Result = board.resolvePin(footprint.reference, pin1.number);
@@ -453,16 +512,16 @@ std::expected<void, std::string> _resolveLumpedComponents(const EMSConfig& confi
         const PadIdentity& pad2 = *pad2Result;
 
         if (pad1.copperLayerName != pad2.copperLayerName) {
-            logWarning("Simulation \"" + sim.name() + "\": component " + footprint.reference +
+            logWarning("Simulation \"" + sim.name() + "\": component " + label +
                        " has pins on different copper layers -- skipping (not supported)");
-            continue;
+            return {};
         }
         const std::string layerFileName = _normalizeLayerName(pad1.copperLayerName);
         const std::optional<std::int32_t> layer = config.metalLayerIndexForFileName(layerFileName);
         if (!layer.has_value()) {
-            logWarning("Simulation \"" + sim.name() + "\": component " + footprint.reference + ": copper layer \"" +
+            logWarning("Simulation \"" + sim.name() + "\": component " + label + ": copper layer \"" +
                        pad1.copperLayerName + "\" not found in stackup -- skipping");
-            continue;
+            return {};
         }
 
         const Position pos1 = _padPositionInSimFrame(pad1, edgeCutsOrigin);
@@ -472,20 +531,13 @@ std::expected<void, std::string> _resolveLumpedComponents(const EMSConfig& confi
 
         LumpedComponentConfig component;
         component.setReference(footprint.reference);
-        component.setType(type);
+        if (branches.size() > 1) component.setName(footprint.reference + "_" + branch.pin1 + "_" + branch.pin2);
+        component.setTopology(branch.topology);
         component.setNet1(_unescapeForDisplay(pin1.netName));
         component.setNet2(_unescapeForDisplay(pin2.netName));
-        switch (type) {
-        case LumpedComponentType::Resistor:
-            component.setResistance(*parsedValue);
-            break;
-        case LumpedComponentType::Inductor:
-            component.setInductance(*parsedValue);
-            break;
-        case LumpedComponentType::Capacitor:
-            component.setCapacitance(*parsedValue);
-            break;
-        }
+        component.setResistance(branch.resistance);
+        component.setInductance(branch.inductance);
+        component.setCapacitance(branch.capacitance);
         component.setPosition1({pos1.x(), pos1.y()});
         component.setPosition2({pos2.x(), pos2.y()});
         component.setLayer(*layer);
@@ -512,11 +564,65 @@ std::expected<void, std::string> _resolveLumpedComponents(const EMSConfig& confi
             component.setBridgeCorner({corner.x(), corner.y()});
             component.setDirection(pos1.x() < corner.x() ? 0.0 : 180.0);
             component.setDirection2(corner.y() < pos2.y() ? 90.0 : 270.0);
-            logInfo("Simulation \"" + sim.name() + "\": component " + footprint.reference +
+            logInfo("Simulation \"" + sim.name() + "\": component " + label +
                      "'s two pads aren't axis-aligned -- bridging via a synthetic corner at (" +
                      std::to_string(corner.x()) + ", " + std::to_string(corner.y()) + ") through open airspace");
         }
         sim.lumpedComponents().push_back(std::move(component));
+        return {};
+    };
+
+    // The SPICE models decide what each included component becomes. A part with no schematic
+    // symbol -- or every part, when the schematic can't be read -- falls back to its designator
+    // and Value field, as a single 2-pin R, L or C.
+    std::unordered_map<std::string, libkicad::ComponentSimModel> modelsByReference;
+    if (auto models = _componentSimModels(config, board)) {
+        for (libkicad::ComponentSimModel& model : *models) {
+            modelsByReference.emplace(model.reference, std::move(model));
+        }
+    } else {
+        logWarning("Simulation \"" + sim.name() + "\": couldn't read the schematic's SPICE models (" +
+                   models.error() + ") -- modelling included components from their values instead");
+    }
+
+    for (const IncludedComponentConfig& included : sim.includedComponents()) {
+        const auto found = footprintsByReference.find(included.reference);
+        if (found == footprintsByReference.end()) {
+            logWarning("Simulation \"" + sim.name() + "\": included component " + included.reference +
+                       " is not on the board -- skipping");
+            continue;
+        }
+        const libkicad::FootprintInfo& footprint = *found->second;
+
+        std::vector<ComponentSimBranch> branches;
+        const auto model = modelsByReference.find(footprint.reference);
+        if (model != modelsByReference.end() && model->second.status != libkicad::ComponentSimModelStatus::NoSymbol) {
+            ComponentSimNetwork network = componentSimNetwork(model->second);
+            if (!network.supported) {
+                logWarning("Simulation \"" + sim.name() + "\": included component " + footprint.reference + ": " +
+                           network.reason + " -- skipping");
+                continue;
+            }
+            if (network.branches.empty()) {
+                logWarning("Simulation \"" + sim.name() + "\": included component " + footprint.reference +
+                           "'s SPICE model connects none of its pins -- skipping");
+                continue;
+            }
+            branches = std::move(network.branches);
+        } else {
+            auto branch = _valueBranch(footprint, sim.name());
+            if (!branch) continue;
+            branches.push_back(std::move(*branch));
+        }
+
+        std::string summary;
+        for (const ComponentSimBranch& branch : branches) {
+            auto added = addBranch(footprint, branch, branches);
+            if (!added) return std::unexpected(std::move(added).error());
+            summary += "\n  pins " + branch.pin1 + "-" + branch.pin2 + ": " + _describeBranch(branch);
+        }
+        logInfo("Simulation \"" + sim.name() + "\": included component " + footprint.reference + " modelled as " +
+                std::to_string(branches.size()) + " lumped element(s):" + summary);
     }
     return {};
 }
@@ -819,7 +925,7 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                     port.setPosition({positionSim.x(), positionSim.y()});
                     port.setDirection(direction);
                     port.setLayer(*layer);
-                    port.setPlane(portEntry.plane());
+                    port.setPlane(_planeForPortLayer(config, *layer, portEntry.plane()));
                     port.setImpedance(automatic ? 45.0 :
                         portEntry.pinImpedance(pad.footprintRef, pad.padNumber).value_or(portEntry.impedance()));
                     if (portEntry.width().has_value()) {
@@ -844,7 +950,7 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                     logInfo("Resolved geometry-only absorbing port \"" + portLabel + "\" at (" +
                             std::to_string(positionSim.x()) + ", " + std::to_string(positionSim.y()) +
                             "), layer " + std::to_string(*layer) + " -> plane " +
-                            std::to_string(portEntry.plane()) + ", impedance " +
+                            std::to_string(port.plane()) + ", impedance " +
                             std::to_string(port.impedance()) + " ohms");
                     sim.ports().push_back(std::move(port));
                 }
@@ -965,7 +1071,7 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                 port.setPosition({positionSim.x(), positionSim.y()});
                 port.setDirection(direction);
                 port.setLayer(*layer);
-                port.setPlane(entry.plane());
+                port.setPlane(_planeForPortLayer(config, *layer, entry.plane()));
                 port.setImpedance(automaticAbsorber ? 45.0 :
                     entry.pinImpedance(pad.footprintRef, pad.padNumber).value_or(entry.impedance()));
                 port.setLength(entry.length());
@@ -1067,7 +1173,7 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                     probe.setWidth(candidate.width);
                     probe.setLength(candidate.length);
                     probe.setLayer(candidate.layer);
-                    probe.setPlane(entry.plane());
+                    probe.setPlane(_planeForPortLayer(config, candidate.layer, entry.plane()));
                     probe.setExcite(false);
                     probe.setAbsorbSignal(false);
                     probe.setIsTraceProbe(true);
@@ -1077,6 +1183,17 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                     sim.ports().push_back(std::move(probe));
                 }
             }
+        }
+
+        // A hull-cut port is keyed by its KiCad track, so it follows its cut as the hull moves along
+        // that track; reconcileHullCutPorts() re-places it there. Once the hull no longer cuts the
+        // track at all, the marker would otherwise still be built as a real port in the middle of
+        // retained copper, so it is discarded along with anything driving it.
+        if (!sim.hullCutPorts().empty()) {
+            const auto simulationIndex = static_cast<std::size_t>(&sim - config.simulations().data());
+            auto hullPlan = planHullCuts(config, simulationIndex, board);
+            if (!hullPlan) return std::unexpected(std::move(hullPlan).error());
+            reconcileHullCutPorts(sim, hullPlan->hullCuts);
         }
 
         std::unordered_set<std::string> excitedHullCutPorts;
@@ -1116,7 +1233,7 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
             port.setWidth(authored.width());
             port.setLength(authored.length());
             port.setLayer(*layer);
-            port.setPlane(authored.plane());
+            port.setPlane(_planeForPortLayer(config, *layer, authored.plane()));
             port.setImpedance(authored.impedance());
             port.setAbsorbSignal(authored.absorbSignal());
             port.setProbe(authored.probe());
