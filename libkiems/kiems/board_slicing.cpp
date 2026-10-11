@@ -842,7 +842,6 @@ void restrictLumpedComponentsToCutout(SimulationConfig& simulation, const Sliced
 
     auto& components = simulation.lumpedComponents();
     const std::size_t before = components.size();
-    for (const auto& c : components) logInfo("DBGLUMP " + c.name() + " " + std::to_string(c.position1().first) + "," + std::to_string(c.position1().second) + " " + std::to_string(contains(c.position1())) + std::to_string(contains(c.position2())));
     std::erase_if(components, [&](const LumpedComponentConfig& component) {
         return !contains(component.position1()) && !contains(component.position2());
     });
