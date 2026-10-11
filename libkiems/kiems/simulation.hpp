@@ -170,6 +170,11 @@ public:
     /// metal/resistor/excitation. Still pushed onto _ports (see addPorts()), so it's reachable
     /// through every existing per-port accessor.
     std::expected<void, std::string> addPassiveProbe(PortConfig& portConfig, std::int32_t portNumber);
+    /// The pad's own footprint extruded from its copper layer to its reference plane -- the column
+    /// addResistivePort()'s resistor fills and addLoadCapacitor()'s capacitor shares.
+    std::expected<std::pair<Point3, Point3>, std::string> padColumn(const PortConfig& portConfig);
+    /// PortConfig::loadCapacitance() as a lumped capacitor filling padColumn().
+    std::expected<void, std::string> addLoadCapacitor(const PortConfig& portConfig);
     /// Built instead of addResistivePort()/addPassiveProbe() for a PortConfig with isTraceProbe()==true --
     /// a non-loading, mid-trace characteristic-impedance measurement point (see
     /// PortConfig::isTraceProbe()'s own doc comment). Same transverse-width/propagation-axis box
@@ -246,6 +251,21 @@ public:
     /// prepares the output directory. Only ever safe to call from a freshly-spawned,
     /// single-purpose process because it changes the working directory on success.
     std::expected<void, std::string> prepareRunDirectory(std::int32_t excitedPortNumber);
+    /// Writes ports.txt (every resolved port by index, the N in port_ut_N) and lumped.txt (every
+    /// resolved lumped component, then every lumped element exactly as the solver receives it)
+    /// into `directory`, so a run's results can be read without re-deriving its setup.
+    void writeRunDiagnostics(const std::filesystem::path& directory) const;
+
+    /// One connected metal region of the solver's grid, as a backend labels it.
+    using MetalRegionAt = std::function<std::optional<std::uint32_t>(const std::array<double, 3>& point)>;
+    using MetalRegionsIn =
+        std::function<std::vector<std::uint32_t>(const std::array<double, 3>& start, const std::array<double, 3>& stop)>;
+    /// Checks the solver's rasterized metal (`regionAt`/`regionsIn`, simulation units) for nets the
+    /// board keeps apart that end up joined: a region reached by two nets' pads, or a port's or
+    /// lumped element's terminal face touching metal of a net other than its own. Writes every
+    /// finding to `directory`/shorts.txt (a header only when there are none) and returns them.
+    std::vector<std::string> writeMetalShortReport(const MetalRegionAt& regionAt, const MetalRegionsIn& regionsIn,
+                                                   const std::filesystem::path& directory);
 
     /// The CSXCAD geometry -- exposed because a Copper worker
     /// needs it to discover probe boxes (see Copper/Internal/CopperProbes.hpp's discoverProbes()),

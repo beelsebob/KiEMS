@@ -12,7 +12,9 @@
 // This worker stays on Copper's public boundary: simulation.hpp supplies the complete CSXCAD type,
 // while CopperFDTDRunner.h only forward-declares it. No Copper/Internal headers are needed here.
 
+#include <array>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -157,6 +159,20 @@ int main(int argc, char** argv) {
     portConfig.f0 = simulation.excitationF0();
     portConfig.fc = simulation.excitationFc();
     portConfig.maxTimesteps = simulation.maxTimesteps();
+    // Check the solver's rasterized metal for nets the board keeps apart that it joins anyway (see
+    // Simulation::writeMetalShortReport()); a failure to check only costs the check, never the run.
+    try {
+        const copper::CopperMetalMap metal(simulation.csx(), portConfig);
+        simulation.writeMetalShortReport(
+            [&](const std::array<double, 3>& point) { return metal.regionAt(point); },
+            [&](const std::array<double, 3>& start, const std::array<double, 3>& stop) {
+                return metal.regionsIn(start, stop);
+            },
+            std::filesystem::current_path());
+    } catch (const std::exception& exception) {
+        std::cerr << "Couldn't check the grid for shorted nets: " << exception.what() << std::endl;
+    }
+
     const copper::CopperFDTDRunResult cpuResult = copper::runFDTDPortOnCPU(
         simulation.csx(), portConfig, {}, cpmlAlphaMax,
         static_cast<std::uint32_t>(simulation.config().grid().absorbingBoundaryCells()));

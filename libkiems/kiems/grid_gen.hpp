@@ -49,6 +49,17 @@ std::vector<TraceSegment> clipTraceSegmentsToCutout(
     const std::vector<std::vector<Cu::Position>>& cutoutLoops,
     double boundaryTolerance = 0.0);
 
+/// The line-merging pass every density stage ends with, exposed for regression tests: lines closer
+/// than gridMin / 2 collapse, but a `protectedLines` line never moves (it absorbs an unprotected
+/// neighbour; two protected lines both stay unless within gridMin / 4, i.e. the same edge) and only
+/// unprotected pairs are averaged.
+std::vector<double> dedupGrid(std::vector<double> grid, double gridMin, const std::vector<double>& protectedLines);
+
+/// Meshes one axis ("x" or "y") from `copperSegments` alone, exactly as GridGenerator does for a
+/// board spanning [trustedMin, trustedMax] on that axis -- exposed for regression tests.
+std::vector<double> meshAxis(const std::string& axis, const std::vector<TraceSegment>& copperSegments,
+                             const Grid& grid, double trustedMin, double trustedMax);
+
 /// Finds the newly-created endpoints where routed trace centrelines cross the hull. The returned
 /// direction points from the boundary into the retained trace, which lets a synthetic port place
 /// its whole footprint on copper rather than half in the discarded region.

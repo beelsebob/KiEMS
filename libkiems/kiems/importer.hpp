@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "config.hpp"
+#include "libkicad/libkicad.hpp"
 #include "gerber_io.hpp"
 #include "paths_config.hpp"
 #include "polygon_geometry.hpp"
@@ -56,6 +57,24 @@ struct ViaHole : Hole {
         return {{x, y}, {x2, y2}};
     }
 };
+
+/// The KiCad files a simulation should load. When KiCad holds unsaved changes (an autosave newer
+/// than, and different from, its source), `boardPath` is a snapshot of the project with those
+/// autosaves standing in for their files and `unsavedFiles` names them (project-relative);
+/// otherwise it is the user's own board.
+struct KicadSources {
+    std::filesystem::path boardPath;
+    std::vector<std::string> unsavedFiles;
+    /// Why the sources may not be what's saved, for a log line or the app's banner; empty if none.
+    std::string warning;
+};
+
+/// Resolves `kicadPcbPath`'s project against KiCad's autosaves. A snapshot is built in
+/// `snapshotDir` (replaced each call; removed when nothing is unsaved): the autosaved files copied
+/// under their real names, every other project entry symlinked, so relative library and sheet
+/// paths still resolve. Failing to check autosaves is a warning, not an error.
+KicadSources resolveKicadSources(libkicad::Runtime& runtime, const std::filesystem::path& kicadPcbPath,
+                                 const std::filesystem::path& snapshotDir);
 
 /// Copies the KiCad board/project into `paths.fabDir` for persistent libkicad queries. The
 /// historical function name is retained for source compatibility; no manufacturing files are

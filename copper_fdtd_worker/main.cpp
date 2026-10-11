@@ -9,6 +9,7 @@
 // while CopperFDTDRunner.h only forward-declares it. No Copper/Internal headers are needed here.
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <cstddef>
 #include <cstdint>
@@ -197,6 +198,21 @@ int main(int argc, char** argv) {
         }
         portConfig.domainCPMLCellSize = simulation.config().grid().max();
     }
+    // Check the solver's rasterized metal for nets the board keeps apart that it joins anyway --
+    // a gap narrower than the local cells merges them. Findings go to shorts.txt and the log; a
+    // failure to check only costs the check, never the run.
+    try {
+        const copper::CopperMetalMap metal(simulation.csx(), portConfig);
+        simulation.writeMetalShortReport(
+            [&](const std::array<double, 3>& point) { return metal.regionAt(point); },
+            [&](const std::array<double, 3>& start, const std::array<double, 3>& stop) {
+                return metal.regionsIn(start, stop);
+            },
+            probeDir);
+    } catch (const std::exception& exception) {
+        std::cerr << "Couldn't check the grid for shorted nets: " << exception.what() << std::endl;
+    }
+
     const copper::CopperFDTDRunResult gpuResult = copper::runFDTDPortOnGPU(
         simulation.csx(), portConfig, {}, cpmlAlphaMax,
         static_cast<std::uint32_t>(simulation.config().grid().absorbingBoundaryCells()));

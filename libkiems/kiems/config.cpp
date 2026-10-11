@@ -150,6 +150,16 @@ void from_json(const nlohmann::json& j, PinImpedanceOverride& p) {
     p.impedance = j.at("impedance").get<double>();
 }
 
+void to_json(nlohmann::json& j, const PinLoadCapacitance& p) {
+    j = nlohmann::json{{"footprint", p.footprint}, {"pin", p.pin}, {"capacitance", p.capacitance}};
+}
+
+void from_json(const nlohmann::json& j, PinLoadCapacitance& p) {
+    p.footprint = j.at("footprint").get<std::string>();
+    p.pin = _pinToString(j.at("pin"));
+    p.capacitance = j.at("capacitance").get<double>();
+}
+
 void to_json(nlohmann::json& j, const InvolvedNetConfig& p) {
     switch (p._kind) {
         case NetSelectorKind::NetClass:
@@ -206,6 +216,9 @@ void to_json(nlohmann::json& j, const InvolvedNetConfig& p) {
     }
     if (!p._pinImpedanceOverrides.empty()) {
         j["pin_impedance_overrides"] = p._pinImpedanceOverrides;
+    }
+    if (!p._pinLoadCapacitances.empty()) {
+        j["pin_load_capacitances"] = p._pinLoadCapacitances;
     }
 }
 
@@ -287,6 +300,12 @@ void from_json(const nlohmann::json& j, InvolvedNetConfig& p) {
     if (j.contains("pin_impedance_overrides")) {
         for (const auto& override : j.at("pin_impedance_overrides")) {
             p._pinImpedanceOverrides.push_back(override.get<PinImpedanceOverride>());
+        }
+    }
+    p._pinLoadCapacitances.clear();
+    if (j.contains("pin_load_capacitances")) {
+        for (const auto& capacitance : j.at("pin_load_capacitances")) {
+            p._pinLoadCapacitances.push_back(capacitance.get<PinLoadCapacitance>());
         }
     }
 }
@@ -652,6 +671,205 @@ void SimulationConfig::scaleToSimulationUnits(std::int32_t unitMultiplier) {
     }
 }
 
+void to_json(nlohmann::json& j, const NamedImpedance& p) {
+    j = nlohmann::json{{"name", p.name}, {"impedance", p.impedance}};
+}
+
+void from_json(const nlohmann::json& j, NamedImpedance& p) {
+    p.name = j.at("name").get<std::string>();
+    p.impedance = j.at("impedance").get<double>();
+}
+
+void to_json(nlohmann::json& j, const BoardPinSetup& p) {
+    j = nlohmann::json{{"footprint", p.footprint}, {"pin", p.pin}};
+    if (p.impedance.has_value()) j["impedance"] = *p.impedance;
+    if (p.absorbing.has_value()) j["absorbing"] = *p.absorbing;
+    if (p.noiseGenerating) j["noise_generating"] = true;
+    j["noise_frequency"] = p.noiseFrequency;
+    j["noise_amplitude"] = p.noiseAmplitude;
+}
+
+void from_json(const nlohmann::json& j, BoardPinSetup& p) {
+    const BoardPinSetup def;
+    p.footprint = j.at("footprint").get<std::string>();
+    p.pin = j.at("pin").get<std::string>();
+    p.impedance = j.contains("impedance") ? std::optional<double>(j.at("impedance").get<double>()) : std::nullopt;
+    p.absorbing = j.contains("absorbing") ? std::optional<bool>(j.at("absorbing").get<bool>()) : std::nullopt;
+    p.noiseGenerating = j.value("noise_generating", def.noiseGenerating);
+    p.noiseFrequency = j.value("noise_frequency", def.noiseFrequency);
+    p.noiseAmplitude = j.value("noise_amplitude", def.noiseAmplitude);
+}
+
+namespace {
+
+std::optional<double> findImpedance(const std::vector<NamedImpedance>& entries, const std::string& name) {
+    const auto it = std::find_if(entries.begin(), entries.end(), [&](const NamedImpedance& e) { return e.name == name; });
+    return it == entries.end() ? std::nullopt : std::optional<double>(it->impedance);
+}
+
+void storeImpedance(std::vector<NamedImpedance>& entries, const std::string& name, std::optional<double> value) {
+    const auto it = std::find_if(entries.begin(), entries.end(), [&](const NamedImpedance& e) { return e.name == name; });
+    if (!value.has_value()) {
+        if (it != entries.end()) entries.erase(it);
+    } else if (it != entries.end()) {
+        it->impedance = *value;
+    } else {
+        entries.push_back({name, *value});
+    }
+}
+
+} // namespace
+
+std::optional<double> BoardSetupConfig::netClassImpedance(const std::string& netClass) const {
+    return findImpedance(_netClassImpedances, netClass);
+}
+
+void BoardSetupConfig::setNetClassImpedance(const std::string& netClass, std::optional<double> value) {
+    storeImpedance(_netClassImpedances, netClass, value);
+}
+
+std::optional<double> BoardSetupConfig::netImpedance(const std::string& net) const {
+    return findImpedance(_netImpedances, net);
+}
+
+void BoardSetupConfig::setNetImpedance(const std::string& net, std::optional<double> value) {
+    storeImpedance(_netImpedances, net, value);
+}
+
+const BoardPinSetup* BoardSetupConfig::pin(const std::string& footprint, const std::string& pin) const {
+    const auto it = std::find_if(_pins.begin(), _pins.end(),
+                                 [&](const BoardPinSetup& p) { return p.footprint == footprint && p.pin == pin; });
+    return it == _pins.end() ? nullptr : &*it;
+}
+
+BoardPinSetup& BoardSetupConfig::pinSetup(const std::string& footprint, const std::string& pin) {
+    const auto it = std::find_if(_pins.begin(), _pins.end(),
+                                 [&](const BoardPinSetup& p) { return p.footprint == footprint && p.pin == pin; });
+    if (it != _pins.end()) return *it;
+    BoardPinSetup setup;
+    setup.footprint = footprint;
+    setup.pin = pin;
+    _pins.push_back(std::move(setup));
+    return _pins.back();
+}
+
+void BoardSetupConfig::pruneEmptyPins() {
+    std::erase_if(_pins, [](const BoardPinSetup& p) { return p.isEmpty(); });
+}
+
+double BoardSetupConfig::effectiveNetImpedance(const std::string& net, const std::string& netClass,
+                                               bool isPowerNet) const {
+    if (const auto value = netImpedance(net)) return *value;
+    if (!netClass.empty()) {
+        if (const auto value = netClassImpedance(netClass)) return *value;
+    }
+    return isPowerNet ? _powerImpedance : _signalImpedance;
+}
+
+void to_json(nlohmann::json& j, const BoardSetupConfig& p) {
+    j = nlohmann::json{
+        {"signal_impedance", p._signalImpedance},
+        {"power_impedance", p._powerImpedance},
+        {"net_class_impedances", p._netClassImpedances},
+        {"net_impedances", p._netImpedances},
+        {"pins", p._pins},
+    };
+    if (p._bitRate > 0) j["bit_rate"] = p._bitRate;
+    if (!p._groundName.empty()) {
+        j["ground_net"] = {{p._groundKind == GroundSelectorKind::NetClass ? "net_class" : "net", p._groundName}};
+    }
+    if (!p._edgeTerminatedNets.empty()) j["edge_terminated_nets"] = p._edgeTerminatedNets;
+    if (!p._includedNets.empty()) j["included_nets"] = p._includedNets;
+    if (!p._includedNetClasses.empty()) j["included_net_classes"] = p._includedNetClasses;
+    if (!p._includedComponents.empty()) j["included_components"] = p._includedComponents;
+}
+
+void from_json(const nlohmann::json& j, BoardSetupConfig& p) {
+    const BoardSetupConfig def;
+    p._signalImpedance = j.value("signal_impedance", def._signalImpedance);
+    p._powerImpedance = j.value("power_impedance", def._powerImpedance);
+    p._bitRate = j.value("bit_rate", def._bitRate);
+    p._netClassImpedances = j.value("net_class_impedances", std::vector<NamedImpedance>{});
+    p._netImpedances = j.value("net_impedances", std::vector<NamedImpedance>{});
+    p._pins = j.value("pins", std::vector<BoardPinSetup>{});
+    p._groundKind = GroundSelectorKind::Net;
+    p._groundName.clear();
+    if (j.contains("ground_net")) {
+        const nlohmann::json& ground = j.at("ground_net");
+        if (ground.contains("net_class")) {
+            p._groundKind = GroundSelectorKind::NetClass;
+            p._groundName = ground.at("net_class").get<std::string>();
+        } else if (ground.contains("net")) {
+            p._groundName = ground.at("net").get<std::string>();
+        }
+    }
+    p._edgeTerminatedNets = j.value("edge_terminated_nets", std::vector<std::string>{});
+    p._includedNets = j.value("included_nets", std::vector<std::string>{});
+    p._includedNetClasses = j.value("included_net_classes", std::vector<std::string>{});
+    p._includedComponents = j.value("included_components", std::vector<std::string>{});
+}
+
+void to_json(nlohmann::json& j, const SimulationSetProbe& p) {
+    j = nlohmann::json{{"footprint", p.footprint}, {"absorbing", p.absorbing},
+                       {"load_impedance", p.loadImpedance}};
+    if (p.loadCapacitance) {
+        j["load_capacitance"] = *p.loadCapacitance;
+    }
+}
+
+void from_json(const nlohmann::json& j, SimulationSetProbe& p) {
+    const SimulationSetProbe def;
+    p.footprint = j.value("footprint", def.footprint);
+    p.absorbing = j.value("absorbing", def.absorbing);
+    p.loadImpedance = j.value("load_impedance", def.loadImpedance);
+    p.loadCapacitance = j.contains("load_capacitance") ? std::optional(j.at("load_capacitance").get<double>())
+                                                       : std::nullopt;
+}
+
+void to_json(nlohmann::json& j, const SimulationSetConfig& p) {
+    j = nlohmann::json{
+        {"id", p.id},
+        {"excitation_footprint", p.excitationFootprint},
+        {"net_selection_mode", p.netSelectionMode == SimulationSetNetSelectionMode::List ? "list" : "regular_expression"},
+        {"net_name_pattern", p.netNamePattern},
+        {"net_names", p.netNames},
+        {"additional_net_patterns", p.additionalNetPatterns},
+        {"phase", p.phaseDegrees},
+        {"amplitude", p.amplitude},
+        {"drive_impedance", p.driveImpedance},
+        {"probed", p.probed},
+        {"probe_net_impedance", p.probeNetImpedance},
+        {"absorbing", p.absorbing},
+        {"load_impedance", p.loadImpedance},
+        {"probes", p.probes},
+    };
+    if (p.loadCapacitance) {
+        j["load_capacitance"] = *p.loadCapacitance;
+    }
+}
+
+void from_json(const nlohmann::json& j, SimulationSetConfig& p) {
+    const SimulationSetConfig def;
+    p.id = j.at("id").get<std::string>();
+    p.excitationFootprint = j.value("excitation_footprint", def.excitationFootprint);
+    p.netSelectionMode = j.value("net_selection_mode", std::string{}) == "list"
+        ? SimulationSetNetSelectionMode::List : SimulationSetNetSelectionMode::RegularExpression;
+    // pin_name_pattern was used by the first, pin-oriented Simulation Set design.
+    p.netNamePattern = j.value("net_name_pattern", j.value("pin_name_pattern", def.netNamePattern));
+    p.netNames = j.value("net_names", std::vector<std::string>{});
+    p.additionalNetPatterns = j.value("additional_net_patterns", std::vector<std::string>{});
+    p.phaseDegrees = j.value("phase", def.phaseDegrees);
+    p.amplitude = j.value("amplitude", def.amplitude);
+    p.driveImpedance = j.value("drive_impedance", def.driveImpedance);
+    p.probed = j.value("probed", def.probed);
+    p.probeNetImpedance = j.value("probe_net_impedance", def.probeNetImpedance);
+    p.absorbing = j.value("absorbing", def.absorbing);
+    p.loadImpedance = j.value("load_impedance", def.loadImpedance);
+    p.loadCapacitance = j.contains("load_capacitance") ? std::optional(j.at("load_capacitance").get<double>())
+                                                       : std::nullopt;
+    p.probes = j.value("probes", std::vector<SimulationSetProbe>{});
+}
+
 void to_json(nlohmann::json& j, const SimulationConfig& p) {
     std::vector<DifferentialPairConfig> authoredDiffPairs;
     std::copy_if(p._diffPairs.begin(), p._diffPairs.end(), std::back_inserter(authoredDiffPairs),
@@ -688,13 +906,21 @@ void to_json(nlohmann::json& j, const SimulationConfig& p) {
     if (!p._includedComponents.empty()) {
         j["included_components"] = p._includedComponents;
     }
+    if (p._simulationSet) {
+        j["simulation_set"] = *p._simulationSet;
+    }
+    if (p._generatedBySet) {
+        j["generated_by_set"] = *p._generatedBySet;
+    }
 }
 
 void from_json(const nlohmann::json& j, SimulationConfig& p) {
     const SimulationConfig def;
     p._name = j.at("name").get<std::string>();
     p._involvedNets = j.value("involved_nets", std::vector<InvolvedNetConfig>{});
-    if (p._involvedNets.empty()) {
+    // A Simulation Set template's own nets are optional: its generated simulations include the
+    // excited and probed pins' nets themselves.
+    if (p._involvedNets.empty() && !j.contains("simulation_set")) {
         throw std::runtime_error("Simulation \"" + p._name + "\" has no involved_nets");
     }
     p._groundNet = j.at("ground_net").get<GroundNetConfig>();
@@ -723,6 +949,10 @@ void from_json(const nlohmann::json& j, SimulationConfig& p) {
     p._hullCutPorts = j.value("hull_cut_ports", std::vector<HullCutPortConfig>{});
     p._traces = j.value("traces", std::vector<SingleEndedConfig>{});
     p._diffPairs = j.value("differential_pairs", std::vector<DifferentialPairConfig>{});
+    p._simulationSet = j.contains("simulation_set")
+        ? std::optional(j.at("simulation_set").get<SimulationSetConfig>()) : std::nullopt;
+    p._generatedBySet = j.contains("generated_by_set")
+        ? std::optional(j.at("generated_by_set").get<std::string>()) : std::nullopt;
 }
 
 void EMSConfig::_postInit() {
@@ -779,6 +1009,7 @@ void EMSConfig::loadStackup(std::vector<LayerConfig> layers) { _layers = std::mo
 
 EMSConfig EMSConfig::scaledToSimulationUnits() const {
     EMSConfig scaled = *this;
+    std::erase_if(scaled._simulations, [](const SimulationConfig& sim) { return sim.simulationSet().has_value(); });
     scaled._applyUnitMultiplier();
     for (auto& simulation : scaled._simulations) {
         simulation.scaleToSimulationUnits(constants::unitMultiplier);
@@ -798,6 +1029,7 @@ std::expected<void, std::string> EMSConfig::save(const std::filesystem::path& cf
     out["via"] = _via;
     out["grid"] = _grid;
     out["simulations"] = _simulations;
+    out["board_setup"] = _boardSetup;
 
     std::ofstream file(cfgPath);
     if (!file) {
@@ -895,6 +1127,7 @@ std::expected<EMSConfig, std::string> EMSConfig::parse(const std::filesystem::pa
         self._pixelSize = jsonCfg.value("pixel_size", 5);
         self._via = jsonCfg.value("via", Via{});
         self._grid = jsonCfg.value("grid", Grid{});
+        self._boardSetup = jsonCfg.value("board_setup", BoardSetupConfig{});
 
         self._simulations.clear();
         for (const auto& s : jsonCfg.at("simulations")) {
@@ -919,6 +1152,7 @@ std::expected<EMSConfig, std::string> EMSConfig::parse(const std::filesystem::pa
             out["via"] = self._via;
             out["grid"] = self._grid;
             out["simulations"] = self._simulations;
+            out["board_setup"] = self._boardSetup;
             std::ofstream file(cfgPath);
             file << out.dump(4);
         }

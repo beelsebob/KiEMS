@@ -1,6 +1,11 @@
 #include "importer.hpp"
 
 #include <cmath>
+#include <expected>
+#include <filesystem>
+#include <system_error>
+#include <map>
+#include <algorithm>
 #include <numbers>
 
 #include "config.hpp"
@@ -39,6 +44,101 @@ void _setHoleCapsule(HoleT& destination, double xMm, double yMm, double widthMm,
 }
 
 } // namespace
+
+namespace {
+
+bool _isKicadScratchFile(const std::string& name) {
+    return name.starts_with("_autosave-") || (name.starts_with("~") && name.ends_with(".lck"));
+}
+
+// Mirrors `source` into `destination`: substituted files copied from their autosave, directories
+// holding a substitution mirrored recursively, everything else symlinked.
+std::expected<void, std::string> _mirrorProject(const std::filesystem::path& source,
+                                                const std::filesystem::path& destination,
+                                                const std::map<std::filesystem::path, std::filesystem::path>& substitutions,
+                                                const std::filesystem::path& snapshotDir) {
+    std::error_code ec;
+    std::filesystem::create_directories(destination, ec);
+    if (ec) return std::unexpected("Couldn't create " + destination.string() + ": " + ec.message());
+    for (const auto& entry : std::filesystem::directory_iterator(source, ec)) {
+        const std::filesystem::path path = entry.path();
+        const std::string name = path.filename().string();
+        std::error_code notSnapshot;
+        if (_isKicadScratchFile(name) || std::filesystem::equivalent(path, snapshotDir, notSnapshot)) continue;
+        const std::filesystem::path target = destination / path.filename();
+        if (const auto substitution = substitutions.find(path); substitution != substitutions.end()) {
+            std::filesystem::copy_file(substitution->second, target, ec);
+        } else if (entry.is_directory() &&
+                   std::any_of(substitutions.begin(), substitutions.end(), [&](const auto& item) {
+                       const auto relative = item.first.lexically_relative(path);
+                       return !relative.empty() && *relative.begin() != "..";
+                   })) {
+            if (auto mirrored = _mirrorProject(path, target, substitutions, snapshotDir); !mirrored) return mirrored;
+            continue;
+        } else if (entry.is_directory()) {
+            std::filesystem::create_directory_symlink(path, target, ec);
+        } else {
+            std::filesystem::create_symlink(path, target, ec);
+        }
+        if (ec) return std::unexpected("Couldn't snapshot " + path.string() + ": " + ec.message());
+    }
+    if (ec) return std::unexpected("Couldn't read " + source.string() + ": " + ec.message());
+    return {};
+}
+
+} // namespace
+
+KicadSources resolveKicadSources(libkicad::Runtime& runtime, const std::filesystem::path& kicadPcbPath,
+                                 const std::filesystem::path& snapshotDir) {
+    KicadSources result{kicadPcbPath, {}, {}};
+    std::error_code ec;
+    std::filesystem::remove_all(snapshotDir, ec);
+    const std::filesystem::path projectPath = std::filesystem::path(kicadPcbPath).replace_extension(".kicad_pro");
+    if (!std::filesystem::is_regular_file(projectPath, ec)) return result;
+
+    const libkicad::Board original(runtime, projectPath.string(), kicadPcbPath.string());
+    auto autosaves = original.unsavedAutosaves();
+    if (!autosaves) {
+        result.warning = "Couldn't check KiCad's autosaves for unsaved changes: " + autosaves.error();
+        logWarning(result.warning);
+        return result;
+    }
+    if (autosaves->empty()) return result;
+
+    const std::filesystem::path projectDir = std::filesystem::absolute(projectPath).parent_path();
+    std::map<std::filesystem::path, std::filesystem::path> substitutions;
+    for (const libkicad::AutosaveFile& file : *autosaves) {
+        const std::filesystem::path source = std::filesystem::absolute(file.sourcePath).lexically_normal();
+        substitutions.emplace(source, file.autosavePath);
+        result.unsavedFiles.push_back(source.lexically_relative(projectDir).string());
+    }
+    std::sort(result.unsavedFiles.begin(), result.unsavedFiles.end());
+
+    std::string names;
+    for (const std::string& name : result.unsavedFiles) names += (names.empty() ? "" : ", ") + name;
+    auto mirrored = _mirrorProject(projectDir, snapshotDir, substitutions, snapshotDir);
+    // An autosave whose source was never saved at all (a new sheet) has nothing to replace.
+    for (const auto& [source, autosave] : substitutions) {
+        if (!mirrored) break;
+        if (std::filesystem::exists(source, ec)) continue;
+        const std::filesystem::path target = snapshotDir / source.lexically_relative(projectDir);
+        std::filesystem::create_directories(target.parent_path(), ec);
+        std::filesystem::copy_file(autosave, target, ec);
+        if (ec) mirrored = std::unexpected("Couldn't snapshot " + autosave.string() + ": " + ec.message());
+    }
+    if (!mirrored) {
+        result.warning = "KiCad has unsaved changes to " + names + ", but they couldn't be used (" +
+                         mirrored.error() + ") -- simulating the saved files.";
+        logWarning(result.warning);
+        std::filesystem::remove_all(snapshotDir, ec);
+        return result;
+    }
+    result.boardPath = snapshotDir / std::filesystem::absolute(kicadPcbPath).lexically_relative(projectDir);
+    result.warning = "KiCad has unsaved changes to " + names +
+                     " -- simulating KiCad's autosaved version. Save in KiCad to make them permanent.";
+    logWarning(result.warning);
+    return result;
+}
 
 std::expected<void, std::string> exportKicadPcb(const PathsConfig& paths, const std::filesystem::path& kicadPcbPath) {
     logInfo("Importing KiCad board " + kicadPcbPath.string());

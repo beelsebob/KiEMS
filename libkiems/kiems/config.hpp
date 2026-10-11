@@ -85,6 +85,12 @@ public:
     bool absorbSignal() const { return _absorbSignal; }
     void setAbsorbSignal(bool value) { _absorbSignal = value; }
 
+    /// A lumped capacitor, in farads, from the pad to its reference plane alongside whatever else
+    /// this port builds -- the input capacitance of the pin's receiver. Zero for none. Only built
+    /// for a non-absorbing port: an absorbing one's resistor already owns those grid edges.
+    double loadCapacitance() const { return _loadCapacitance; }
+    void setLoadCapacitance(double value) { _loadCapacitance = value; }
+
     /// True for a net-level, auto-placed trace-impedance probe (see InvolvedNetConfig::
     /// probeImpedance()'s own doc comment) -- selects Simulation::addImpedanceProbe() in
     /// addPorts()'s dispatch, ahead of the absorbSignal() check (a trace probe is never pad-
@@ -127,6 +133,7 @@ private:
     std::int32_t _plane = 1;
     double _dBMargin = -15;
     bool _excite = false;
+    double _loadCapacitance = 0;
     bool _absorbSignal = true;
     bool _isTraceProbe = false;
     bool _probe = true;
@@ -410,6 +417,22 @@ struct PinImpedanceOverride {
 void to_json(nlohmann::json& j, const PinImpedanceOverride& p);
 void from_json(const nlohmann::json& j, PinImpedanceOverride& p);
 
+/// One footprint+pin load capacitance, in farads: the input capacitance of whatever the pin
+/// belongs to (a DRAM address input is ~1-1.4 pF), built as a lumped capacitor from the pad to its
+/// reference plane. Kept separate from ProbedPin for the same reason as PinImpedanceOverride.
+struct PinLoadCapacitance {
+    std::string footprint;
+    std::string pin;
+    double capacitance = 0;
+
+    bool operator==(const PinLoadCapacitance& other) const {
+        return footprint == other.footprint && pin == other.pin;
+    }
+};
+
+void to_json(nlohmann::json& j, const PinLoadCapacitance& p);
+void from_json(const nlohmann::json& j, PinLoadCapacitance& p);
+
 /// One component the user has included in a simulation (the Info panel's "Included in Simulation"
 /// checkbox). Included 2-pin R/L/C components become lumped components -- see port_resolution.cpp's
 /// _resolveLumpedComponents(). Nothing is included automatically.
@@ -617,6 +640,24 @@ public:
         }
     }
 
+    std::optional<double> pinLoadCapacitance(const std::string& footprint, const std::string& pin) const {
+        const auto it = std::find_if(_pinLoadCapacitances.begin(), _pinLoadCapacitances.end(),
+                                     [&](const PinLoadCapacitance& c) {
+                                         return c.footprint == footprint && c.pin == pin;
+                                     });
+        return it != _pinLoadCapacitances.end() ? std::optional<double>(it->capacitance) : std::nullopt;
+    }
+    /// Sets (or, given nullopt or zero, clears) this pin's load capacitance, in farads.
+    void setPinLoadCapacitance(const std::string& footprint, const std::string& pin,
+                               std::optional<double> capacitance) {
+        std::erase_if(_pinLoadCapacitances, [&](const PinLoadCapacitance& c) {
+            return c.footprint == footprint && c.pin == pin;
+        });
+        if (capacitance.has_value() && *capacitance > 0) {
+            _pinLoadCapacitances.push_back({footprint, pin, *capacitance});
+        }
+    }
+
     // impedance/length/width are intentionally left unscaled here: they're copied verbatim into a
     // resolved PortConfig by port_resolution.cpp, which scales the whole PortConfig exactly once
     // (PortConfig::scaleToSimulationUnits) -- scaling them here too would double-scale.
@@ -659,6 +700,7 @@ private:
     std::optional<double> _direction;
     std::vector<PinDirectionOverride> _pinDirectionOverrides;
     std::vector<PinImpedanceOverride> _pinImpedanceOverrides;
+    std::vector<PinLoadCapacitance> _pinLoadCapacitances;
 };
 
 void to_json(nlohmann::json& j, const InvolvedNetConfig& p);
@@ -1139,6 +1181,57 @@ private:
 void to_json(nlohmann::json& j, const Grid& g);
 void from_json(const nlohmann::json& j, Grid& g);
 
+/// One probe of a SimulationSetConfig. Every pin of `footprint` reached by any net selected for a
+/// generated simulation is probed.
+struct SimulationSetProbe {
+    std::string footprint;
+    bool absorbing = false;
+    double loadImpedance = 45;              // ohms, used when absorbing
+    std::optional<double> loadCapacitance;  // farads, used when absorbing
+
+    bool operator==(const SimulationSetProbe& other) const = default;
+};
+
+void to_json(nlohmann::json& j, const SimulationSetProbe& p);
+void from_json(const nlohmann::json& j, SimulationSetProbe& p);
+
+/// Selects the primary nets from which a Simulation Set generates simulations.
+enum class SimulationSetNetSelectionMode {
+    RegularExpression,
+    List,
+};
+
+/// Makes a SimulationConfig a template that the app expands into one ordinary simulation per net
+/// selected by `netSelectionMode`: either matching `netNamePattern` (a whole-name regex), or named
+/// explicitly in `netNames`. `additionalNetPatterns` are regex substitution
+/// templates expanded against that primary match, adding further nets to that simulation. Each
+/// generated simulation is a copy of the template with the matching pin on `excitationFootprint`
+/// excited and every matching pin on every probe component applied,
+/// and carries the template's `id` as its SimulationConfig::generatedBySet(). The template itself
+/// is never run -- EMSConfig::scaledToSimulationUnits() drops it.
+struct SimulationSetConfig {
+    std::string id;
+    std::string excitationFootprint;
+    SimulationSetNetSelectionMode netSelectionMode = SimulationSetNetSelectionMode::RegularExpression;
+    std::string netNamePattern;
+    std::vector<std::string> netNames;
+    std::vector<std::string> additionalNetPatterns;
+    double phaseDegrees = 0;
+    double amplitude = 1;       // volts
+    double driveImpedance = 45; // ohms
+    bool probed = false;
+    bool probeNetImpedance = false;
+    bool absorbing = false;
+    double loadImpedance = 45;
+    std::optional<double> loadCapacitance;
+    std::vector<SimulationSetProbe> probes;
+
+    bool operator==(const SimulationSetConfig& other) const = default;
+};
+
+void to_json(nlohmann::json& j, const SimulationSetConfig& p);
+void from_json(const nlohmann::json& j, SimulationSetConfig& p);
+
 /// One independent simulation: its own involved-nets-driven port resolution, board slicing
 /// parameters, and excitation list. Replaces the old flat Config::ports()/traces()/diffPairs() for
 /// everything simulation-specific.
@@ -1225,6 +1318,13 @@ public:
     std::vector<std::string>& resolvedNets() { return _resolvedNets; }
     const std::vector<std::string>& resolvedNets() const { return _resolvedNets; }
 
+    /// Set when this simulation is a Simulation Set template -- see SimulationSetConfig.
+    const std::optional<SimulationSetConfig>& simulationSet() const { return _simulationSet; }
+    std::optional<SimulationSetConfig>& simulationSet() { return _simulationSet; }
+    /// The SimulationSetConfig::id of the set this simulation was generated from, if any.
+    const std::optional<std::string>& generatedBySet() const { return _generatedBySet; }
+    void setGeneratedBySet(std::optional<std::string> value) { _generatedBySet = std::move(value); }
+
     /// Scales every involved net's and included component's hull padding, viaEdgeDistance/viaSpacing, and every resolved
     /// port's width/length (PortConfig::scaleToSimulationUnits), into simulation units. The other
     /// InvolvedNetConfig fields stay in file units: impedance/length/width are copied verbatim into
@@ -1253,6 +1353,8 @@ private:
     std::vector<HullCutPortConfig> _hullCutPorts;
     std::vector<SingleEndedConfig> _traces;
     std::vector<DifferentialPairConfig> _diffPairs;
+    std::optional<SimulationSetConfig> _simulationSet;
+    std::optional<std::string> _generatedBySet;
 
     std::vector<PortConfig> _ports;         // not (de)serialized, populated by resolveSimulationPorts()
     std::vector<std::string> _resolvedNets; // not (de)serialized, populated by resolveSimulationPorts()
@@ -1261,6 +1363,108 @@ private:
 
 void to_json(nlohmann::json& j, const SimulationConfig& p);
 void from_json(const nlohmann::json& j, SimulationConfig& p);
+
+/// One net or net class's own impedance in BoardSetupConfig, in ohms.
+struct NamedImpedance {
+    std::string name;
+    double impedance = 45;
+
+    bool operator==(const NamedImpedance& other) const = default;
+};
+
+void to_json(nlohmann::json& j, const NamedImpedance& p);
+void from_json(const nlohmann::json& j, NamedImpedance& p);
+
+/// One pin's board-level defaults. Unset optionals inherit (impedance from the pin's net, net class
+/// or the signal/power default; absorbing from the simulation's own automatic termination rule).
+/// A noise-generating pin becomes an adversarial excitation when its net is simulated.
+struct BoardPinSetup {
+    std::string footprint;
+    std::string pin;
+    std::optional<double> impedance;
+    std::optional<bool> absorbing;
+    bool noiseGenerating = false;
+    double noiseFrequency = 100e6; // Hz
+    double noiseAmplitude = 1;     // V
+
+    bool isEmpty() const { return !impedance.has_value() && !absorbing.has_value() && !noiseGenerating; }
+    bool operator==(const BoardPinSetup& other) const = default;
+};
+
+void to_json(nlohmann::json& j, const BoardPinSetup& p);
+void from_json(const nlohmann::json& j, BoardPinSetup& p);
+
+/// Board-wide defaults, configured once per document and copied into a simulation as nets are
+/// included in it (see the app's WholeBoardViewController). Nothing here is read by the FDTD
+/// pipeline directly -- a simulation always carries its own resolved values.
+class BoardSetupConfig {
+public:
+    /// The ground net (or net class) new simulations start with; an empty name means none chosen.
+    GroundSelectorKind groundKind() const { return _groundKind; }
+    void setGroundKind(GroundSelectorKind value) { _groundKind = value; }
+    const std::string& groundName() const { return _groundName; }
+    void setGroundName(std::string value) { _groundName = std::move(value); }
+    /// The edge-terminated nets new simulations start with (see SimulationConfig::edgeTerminatedNets()).
+    std::vector<std::string>& edgeTerminatedNets() { return _edgeTerminatedNets; }
+    const std::vector<std::string>& edgeTerminatedNets() const { return _edgeTerminatedNets; }
+    /// The nets and net classes new simulations start with included (geometry only -- the
+    /// simulation's own "Included in simulation" level). A pin is included through its net.
+    std::vector<std::string>& includedNets() { return _includedNets; }
+    const std::vector<std::string>& includedNets() const { return _includedNets; }
+    std::vector<std::string>& includedNetClasses() { return _includedNetClasses; }
+    const std::vector<std::string>& includedNetClasses() const { return _includedNetClasses; }
+    /// The components (by reference) new simulations start with included (see
+    /// SimulationConfig's included components).
+    std::vector<std::string>& includedComponents() { return _includedComponents; }
+    const std::vector<std::string>& includedComponents() const { return _includedComponents; }
+
+    double signalImpedance() const { return _signalImpedance; }
+    void setSignalImpedance(double value) { _signalImpedance = value; }
+    double powerImpedance() const { return _powerImpedance; }
+    void setPowerImpedance(double value) { _powerImpedance = value; }
+    /// Default digital bit rate for new simulations' eyes. Non-positive means automatic.
+    double bitRate() const { return _bitRate; }
+    void setBitRate(double value) { _bitRate = value; }
+
+    std::vector<NamedImpedance>& netClassImpedances() { return _netClassImpedances; }
+    const std::vector<NamedImpedance>& netClassImpedances() const { return _netClassImpedances; }
+    std::vector<NamedImpedance>& netImpedances() { return _netImpedances; }
+    const std::vector<NamedImpedance>& netImpedances() const { return _netImpedances; }
+    std::vector<BoardPinSetup>& pins() { return _pins; }
+    const std::vector<BoardPinSetup>& pins() const { return _pins; }
+
+    std::optional<double> netClassImpedance(const std::string& netClass) const;
+    void setNetClassImpedance(const std::string& netClass, std::optional<double> value);
+    std::optional<double> netImpedance(const std::string& net) const;
+    void setNetImpedance(const std::string& net, std::optional<double> value);
+    const BoardPinSetup* pin(const std::string& footprint, const std::string& pin) const;
+    /// Finds or creates the pin's entry. Callers should pruneEmptyPins() after clearing fields.
+    BoardPinSetup& pinSetup(const std::string& footprint, const std::string& pin);
+    void pruneEmptyPins();
+
+    /// The impedance a net gets: its own override, else its class's, else the signal/power default.
+    double effectiveNetImpedance(const std::string& net, const std::string& netClass, bool isPowerNet) const;
+
+private:
+    friend void to_json(nlohmann::json& j, const BoardSetupConfig& p);
+    friend void from_json(const nlohmann::json& j, BoardSetupConfig& p);
+
+    GroundSelectorKind _groundKind = GroundSelectorKind::Net;
+    std::string _groundName;
+    std::vector<std::string> _edgeTerminatedNets;
+    std::vector<std::string> _includedNets;
+    std::vector<std::string> _includedNetClasses;
+    std::vector<std::string> _includedComponents;
+    double _signalImpedance = 45;
+    double _powerImpedance = 1;
+    double _bitRate = 0;
+    std::vector<NamedImpedance> _netClassImpedances;
+    std::vector<NamedImpedance> _netImpedances;
+    std::vector<BoardPinSetup> _pins;
+};
+
+void to_json(nlohmann::json& j, const BoardSetupConfig& p);
+void from_json(const nlohmann::json& j, BoardSetupConfig& p);
 
 /// Per-run knobs that don't belong in the parsed config itself -- distinct from Arguments in the
 /// CLI (its argv-parsing type, which also carries argv-only fields like configPath/updateConfig
@@ -1299,7 +1503,8 @@ public:
     /// via edge distance/via spacing/resolved ports' width+length) scaled from file units into FDTD
     /// simulation units. `self` itself is never mutated -- called once, by GeometryResult::build()/
     /// load(), right before any FDTD-facing code runs; every other caller (a document editor, this
-    /// type's own save()) should keep working with unscaled instances.
+    /// type's own save()) should keep working with unscaled instances. Simulation Set templates (see
+    /// SimulationSetConfig) are dropped from the copy -- only their generated simulations run.
     EMSConfig scaledToSimulationUnits() const;
 
     /// Replaces layers() with `layers` (already resolved by the caller from the live board via
@@ -1319,6 +1524,9 @@ public:
 
     const std::vector<SimulationConfig>& simulations() const { return _simulations; }
     std::vector<SimulationConfig>& simulations() { return _simulations; }
+
+    const BoardSetupConfig& boardSetup() const { return _boardSetup; }
+    BoardSetupConfig& boardSetup() { return _boardSetup; }
 
     const Frequency& frequency() const { return _frequency; }
     void setFrequency(Frequency value) { _frequency = value; }
@@ -1374,6 +1582,7 @@ private:
     std::string _formatVersion;
     std::optional<std::filesystem::path> _kicadPcbPath;
     std::vector<SimulationConfig> _simulations;
+    BoardSetupConfig _boardSetup;
     Frequency _frequency;
     std::int32_t _maxSteps = 100000;
     std::int32_t _pixelSize = 5;

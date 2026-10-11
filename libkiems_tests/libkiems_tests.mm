@@ -718,6 +718,45 @@ bool isSimNode(const libkicad::ComponentSimNode& node, libkicad::ComponentSimNod
     XCTAssertTrue(json.get<kiems::ExcitationConfig>().durationMode() == kiems::ExcitationDurationMode::Limited);
 }
 
+- (void)testBoardSetupResolvesImpedancesAndRoundTrips {
+    kiems::BoardSetupConfig setup;
+    setup.setSignalImpedance(50);
+    setup.setPowerImpedance(0.5);
+    setup.setNetClassImpedance("DDR", 40);
+    setup.setNetImpedance("CLK", 60);
+    XCTAssertEqualWithAccuracy(setup.effectiveNetImpedance("A", "", false), 50, 1e-12);
+    XCTAssertEqualWithAccuracy(setup.effectiveNetImpedance("+3V3", "", true), 0.5, 1e-12);
+    XCTAssertEqualWithAccuracy(setup.effectiveNetImpedance("DQ0", "DDR", false), 40, 1e-12);
+    XCTAssertEqualWithAccuracy(setup.effectiveNetImpedance("CLK", "DDR", false), 60, 1e-12);
+
+    kiems::BoardPinSetup& pin = setup.pinSetup("U1", "4");
+    pin.noiseGenerating = true;
+    pin.noiseFrequency = 25e6;
+    pin.noiseAmplitude = 0.3;
+    setup.pinSetup("U1", "5").absorbing = true;
+    setup.pinSetup("U1", "6"); // Nothing set: pruned.
+    setup.pruneEmptyPins();
+    XCTAssertEqual(setup.pins().size(), static_cast<std::size_t>(2));
+
+    setup.setGroundKind(kiems::GroundSelectorKind::NetClass);
+    setup.setGroundName("GND_CLASS");
+    setup.edgeTerminatedNets() = {"+3V3", "VBUS"};
+
+    const kiems::BoardSetupConfig loaded = nlohmann::json(setup).get<kiems::BoardSetupConfig>();
+    XCTAssertTrue(loaded.groundKind() == kiems::GroundSelectorKind::NetClass);
+    XCTAssertTrue(loaded.groundName() == "GND_CLASS");
+    XCTAssertTrue(loaded.edgeTerminatedNets() == (std::vector<std::string>{"+3V3", "VBUS"}));
+    XCTAssertEqualWithAccuracy(loaded.powerImpedance(), 0.5, 1e-12);
+    XCTAssertTrue(loaded.netClassImpedance("DDR") == std::optional<double>(40));
+    XCTAssertTrue(loaded.netImpedance("CLK") == std::optional<double>(60));
+    XCTAssertTrue(loaded.pins() == setup.pins());
+
+    setup.setNetClassImpedance("DDR", std::nullopt);
+    XCTAssertFalse(setup.netClassImpedance("DDR").has_value());
+    // Documents written before board_setup existed read back the defaults.
+    XCTAssertEqualWithAccuracy(nlohmann::json::object().get<kiems::BoardSetupConfig>().signalImpedance(), 45, 1e-12);
+}
+
 - (void)testAdversarialRecordWindowFollowsPrimaryRunAndDecay {
     kiems::Frequency frequency;
     frequency.setStart(1e9);
@@ -2468,7 +2507,7 @@ static kiems::EyeAggressor eyeTestTone(const std::vector<double>& frequencies, d
 - (void)testHullCutTracePointIsPlacedAtNewEndpointAndPointsInward {
     const std::vector<std::vector<Cu::Position>> cutout = {{{0, 0}, {10, 0}, {10, 10}, {0, 10}}};
     const kiems::grid_detail::HullCutTrace trace{
-        kiems::TraceSegment({5, 5}, {25, 5}, "", 2.0), "DATA", "F.Cu"};
+        kiems::TraceSegment({5, 5}, {25, 5}, "", 2.0), "DATA", "F.Cu", ""};
     const auto points = kiems::grid_detail::hullCutTracePoints({trace}, cutout);
     XCTAssertEqual(points.size(), 1U);
     XCTAssertEqual(points[0].netName, "DATA");
@@ -2482,7 +2521,7 @@ static kiems::EyeAggressor eyeTestTone(const std::vector<double>& frequencies, d
 - (void)testHullCutTracePointsIncludeBothSidesOfAThroughTrace {
     const std::vector<std::vector<Cu::Position>> cutout = {{{0, 0}, {10, 0}, {10, 10}, {0, 10}}};
     const kiems::grid_detail::HullCutTrace trace{
-        kiems::TraceSegment({-5, 5}, {15, 5}, "", 1.0), "DATA", "In1.Cu"};
+        kiems::TraceSegment({-5, 5}, {15, 5}, "", 1.0), "DATA", "In1.Cu", ""};
     const auto points = kiems::grid_detail::hullCutTracePoints({trace}, cutout);
     XCTAssertEqual(points.size(), 2U);
     XCTAssertEqualWithAccuracy(points[0].position.x(), 0.0, 1e-12);
@@ -2496,9 +2535,9 @@ static kiems::EyeAggressor eyeTestTone(const std::vector<double>& frequencies, d
     // ends at an original corner rather than a newly created endpoint.
     const std::vector<std::vector<Cu::Position>> cutout = {{{0, 0}, {10, 0}, {10, 10}, {0, 10}}};
     const std::vector<kiems::grid_detail::HullCutTrace> traces = {
-        {kiems::TraceSegment({2, 5}, {6, 5}, "", 1.0), "DATA", "F.Cu"},
-        {kiems::TraceSegment({6, 5}, {10, 5}, "", 1.0), "DATA", "F.Cu"},
-        {kiems::TraceSegment({10, 5}, {15, 8}, "", 1.0), "DATA", "F.Cu"}};
+        {kiems::TraceSegment({2, 5}, {6, 5}, "", 1.0), "DATA", "F.Cu", ""},
+        {kiems::TraceSegment({6, 5}, {10, 5}, "", 1.0), "DATA", "F.Cu", ""},
+        {kiems::TraceSegment({10, 5}, {15, 8}, "", 1.0), "DATA", "F.Cu", ""}};
     const auto points = kiems::grid_detail::hullCutTracePoints(traces, cutout);
     XCTAssertEqual(points.size(), 1U);
     XCTAssertEqualWithAccuracy(points[0].position.x(), 10.0, 1e-12);
@@ -2547,6 +2586,36 @@ static kiems::EyeAggressor eyeTestTone(const std::vector<double>& frequencies, d
         XCTAssertLessThanOrEqual(segment.start().y(), 10.0);
         XCTAssertLessThanOrEqual(segment.stop().y(), 10.0);
     }
+}
+
+- (void)testDedupNeverMovesProtectedLines {
+    // gridMin 30 merges lines closer than 15. A protected line absorbs an unprotected neighbour
+    // without moving; two protected lines both stay unless within 7.5 (gridMin / 4: the same edge,
+    // where keeping both would make a sub-micron cell); only unprotected pairs are averaged.
+    const auto lines = kiems::grid_detail::dedupGrid({0, 10, 100, 105, 200, 210, 300, 306, 400, 401}, 30.0,
+                                                     {10, 100, 200, 210, 400, 401});
+    const std::vector<double> expected = {10, 100, 200, 210, 303, 400.5};
+    XCTAssertEqual(lines.size(), expected.size());
+    for (std::size_t i = 0; i < std::min(lines.size(), expected.size()); ++i) {
+        XCTAssertEqualWithAccuracy(lines[i], expected[i], 1e-9);
+    }
+}
+
+- (void)testMeshKeepsALineInsideANarrowGapBetweenCopper {
+    // Two pieces of copper 40 apart -- narrower than the default 50 optimal cell, like a BGA ball's
+    // clearance to the pour around it. Their edges' rule-of-thirds bands overlap; merging them used
+    // to average both bands across the gap, leaving lines only inside the copper on either side, so
+    // the two rasterized onto the same nodes as one piece of metal.
+    const std::vector<Cu::PolygonSet> copper = {{
+        {{0, 0}, {300, 0}, {300, 300}, {0, 300}},
+        {{340, 0}, {700, 0}, {700, 300}, {340, 300}},
+    }};
+    const auto segments = kiems::grid_detail::copperBoundarySegments(copper);
+    const kiems::Grid grid;
+    const auto lines = kiems::grid_detail::meshAxis("x", segments, grid, 0, 700);
+    const bool lineInsideGap =
+        std::any_of(lines.begin(), lines.end(), [](double line) { return line > 300 && line < 340; });
+    XCTAssertTrue(lineInsideGap, @"no x mesh line falls inside the 300..340 gap between the two pieces of copper");
 }
 
 - (void)testSlicedBoardPersistsPostCutCopperLoops {

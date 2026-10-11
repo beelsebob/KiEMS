@@ -7,6 +7,8 @@
 #endif
 #include <cmath>
 #include <unordered_map>
+#include <map>
+#include <set>
 #include <unordered_set>
 
 #include "config.hpp"
@@ -311,6 +313,12 @@ std::expected<BoundingBox<double>, std::string> boardBoundsInSimulationUnits(
     return result;
 }
 
+namespace {
+/// How far past a port's own pad the hull extends (simulation units): enough to keep the pad's
+/// edge and via clear of the cut, as for any other contributor.
+constexpr double kPortPadHullPadding = 250.0 * constants::unitMultiplier;
+} // namespace
+
 std::expected<ClassifiedCopper, std::string> classifyCopperForSimulation(const SimulationConfig& sim,
                                                                            const libkicad::BoardGeometry& geometry,
                                                                            const libkicad::Board& board) {
@@ -370,6 +378,27 @@ std::expected<ClassifiedCopper, std::string> classifyCopperForSimulation(const S
         contribution.padding = component.hullPadding;
         for (const libkicad::CopperPolygon& polygon : geometry.copper) {
             if (polygon.footprintRef == component.reference) contribution.copper.push_back(polygon);
+        }
+        result.hullContributions.push_back(std::move(contribution));
+    }
+    // Every pad that carries a port (an absorber, probe or excitation) grows the hull to cover
+    // itself and its via-in-pad -- but only where it reaches the hull anyway. Without this, a pad
+    // whose via-in-pad was punched out of the hull has its copper cut away, so its absorber
+    // terminates nothing, and the port's metal caps land in the coarse exterior mesh where
+    // neighbouring pads' caps fuse. A port pad far from the simulated geometry stays excluded.
+    // Ports exist only once resolveSimulationPorts() has run, so a caller planning the hull for
+    // display must resolve them first to match.
+    std::set<std::pair<std::string, std::string>> portPads;
+    for (const PortConfig& port : sim.ports()) {
+        if (port.isTraceProbe() || port.footprintRef().empty()) continue;
+        portPads.emplace(port.footprintRef(), port.padNumber());
+    }
+    if (!portPads.empty()) {
+        ClassifiedCopper::HullContribution contribution;
+        contribution.padding = kPortPadHullPadding;
+        contribution.onlyWhereTouchingHull = true;
+        for (const libkicad::CopperPolygon& polygon : geometry.copper) {
+            if (portPads.contains({polygon.footprintRef, polygon.padNumber})) contribution.copper.push_back(polygon);
         }
         result.hullContributions.push_back(std::move(contribution));
     }
@@ -465,25 +494,53 @@ std::expected<CutoutStage, std::string> computeCutoutStage(
     // zero is not the same as GeometryOnly: a zero-padding contribution is unioned into the cutout
     // at its exact copper edge and therefore survives clipping. GeometryOnly copper is absent here
     // and remains clipped to the union these contributors produce.
-    PolygonSet cutoutSource;
-    for (const auto& contribution : hullContributions) {
+    const auto expandedContribution = [&](const std::vector<libkicad::CopperPolygon>& copper, double padding) {
         PolygonSet source;
         for (const auto& layerName : layerNames) {
-            PolygonSet onLayer = _copperOnLayer(contribution.copper, layerName, origin.xMin, origin.yMin);
+            PolygonSet onLayer = _copperOnLayer(copper, layerName, origin.xMin, origin.yMin);
             source.insert(source.end(), onLayer.begin(), onLayer.end());
         }
         source = unionPolygons(source);
-        if (!source.empty()) {
-            // Preserve the exact union for a zero-padding contributor. Apart from avoiding an
-            // unnecessary GEOS operation, this makes the semantic distinction explicit: zero is
-            // still a hull contribution, whereas GeometryOnly copper never enters this loop.
-            PolygonSet expanded = contribution.padding > 0.0
-                                      ? offsetPolygons(source, contribution.padding, tessellationTolerance)
-                                      : source;
-            cutoutSource.insert(cutoutSource.end(), expanded.begin(), expanded.end());
-        }
+        // Preserve the exact union for a zero-padding contributor. Apart from avoiding an
+        // unnecessary GEOS operation, this makes the semantic distinction explicit: zero is
+        // still a hull contribution, whereas GeometryOnly copper never enters this loop.
+        if (source.empty() || padding <= 0.0) return source;
+        return offsetPolygons(source, padding, tessellationTolerance);
+    };
+    PolygonSet cutoutSource;
+    for (const auto& contribution : hullContributions) {
+        if (contribution.onlyWhereTouchingHull) continue;
+        PolygonSet expanded = expandedContribution(contribution.copper, contribution.padding);
+        cutoutSource.insert(cutoutSource.end(), expanded.begin(), expanded.end());
     }
     cutoutSource = unionPolygons(cutoutSource);
+    // Conditional contributors (absorbing pads) join pad by pad, and only where the padded pad
+    // reaches the hull above: a via-in-pad drilled out of the hull is restored, a pad far from the
+    // simulated geometry is not.
+    PolygonSet conditionalAdditions;
+    for (const auto& contribution : hullContributions) {
+        if (!contribution.onlyWhereTouchingHull) continue;
+        std::map<std::pair<std::string, std::string>, std::vector<libkicad::CopperPolygon>> byPad;
+        for (const libkicad::CopperPolygon& polygon : contribution.copper) {
+            byPad[{polygon.footprintRef, polygon.padNumber}].push_back(polygon);
+        }
+        for (const auto& [pad, copper] : byPad) {
+            PolygonSet expanded = expandedContribution(copper, contribution.padding);
+            // GEOS can hand back a degenerate zero-area loop for a disjoint pair, so test the
+            // overlap's area rather than whether any loop came back.
+            double overlapArea = 0;
+            if (!expanded.empty()) {
+                for (const Polygon& loop : intersectPolygons(expanded, cutoutSource)) overlapArea += signedArea(loop);
+            }
+            const bool touches = overlapArea > tessellationTolerance * tessellationTolerance;
+            if (!touches) continue;
+            conditionalAdditions.insert(conditionalAdditions.end(), expanded.begin(), expanded.end());
+        }
+    }
+    if (!conditionalAdditions.empty()) {
+        conditionalAdditions.insert(conditionalAdditions.end(), cutoutSource.begin(), cutoutSource.end());
+        cutoutSource = unionPolygons(conditionalAdditions);
+    }
     // KiCad's zone fill knocks out every drill, so a filled through hole inside the hull leaves a
     // hole loop in the cutout -- which the irregular domain mask then reads as outside the board
     // and rings with CPML. A filled drill is solid board (its filling is modeled by
@@ -785,6 +842,7 @@ void restrictLumpedComponentsToCutout(SimulationConfig& simulation, const Sliced
 
     auto& components = simulation.lumpedComponents();
     const std::size_t before = components.size();
+    for (const auto& c : components) logInfo("DBGLUMP " + c.name() + " " + std::to_string(c.position1().first) + "," + std::to_string(c.position1().second) + " " + std::to_string(contains(c.position1())) + std::to_string(contains(c.position2())));
     std::erase_if(components, [&](const LumpedComponentConfig& component) {
         return !contains(component.position1()) && !contains(component.position2());
     });
@@ -792,6 +850,31 @@ void restrictLumpedComponentsToCutout(SimulationConfig& simulation, const Sliced
         logInfo("Simulation \"" + simulation.name() + "\": discarded " +
                 std::to_string(before - components.size()) +
                 " lumped component(s) with both pins outside the sliced cutout");
+    }
+
+    // Likewise an absorbing-only port whose pad lies outside the cutout: there is no copper left
+    // for it to terminate. (A via-in-pad absorber that reaches the hull was pulled back into it by
+    // classifyCopperForSimulation(), so its centre is inside.) Excitations and probes are kept --
+    // they are what the user asked to measure. Excitations hold port indices, so remap them.
+    auto& ports = simulation.ports();
+    std::vector<std::int32_t> newIndex(ports.size(), -1);
+    std::vector<PortConfig> kept;
+    for (std::size_t index = 0; index < ports.size(); ++index) {
+        const PortConfig& port = ports[index];
+        const bool pureAbsorber = !port.isTraceProbe() && port.absorbSignal() && !port.excite() && !port.probe();
+        if (pureAbsorber && port.position().has_value() && !contains(*port.position())) continue;
+        newIndex[index] = static_cast<std::int32_t>(kept.size());
+        kept.push_back(port);
+    }
+    if (kept.size() != ports.size()) {
+        logInfo("Simulation \"" + simulation.name() + "\": discarded " +
+                std::to_string(ports.size() - kept.size()) + " absorbing port(s) outside the sliced cutout");
+        ports = std::move(kept);
+        for (ExcitationConfig& excitation : simulation.excitations()) {
+            if (excitation.drivenPortIndex().has_value()) {
+                excitation.setDrivenPortIndex(newIndex[static_cast<std::size_t>(*excitation.drivenPortIndex())]);
+            }
+        }
     }
 }
 

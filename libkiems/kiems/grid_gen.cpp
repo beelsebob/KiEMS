@@ -96,22 +96,43 @@ std::vector<double> _extendPMLBand(std::vector<double> lines, std::int32_t pmlCe
 
 /// Merge grid lines that are too close to each other.
 std::vector<double> _dedupGrid(std::vector<double> grid, double gridMin, const std::vector<double>& edgeGrid) {
-    std::vector<std::size_t> toRemove;
+    // Lines closer than gridMin / 2 collapse into one. A protected (edgeGrid) line marks real copper
+    // and never moves: it absorbs an unprotected neighbour, and two protected lines both stay --
+    // shifting a copper edge used to let a ball and the pour across its clearance land on the same
+    // row of nodes and fuse -- unless they're within gridMin / 4, i.e. the same edge, which merge.
+    // Only two unprotected lines are otherwise averaged.
+    std::vector<double> protectedLines = edgeGrid;
+    std::sort(protectedLines.begin(), protectedLines.end());
+    const auto isProtected = [&](double line) {
+        return std::binary_search(protectedLines.begin(), protectedLines.end(), line);
+    };
     std::sort(grid.begin(), grid.end());
-    for (std::size_t idx = 0; idx + 1 < grid.size(); ++idx) {
-        if (grid[idx + 1] - grid[idx] < gridMin / 2) {
-            grid[idx + 1] = (grid[idx + 1] + grid[idx]) / 2;
-            if (std::find(edgeGrid.begin(), edgeGrid.end(), grid[idx]) == edgeGrid.end()) {
-                toRemove.push_back(idx);
-            } else if (std::find(edgeGrid.begin(), edgeGrid.end(), grid[idx + 1]) == edgeGrid.end()) {
-                toRemove.push_back(idx + 1);
+    std::vector<double> result;
+    result.reserve(grid.size());
+    for (const double line : grid) {
+        if (result.empty() || line - result.back() >= gridMin / 2) {
+            result.push_back(line);
+            continue;
+        }
+        const bool previousProtected = isProtected(result.back());
+        const bool lineProtected = isProtected(line);
+        if (previousProtected && lineProtected) {
+            // Edges this close are the same edge (a pad outline and a trace end a micron apart);
+            // keeping both would make a sub-micron cell and shrink every timestep with it.
+            if (line - result.back() < gridMin / 4) {
+                result.back() = (result.back() + line) / 2;
+                protectedLines.insert(std::lower_bound(protectedLines.begin(), protectedLines.end(), result.back()),
+                                      result.back());
+            } else {
+                result.push_back(line);
             }
+        } else if (lineProtected) {
+            result.back() = line;
+        } else if (!previousProtected) {
+            result.back() = (result.back() + line) / 2;
         }
     }
-    for (auto it = toRemove.rbegin(); it != toRemove.rend(); ++it) {
-        grid.erase(grid.begin() + static_cast<std::ptrdiff_t>(*it));
-    }
-    return grid;
+    return result;
 }
 
 /// Stores a range with additional data as priority and center position. Purely internal to grid
@@ -120,11 +141,12 @@ std::vector<double> _dedupGrid(std::vector<double> grid, double gridMin, const s
 class Region {
 public:
     Region() = default;
-    Region(double regionMin, double regionMax, double regionPrio = 1, double regionCenter = 0)
-        : min(regionMin), max(regionMax), prio(regionPrio), center(regionCenter) {}
+    Region(double regionMin, double regionMax, double regionPrio = 1, double regionCenter = 0, int regionSide = 0)
+        : min(regionMin), max(regionMax), prio(regionPrio), center(regionCenter), side(regionSide) {}
 
     bool operator==(const Region& other) const {
-        return min == other.min && max == other.max && prio == other.prio && center == other.center;
+        return min == other.min && max == other.max && prio == other.prio && center == other.center &&
+               side == other.side;
     }
 
     /// Distance to another region (sub-zero values indicate how much one region needs to move to
@@ -157,6 +179,9 @@ public:
     double max = 0;
     double prio = 1;
     double center = 0;
+    /// For an edge cell: +1 where copper begins (it lies above `center` along this axis), -1 where
+    /// it ends, 0 when unknown or merged from both kinds.
+    int side = 0;
 };
 
 /// Part of a region that consists of 4 grid lines (and 3 cells in between, with the center cell to
@@ -498,10 +523,10 @@ public:
             } else if ((ang < deg5 && _axis == "y") || (ang > M_PI / 2 - deg5 && _axis == "x")) {
                 _parallel.push_back(region);
                 if (seg.width() != 0 || seg.normal()) {
-                    _edgeCells.emplace_back(region.min - 2 * w3, region.min + w3, slenOaxis + 1, region.min);
+                    _edgeCells.emplace_back(region.min - 2 * w3, region.min + w3, slenOaxis + 1, region.min, +1);
                 }
                 if (seg.width() != 0 || !seg.normal()) {
-                    _edgeCells.emplace_back(region.max - w3, region.max + 2 * w3, slenOaxis + 1, region.max);
+                    _edgeCells.emplace_back(region.max - w3, region.max + 2 * w3, slenOaxis + 1, region.max, -1);
                 }
             } else {
                 _diagonal.push_back(region);
@@ -594,6 +619,13 @@ public:
                     continue;
                 }
                 Region reg2 = _edgeCells[j];
+                // Copper ending, then copper beginning above it, bounds a gap: merging the two would
+                // average away the lines on either side of it and leave the gap unmeshed.
+                const Region& lower = reg.center <= reg2.center ? reg : reg2;
+                const Region& upper = reg.center <= reg2.center ? reg2 : reg;
+                if (lower.side == -1 && upper.side == +1 && upper.center > lower.center) {
+                    continue;
+                }
                 double dist = reg.distance(reg2);
                 if (dist > gridMin) {
                     continue;
@@ -613,7 +645,8 @@ public:
                 const Region newReg((reg.min * reg.prio + reg2.min * reg2.prio) / (reg.prio + reg2.prio),
                                      (reg.max * reg.prio + reg2.max * reg2.prio) / (reg.prio + reg2.prio),
                                      reg.prio + reg2.prio,
-                                     (reg.center * reg.prio + reg2.center * reg2.prio) / (reg.prio + reg2.prio));
+                                     (reg.center * reg.prio + reg2.center * reg2.prio) / (reg.prio + reg2.prio),
+                                     reg.side == reg2.side ? reg.side : 0);
                 deleted[j] = true;
                 reg = newReg;
                 _edgeCells[i] = newReg;
@@ -1004,6 +1037,26 @@ std::vector<TraceSegment> grid_detail::clipTraceSegmentsToCutout(
         }
     }
     return clipped;
+}
+
+std::vector<double> grid_detail::dedupGrid(std::vector<double> grid, double gridMin,
+                                           const std::vector<double>& protectedLines) {
+    return _dedupGrid(std::move(grid), gridMin, protectedLines);
+}
+
+std::vector<double> grid_detail::meshAxis(const std::string& axis, const std::vector<TraceSegment>& copperSegments,
+                                          const Grid& grid, double trustedMin, double trustedMax) {
+    const double margin = grid.margin().xy();
+    GridGeneratorAxis generator(axis, Region(-margin, trustedMax - trustedMin + margin), grid, trustedMin, trustedMax);
+    generator.addLinesFromTrace(copperSegments);
+    CSRectGrid csGrid;
+    generator.compileGrid(csGrid, trustedMin);
+    const int axisIndex = axis == "x" ? 0 : axis == "y" ? 1 : 2;
+    unsigned int quantity = 0;
+    double* lines = csGrid.GetLines(axisIndex, nullptr, quantity, true);
+    std::vector<double> result(lines, lines + quantity);
+    delete[] lines;
+    return result;
 }
 
 std::vector<grid_detail::HullCutPoint> grid_detail::hullCutTracePoints(

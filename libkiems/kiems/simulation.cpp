@@ -6,10 +6,12 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <limits>
 #include <map>
+#include <set>
 #include <sstream>
 #include <utility>
 
@@ -675,14 +677,10 @@ std::expected<void, std::string> Simulation::addImpedanceProbe(PortConfig& portC
     return {};
 }
 
-std::expected<void, std::string> Simulation::addResistivePort(PortConfig& portConfig, std::int32_t portNumber,
-                                                                bool excite) {
-    logDebug("Adding port number " + std::to_string(_ports.size()));
+std::expected<std::pair<Point3, Point3>, std::string> Simulation::padColumn(const PortConfig& portConfig) {
     if (!portConfig.position().has_value() || !portConfig.direction().has_value()) {
-        logError("Port has no defined position or rotation, skipping");
-        return {};
+        return std::unexpected("Port " + portConfig.name() + " has no defined position or rotation");
     }
-
     const auto startZResult = getMetalLayerOffset(portConfig.layer());
     if (!startZResult) {
         return std::unexpected(startZResult.error());
@@ -724,6 +722,39 @@ std::expected<void, std::string> Simulation::addResistivePort(PortConfig& portCo
         std::round(posY + halfExtentY),
         std::round(stopZ),
     };
+
+    return std::pair<Point3, Point3>{start, stop};
+}
+
+std::expected<void, std::string> Simulation::addLoadCapacitor(const PortConfig& portConfig) {
+    const auto column = padColumn(portConfig);
+    if (!column) {
+        return std::unexpected(column.error());
+    }
+    const auto& [start, stop] = *column;
+    const double capacitance = portConfig.loadCapacitance();
+    logInfo("Adding " + std::to_string(capacitance * 1e12) + " pF load capacitance at " + portConfig.name());
+    // R and L NaN mark them absent (see LumpedComponentConfig), leaving a pure capacitor.
+    CSPropLumpedElement* prop = addLumpedElement(*_csx, "Load_" + portConfig.name(), axisIndex("z"), /*caps=*/false,
+                                                   std::nan(""), CSPropLumpedElement::PARALLEL, std::nan(""),
+                                                   capacitance);
+    addBox(*prop, start, stop, 100);
+    return {};
+}
+
+std::expected<void, std::string> Simulation::addResistivePort(PortConfig& portConfig, std::int32_t portNumber,
+                                                                bool excite) {
+    logDebug("Adding port number " + std::to_string(_ports.size()));
+    if (!portConfig.position().has_value() || !portConfig.direction().has_value()) {
+        logError("Port has no defined position or rotation, skipping");
+        return {};
+    }
+
+    const auto column = padColumn(portConfig);
+    if (!column) {
+        return std::unexpected(column.error());
+    }
+    const auto& [start, stop] = *column;
 
     logDebug("Adding resistive port at start: " + _point3ToString(start) + " end: " + _point3ToString(stop));
     _ports.push_back(std::make_unique<LumpedPort>(*_csx, portNumber,
@@ -1185,8 +1216,224 @@ std::expected<void, std::string> Simulation::prepareRunDirectory(std::int32_t ex
         return std::unexpected("Failed to create simulation directory: " + dirEc.message());
     }
     std::filesystem::current_path(simPath);
+    writeRunDiagnostics(simPath);
 
     return {};
+}
+
+std::vector<std::string> Simulation::writeMetalShortReport(const MetalRegionAt& regionAt,
+                                                            const MetalRegionsIn& regionsIn,
+                                                            const std::filesystem::path& directory) {
+    const auto mm = [](double simUnits) { return simUnits * constants::baseUnit / constants::unitMultiplier * 1e3; };
+    const auto where = [&](double x, double y) {
+        std::ostringstream text;
+        text << "(" << mm(x) << ", " << mm(y) << ") mm";
+        return text.str();
+    };
+
+    // Label each region with the nets whose pads reach it: every pad-anchored port, and both pads of
+    // every lumped component, on their own copper layer.
+    std::map<std::uint32_t, std::set<std::string>> netsByRegion;
+    std::map<std::uint32_t, std::string> regionLocation;
+    const auto label = [&](std::int32_t layer, double x, double y, const std::string& net) {
+        const auto z = getMetalLayerOffset(layer);
+        if (!z || net.empty()) return;
+        if (const auto region = regionAt({x, y, *z})) {
+            netsByRegion[*region].insert(net);
+            regionLocation.try_emplace(*region, where(x, y));
+        }
+    };
+    const auto& ports = _simConfig.ports();
+    for (const PortConfig& port : ports) {
+        if (port.isTraceProbe() || !port.position().has_value()) continue;
+        label(port.layer(), port.position()->first, port.position()->second, port.netName());
+    }
+    for (const LumpedComponentConfig& component : _simConfig.lumpedComponents()) {
+        label(component.layer(), component.position1().first, component.position1().second, component.net1());
+        label(component.layer(), component.position2().first, component.position2().second, component.net2());
+    }
+
+    std::vector<std::string> findings;
+    const auto join = [](const std::set<std::string>& nets) {
+        std::string text;
+        for (const std::string& net : nets) text += (text.empty() ? "" : " + ") + net;
+        return text;
+    };
+    for (const auto& [region, nets] : netsByRegion) {
+        if (nets.size() > 1) {
+            findings.push_back("Nets " + join(nets) + " share one piece of metal in the grid (near " +
+                               regionLocation[region] + ")");
+        }
+    }
+    // A terminal face may touch its own nets' metal and unlabelled metal (a plane, a floating
+    // island); metal labelled only with other nets means the element is wired into the wrong net.
+    const auto checkFace = [&](const std::string& element, const std::set<std::string>& own,
+                               const std::array<double, 3>& start, const std::array<double, 3>& stop) {
+        std::set<std::string> foreign;
+        for (std::uint32_t region : regionsIn(start, stop)) {
+            const auto nets = netsByRegion.find(region);
+            if (nets == netsByRegion.end()) continue;
+            bool sharesOwn = false;
+            for (const std::string& net : nets->second) sharesOwn = sharesOwn || own.contains(net);
+            if (!sharesOwn) foreign.insert(nets->second.begin(), nets->second.end());
+        }
+        if (!foreign.empty()) {
+            findings.push_back(element + " (" + join(own) + ") also touches " + join(foreign) + " near " +
+                               where((start[0] + stop[0]) / 2, (start[1] + stop[1]) / 2));
+        }
+    };
+    for (const PortConfig& port : ports) {
+        if (port.isTraceProbe() || !port.position().has_value()) continue;
+        const auto column = padColumn(port);
+        if (!column) continue;
+        // Only the pad end: the other end is the reference plane, which no net label covers.
+        const auto& [start, stop] = *column;
+        checkFace("Port " + port.name(), {port.netName()}, {start[0], start[1], start[2]},
+                  {stop[0], stop[1], start[2]});
+    }
+    for (const LumpedComponentConfig& component : _simConfig.lumpedComponents()) {
+        for (CSProperties* property : _csx->GetPropertiesByName("Lumped_" + component.name())) {
+        auto* element = dynamic_cast<CSPropLumpedElement*>(property);
+        if (element == nullptr) continue;
+        const int axis = element->GetDirection();
+        for (std::size_t p = 0; p < element->GetQtyPrimitives(); ++p) {
+            CSPrimBox* box = element->GetPrimitive(p)->ToBox();
+            if (box == nullptr || axis < 0 || axis > 2) continue;
+            std::array<double, 3> lo{}, hi{};
+            for (int n = 0; n < 3; ++n) {
+                lo[static_cast<std::size_t>(n)] = std::min(box->GetCoord(2 * n), box->GetCoord(2 * n + 1));
+                hi[static_cast<std::size_t>(n)] = std::max(box->GetCoord(2 * n), box->GetCoord(2 * n + 1));
+            }
+            for (const double end : {lo[static_cast<std::size_t>(axis)], hi[static_cast<std::size_t>(axis)]}) {
+                std::array<double, 3> faceLo = lo, faceHi = hi;
+                faceLo[static_cast<std::size_t>(axis)] = faceHi[static_cast<std::size_t>(axis)] = end;
+                checkFace("Component " + component.name(), {component.net1(), component.net2()}, faceLo, faceHi);
+            }
+        }
+        }
+    }
+
+    // Debugging aid: KIEMS_SHORTS_DUMP="x,y,halfwidth" (mm, board-origin frame) writes
+    // shorts_map.txt, a character map of the metal regions around that point on every copper layer.
+    if (const char* dump = std::getenv("KIEMS_SHORTS_DUMP")) {
+        double cx = 0, cy = 0, half = 0;
+        if (std::sscanf(dump, "%lf,%lf,%lf", &cx, &cy, &half) == 3) {
+            const double perMm = constants::unitMultiplier * 1e-3 / constants::baseUnit;
+            std::ofstream map(directory / "shorts_map.txt");
+            std::map<std::uint32_t, char> symbols;
+            const std::string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+            // Sample exactly the mesh's own nodes in the window, so a gap with a line through it can't
+            // be hidden by nearest-line snapping.
+            const auto linesIn = [&](int axis, double lo, double hi) {
+                unsigned int qty = 0;
+                double* raw = _csx->GetGrid()->GetLines(axis, nullptr, qty, true);
+                std::vector<double> kept;
+                for (unsigned int i = 0; i < qty; ++i) {
+                    if (raw[i] >= lo && raw[i] <= hi) kept.push_back(raw[i]);
+                }
+                delete[] raw;
+                return kept;
+            };
+            const std::vector<double> xs = linesIn(0, (cx - half) * perMm, (cx + half) * perMm);
+            std::vector<double> ys = linesIn(1, (cy - half) * perMm, (cy + half) * perMm);
+            std::reverse(ys.begin(), ys.end());
+            const std::vector<double> zs = linesIn(2, -1e12, 1e12);
+            for (const double zLine : zs) {
+                {
+                    const double z = zLine;
+                map << "z=" << z / perMm << " mm\n";
+                for (const double yLine : ys) {
+                    for (const double xLine : xs) {
+                        const std::array<double, 3> point{xLine, yLine, z};
+                        const auto regions = regionsIn(point, point);
+                        if (regions.empty()) {
+                            map << '.';
+                            continue;
+                        }
+                        auto [it, added] = symbols.try_emplace(regions.front(), '?');
+                        if (added) it->second = symbols.size() <= alphabet.size() ? alphabet[symbols.size() - 1] : '?';
+                        map << it->second;
+                    }
+                    map << "  y=" << yLine / perMm << "\n";
+                }
+                }
+            }
+            map << "x lines (mm):";
+            for (const double xLine : xs) map << " " << xLine / perMm;
+            map << "\n";
+            map << "\nlegend:\n";
+            for (const auto& [region, symbol] : symbols) {
+                const auto nets = netsByRegion.find(region);
+                map << symbol << " = region " << region << " " << (nets == netsByRegion.end() ? "(no pad labels)" : join(nets->second)) << "\n";
+            }
+        }
+    }
+
+    std::ofstream report(directory / "shorts.txt");
+    report << "# Nets joined in the solver's grid that the board keeps apart (empty when none)\n";
+    for (const std::string& finding : findings) {
+        report << finding << "\n";
+        logWarning(finding);
+    }
+    return findings;
+}
+
+void Simulation::writeRunDiagnostics(const std::filesystem::path& directory) const {
+    // Simulation units (config microns * unitMultiplier) to millimetres, in the board-origin frame.
+    const auto mm = [](double simUnits) { return simUnits * constants::baseUnit / constants::unitMultiplier * 1e3; };
+    const auto value = [](double v) {
+        if (std::isnan(v)) return std::string("-");
+        std::ostringstream text;
+        text << v; // shortest form, so picofarads don't round to 0.000000
+        return text.str();
+    };
+
+    std::ofstream ports(directory / "ports.txt");
+    ports << "# Resolved ports for simulation \"" << _simConfig.name() << "\": index -- the N in port_ut_N /\n"
+          << "# port_it_N -- name, net, role, impedance (ohm), load capacitance (F), position (mm), layer -> plane\n";
+    const auto& portConfigs = _simConfig.ports();
+    for (std::size_t index = 0; index < portConfigs.size(); ++index) {
+        const PortConfig& port = portConfigs[index];
+        std::string role = port.isTraceProbe() ? "trace-probe"
+                           : port.absorbSignal() ? (port.excite() ? "excited" : "absorbing")
+                                                 : "passive-probe";
+        if (!port.probe() && !port.isTraceProbe()) role += ",hidden";
+        ports << index << "\t" << port.name() << "\tnet=" << port.netName() << "\t" << role
+              << "\tZ=" << port.impedance() << "\tCload=" << port.loadCapacitance();
+        if (port.position().has_value()) {
+            ports << "\tat=(" << mm(port.position()->first) << ", " << mm(port.position()->second) << ")";
+        }
+        ports << "\tlayer=" << port.layer() << "->" << port.plane() << "\n";
+    }
+
+    std::ofstream lumped(directory / "lumped.txt");
+    lumped << "# Resolved lumped components (config): name, nets, topology, R (ohm), L (H), C (F), pad positions (mm)\n";
+    for (const LumpedComponentConfig& component : _simConfig.lumpedComponents()) {
+        lumped << component.name() << "\t" << component.net1() << " -- " << component.net2() << "\t"
+               << (component.topology() == LumpedComponentTopology::Series ? "series" : "parallel")
+               << "\tR=" << value(component.resistance()) << "\tL=" << value(component.inductance())
+               << "\tC=" << value(component.capacitance()) << "\tpads=(" << mm(component.position1().first) << ", "
+               << mm(component.position1().second) << ") (" << mm(component.position2().first) << ", "
+               << mm(component.position2().second) << ")" << (component.cornerBridge() ? "\tcorner-bridge" : "")
+               << "\n";
+    }
+    lumped << "\n# Lumped elements as handed to the solver: name, type, R, L, C, axis, boxes (mm)\n";
+    for (CSProperties* property : _csx->GetPropertyByType(CSProperties::LUMPED_ELEMENT)) {
+        auto* element = dynamic_cast<CSPropLumpedElement*>(property);
+        if (element == nullptr) continue;
+        lumped << element->GetName() << "\t"
+               << (element->GetLEtype() == CSPropLumpedElement::SERIES ? "series" : "parallel")
+               << "\tR=" << value(element->GetResistance()) << "\tL=" << value(element->GetInductance())
+               << "\tC=" << value(element->GetCapacity()) << "\taxis=" << "xyz"[element->GetDirection() % 3];
+        for (std::size_t p = 0; p < element->GetQtyPrimitives(); ++p) {
+            CSPrimBox* box = element->GetPrimitive(p)->ToBox();
+            if (box == nullptr) continue;
+            lumped << "\t[(" << mm(box->GetCoord(0)) << ", " << mm(box->GetCoord(2)) << ", " << mm(box->GetCoord(4))
+                   << ")..(" << mm(box->GetCoord(1)) << ", " << mm(box->GetCoord(3)) << ", " << mm(box->GetCoord(5))
+                   << ")]";
+        }
+        lumped << "\n";
+    }
 }
 
 std::expected<Simulation::PortParameters, std::string> Simulation::getPortParameters(
@@ -1485,6 +1732,14 @@ std::expected<void, std::string> Simulation::addPorts() {
         }
         if (!result) {
             return result;
+        }
+        if (ports[index].loadCapacitance() > 0) {
+            if (ports[index].absorbSignal()) {
+                logWarning("Ignoring the load capacitance on " + ports[index].name() +
+                           ": it absorbs the signal, and its resistor already fills the pad's column");
+            } else if (auto capacitor = addLoadCapacitor(ports[index]); !capacitor) {
+                return capacitor;
+            }
         }
     }
     return {};

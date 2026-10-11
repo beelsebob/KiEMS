@@ -554,8 +554,19 @@ int main(int argc, char** argv) {
                                                           executableDir() / "kiems_fdtd_worker",
                                                           executableDir() / "copper_fdtd_worker");
 
+    // Owned by main so the loaded KiCad board is torn down before main returns, while KiCad's own
+    // process-wide state is still alive -- not from exit()'s static destructors.
+    auto runtime = libkicad::Runtime::create();
+    if (!runtime) {
+        logError(runtime.error());
+        return EXIT_FAILURE;
+    }
+
+    // Use what KiCad has, including changes it has only autosaved (resolveKicadSources() logs it).
+    std::optional<KicadSources> sources;
     if (args.input().extension() == ".kicad_pcb") {
-        if (auto result = exportKicadPcb(paths, args.input()); !result) {
+        sources = resolveKicadSources(*runtime, args.input(), paths.fabDir / "kicad-source");
+        if (auto result = exportKicadPcb(paths, sources->boardPath); !result) {
             logError(result.error());
             return EXIT_FAILURE;
         }
@@ -566,6 +577,7 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
     EMSConfig config = std::move(*configResult);
+    if (sources.has_value()) config.setKicadPcbPath(sources->boardPath);
     if (args.absorbingBoundaryCells().has_value()) {
         // A standalone -s reuses the cached grid, built with whatever depth -g had: running it with
         // another would grade the wrong cells as CPML.
@@ -591,13 +603,6 @@ int main(int argc, char** argv) {
     // count to load Sx<port>.csv files. Requires fab/board.kicad_pcb (persisted by exportKicadPcb())
     // from this invocation's own -i or an earlier one, and fab/stackup.json (importStackup()) for
     // resolveSimulationPorts()'s copper-layer-index lookup.
-    // Owned by main so the loaded KiCad board is torn down before main returns, while KiCad's own
-    // process-wide state is still alive -- not from exit()'s static destructors.
-    auto runtime = libkicad::Runtime::create();
-    if (!runtime) {
-        logError(runtime.error());
-        return EXIT_FAILURE;
-    }
     const libkicad::Board board(*runtime, paths.kicadBoardPaths());
 
     if (auto result = importStackup(board, config); !result) {

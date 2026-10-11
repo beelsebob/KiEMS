@@ -778,6 +778,8 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
     std::optional<_NetConnectivity> netConnectivity;
 
     for (SimulationConfig& sim : config.simulations()) {
+        // A Simulation Set template is never run itself -- only the simulations generated from it.
+        if (sim.simulationSet()) continue;
         // ports() is entirely derived by this function (see its own doc comment) -- resolving must
         // be idempotent, since both the Geometry and Simulation Results steps independently call
         // this on the same long-lived, in-memory EMSConfig. Without clearing first, a second call
@@ -886,8 +888,11 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                     const PhysicalPin pinKey{pad.footprintRef, pad.padNumber};
                     const auto explicitChoice = explicitAbsorbingChoices.find(pinKey);
                     const bool automatic = explicitChoice == explicitAbsorbingChoices.end();
+                    // A pad alone on its net (an NC ball's "unconnected-(...)" net) has no line to
+                    // terminate, so it never absorbs by default; an explicit choice still applies.
                     const bool shouldAbsorb = automatic
-                        ? pinTypeAbsorbsByDefault(pad.pinType, groundNets.contains(NetName(netName)))
+                        ? padsResult->size() > 1 &&
+                              pinTypeAbsorbsByDefault(pad.pinType, groundNets.contains(NetName(netName)))
                         : explicitChoice->second.enabled;
                     if (!shouldAbsorb || !geometryAbsorbersAdded.insert(pinKey).second) continue;
                     const InvolvedNetConfig& portEntry = automatic ? entry : *explicitChoice->second.source;
@@ -926,8 +931,10 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                     port.setDirection(direction);
                     port.setLayer(*layer);
                     port.setPlane(_planeForPortLayer(config, *layer, portEntry.plane()));
-                    port.setImpedance(automatic ? 45.0 :
-                        portEntry.pinImpedance(pad.footprintRef, pad.padNumber).value_or(portEntry.impedance()));
+                    // A per-pin override wins over the entry's own impedance (45 ohms unless the
+                    // board setup seeded another value when the net was included).
+                    port.setImpedance(portEntry.pinImpedance(pad.footprintRef, pad.padNumber)
+                                          .value_or(portEntry.impedance()));
                     if (portEntry.width().has_value()) {
                         port.setWidth(*portEntry.width());
                     } else {
@@ -991,7 +998,6 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                     excitationTargets.find({pad.footprintRef, pad.padNumber}) != excitationTargets.end();
                 std::optional<bool> absorb;
                 std::optional<bool> isProbe;
-                bool automaticAbsorber = false;
                 const auto explicitChoice = explicitAbsorbingChoices.find(
                     PhysicalPin{pad.footprintRef, pad.padNumber});
                 if (explicitChoice != explicitAbsorbingChoices.end()) {
@@ -1006,16 +1012,20 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                         isProbe = true;
                     }
                 } else {
-                    if (pinTypeAbsorbsByDefault(pad.pinType, groundNets.contains(NetName(netName)))) {
+                    // As for geometry-only nets: a pad alone on its net has nothing to terminate.
+                    if (pads.size() > 1 &&
+                        pinTypeAbsorbsByDefault(pad.pinType, groundNets.contains(NetName(netName)))) {
                         absorb = true;
                         isProbe = false;
-                        automaticAbsorber = true;
                     }
                 }
                 // probe=false/absorb=false is a deliberately persisted no-port override (see
                 // InvolvedNetConfig::setPinAbsorbOnly()). Presence in probedPins() alone is not
                 // enough to build a port; either behavior must actually be enabled.
-                if (!isExcitationTarget && !absorb.value_or(false) && !isProbe.value_or(false)) {
+                // A load capacitance needs a port to hang from even on an otherwise port-less pin.
+                const double loadCapacitance = entry.pinLoadCapacitance(pad.footprintRef, pad.padNumber).value_or(0);
+                if (!isExcitationTarget && !absorb.value_or(false) && !isProbe.value_or(false) &&
+                    loadCapacitance <= 0) {
                     continue;
                 }
                 // netName un-escaped here, not left for each individual message to handle -- portLabel
@@ -1072,8 +1082,9 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                 port.setDirection(direction);
                 port.setLayer(*layer);
                 port.setPlane(_planeForPortLayer(config, *layer, entry.plane()));
-                port.setImpedance(automaticAbsorber ? 45.0 :
-                    entry.pinImpedance(pad.footprintRef, pad.padNumber).value_or(entry.impedance()));
+                // A per-pin override wins over the entry's own impedance (see above).
+                port.setImpedance(entry.pinImpedance(pad.footprintRef, pad.padNumber)
+                                      .value_or(entry.impedance()));
                 port.setLength(entry.length());
                 if (entry.width().has_value()) {
                     port.setWidth(*entry.width());
@@ -1121,6 +1132,7 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                 // Automatic terminations are physical loads only, not reportable probes. An
                 // excitation remains reportable regardless of the explicit/default pin state.
                 port.setProbe(isExcitationTarget || isProbe.value_or(false));
+                port.setLoadCapacitance(loadCapacitance);
                 // width/length deliberately left unscaled here, matching entry.length()/entry.width()'s
                 // own file units -- SimulationConfig::scaleToSimulationUnits() (called once, by
                 // EMSConfig::scaledToSimulationUnits(), at the FDTD-facing boundary) scales every

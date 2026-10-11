@@ -302,6 +302,10 @@ struct ClassifiedCopper {
     struct HullContribution {
         std::vector<libkicad::CopperPolygon> copper;
         double padding = 0;
+        /// When set, each pad (footprintRef/padNumber) in copper contributes only if its padded
+        /// shape reaches the hull the unconditional contributions build: an absorber whose via-in-
+        /// pad punched it out of the hull is pulled back in, one far from the hull is not.
+        bool onlyWhereTouchingHull = false;
     };
     std::vector<libkicad::CopperPolygon> involved;
     std::vector<libkicad::CopperPolygon> geometryOnly;
@@ -439,7 +443,8 @@ std::expected<SlicedBoard, std::string> sliceBoardForSimulation(
 /// Removes included lumped R/L/C components whose two pad centres both lie outside the
 /// board cutout. Called immediately after slicing (and after loading cached sliced geometry), so
 /// subsequent grid generation and FDTD construction see exactly the passives that physically
-/// intersect the retained simulation region.
+/// intersect the retained simulation region. Also drops absorbing-only ports (not excited, not
+/// probed) whose pad lies outside the cutout.
 void restrictLumpedComponentsToCutout(SimulationConfig& simulation, const SlicedBoard& board);
 
 } // namespace kiems
