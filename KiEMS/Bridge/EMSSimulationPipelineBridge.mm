@@ -148,7 +148,7 @@ constexpr const char* kCancelledMessage = "Cancelled";
 // not the shape of geometry.json or the S-parameter CSVs, so merely finding those files is not
 // enough to prove they can be reused. Bump this version whenever a solver/serialization change
 // makes otherwise-identical saved products unsafe to restore.
-constexpr const char* kPipelineCacheVersion = "KiEMS-pipeline-cache-v6\n";
+constexpr const char* kPipelineCacheVersion = "KiEMS-pipeline-cache-v8\n";
 constexpr const char* kGeometryCacheInputsName = "cache_inputs.txt";
 constexpr const char* kResultsCacheInputsName = "cache_inputs.txt";
 
@@ -424,6 +424,20 @@ std::expected<std::uint32_t, std::string> runGPUPortInProcess(Simulation& sim, s
             progressHandler(progress);
         };
     }
+    // Check the solver's rasterized metal for nets the board keeps apart that it joins anyway (see
+    // Simulation::writeMetalShortReport()); findings land in shorts.txt beside ports.txt, and a
+    // failure to check only costs the check, never the run.
+    try {
+        const copper::CopperMetalMap metal(sim.csx(), portConfig);
+        sim.writeMetalShortReport(
+            [&](const std::array<double, 3>& point) { return metal.regionAt(point); },
+            [&](const std::array<double, 3>& start, const std::array<double, 3>& stop) {
+                return metal.regionsIn(start, stop);
+            },
+            probeDir);
+    } catch (const std::exception& exception) {
+        Cu::logWarning(std::string("Couldn't check the grid for shorted nets: ") + exception.what());
+    }
     copper::FieldFrameSeriesRequest fieldSeries;
     fieldSeries.path = fieldFrameSeriesPath;
     fieldSeries.simulationName = simulationName;
@@ -586,6 +600,7 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
     std::optional<EMSConfig> _scaledConfig;
     SimulationConfig* _simConfig;
     std::optional<PathsConfig> _paths;
+    NSString* _kicadSourcesWarning;
     // The fab/ copy of the KiCad board under `_paths` -- loaded on first use, reset with `_paths`.
     std::optional<libkicad::Board> _board;
     std::optional<SimulationData<SimulationStage::Configured>> _configured;
@@ -700,6 +715,27 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
 // means this pipeline only ever does and depends on the one simulation's own work. The scratch
 // package's own simulation.json (saved below) ends up holding just this trimmed copy too -- a
 // genuinely temporary, single-simulation file, distinct from the real project package's own.
+- (nullable NSString*)kicadSourcesWarning {
+    return _kicadSourcesWarning;
+}
+
+- (nullable NSString*)metalShortsWarning {
+    if (!_paths.has_value()) return nil;
+    // Every excited port's run writes its own shorts.txt (see Simulation::writeMetalShortReport()).
+    std::set<std::string> findings;
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(_paths->simulationDir / _simulationName, ec)) {
+        std::ifstream report(entry.path() / "shorts.txt");
+        for (std::string line; std::getline(report, line);) {
+            if (!line.empty() && line[0] != '#') findings.insert(line);
+        }
+    }
+    if (findings.empty()) return nil;
+    std::string text = "The simulation grid joins nets the board keeps apart -- refine the mesh there:";
+    for (const std::string& finding : findings) text += "\n" + finding;
+    return @(text.c_str());
+}
+
 - (BOOL)ensurePrepared:(EMSConfigBridge*)config
              packageDir:(NSString*)packageDir
            kicadCliPath:(NSString*)kicadCliPath
@@ -730,7 +766,14 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
     PathsConfig paths = PathsConfig::forConfigFile(std::filesystem::path(packageDir.UTF8String) / "simulation.json",
                                                     kicadCliPath.UTF8String, "");
 
-    if (auto result = kiems::exportKicadPcb(paths, *trimmedConfig.kicadPcbPath()); !result) {
+    // Simulate what KiCad has, including changes it has only autosaved (see resolveKicadSources()).
+    // The trimmed config, and so every worker reading the scratch simulation.json, then points at
+    // the same snapshot.
+    const kiems::KicadSources sources =
+        kiems::resolveKicadSources(_runtime.cxxRuntime, *trimmedConfig.kicadPcbPath(), paths.fabDir / "kicad-source");
+    _kicadSourcesWarning = sources.warning.empty() ? nil : @(sources.warning.c_str());
+    trimmedConfig.setKicadPcbPath(sources.boardPath);
+    if (auto result = kiems::exportKicadPcb(paths, sources.boardPath); !result) {
         if (error) *error = makeError(result.error());
         return NO;
     }

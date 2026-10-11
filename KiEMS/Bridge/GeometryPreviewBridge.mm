@@ -1482,7 +1482,22 @@ EMSGeometryPreview* buildGeometryPreview(const SlicedBoard& sliced, const Simula
             [renderedRefs addObject:@(ref.c_str())];
         }
         if (auto originResult = boardOrigin(board); originResult) {
-            const ComponentExportOutcome outcome = exportComponentTriangles(board, refs);
+            // `board` is normally the snapshot in fab/, which has the board and project files but
+            // not the 3D models a footprint names relative to the project (${KIPRJMOD}/...), so
+            // export from the original project scaledConfig.kicadPcbPath() names whenever it still
+            // exists -- as port_resolution.cpp's _componentSimModels() does for SPICE models.
+            std::optional<libkicad::Board> sourceBoard;
+            if (scaledConfig.kicadPcbPath().has_value()) {
+                const std::filesystem::path boardPath = *scaledConfig.kicadPcbPath();
+                const std::filesystem::path projectPath =
+                    std::filesystem::path(boardPath).replace_extension(".kicad_pro");
+                std::error_code ec;
+                if (std::filesystem::is_regular_file(boardPath, ec) &&
+                    std::filesystem::is_regular_file(projectPath, ec) && boardPath != board.paths().boardPath) {
+                    sourceBoard.emplace(board.runtime(), projectPath.string(), boardPath.string());
+                }
+            }
+            const ComponentExportOutcome outcome = exportComponentTriangles(sourceBoard ? *sourceBoard : board, refs);
             for (const auto& message : outcome.messages) {
                 [componentModelExportMessages addObject:@(message.c_str())];
             }

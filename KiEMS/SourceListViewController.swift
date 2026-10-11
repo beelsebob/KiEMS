@@ -39,18 +39,16 @@ final class SourceListNode: NSObject {
         case .net(let name): return name
         case .footprint(let info): return info.value.isEmpty ? info.reference : "\(info.reference) (\(info.value))"
         case .group(let name): return name
-        case .pin(_, let pin):
-            let function = Self.strippingTrailingNumericSuffix(pin.function)
-            return function.isEmpty ? pin.number : "\(pin.number) (\(function))"
+        case .pin(let reference, let pin):
+            return BoardPinDisplay.label(reference: reference, pin: pin)
         }
     }
 
     /// KiCad often auto-suffixes a pin's schematic-level function name with its own pad number to
     /// keep otherwise-identical function names unique within a footprint -- e.g. a MOSFET array's
     /// four drain pads (numbers 5-8) show up with pin *function* "Drain_5"/"Drain_6"/"Drain_7"/
-    /// "Drain_8". Redundant once the pad's own number is already shown right alongside it (see
-    /// `title` above), so stripped for display -- the raw, unstripped value (still on `pin.function`)
-    /// is untouched, since nothing besides display needs it.
+    /// "Drain_8". BoardPinDisplay removes a suffix matching the pin's own pad number for display;
+    /// this helper is only for deduplicating the corresponding logical pins.
     static func strippingTrailingNumericSuffix(_ text: String) -> String {
         guard let underscoreIndex = text.lastIndex(of: "_") else { return text }
         let suffix = text[text.index(after: underscoreIndex)...]
@@ -1089,10 +1087,7 @@ final class SourceListViewController: NSViewController {
                 guard seenPerNet[pin.netName, default: []].insert(dedupeKey).inserted else { continue }
 
                 let node = SourceListNode(kind: .pin(footprintReference: footprint.reference, pin: pin))
-                let function = SourceListNode.strippingTrailingNumericSuffix(pin.function)
-                node.displayTitleOverride = function.isEmpty
-                    ? "\(footprint.reference) pin \(pin.number)"
-                    : "\(footprint.reference) pin \(pin.number) (\(function))"
+                node.displayTitleOverride = BoardPinDisplay.label(reference: footprint.reference, pin: pin)
                 result[pin.netName, default: []].append(node)
             }
         }
@@ -1927,7 +1922,7 @@ final class SourceListViewController: NSViewController {
         guard currentlyProbed != probed else { return }
         confirmAndMirrorDifferentialPairChange(
             actionVerb: probed ? "Probe" : "Stop probing",
-            targetDescription: "\(footprintReference) pin \(partner.number) (\(partner.netName))") { [self] in
+            targetDescription: "\(BoardPinDisplay.label(reference: footprintReference, pin: partner)) (\(partner.netName))") { [self] in
             if probed {
                 guard let entry = entryAutoIncluding(partnerIdentity, in: sim) else { return }
                 entry.setPinProbed(true, absorbSignal: true, withFootprint: footprintReference, pin: partner.number)
@@ -1953,7 +1948,7 @@ final class SourceListViewController: NSViewController {
         guard currentlyExcited != excited else { return }
         confirmAndMirrorDifferentialPairChange(
             actionVerb: excited ? "Excite" : "Stop exciting",
-            targetDescription: "\(footprintReference) pin \(partner.number) (\(partner.netName))") { [self] in
+            targetDescription: "\(BoardPinDisplay.label(reference: footprintReference, pin: partner)) (\(partner.netName))") { [self] in
             if excited {
                 guard entryAutoIncluding(partnerIdentity, in: sim) != nil else { return }
                 let excitation = sim.addExcitation(forFootprint: footprintReference, pin: partner.number)

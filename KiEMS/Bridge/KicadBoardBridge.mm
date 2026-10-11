@@ -4,6 +4,7 @@
 
 #include "kiems/component_sim_model.hpp"
 #include "kiems/importer.hpp"
+#include "kiems/port_resolution.hpp"
 #include "kiems/board_slicing.hpp"
 #include "kiems/grid_gen.hpp"
 #include "kiems/constants.hpp"
@@ -189,6 +190,12 @@ std::string stitchingViaPlanInputsKey(const kiems::EMSConfig& config, const kiem
         if (auto imported = kiems::importStackup(board, config); !imported) {
             if (error != nil) *error = makeError(imported.error());
             return nil;
+        }
+        // Port pads grow the hull (see classifyCopperForSimulation()), so resolve them first or this
+        // preview would show a smaller hull than the simulation uses. A configuration that can't
+        // resolve yet still gets a preview, just without that growth.
+        if (auto resolved = kiems::resolveSimulationPorts(config, board); !resolved) {
+            NSLog(@"Hull preview: ports didn't resolve (%s); previewing without port pads", resolved.error().c_str());
         }
         auto hullPlan = kiems::planHullCuts(config, static_cast<std::size_t>(self.simulationIndex), board);
         if (!hullPlan) {

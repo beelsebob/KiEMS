@@ -1,16 +1,20 @@
 import Cocoa
 
 /// Which row is currently selected in SimulationListViewController's outline view, passed to
-/// onSelectionChanged. Every case carries the index (into document.config.simulations) of the
-/// simulation it belongs to, whether it's the simulation's own row or one of its 3 fixed sub-entries.
+/// onSelectionChanged. Every case but boardSetup carries the index (into document.config.simulations)
+/// of the simulation it belongs to, whether it's the simulation's own row or one of its 3 fixed
+/// sub-entries.
 enum SimulationListSelection: Equatable {
+    /// The board-wide defaults row pinned above every simulation.
+    case boardSetup
     case simulation(index: Int)
     case geometry(simulationIndex: Int)
     case simulationResults(simulationIndex: Int)
     case fieldViewer(simulationIndex: Int)
 
-    var simulationIndex: Int {
+    var simulationIndex: Int? {
         switch self {
+        case .boardSetup: return nil
         case .simulation(let index): return index
         case .geometry(let simulationIndex): return simulationIndex
         case .simulationResults(let simulationIndex): return simulationIndex
@@ -24,6 +28,14 @@ enum SimulationListSelection: Equatable {
 /// only so SimulationListViewController's NSTextFieldDelegate methods can type-check which fields
 /// they're meant to handle without also matching some other, unrelated text field.
 private final class SimulationNameField: NSTextField {}
+
+/// A stable description of a branch across the node rebuilds caused by structural edits.  Outline
+/// view item identity cannot survive those rebuilds, while a set identifier or simulation name can.
+private enum SimulationListExpansionIdentity: Hashable {
+    case simulation(name: String)
+    case simulationSet(identifier: String)
+    case generatedSimulation(setIdentifier: String, name: String)
+}
 
 /// Detects a click on a row that's already selected -- the trigger for renaming, Finder-style --
 /// which turns out not to be reachable from the cell's own text field at all: a label created via
@@ -51,15 +63,37 @@ private final class SimulationOutlineView: NSOutlineView {
     }
 }
 
-/// One row in SimulationListViewController's outline view -- either a simulation itself (a
-/// top-level row) or one of its 3 fixed sub-entries (a child row). Node objects are only rebuilt by
+/// A transparent hit target at the glass source list's trailing edge. It preserves the card's
+/// appearance while letting its edge act as a resize boundary.
+private final class SourceListResizeEdgeView: NSView {
+    var onDrag: ((CGFloat) -> Void)?
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .resizeLeftRight)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        onDrag?(event.deltaX)
+    }
+}
+
+/// One row in SimulationListViewController's outline view -- the Board Setup row, the separator
+/// beneath it (kind == nil), a simulation itself (a top-level row) or one of its 3 fixed sub-entries
+/// (a child row). Node objects are only rebuilt by
 /// reloadData(); refreshRows() reuses the same instances, since NSOutlineView needs stable item
 /// identity to preserve expansion state (and, restored explicitly below, selection) across a reload.
 private final class SimulationListNode {
-    let kind: SimulationListSelection
+    let kind: SimulationListSelection?
     var children: [SimulationListNode] = []
+    var expansionIdentity: SimulationListExpansionIdentity?
+    /// A Simulation Set's row: its children are the simulations generated from it.
+    var isSimulationSet = false
 
-    init(kind: SimulationListSelection) {
+    init(kind: SimulationListSelection?) {
         self.kind = kind
     }
 }
@@ -93,6 +127,10 @@ final class SimulationListViewController: NSViewController {
     /// Rebuilt from document.config.simulations by reloadData(); left untouched by refreshRows() so
     /// item identity (and therefore expansion/selection) survives a cosmetic-only reload.
     private var simulationNodes: [SimulationListNode] = []
+    /// Pinned above every simulation; stable instances so selection survives reloads.
+    private let boardSetupNode = SimulationListNode(kind: .boardSetup)
+    private let separatorNode = SimulationListNode(kind: nil)
+    private var rootNodes: [SimulationListNode] { [boardSetupNode, separatorNode] + simulationNodes }
 
     /// Central, per-simulation, per-phase status store -- one PhaseState per (simulation index,
     /// JobKind), covering all 3 sidebar sub-rows (Geometry/.geometryGeneration, Simulation
@@ -110,10 +148,18 @@ final class SimulationListViewController: NSViewController {
     /// is selected.
     var onSelectionChanged: ((SimulationListSelection?) -> Void)?
 
+    /// Horizontal drag deltas from the card's trailing edge. The window controller owns the
+    /// adjacent editor region, so it applies these to the card's width constraint.
+    var onWidthDrag: ((CGFloat) -> Void)?
+
     /// Fired (with the renamed simulation's index) after a rename performed directly in this list --
     /// SimulationPropertiesViewController's own name field has no other way to notice, the same way
     /// this controller wouldn't notice a rename made there without its own onNameChanged callback.
     var onSimulationRenamed: ((Int) -> Void)?
+
+    /// Fired (with the new simulation's index) right after addSimulation() creates one, before it
+    /// is selected -- lets Board Setup's included nets be applied to it.
+    var onSimulationAdded: ((Int) -> Void)?
 
     /// Context-menu actions, each fired with the clicked row's simulation index -- the sidebar has
     /// no access to the pipeline itself, so DocumentWindowController routes these to
@@ -169,8 +215,11 @@ final class SimulationListViewController: NSViewController {
 
         buildUI(in: content)
         reloadData()
-        if !simulationNodes.isEmpty {
-            outlineView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        if simulationNodes.isEmpty {
+            outlineView.selectRowIndexes(IndexSet(integer: outlineView.row(forItem: boardSetupNode)),
+                                         byExtendingSelection: false)
+        } else {
+            selectSimulationRow(at: 0)
         }
         selectionChanged()
     }
@@ -209,12 +258,16 @@ final class SimulationListViewController: NSViewController {
         scroll.contentView.drawsBackground = false
         scroll.translatesAutoresizingMaskIntoConstraints = false
 
+        let resizeEdge = SourceListResizeEdgeView()
+        resizeEdge.onDrag = { [weak self] delta in self?.onWidthDrag?(delta) }
+        resizeEdge.translatesAutoresizingMaskIntoConstraints = false
+
         addButton.bezelStyle = .circular
         addButton.isBordered = true
         addButton.imagePosition = .imageOnly
         addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "Add simulation")
         addButton.target = self
-        addButton.action = #selector(addSimulation)
+        addButton.action = #selector(showAddMenu)
         addButton.widthAnchor.constraint(equalToConstant: 24).isActive = true
         addButton.heightAnchor.constraint(equalToConstant: 24).isActive = true
 
@@ -236,6 +289,7 @@ final class SimulationListViewController: NSViewController {
 
         content.addSubview(scroll)
         content.addSubview(buttonRow)
+        content.addSubview(resizeEdge)
         // scroll's height is intentionally left undetermined here -- DocumentWindowController pins
         // this whole panel's bottom straight to the window's content view, with no fixed height, so
         // the list always fills whatever vertical space is available as the window resizes.
@@ -248,31 +302,104 @@ final class SimulationListViewController: NSViewController {
             // On the right, not the left -- see DocumentWindowController's call site for why.
             buttonRow.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -8),
             buttonRow.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -8),
+
+            // A thin, invisible strip directly inside the glass edge: no system splitter or
+            // visible handle, just the normal horizontal-resize cursor and drag behavior.
+            resizeEdge.topAnchor.constraint(equalTo: content.topAnchor),
+            resizeEdge.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            resizeEdge.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            resizeEdge.widthAnchor.constraint(equalToConstant: 5),
         ])
     }
 
+    /// A Simulation Set is a top-level row whose children are the simulations generated from it,
+    /// sorted by name; every other simulation is a top-level row of its own.
     private func rebuildNodes() {
-        let count = document?.config.simulations.count ?? 0
-        simulationNodes = (0..<count).map { index in
+        let simulations = document?.config.simulations ?? []
+        let setIdentifiers = simulations.map { $0.simulationSet?.identifier }
+        let templateIdentifiers = Set(setIdentifiers.compactMap { $0 })
+        var generatedBySet: [String: [(name: String, node: SimulationListNode)]] = [:]
+        var setNodes: [String: SimulationListNode] = [:]
+        simulationNodes = []
+        for (index, simulation) in simulations.enumerated() {
+            if let identifier = setIdentifiers[index] {
+                let node = SimulationListNode(kind: .simulation(index: index))
+                node.isSimulationSet = true
+                node.expansionIdentity = .simulationSet(identifier: identifier)
+                setNodes[identifier] = node
+                simulationNodes.append(node)
+                continue
+            }
             let node = SimulationListNode(kind: .simulation(index: index))
+            if let identifier = simulation.generatedBySetIdentifier, templateIdentifiers.contains(identifier) {
+                node.expansionIdentity = .generatedSimulation(setIdentifier: identifier, name: simulation.name)
+            } else {
+                node.expansionIdentity = .simulation(name: simulation.name)
+            }
             node.children = [
                 SimulationListNode(kind: .geometry(simulationIndex: index)),
                 SimulationListNode(kind: .simulationResults(simulationIndex: index)),
                 SimulationListNode(kind: .fieldViewer(simulationIndex: index)),
             ]
-            return node
+            if let identifier = simulation.generatedBySetIdentifier, templateIdentifiers.contains(identifier) {
+                generatedBySet[identifier, default: []].append((simulation.name, node))
+            } else {
+                simulationNodes.append(node)
+            }
         }
+        for (identifier, generated) in generatedBySet {
+            setNodes[identifier]?.children = generated
+                .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+                .map(\.node)
+        }
+    }
+
+    /// Every simulation's own row, top-level or nested under its Simulation Set.
+    private var allSimulationNodes: [SimulationListNode] {
+        simulationNodes.flatMap { node in
+            [node] + (node.isSimulationSet ? node.children : [])
+        }
+    }
+
+    private func simulationNode(forIndex index: Int) -> SimulationListNode? {
+        allSimulationNodes.first { $0.kind == .simulation(index: index) }
+    }
+
+    /// The Simulation Set row `node` is nested under, if any.
+    private func parentSetNode(of node: SimulationListNode) -> SimulationListNode? {
+        simulationNodes.first { $0.isSimulationSet && $0.children.contains { $0 === node } }
     }
 
     /// Full rebuild: used whenever the number/order of simulations changes (add/remove). Rebuilds
     /// simulationNodes from scratch, so any previously-held item identity (and therefore selection)
     /// is gone after this -- callers that need to keep something selected must re-select explicitly
-    /// afterward using the freshly-rebuilt nodes (see selectSimulationRow(at:) below).
-    private func reloadData() {
+    /// afterward using the freshly-rebuilt nodes (see selectSimulationRow(at:) below).  A caller
+    /// can provide the stable identities of branches that were expanded before the rebuild;
+    /// otherwise a freshly-built list opens every branch, as it always has.
+    private func reloadData(expanding identities: Set<SimulationListExpansionIdentity>? = nil) {
         rebuildNodes()
         outlineView.reloadData()
-        outlineView.expandItem(nil, expandChildren: true)
+        if let identities {
+            for node in allSimulationNodes
+                where !node.children.isEmpty && node.expansionIdentity.map(identities.contains) == true {
+                outlineView.expandItem(node)
+            }
+        } else {
+            outlineView.expandItem(nil, expandChildren: true)
+        }
         updateButtonEnabledState()
+    }
+
+    /// Expansion is held by NSOutlineView against node identity, but a structural rebuild creates
+    /// new nodes.  Capture stable branch identities before the rebuild and apply them afterward.
+    private func expandedSimulationIdentities() -> Set<SimulationListExpansionIdentity> {
+        Set(allSimulationNodes.compactMap { node in
+            guard !node.children.isEmpty,
+                  outlineView.isItemExpanded(node),
+                  let identity = node.expansionIdentity
+            else { return nil }
+            return identity
+        })
     }
 
     /// Cosmetic-only reload: used when a property of an existing simulation changes (e.g. its name)
@@ -294,7 +421,11 @@ final class SimulationListViewController: NSViewController {
 
     private func updateButtonEnabledState() {
         addButton.isEnabled = isProjectAvailable
-        removeButton.isEnabled = isProjectAvailable && outlineView.selectedRow >= 0
+        let selectedNode = outlineView.item(atRow: outlineView.selectedRow) as? SimulationListNode
+        // Generated rows are derived from their parent set and would immediately return on the
+        // next regeneration.  Remove the set itself instead.
+        let isGenerated = selectedNode.flatMap(parentSetNode(of:)) != nil
+        removeButton.isEnabled = isProjectAvailable && selectedNode?.kind?.simulationIndex != nil && !isGenerated
     }
 
     /// Called by DocumentWindowController once a board has been linked (and, symmetrically, would be
@@ -309,16 +440,14 @@ final class SimulationListViewController: NSViewController {
     /// default one created on first KiCad project selection), so the list picks it up and selects it
     /// the same way selecting a row here would.
     func simulationAddedExternally(at index: Int) {
-        reloadData()
+        reloadData(expanding: expandedSimulationIdentities())
         selectSimulationRow(at: index)
         selectionChanged()
     }
 
     private func selectSimulationRow(at index: Int) {
-        guard let node = simulationNodes.first(where: {
-            if case .simulation(let i) = $0.kind { return i == index }
-            return false
-        }) else { return }
+        guard let node = simulationNode(forIndex: index) else { return }
+        if let parent = parentSetNode(of: node) { outlineView.expandItem(parent) }
         let row = outlineView.row(forItem: node)
         if row >= 0 {
             outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
@@ -332,13 +461,17 @@ final class SimulationListViewController: NSViewController {
     func select(_ selection: SimulationListSelection) {
         let node: SimulationListNode
         switch selection {
-        case .simulation:
-            guard let match = simulationNodes.first(where: { $0.kind == selection }) else { return }
+        case .boardSetup:
+            node = boardSetupNode
+        case .simulation(let index):
+            guard let match = simulationNode(forIndex: index) else { return }
+            if let parent = parentSetNode(of: match) { outlineView.expandItem(parent) }
             node = match
         case .geometry, .simulationResults, .fieldViewer:
-            let index = selection.simulationIndex
-            guard let simNode = simulationNodes.first(where: { $0.kind == .simulation(index: index) }),
+            guard let index = selection.simulationIndex,
+                  let simNode = simulationNode(forIndex: index),
                   let child = simNode.children.first(where: { $0.kind == selection }) else { return }
+            if let parent = parentSetNode(of: simNode) { outlineView.expandItem(parent) }
             outlineView.expandItem(simNode)
             node = child
         }
@@ -368,11 +501,10 @@ final class SimulationListViewController: NSViewController {
     /// this state is purely local to a single row, not something that can leave a sibling row's
     /// cached icon stale).
     private func reloadRow(forSimulationIndex index: Int, kind: JobKind) {
-        guard let simulationNode = simulationNodes.first(where: {
-            if case .simulation(let i) = $0.kind { return i == index }
-            return false
-        }) else { return }
-        guard let childNode = simulationNode.children.first(where: { Self.matchesChild($0.kind, kind: kind) })
+        guard let simulationNode = simulationNode(forIndex: index) else { return }
+        guard let childNode = simulationNode.children.first(where: {
+            $0.kind.map { Self.matchesChild($0, kind: kind) } ?? false
+        })
         else { return }
         outlineView.reloadItem(childNode)
     }
@@ -454,12 +586,34 @@ final class SimulationListViewController: NSViewController {
     }
 
     @objc private func addSimulation() {
+        createSimulation(isSet: false)
+    }
+
+    /// Presents the two kinds of source the + button can add.  Keeping this as a regular menu
+    /// (rather than an NSPopUpButton) preserves the small circular toolbar control.
+    @objc private func showAddMenu() {
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Add Simulation", action: #selector(addSimulation), keyEquivalent: "")
+        menu.addItem(withTitle: "Add Simulation Set", action: #selector(addSimulationSet), keyEquivalent: "")
+        for item in menu.items { item.target = self }
+        NSMenu.popUpContextMenu(menu, with: NSApp.currentEvent!, for: addButton)
+    }
+
+    @objc private func addSimulationSet() {
+        createSimulation(isSet: true)
+    }
+
+    private func createSimulation(isSet: Bool) {
         guard let document else { return }
+        let expandedIdentities = expandedSimulationIdentities()
         let count = document.config.simulations.count
-        _ = document.config.addSimulationNamed(count == 0 ? "simulation" : "simulation \(count + 1)")
+        let baseName = isSet ? "Simulation Set" : "simulation"
+        let name = count == 0 ? baseName : "\(baseName) \(count + 1)"
+        _ = isSet ? document.config.addSimulationSetNamed(name) : document.config.addSimulationNamed(name)
         document.updateChangeCount(.changeDone)
         let newIndex = document.config.simulations.count - 1
-        reloadData()
+        onSimulationAdded?(newIndex)
+        reloadData(expanding: expandedIdentities)
         selectSimulationRow(at: newIndex)
         selectionChanged()
         // The placeholder name just given above is rarely what the user actually wants -- straight
@@ -472,27 +626,37 @@ final class SimulationListViewController: NSViewController {
         DispatchQueue.main.async { [weak self] in self?.beginRenaming(forSimulationIndex: newIndex) }
     }
 
+    /// Rebuilds the hierarchy after a set changes, while retaining its template as the selection.
+    func simulationSetRegenerated(at templateIndex: Int) {
+        reloadData(expanding: expandedSimulationIdentities())
+        selectSimulationRow(at: templateIndex)
+        selectionChanged()
+    }
+
     @objc private func removeSimulation() {
         guard let document else { return }
         let row = outlineView.selectedRow
-        guard row >= 0, let node = outlineView.item(atRow: row) as? SimulationListNode else { return }
-        let index = node.kind.simulationIndex
-        guard index < document.config.simulations.count else { return }
+        guard row >= 0, let node = outlineView.item(atRow: row) as? SimulationListNode,
+              parentSetNode(of: node) == nil,
+              let index = node.kind?.simulationIndex, index < document.config.simulations.count else { return }
+        let expandedIdentities = expandedSimulationIdentities()
         document.config.removeSimulation(at: index)
         document.updateChangeCount(.changeDone)
-        reloadData()
+        // Keep every surviving source-list branch exactly as the user left it rather than
+        // expanding the freshly-created node hierarchy wholesale.
+        reloadData(expanding: expandedIdentities)
         selectionChanged()
     }
 }
 
 extension SimulationListViewController: NSOutlineViewDataSource {
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        guard let item else { return simulationNodes.count }
+        guard let item else { return rootNodes.count }
         return (item as? SimulationListNode)?.children.count ?? 0
     }
 
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        guard let item else { return simulationNodes[index] }
+        guard let item else { return rootNodes[index] }
         return (item as! SimulationListNode).children[index]
     }
 
@@ -504,12 +668,31 @@ extension SimulationListViewController: NSOutlineViewDataSource {
 extension SimulationListViewController: NSOutlineViewDelegate {
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard let document, let node = item as? SimulationListNode else { return nil }
-        switch node.kind {
+        guard let kind = node.kind else {
+            let identifier = NSUserInterfaceItemIdentifier("SimulationListSeparator")
+            if let reused = outlineView.makeView(withIdentifier: identifier, owner: self) { return reused }
+            let cell = NSView()
+            cell.identifier = identifier
+            let separator = NSBox()
+            separator.boxType = .separator
+            separator.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(separator)
+            NSLayoutConstraint.activate([
+                separator.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
+                separator.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
+                separator.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            ])
+            return cell
+        }
+        switch kind {
+        case .boardSetup:
+            return makeBoardSetupCell(in: outlineView)
         case .simulation(let index):
             guard index < document.config.simulations.count else { return nil }
-            let identifier = NSUserInterfaceItemIdentifier("SimulationListCell")
+            let symbolName = node.isSimulationSet ? "square.stack.3d.up" : nil
+            let identifier = NSUserInterfaceItemIdentifier(node.isSimulationSet ? "SimulationSetListCell" : "SimulationListCell")
             let cell = outlineView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView
-                ?? makeSimulationCell(identifier: identifier)
+                ?? makeSimulationCell(identifier: identifier, symbolName: symbolName)
             cell.textField?.stringValue = document.config.simulations[index].name
             return cell
         case .geometry(let simulationIndex):
@@ -529,7 +712,44 @@ extension SimulationListViewController: NSOutlineViewDelegate {
         selectionChanged()
     }
 
-    private func makeSimulationCell(identifier: NSUserInterfaceItemIdentifier) -> NSTableCellView {
+    func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
+        (item as? SimulationListNode)?.kind == nil ? 9 : outlineView.rowHeight
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
+        (item as? SimulationListNode)?.kind != nil
+    }
+
+    private func makeBoardSetupCell(in outlineView: NSOutlineView) -> NSTableCellView {
+        let identifier = NSUserInterfaceItemIdentifier("SimulationListBoardSetupCell")
+        if let reused = outlineView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView {
+            return reused
+        }
+        let cell = NSTableCellView()
+        cell.identifier = identifier
+        let imageView = NSImageView(image: NSImage(systemSymbolName: "slider.horizontal.3",
+                                                   accessibilityDescription: "Board Setup")!)
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        let textField = NSTextField(labelWithString: "Board Setup")
+        textField.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(imageView)
+        cell.addSubview(textField)
+        cell.imageView = imageView
+        cell.textField = textField
+        NSLayoutConstraint.activate([
+            imageView.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
+            imageView.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            imageView.widthAnchor.constraint(equalToConstant: 16),
+            imageView.heightAnchor.constraint(equalToConstant: 16),
+            textField.leadingAnchor.constraint(equalTo: imageView.trailingAnchor, constant: 6),
+            textField.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
+            textField.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+        ])
+        return cell
+    }
+
+    /// `symbolName`, when given, is shown as a leading icon -- a Simulation Set's row.
+    private func makeSimulationCell(identifier: NSUserInterfaceItemIdentifier, symbolName: String? = nil) -> NSTableCellView {
         let cell = NSTableCellView()
         cell.identifier = identifier
         // A plain label until beginRenaming(atRow:) flips isEditable/isSelectable on -- see
@@ -540,8 +760,25 @@ extension SimulationListViewController: NSOutlineViewDelegate {
         textField.translatesAutoresizingMaskIntoConstraints = false
         cell.addSubview(textField)
         cell.textField = textField
+        var leadingAnchor = cell.leadingAnchor
+        var leadingSpacing: CGFloat = 0
+        if let symbolName {
+            let imageView = NSImageView(image: NSImage(systemSymbolName: symbolName,
+                                                       accessibilityDescription: "Simulation Set")!)
+            imageView.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(imageView)
+            cell.imageView = imageView
+            NSLayoutConstraint.activate([
+                imageView.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
+                imageView.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                imageView.widthAnchor.constraint(equalToConstant: 16),
+                imageView.heightAnchor.constraint(equalToConstant: 16),
+            ])
+            leadingAnchor = imageView.trailingAnchor
+            leadingSpacing = 6
+        }
         NSLayoutConstraint.activate([
-            textField.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
+            textField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: leadingSpacing),
             textField.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
             textField.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
         ])
@@ -552,7 +789,11 @@ extension SimulationListViewController: NSOutlineViewDelegate {
     /// out to be one of a simulation's 3 fixed child rows (Geometry/Simulation Results/Field Viewer)
     /// rather than a simulation's own row -- those have no name to rename.
     private func beginRenamingIfSimulationRow(_ row: Int) {
-        guard let node = outlineView.item(atRow: row) as? SimulationListNode, case .simulation = node.kind else {
+        // A generated simulation's name is derived from its set's, so renaming it would just be
+        // undone by the set's next regeneration.
+        guard let node = outlineView.item(atRow: row) as? SimulationListNode, case .simulation(let index) = node.kind,
+              let document, index < document.config.simulations.count,
+              document.config.simulations[index].generatedBySetIdentifier == nil else {
             return
         }
         beginRenaming(atRow: row)
@@ -579,10 +820,7 @@ extension SimulationListViewController: NSOutlineViewDelegate {
     /// can type its real name immediately instead of having to click into the placeholder name
     /// first.
     private func beginRenaming(forSimulationIndex index: Int) {
-        guard let node = simulationNodes.first(where: {
-            if case .simulation(let i) = $0.kind { return i == index }
-            return false
-        }) else { return }
+        guard let node = simulationNode(forIndex: index) else { return }
         let row = outlineView.row(forItem: node)
         guard row >= 0 else { return }
         beginRenaming(atRow: row)
@@ -757,8 +995,11 @@ extension SimulationListViewController: NSMenuDelegate {
     /// nothing (current, out of date or failed) to throw away, or while it's still running.
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        guard let node = outlineView.item(atRow: outlineView.clickedRow) as? SimulationListNode else { return }
-        let index = node.kind.simulationIndex
+        guard let node = outlineView.item(atRow: outlineView.clickedRow) as? SimulationListNode,
+              let index = node.kind?.simulationIndex else { return }
+        // A Simulation Set is a template rather than a runnable simulation. Its generated child
+        // rows have the ordinary run and invalidate actions.
+        guard !node.isSimulationSet else { return }
         let geometry = phaseState(forSimulationIndex: index, kind: .geometryGeneration)
         let simulation = phaseState(forSimulationIndex: index, kind: .simulation)
         let isRunning = { (state: PhaseState) -> Bool in

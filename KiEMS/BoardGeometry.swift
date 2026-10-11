@@ -10,6 +10,33 @@ struct BoardPinRef: Hashable {
     let net: String?
 }
 
+/// The consistent, user-facing identity for a board pin. `function` is KiCad's schematic pin
+/// name; pads without one use their pad number as their name.
+enum BoardPinDisplay {
+    /// KiCad appends "_<pad number>" when it needs to make otherwise-identical logical pin names
+    /// distinct. It is redundant in the UI, which always shows the pad number separately.
+    static func name(_ pin: KicadFootprintPin) -> String {
+        name(function: pin.function, number: pin.number)
+    }
+
+    static func name(function: String, number: String) -> String {
+        guard !function.isEmpty else { return number }
+        let suffix = "_\(number)"
+        guard function.hasSuffix(suffix) else { return function }
+        let name = String(function.dropLast(suffix.count))
+        return name.isEmpty ? number : name
+    }
+
+    static func label(reference: String, pin: KicadFootprintPin) -> String {
+        "\(reference)/\(name(pin))(\(pin.number))"
+    }
+
+    static func label(reference: String, number: String, footprints: [KicadFootprintInfo]) -> String {
+        let pin = footprints.first(where: { $0.reference == reference })?.pins.first { $0.number == number }
+        return pin.map { label(reference: reference, pin: $0) } ?? "\(reference)/\(number)(\(number))"
+    }
+}
+
 /// Something a click on GeometryView's board can select.
 enum BoardPickTarget: Hashable {
     case pin(reference: String, number: String, net: String?)

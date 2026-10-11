@@ -29,6 +29,11 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
     EMSNetInclusionLevelGeometryOnly,
 };
 
+typedef NS_ENUM(NSInteger, EMSSimulationSetNetSelectionMode) {
+    EMSSimulationSetNetSelectionModeRegularExpression,
+    EMSSimulationSetNetSelectionModeList,
+};
+
 /// One ProbedPin entry -- a plain value snapshot (not index-forwarding like EMSInvolvedNetBridge
 /// itself), since kiems::ProbedPin has no separate identity to look up by index; a fresh array
 /// of these is built from InvolvedNetConfig::probedPins() on every read of
@@ -143,6 +148,9 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 /// This is independent of the pin's Probe/Absorb/Excite state.
 - (nullable NSNumber *)impedanceWithFootprint:(NSString *)footprint pin:(NSString *)pin;
 - (void)setImpedance:(nullable NSNumber *)impedance withFootprint:(NSString *)footprint pin:(NSString *)pin;
+/// The pin's load (receiver input) capacitance in farads, or nil for none.
+- (nullable NSNumber *)loadCapacitanceWithFootprint:(NSString *)footprint pin:(NSString *)pin;
+- (void)setLoadCapacitance:(nullable NSNumber *)capacitance withFootprint:(NSString *)footprint pin:(NSString *)pin;
 
 @end
 
@@ -198,6 +206,38 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 /// One SimulationConfig within an EMSConfig. Never holds a raw pointer into the parent's C++
 /// vector<SimulationConfig> (which reallocates on add/remove) -- every property forwards through
 /// the parent by index instead, so this stays valid across mutations elsewhere in the document.
+/// One probe of a Simulation Set -- see kiems::SimulationSetProbe. A plain value: edit a copy and
+/// assign the owning EMSSimulationSetBridge back to its simulation.
+@interface EMSSimulationSetProbeBridge : NSObject
+@property (nonatomic, copy) NSString *footprintReference;
+@property (nonatomic) BOOL absorbing;
+@property (nonatomic) double loadImpedance;
+@property (nonatomic, nullable) NSNumber *loadCapacitance;
+@end
+
+/// A Simulation Set's own setup -- see kiems::SimulationSetConfig. A plain value snapshot, not a
+/// live view: changes take effect only once assigned back to EMSSimulationBridge.simulationSet.
+@interface EMSSimulationSetBridge : NSObject
+@property (nonatomic, copy, readonly) NSString *identifier;
+@property (nonatomic, copy) NSString *excitationFootprintReference;
+@property (nonatomic) EMSSimulationSetNetSelectionMode netSelectionMode;
+/// A regex the whole primary net name must match.
+@property (nonatomic, copy) NSString *netNamePattern;
+/// Explicit primary net names, used when netSelectionMode is List.
+@property (nonatomic, copy) NSArray<NSString *> *netNames;
+/// Regex substitution templates that add nets to each primary-net simulation.
+@property (nonatomic, copy) NSArray<NSString *> *additionalNetPatterns;
+@property (nonatomic) double phaseDegrees;
+@property (nonatomic) double amplitude;
+@property (nonatomic) double driveImpedance;
+@property (nonatomic) BOOL probed;
+@property (nonatomic) BOOL probeNetImpedance;
+@property (nonatomic) BOOL absorbing;
+@property (nonatomic) double loadImpedance;
+@property (nonatomic, nullable) NSNumber *loadCapacitance;
+@property (nonatomic, copy) NSArray<EMSSimulationSetProbeBridge *> *probes;
+@end
+
 @interface EMSSimulationBridge : NSObject
 
 @property (nonatomic, copy) NSString *name;
@@ -225,6 +265,14 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 /// Nets terminated to the ground net along the board-slicing cut -- see
 /// kiems::SimulationConfig::edgeTerminatedNets(). Empty strings are rows not yet given a net.
 @property (nonatomic, copy) NSArray<NSString *> *edgeTerminatedNets;
+
+/// Non-nil when this simulation is a Simulation Set template (never run itself). Assigning nil is
+/// ignored -- a simulation's set-ness is fixed when it's created.
+@property (nonatomic, nullable) EMSSimulationSetBridge *simulationSet;
+/// The identifier of the Simulation Set this simulation was generated from, if any.
+@property (nonatomic, copy, readonly, nullable) NSString *generatedBySetIdentifier;
+/// This simulation's saved JSON, for telling whether a regeneration actually changed it.
+@property (nonatomic, copy, readonly) NSString *jsonRepresentation;
 
 @property (nonatomic, readonly) NSArray<EMSInvolvedNetBridge *> *involvedNets;
 - (EMSInvolvedNetBridge *)addInvolvedNetWithKind:(EMSNetSelectorKind)kind;
@@ -254,6 +302,56 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 /// A simulation.json document's in-memory model. Always in file units (mm etc.) -- see
 /// kiems::EMSConfig::scaledToSimulationUnits()'s doc comment; this bridge never scales
 /// anything, it just edits/saves exactly what's in the file.
+/// One pin's board-level defaults -- see kiems::BoardPinSetup. A snapshot: edit through
+/// EMSBoardSetupBridge's pin setters, which create/prune the underlying entry.
+@interface EMSBoardPinSetupBridge : NSObject
+@property (nonatomic, copy, readonly) NSString *footprintReference;
+@property (nonatomic, copy, readonly) NSString *pin;
+/// Ohms; nil inherits the net/net class/default impedance.
+@property (nonatomic, readonly, nullable) NSNumber *impedance;
+/// BOOL; nil leaves the simulation's automatic termination rule in charge.
+@property (nonatomic, readonly, nullable) NSNumber *absorbing;
+@property (nonatomic, readonly) BOOL noiseGenerating;
+@property (nonatomic, readonly) double noiseFrequency;
+@property (nonatomic, readonly) double noiseAmplitude;
+@end
+
+/// Board-wide defaults (kiems::BoardSetupConfig), copied into a simulation as its nets are included.
+@interface EMSBoardSetupBridge : NSObject
+/// The ground net (or net class) new simulations start with; nil when none is chosen.
+@property (nonatomic) EMSGroundSelectorKind groundNetKind;
+@property (nonatomic, copy, nullable) NSString *groundNetName;
+/// The edge-terminated nets new simulations start with.
+@property (nonatomic, copy) NSArray<NSString *> *edgeTerminatedNets;
+/// The nets and net classes new simulations start with included (geometry only).
+@property (nonatomic, copy) NSArray<NSString *> *includedNets;
+@property (nonatomic, copy) NSArray<NSString *> *includedNetClasses;
+/// The component references new simulations start with included.
+@property (nonatomic, copy) NSArray<NSString *> *includedComponents;
+@property (nonatomic) double signalImpedance;
+@property (nonatomic) double powerImpedance;
+/// Default digital bit rate for new simulations; 0 means automatic.
+@property (nonatomic) double bitRate;
+/// Net class name -> ohms, for classes with their own impedance.
+@property (nonatomic, readonly) NSDictionary<NSString *, NSNumber *> *netClassImpedances;
+- (nullable NSNumber *)impedanceForNetClass:(NSString *)netClass;
+- (void)setImpedance:(nullable NSNumber *)impedance forNetClass:(NSString *)netClass;
+- (nullable NSNumber *)impedanceForNet:(NSString *)net;
+- (void)setImpedance:(nullable NSNumber *)impedance forNet:(NSString *)net;
+/// The impedance `net` resolves to: its own, else its class's, else the signal/power default.
+- (double)effectiveImpedanceForNet:(NSString *)net netClass:(nullable NSString *)netClass isPowerNet:(BOOL)isPowerNet;
+
+@property (nonatomic, readonly) NSArray<EMSBoardPinSetupBridge *> *pins;
+- (nullable EMSBoardPinSetupBridge *)pinWithFootprint:(NSString *)footprint pin:(NSString *)pin;
+- (void)setImpedance:(nullable NSNumber *)impedance forFootprint:(NSString *)footprint pin:(NSString *)pin;
+- (void)setAbsorbing:(nullable NSNumber *)absorbing forFootprint:(NSString *)footprint pin:(NSString *)pin;
+- (void)setNoiseGenerating:(BOOL)noiseGenerating
+                 frequency:(double)frequency
+                 amplitude:(double)amplitude
+              forFootprint:(NSString *)footprint
+                       pin:(NSString *)pin;
+@end
+
 @interface EMSConfigBridge : NSObject
 
 + (instancetype)configWithDefaults;
@@ -300,6 +398,17 @@ typedef NS_ENUM(NSInteger, EMSNetInclusionLevel) {
 @property (nonatomic, readonly) NSArray<EMSSimulationBridge *> *simulations;
 - (EMSSimulationBridge *)addSimulationNamed:(NSString *)name;
 - (void)removeSimulationAtIndex:(NSInteger)index;
+/// Adds a simulation exactly as addSimulationNamed: does, made into an empty Simulation Set template.
+- (EMSSimulationBridge *)addSimulationSetNamed:(NSString *)name;
+/// Writes a copy of the Simulation Set template at `templateIndex`, renamed and marked as generated
+/// by it, over the simulation at `targetIndex` -- or appends it when `targetIndex` is out of range.
+/// Returns the generated simulation's index.
+- (NSInteger)generateSimulationFromSetAtIndex:(NSInteger)templateIndex
+                                        named:(NSString *)name
+                               replacingIndex:(NSInteger)targetIndex;
+
+/// A live view of this document's board setup; edits apply directly to the config.
+@property (nonatomic, readonly) EMSBoardSetupBridge *boardSetup;
 
 @end
 

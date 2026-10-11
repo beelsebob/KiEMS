@@ -129,6 +129,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenu.addItem(NSMenuItem.separator())
+        // Routed through the responder chain to the frontmost document window's controller.
+        editMenu.addItem(withTitle: "Find…", action: #selector(DocumentWindowController.showFindPanel(_:)),
+                         keyEquivalent: "f")
 
         let itemMenuItem = NSMenuItem()
         mainMenu.addItem(itemMenuItem)

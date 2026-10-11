@@ -76,6 +76,14 @@ NSErrorDomain const EMSConfigErrorDomain = @"EMSConfigErrorDomain";
 - (IncludedComponentConfig&)cxxComponent;
 @end
 
+@interface EMSBoardSetupBridge () {
+@public
+    // Strong -- same reasoning as EMSInvolvedNetBridge's _parentSim.
+    EMSConfigBridge* _parent;
+}
+- (kiems::BoardSetupConfig&)cxxSetup;
+@end
+
 namespace {
 
 NSError* makeError(const std::string& message) {
@@ -346,6 +354,16 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
                                  impedance != nil ? std::optional<double>(impedance.doubleValue) : std::nullopt);
 }
 
+- (nullable NSNumber*)loadCapacitanceWithFootprint:(NSString*)footprint pin:(NSString*)pin {
+    const auto value = self.cxxNet.pinLoadCapacitance(footprint.UTF8String, pin.UTF8String);
+    return value.has_value() ? @(*value) : nil;
+}
+- (void)setLoadCapacitance:(nullable NSNumber*)capacitance withFootprint:(NSString*)footprint pin:(NSString*)pin {
+    self.cxxNet.setPinLoadCapacitance(footprint.UTF8String, pin.UTF8String,
+                                       capacitance != nil ? std::optional<double>(capacitance.doubleValue)
+                                                          : std::nullopt);
+}
+
 @end
 
 // Not cached, for the same reason as EMSInvolvedNetBridge.
@@ -465,10 +483,115 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
 - (void)setAbsorbSignal:(BOOL)value { self.cxxPort.setAbsorbSignal(value); }
 @end
 
+@implementation EMSSimulationSetProbeBridge
+
+- (instancetype)init {
+    if ((self = [super init])) {
+        const kiems::SimulationSetProbe def;
+        _footprintReference = @"";
+        _loadImpedance = def.loadImpedance;
+    }
+    return self;
+}
+
+- (instancetype)initWithProbe:(const kiems::SimulationSetProbe&)probe {
+    if ((self = [super init])) {
+        _footprintReference = @(probe.footprint.c_str());
+        _absorbing = probe.absorbing;
+        _loadImpedance = probe.loadImpedance;
+        _loadCapacitance = probe.loadCapacitance ? @(*probe.loadCapacitance) : nil;
+    }
+    return self;
+}
+
+- (kiems::SimulationSetProbe)cxxProbe {
+    kiems::SimulationSetProbe probe;
+    probe.footprint = _footprintReference.UTF8String;
+    probe.absorbing = _absorbing;
+    probe.loadImpedance = _loadImpedance;
+    if (_loadCapacitance) probe.loadCapacitance = _loadCapacitance.doubleValue;
+    return probe;
+}
+
+@end
+
+@implementation EMSSimulationSetBridge
+
+- (instancetype)initWithSet:(const kiems::SimulationSetConfig&)set {
+    if ((self = [super init])) {
+        _identifier = @(set.id.c_str());
+        _excitationFootprintReference = @(set.excitationFootprint.c_str());
+        _netSelectionMode = set.netSelectionMode == kiems::SimulationSetNetSelectionMode::List
+            ? EMSSimulationSetNetSelectionModeList : EMSSimulationSetNetSelectionModeRegularExpression;
+        _netNamePattern = @(set.netNamePattern.c_str());
+        _netNames = toNSStringArray(set.netNames);
+        _additionalNetPatterns = toNSStringArray(set.additionalNetPatterns);
+        _phaseDegrees = set.phaseDegrees;
+        _amplitude = set.amplitude;
+        _driveImpedance = set.driveImpedance;
+        _probed = set.probed;
+        _probeNetImpedance = set.probeNetImpedance;
+        _absorbing = set.absorbing;
+        _loadImpedance = set.loadImpedance;
+        _loadCapacitance = set.loadCapacitance ? @(*set.loadCapacitance) : nil;
+        NSMutableArray<EMSSimulationSetProbeBridge*>* probes = [NSMutableArray array];
+        for (const auto& probe : set.probes) {
+            [probes addObject:[[EMSSimulationSetProbeBridge alloc] initWithProbe:probe]];
+        }
+        _probes = probes;
+    }
+    return self;
+}
+
+- (kiems::SimulationSetConfig)cxxSet {
+    kiems::SimulationSetConfig set;
+    set.id = _identifier.UTF8String;
+    set.excitationFootprint = _excitationFootprintReference.UTF8String;
+    set.netSelectionMode = _netSelectionMode == EMSSimulationSetNetSelectionModeList
+        ? kiems::SimulationSetNetSelectionMode::List : kiems::SimulationSetNetSelectionMode::RegularExpression;
+    set.netNamePattern = _netNamePattern.UTF8String;
+    set.netNames = toStdStringVector(_netNames);
+    set.additionalNetPatterns = toStdStringVector(_additionalNetPatterns);
+    set.phaseDegrees = _phaseDegrees;
+    set.amplitude = _amplitude;
+    set.driveImpedance = _driveImpedance;
+    set.probed = _probed;
+    set.probeNetImpedance = _probeNetImpedance;
+    set.absorbing = _absorbing;
+    set.loadImpedance = _loadImpedance;
+    if (_loadCapacitance) set.loadCapacitance = _loadCapacitance.doubleValue;
+    for (EMSSimulationSetProbeBridge* probe in _probes) {
+        set.probes.push_back([probe cxxProbe]);
+    }
+    return set;
+}
+
+@end
+
 @implementation EMSSimulationBridge
 
 - (SimulationConfig&)cxxSim {
     return _parent.cxxConfig.simulations().at(static_cast<std::size_t>(_index));
+}
+
+- (EMSSimulationSetBridge*)simulationSet {
+    const auto& set = self.cxxSim.simulationSet();
+    return set ? [[EMSSimulationSetBridge alloc] initWithSet:*set] : nil;
+}
+- (void)setSimulationSet:(EMSSimulationSetBridge*)simulationSet {
+    if (simulationSet && self.cxxSim.simulationSet()) {
+        self.cxxSim.simulationSet() = [simulationSet cxxSet];
+    }
+}
+
+- (NSString*)generatedBySetIdentifier {
+    const auto& identifier = self.cxxSim.generatedBySet();
+    return identifier ? @(identifier->c_str()) : nil;
+}
+
+- (NSString*)jsonRepresentation {
+    const nlohmann::json json = self.cxxSim;
+    return @(json.dump().c_str());
 }
 
 - (NSString*)name {
@@ -874,14 +997,23 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
 - (EMSSimulationBridge*)addSimulationNamed:(NSString*)name {
     SimulationConfig sim;
     sim.setName(name.UTF8String);
-    sim.setEyeBitRate(_config.frequency().stop());
+    const double boardBitRate = _config.boardSetup().bitRate();
+    sim.setEyeBitRate(boardBitRate > 0 ? boardBitRate : _config.frequency().stop());
     // A placeholder, not a real selection -- to_json() dereferences groundNet's active-kind
     // optional unconditionally, so it can never be left unset. involvedNets() is deliberately left
     // empty here: SimulationConfig::from_json() rejects an empty involved_nets list, so a document
     // saved before the user adds at least one (Phase 7's source list) won't re-parse -- callers
     // driving the UI should be aware a brand-new simulation isn't yet in a savable state until then.
-    sim.groundNet().setKind(GroundSelectorKind::Net);
-    sim.groundNet().setNet(std::string());
+    // Board Setup's ground and edge terminations, when chosen; otherwise an empty placeholder.
+    const kiems::BoardSetupConfig& board = _config.boardSetup();
+    if (board.groundKind() == GroundSelectorKind::NetClass && !board.groundName().empty()) {
+        sim.groundNet().setKind(GroundSelectorKind::NetClass);
+        sim.groundNet().setNetClass(board.groundName());
+    } else {
+        sim.groundNet().setKind(GroundSelectorKind::Net);
+        sim.groundNet().setNet(board.groundName());
+    }
+    sim.edgeTerminatedNets() = board.edgeTerminatedNets();
     _config.simulations().push_back(std::move(sim));
     return [self _wrapperForSimulationIndex:static_cast<NSInteger>(_config.simulations().size() - 1)];
 }
@@ -892,6 +1024,195 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
         return;
     }
     simulations.erase(simulations.begin() + index);
+}
+
+- (EMSSimulationBridge*)addSimulationSetNamed:(NSString*)name {
+    EMSSimulationBridge* simulation = [self addSimulationNamed:name];
+    kiems::SimulationSetConfig set;
+    set.id = NSUUID.UUID.UUIDString.UTF8String;
+    simulation.cxxSim.simulationSet() = std::move(set);
+    return simulation;
+}
+
+- (NSInteger)generateSimulationFromSetAtIndex:(NSInteger)templateIndex
+                                        named:(NSString*)name
+                               replacingIndex:(NSInteger)targetIndex {
+    auto& simulations = _config.simulations();
+    SimulationConfig generated = simulations.at(static_cast<std::size_t>(templateIndex));
+    const std::string setID = generated.simulationSet() ? generated.simulationSet()->id : std::string();
+    generated.simulationSet().reset();
+    generated.setGeneratedBySet(setID);
+    generated.setName(name.UTF8String);
+    if (targetIndex >= 0 && static_cast<std::size_t>(targetIndex) < simulations.size()) {
+        simulations[static_cast<std::size_t>(targetIndex)] = std::move(generated);
+        return targetIndex;
+    }
+    simulations.push_back(std::move(generated));
+    return static_cast<NSInteger>(simulations.size() - 1);
+}
+
+- (EMSBoardSetupBridge*)boardSetup {
+    EMSBoardSetupBridge* bridge = [[EMSBoardSetupBridge alloc] init];
+    bridge->_parent = self;
+    return bridge;
+}
+
+@end
+
+@implementation EMSBoardPinSetupBridge {
+    NSString* _footprintReference;
+    NSString* _pin;
+    NSNumber* _impedance;
+    NSNumber* _absorbing;
+    BOOL _noiseGenerating;
+    double _noiseFrequency;
+    double _noiseAmplitude;
+}
+
+- (instancetype)initWithSetup:(const kiems::BoardPinSetup&)setup {
+    if ((self = [super init])) {
+        _footprintReference = @(setup.footprint.c_str());
+        _pin = @(setup.pin.c_str());
+        _impedance = setup.impedance.has_value() ? @(*setup.impedance) : nil;
+        _absorbing = setup.absorbing.has_value() ? @(*setup.absorbing) : nil;
+        _noiseGenerating = setup.noiseGenerating;
+        _noiseFrequency = setup.noiseFrequency;
+        _noiseAmplitude = setup.noiseAmplitude;
+    }
+    return self;
+}
+
+- (NSString*)footprintReference { return _footprintReference; }
+- (NSString*)pin { return _pin; }
+- (NSNumber*)impedance { return _impedance; }
+- (NSNumber*)absorbing { return _absorbing; }
+- (BOOL)noiseGenerating { return _noiseGenerating; }
+- (double)noiseFrequency { return _noiseFrequency; }
+- (double)noiseAmplitude { return _noiseAmplitude; }
+
+@end
+
+@implementation EMSBoardSetupBridge
+
+- (kiems::BoardSetupConfig&)cxxSetup {
+    return _parent.cxxConfig.boardSetup();
+}
+
+- (EMSGroundSelectorKind)groundNetKind {
+    return self.cxxSetup.groundKind() == GroundSelectorKind::NetClass ? EMSGroundSelectorKindNetClass
+                                                                       : EMSGroundSelectorKindNet;
+}
+- (void)setGroundNetKind:(EMSGroundSelectorKind)kind {
+    self.cxxSetup.setGroundKind(kind == EMSGroundSelectorKindNetClass ? GroundSelectorKind::NetClass
+                                                                       : GroundSelectorKind::Net);
+}
+- (nullable NSString*)groundNetName {
+    const std::string& name = self.cxxSetup.groundName();
+    return name.empty() ? nil : @(name.c_str());
+}
+- (void)setGroundNetName:(nullable NSString*)name {
+    self.cxxSetup.setGroundName(name != nil ? std::string(name.UTF8String) : std::string());
+}
+- (NSArray<NSString*>*)edgeTerminatedNets {
+    return toNSStringArray(self.cxxSetup.edgeTerminatedNets());
+}
+- (void)setEdgeTerminatedNets:(NSArray<NSString*>*)nets {
+    self.cxxSetup.edgeTerminatedNets() = toStdStringVector(nets);
+}
+- (NSArray<NSString*>*)includedNets {
+    return toNSStringArray(self.cxxSetup.includedNets());
+}
+- (void)setIncludedNets:(NSArray<NSString*>*)nets {
+    self.cxxSetup.includedNets() = toStdStringVector(nets);
+}
+- (NSArray<NSString*>*)includedComponents {
+    return toNSStringArray(self.cxxSetup.includedComponents());
+}
+- (void)setIncludedComponents:(NSArray<NSString*>*)references {
+    self.cxxSetup.includedComponents() = toStdStringVector(references);
+}
+- (NSArray<NSString*>*)includedNetClasses {
+    return toNSStringArray(self.cxxSetup.includedNetClasses());
+}
+- (void)setIncludedNetClasses:(NSArray<NSString*>*)netClasses {
+    self.cxxSetup.includedNetClasses() = toStdStringVector(netClasses);
+}
+
+- (double)signalImpedance { return self.cxxSetup.signalImpedance(); }
+- (void)setSignalImpedance:(double)value { self.cxxSetup.setSignalImpedance(value); }
+- (double)powerImpedance { return self.cxxSetup.powerImpedance(); }
+- (void)setPowerImpedance:(double)value { self.cxxSetup.setPowerImpedance(value); }
+- (double)bitRate { return self.cxxSetup.bitRate(); }
+- (void)setBitRate:(double)value { self.cxxSetup.setBitRate(value); }
+
+- (NSDictionary<NSString*, NSNumber*>*)netClassImpedances {
+    NSMutableDictionary<NSString*, NSNumber*>* result = [NSMutableDictionary dictionary];
+    for (const kiems::NamedImpedance& entry : self.cxxSetup.netClassImpedances()) {
+        result[@(entry.name.c_str())] = @(entry.impedance);
+    }
+    return result;
+}
+
+- (nullable NSNumber*)impedanceForNetClass:(NSString*)netClass {
+    const auto value = self.cxxSetup.netClassImpedance(netClass.UTF8String);
+    return value.has_value() ? @(*value) : nil;
+}
+
+- (void)setImpedance:(nullable NSNumber*)impedance forNetClass:(NSString*)netClass {
+    self.cxxSetup.setNetClassImpedance(netClass.UTF8String,
+                                       impedance != nil ? std::optional<double>(impedance.doubleValue) : std::nullopt);
+}
+
+- (nullable NSNumber*)impedanceForNet:(NSString*)net {
+    const auto value = self.cxxSetup.netImpedance(net.UTF8String);
+    return value.has_value() ? @(*value) : nil;
+}
+
+- (void)setImpedance:(nullable NSNumber*)impedance forNet:(NSString*)net {
+    self.cxxSetup.setNetImpedance(net.UTF8String,
+                                  impedance != nil ? std::optional<double>(impedance.doubleValue) : std::nullopt);
+}
+
+- (double)effectiveImpedanceForNet:(NSString*)net netClass:(nullable NSString*)netClass isPowerNet:(BOOL)isPowerNet {
+    return self.cxxSetup.effectiveNetImpedance(net.UTF8String, netClass != nil ? netClass.UTF8String : "",
+                                               isPowerNet ? true : false);
+}
+
+- (NSArray<EMSBoardPinSetupBridge*>*)pins {
+    NSMutableArray<EMSBoardPinSetupBridge*>* result = [NSMutableArray array];
+    for (const kiems::BoardPinSetup& setup : self.cxxSetup.pins()) {
+        [result addObject:[[EMSBoardPinSetupBridge alloc] initWithSetup:setup]];
+    }
+    return result;
+}
+
+- (nullable EMSBoardPinSetupBridge*)pinWithFootprint:(NSString*)footprint pin:(NSString*)pin {
+    const kiems::BoardPinSetup* setup = self.cxxSetup.pin(footprint.UTF8String, pin.UTF8String);
+    return setup != nullptr ? [[EMSBoardPinSetupBridge alloc] initWithSetup:*setup] : nil;
+}
+
+- (void)setImpedance:(nullable NSNumber*)impedance forFootprint:(NSString*)footprint pin:(NSString*)pin {
+    self.cxxSetup.pinSetup(footprint.UTF8String, pin.UTF8String).impedance =
+        impedance != nil ? std::optional<double>(impedance.doubleValue) : std::nullopt;
+    self.cxxSetup.pruneEmptyPins();
+}
+
+- (void)setAbsorbing:(nullable NSNumber*)absorbing forFootprint:(NSString*)footprint pin:(NSString*)pin {
+    self.cxxSetup.pinSetup(footprint.UTF8String, pin.UTF8String).absorbing =
+        absorbing != nil ? std::optional<bool>(absorbing.boolValue ? true : false) : std::nullopt;
+    self.cxxSetup.pruneEmptyPins();
+}
+
+- (void)setNoiseGenerating:(BOOL)noiseGenerating
+                 frequency:(double)frequency
+                 amplitude:(double)amplitude
+              forFootprint:(NSString*)footprint
+                       pin:(NSString*)pin {
+    kiems::BoardPinSetup& setup = self.cxxSetup.pinSetup(footprint.UTF8String, pin.UTF8String);
+    setup.noiseGenerating = noiseGenerating ? true : false;
+    setup.noiseFrequency = frequency;
+    setup.noiseAmplitude = amplitude;
+    self.cxxSetup.pruneEmptyPins();
 }
 
 @end

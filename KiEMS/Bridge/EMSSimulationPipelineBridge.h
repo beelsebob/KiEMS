@@ -121,6 +121,14 @@ typedef void (^EMSPipelineProgressHandler)(EMSPipelineProgress *progress);
 /// JobScheduler uses this to mark the document edited only for genuinely new pipeline output.
 - (BOOL)lastEnsureStageWroteOutput;
 
+/// Set by the first stage run when KiCad holds unsaved (autosaved) changes, or their check failed:
+/// what the run used instead of the saved files. Nil when the saved files were used as they are.
+- (nullable NSString *)kicadSourcesWarning;
+
+/// What the simulation runs' metal check found (see Simulation::writeMetalShortReport()): nets the
+/// solver's grid joins that the board keeps apart, one per line after a summary. Nil when none.
+- (nullable NSString *)metalShortsWarning;
+
 /// Runs whatever's still missing -- kicad-cli gerber export, stackup import, port resolution (once,
 /// the first time any stage is computed since construction or the last invalidateFromStage: call),
 /// then each pipeline stage up to and including `stage` -- to make that stage's data available. A

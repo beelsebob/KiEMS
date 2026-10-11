@@ -435,6 +435,17 @@ final class SimulationResultsViewController: NSViewController {
             excitationIcon.isHidden = true
             energyHistoryChart.isHidden = true
             showCategories(for: preview)
+            if let shorts = pipeline.metalShortsWarning() {
+                let lines = shorts.components(separatedBy: "\n")
+                banner.show(style: .warning, title: lines[0], details: Array(lines.dropFirst()),
+                            buttonTitle: "Run Simulation") { [weak self] in
+                    self?.runSimulation()
+                }
+            } else if let warning = pipeline.kicadSourcesWarning() {
+                banner.show(style: .warning, title: warning, buttonTitle: "Run Simulation") { [weak self] in
+                    self?.runSimulation()
+                }
+            }
         } else if runningIndices.contains(currentIndex) {
             categoryControl.isHidden = true
             scrollView.isHidden = true

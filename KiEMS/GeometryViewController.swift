@@ -284,6 +284,9 @@ final class GeometryViewController: NSViewController {
             progressStatus.setState(.hidden)
             geometryView.legendFooterView?.isHidden = false
             updateGridStatistics(pipeline.gridStatistics())
+            if let warning = pipeline.kicadSourcesWarning() {
+                banner.show(style: .warning, title: warning, buttonTitle: "Generate Geometry", action: generate)
+            }
         } else if let stale = staleGeometry[currentIndex] {
             if geometryView.preview !== stale { geometryView.preview = stale }
             geometryView.showGrid = false

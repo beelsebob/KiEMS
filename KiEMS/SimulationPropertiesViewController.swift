@@ -5,8 +5,7 @@ import Cocoa
 /// setSelectedSimulationIndex) -- viaPlatingThickness/viaFillingEpsilon/frequencyStart/frequencyStop
 /// stay editable regardless (they're document-level, not per-simulation), but the rest disable
 /// themselves when nothing is selected.
-final class SimulationPropertiesViewController: NSViewController, NSTableViewDataSource,
-    NSTableViewDelegate {
+final class SimulationPropertiesViewController: NSViewController {
     private static let formFont = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
     private weak var document: Document?
     private var selectedIndex: Int?
@@ -49,13 +48,7 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
     // (overlines included) in the field and its menu -- see NetNameComboBox.
     private let groundNameComboBox = NetNameComboBox()
     // kiems::SimulationConfig::edgeTerminatedNets(): one row per net, each picked with a combo box.
-    private let edgeTerminationTable = NSTableView()
-    private let edgeTerminationScroll = NSScrollView()
-    private let addEdgeTerminationButton = NSButton()
-    private let removeEdgeTerminationButton = NSButton()
-    private let editEdgeTerminationButton = NSButton()
-    private let edgeTerminationEmptyLabel = NSTextField(labelWithString: "No Nets")
-    private var edgeTerminatedNetRows: [String] = []
+    private let edgeTerminationList = NetListEditorView()
     private let maxStepsField = NSTextField(string: "")
     // The FDTD grid's own base target cell size -- document-level (EMSConfig), not per-simulation,
     // same as maxStepsField beside it. maxTimestepValueLabel/simulationRealTimeValueLabel are
@@ -230,6 +223,7 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
         nameField.action = #selector(nameChanged)
 
         groundNameComboBox.onCommit = { [weak self] name, tag in self?.groundNameChanged(name, tag: tag) }
+        edgeTerminationList.onChange = { [weak self] rows in self?.commitEdgeTerminatedNets(rows) }
         groundNameComboBox.controlSize = .small
         groundNameComboBox.font = Self.formFont
 
@@ -282,7 +276,7 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
         let networksSection = section("Networks", views: [
                 labeled("", differentialPairCheckbox),
                 labeled("Ground Net:", groundNameComboBox),
-                stacked("Edge Terminated Nets:", buildEdgeTerminationTable()),
+                stacked("Edge Terminated Nets:", edgeTerminationList),
             ])
         let geometrySection = section("Geometry", views: [
                 labeled("Stitching Inset:", viaEdgeDistanceField),
@@ -322,123 +316,6 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
             stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 4),
             stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -4),
         ])
-    }
-
-    /// Laid out like Xcode's Target Membership list: one bordered box holding the list (with a
-    /// "No Nets" placeholder while it's empty) and, under a hairline, a bar of borderless
-    /// add/remove/edit buttons separated by short vertical dividers.
-    private func buildEdgeTerminationTable() -> NSView {
-        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("net"))
-        column.resizingMask = .autoresizingMask
-        edgeTerminationTable.addTableColumn(column)
-        edgeTerminationTable.headerView = nil
-        edgeTerminationTable.rowHeight = 24
-        edgeTerminationTable.intercellSpacing = NSSize(width: 0, height: 0)
-        edgeTerminationTable.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
-        // .plain and no backgrounds, as in SimulationListViewController: the box's own fill shows
-        // through, rather than an opaque table fighting the glass panel this sits in.
-        edgeTerminationTable.style = .plain
-        edgeTerminationTable.backgroundColor = .clear
-        edgeTerminationTable.dataSource = self
-        edgeTerminationTable.delegate = self
-
-        edgeTerminationScroll.documentView = edgeTerminationTable
-        edgeTerminationScroll.hasVerticalScroller = true
-        edgeTerminationScroll.autohidesScrollers = true
-        edgeTerminationScroll.borderType = .noBorder
-        edgeTerminationScroll.drawsBackground = false
-        edgeTerminationScroll.contentView.drawsBackground = false
-        edgeTerminationScroll.automaticallyAdjustsContentInsets = false
-        edgeTerminationScroll.contentInsets = NSEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
-        edgeTerminationScroll.translatesAutoresizingMaskIntoConstraints = false
-
-        edgeTerminationEmptyLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
-        edgeTerminationEmptyLabel.textColor = .secondaryLabelColor
-        edgeTerminationEmptyLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        for (button, symbol, description, action) in [
-            (addEdgeTerminationButton, "plus", "Add edge-terminated net", #selector(addEdgeTerminatedNet)),
-            (removeEdgeTerminationButton, "minus", "Remove edge-terminated net", #selector(removeEdgeTerminatedNet)),
-            (editEdgeTerminationButton, "pencil", "Edit edge-terminated net", #selector(editEdgeTerminatedNet)),
-        ] {
-            button.isBordered = false
-            button.imagePosition = .imageOnly
-            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)?
-                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10, weight: .bold))
-            button.contentTintColor = .secondaryLabelColor
-            button.target = self
-            button.action = action
-            button.widthAnchor.constraint(equalToConstant: 20).isActive = true
-            button.heightAnchor.constraint(equalToConstant: 18).isActive = true
-        }
-        func divider() -> NSView {
-            let line = NSBox()
-            line.boxType = .separator
-            line.heightAnchor.constraint(equalToConstant: 10).isActive = true
-            return line
-        }
-        let buttonBar = NSStackView(views: [addEdgeTerminationButton, divider(),
-                                            removeEdgeTerminationButton, divider(),
-                                            editEdgeTerminationButton])
-        buttonBar.orientation = .horizontal
-        buttonBar.alignment = .centerY
-        buttonBar.spacing = 2
-        buttonBar.edgeInsets = NSEdgeInsets(top: 0, left: 4, bottom: 0, right: 4)
-        buttonBar.translatesAutoresizingMaskIntoConstraints = false
-
-        let barSeparator = NSBox()
-        barSeparator.boxType = .separator
-        barSeparator.translatesAutoresizingMaskIntoConstraints = false
-
-        // Drawn by hand: an NSBox(.custom) border didn't show up at all inside the glass panel.
-        let box = ListBoxView()
-        box.translatesAutoresizingMaskIntoConstraints = false
-        // Everything inside sits one point in from each edge (see the constraints below) so
-        // nothing (selection highlight, separator) can overdraw the border.
-        let content = NSView()
-        content.translatesAutoresizingMaskIntoConstraints = false
-        box.addSubview(content)
-        NSLayoutConstraint.activate([
-            content.topAnchor.constraint(equalTo: box.topAnchor, constant: 1),
-            content.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 1),
-            content.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -1),
-            content.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -1),
-        ])
-        for view in [edgeTerminationScroll, edgeTerminationEmptyLabel, barSeparator, buttonBar] {
-            content.addSubview(view)
-        }
-        NSLayoutConstraint.activate([
-            edgeTerminationScroll.topAnchor.constraint(equalTo: content.topAnchor),
-            edgeTerminationScroll.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            edgeTerminationScroll.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            edgeTerminationScroll.heightAnchor.constraint(equalToConstant: 76),
-            edgeTerminationEmptyLabel.centerXAnchor.constraint(equalTo: edgeTerminationScroll.centerXAnchor),
-            edgeTerminationEmptyLabel.centerYAnchor.constraint(equalTo: edgeTerminationScroll.centerYAnchor),
-            barSeparator.topAnchor.constraint(equalTo: edgeTerminationScroll.bottomAnchor),
-            barSeparator.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            barSeparator.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            buttonBar.topAnchor.constraint(equalTo: barSeparator.bottomAnchor),
-            buttonBar.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            buttonBar.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-            buttonBar.heightAnchor.constraint(equalToConstant: 20),
-        ])
-        return box
-    }
-
-    /// The placeholder shows only while the list is empty; remove/edit act on the selected row, so
-    /// (as in Xcode) they're only enabled while there is one.
-    private func updateEdgeTerminationControls() {
-        let enabled = selectedSimulation != nil
-        let hasSelection = enabled && edgeTerminatedNetRows.indices.contains(edgeTerminationTable.selectedRow)
-        edgeTerminationEmptyLabel.isHidden = !edgeTerminatedNetRows.isEmpty
-        edgeTerminationEmptyLabel.textColor = enabled ? .secondaryLabelColor : .tertiaryLabelColor
-        addEdgeTerminationButton.isEnabled = enabled
-        removeEdgeTerminationButton.isEnabled = hasSelection
-        editEdgeTerminationButton.isEnabled = hasSelection
-    }
-
-    func tableViewSelectionDidChange(_ notification: Notification) {
-        updateEdgeTerminationControls()
     }
 
     private static let plainNumberFormatter: NumberFormatter = {
@@ -505,10 +382,8 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
             differentialPairCheckbox.state = .off
             groundNameComboBox.entries = []
             groundNameComboBox.stringValue = ""
-            edgeTerminatedNetRows = []
-            edgeTerminationTable.reloadData()
+            edgeTerminationList.rows = []
             setPerSimulationFieldsEnabled(false)
-            updateEdgeTerminationControls()
             return
         }
         setPerSimulationFieldsEnabled(true)
@@ -521,9 +396,7 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
         eyeBitRateField.doubleValue = sim.eyeBitRate
         eyeDrawCountField.integerValue = sim.eyeDrawCount
         sharedClockCheckbox.state = sim.adversarialSharedClock ? .on : .off
-        edgeTerminatedNetRows = sim.edgeTerminatedNets
-        edgeTerminationTable.reloadData()
-        updateEdgeTerminationControls()
+        edgeTerminationList.rows = sim.edgeTerminatedNets
 
         refreshNetLists()
 
@@ -568,9 +441,10 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
     private func setPerSimulationFieldsEnabled(_ enabled: Bool) {
         for control in [nameField, differentialPairCheckbox, groundNameComboBox,
                          viaEdgeDistanceField, viaSpacingField, eyeBitRateField, eyeDrawCountField,
-                         sharedClockCheckbox, edgeTerminationTable] as [NSControl] {
+                         sharedClockCheckbox] as [NSControl] {
             control.isEnabled = enabled
         }
+        edgeTerminationList.isEditable = enabled
     }
 
     /// Called after a KiCad board is linked (see DocumentWindowController) -- the ground-net
@@ -584,7 +458,7 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
                 self?.groundNetClassNames = NetNameFormatting.sortedForDisplay(classes)
                 self?.groundNetNames = NetNameFormatting.sortedForDisplay(nets)
                 self?.updateGroundNameComboBox()
-                self?.edgeTerminationTable.reloadData()
+                self?.edgeTerminationList.availableNames = NetNameFormatting.sortedForDisplay(nets)
             }
         }
     }
@@ -671,101 +545,11 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
         updateGroundNameComboBox()
     }
 
-    // MARK: Edge-terminated nets
-
-    func numberOfRows(in tableView: NSTableView) -> Int {
-        edgeTerminatedNetRows.count
-    }
-
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let comboBox = NetNameComboBox(bordered: false)
-        comboBox.controlSize = .small
-        comboBox.font = Self.formFont
-        comboBox.entries = groundNetNames.map { .name($0, tag: 0) }
-        comboBox.stringValue = edgeTerminatedNetRows[row]
-        comboBox.isEnabled = selectedSimulation != nil
-        comboBox.onCommit = { [weak self, weak comboBox] name, _ in
-            guard let self, let comboBox else { return }
-            edgeTerminatedNetChanged(comboBox, name: name)
-        }
-        // Inset from the box's edges rather than filling the row, as Xcode's lists are.
-        let cell = NSTableCellView()
-        comboBox.translatesAutoresizingMaskIntoConstraints = false
-        cell.addSubview(comboBox)
-        NSLayoutConstraint.activate([
-            comboBox.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
-            comboBox.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
-            comboBox.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-        ])
-        return cell
-    }
-
-    /// Accepts a picked menu item, or typed text naming a real net; anything else reverts the row.
-    private func edgeTerminatedNetChanged(_ comboBox: NetNameComboBox, name: String) {
-        // Looked up afresh rather than trusting the row captured when the cell was made: Return
-        // and end-of-editing can both commit, and the first may already have removed a row.
-        let row = edgeTerminationTable.row(for: comboBox)
-        guard let sim = selectedSimulation, edgeTerminatedNetRows.indices.contains(row) else { return }
-        guard groundNetNames.contains(name) else {
-            if edgeTerminatedNetRows[row].isEmpty {
-                // A row added with (+) and left without picking a net: drop it rather than keep a
-                // blank entry around. Deferred so the table isn't edited mid end-editing callback.
-                DispatchQueue.main.async { [weak self] in
-                    guard let self, edgeTerminationTable.row(for: comboBox) == row,
-                          edgeTerminatedNetRows.indices.contains(row),
-                          edgeTerminatedNetRows[row].isEmpty else { return }
-                    edgeTerminatedNetRows.remove(at: row)
-                    commitEdgeTerminatedNets(to: sim)
-                    edgeTerminationTable.reloadData()
-                    updateEdgeTerminationControls()
-                }
-            } else {
-                comboBox.stringValue = edgeTerminatedNetRows[row]
-            }
-            return
-        }
-        guard edgeTerminatedNetRows[row] != name else { return }
-        edgeTerminatedNetRows[row] = name
-        commitEdgeTerminatedNets(to: sim)
-    }
-
-    @objc private func addEdgeTerminatedNet() {
-        guard let sim = selectedSimulation else { return }
-        edgeTerminatedNetRows.append("")
-        // A row with no net yet is stored as "" (ignored by slicing), so it survives reloads.
-        commitEdgeTerminatedNets(to: sim)
-        edgeTerminationTable.reloadData()
-        let row = edgeTerminatedNetRows.count - 1
-        edgeTerminationTable.scrollRowToVisible(row)
-        edgeTerminationTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-        updateEdgeTerminationControls()
-        beginEditingEdgeTerminatedNet(row: row)
-    }
-
-    @objc private func removeEdgeTerminatedNet() {
-        let selected = edgeTerminationTable.selectedRow
-        guard let sim = selectedSimulation, edgeTerminatedNetRows.indices.contains(selected) else { return }
-        edgeTerminatedNetRows.remove(at: selected)
-        commitEdgeTerminatedNets(to: sim)
-        edgeTerminationTable.reloadData()
-        updateEdgeTerminationControls()
-    }
-
-    @objc private func editEdgeTerminatedNet() {
-        let selected = edgeTerminationTable.selectedRow
-        guard selectedSimulation != nil, edgeTerminatedNetRows.indices.contains(selected) else { return }
-        beginEditingEdgeTerminatedNet(row: selected)
-    }
-
-    private func beginEditingEdgeTerminatedNet(row: Int) {
-        let cell = edgeTerminationTable.view(atColumn: 0, row: row, makeIfNecessary: true)
-        (cell?.subviews.first as? NetNameComboBox)?.beginEditing()
-    }
-
     /// Edge terminations are part of the sliced geometry (SlicedBoard::edgeTerminationLoops), so
     /// any change invalidates this simulation's cached geometry like a ground-net change does.
-    private func commitEdgeTerminatedNets(to sim: EMSSimulationBridge) {
-        sim.edgeTerminatedNets = edgeTerminatedNetRows
+    private func commitEdgeTerminatedNets(_ rows: [String]) {
+        guard let sim = selectedSimulation else { return }
+        sim.edgeTerminatedNets = rows
         document?.updateChangeCount(.changeDone)
         if let selectedIndex {
             onGeometryParametersChanged?(selectedIndex, "Edge-terminated nets changed")
@@ -888,36 +672,5 @@ final class SimulationPropertiesViewController: NSViewController, NSTableViewDat
             return String(format: "%.3g", seconds / prefix.factor) + " \(prefix.symbol)s"
         }
         return String(format: "%.3g", seconds) + " s"
-    }
-}
-
-/// The bordered, pale-filled box behind SimulationPropertiesViewController's edge-terminated nets
-/// list, modelled on Xcode's inspector lists (Target Membership).
-private final class ListBoxView: NSView {
-    // Explicit translucent colours rather than system ones: inside the vibrant glass panel,
-    // tertiaryLabelColor/separatorColor resolve to opaque greys meant for vibrancy blending, which
-    // land at the same shade as this fill and vanish. Both are lighter than the panel in either
-    // appearance (quaternarySystemFill is a black wash in light mode, which reads as darker), with
-    // the border clearly stronger than the fill.
-    private static let fillColor = dynamicColor(dark: NSColor(white: 1, alpha: 0.1),
-                                                light: NSColor(white: 1, alpha: 0.6))
-    private static let borderColor = dynamicColor(dark: NSColor(white: 1, alpha: 0.3),
-                                                  light: NSColor(white: 0, alpha: 0.2))
-
-    private static func dynamicColor(dark: NSColor, light: NSColor) -> NSColor {
-        NSColor(name: nil) { appearance in
-            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
-        }
-    }
-
-    override var isOpaque: Bool { false }
-
-    override func draw(_ dirtyRect: NSRect) {
-        Self.fillColor.setFill()
-        bounds.fill()
-        Self.borderColor.setStroke()
-        let border = NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5))
-        border.lineWidth = 1
-        border.stroke()
     }
 }

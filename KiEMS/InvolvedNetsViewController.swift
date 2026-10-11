@@ -430,8 +430,8 @@ final class InvolvedNetsViewController: NSViewController {
 
 private extension InvolvedNetsNode {
     /// Display text for the "Net" column -- a net's own name, or an excited pin's
-    /// footprint+number(+function), matching SourceListViewController's own "ref pin number
-    /// (function)" format for a pin nested under a net.
+    /// component-reference/pin-name(pin-number), matching SourceListViewController's format for
+    /// a pin nested under a net.
     var pinTitle: String {
         switch kind {
         case .differentialPair:
@@ -439,16 +439,10 @@ private extension InvolvedNetsNode {
         case .net(let name, _, _):
             return name
         case .excitedPin(let footprintReference, let pin, let isMain, _, _, _):
-            let function = SourceListNode.strippingTrailingNumericSuffix(pin.function)
-            let base = function.isEmpty
-                ? "\(footprintReference) pin \(pin.number)"
-                : "\(footprintReference) pin \(pin.number) (\(function))"
+            let base = BoardPinDisplay.label(reference: footprintReference, pin: pin)
             return isMain ? "\(base) (Primary Excitation)" : base
         case .probedPin(let footprintReference, let pin, let absorbSignal):
-            let function = SourceListNode.strippingTrailingNumericSuffix(pin.function)
-            let base = function.isEmpty
-                ? "\(footprintReference) pin \(pin.number)"
-                : "\(footprintReference) pin \(pin.number) (\(function))"
+            let base = BoardPinDisplay.label(reference: footprintReference, pin: pin)
             return absorbSignal ? "\(base) (Absorb Signal)" : "\(base) (Passive Probe)"
         }
     }

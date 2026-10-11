@@ -20,8 +20,16 @@ final class DocumentWindowController: NSWindowController {
     private let progressIndicator = NSProgressIndicator()
     private let mainContentLoadingIndicator = NSProgressIndicator()
     private var simulationListViewController: SimulationListViewController?
+    /// The source-list card's width.  Its trailing edge is draggable directly on the glass card,
+    /// rather than using a separate split-view divider.
+    private var sourceListWidthConstraint: NSLayoutConstraint?
     private var propertiesViewController: SimulationPropertiesViewController?
     private var wholeBoardViewController: WholeBoardViewController?
+
+    /// Edit > Find… -- see WholeBoardViewController.showFindPanel().
+    @objc func showFindPanel(_ sender: Any?) {
+        wholeBoardViewController?.showFindPanel()
+    }
 
     /// See WholeBoardViewController.populateItemMenu(_:) -- called by AppDelegate's Item menu.
     func populateItemMenu(_ menu: NSMenu) {
@@ -292,6 +300,11 @@ final class DocumentWindowController: NSWindowController {
         }
         sourceListVC.onInvolvedNetsChanged = configurationChanged
         wholeBoardVC.onConfigurationChanged = configurationChanged
+        // Board Setup edits the document's own frequency range, the same one the simulation settings
+        // show -- so it invalidates results exactly as an edit there would.
+        wholeBoardVC.onBoardFrequencyRangeChanged = { [weak propertiesVC] in
+            propertiesVC?.onFDTDParametersChanged?("Frequency range changed")
+        }
         // Wired before simulationListVC's view loads: its initial selection callback can start the
         // board load (via wholeBoardVC.refresh()), and a load started with nobody listening never
         // shows the spinner -- the board view was revealed, interactive, before anything loaded.
@@ -344,8 +357,42 @@ final class DocumentWindowController: NSWindowController {
         propertiesVC.onNameChanged = { [weak simulationListVC] in simulationListVC?.refreshRows() }
         // ...and the reverse: a rename made directly in the sidebar (see SimulationNameField) has no
         // other way to reach propertiesVC's own name field if it's showing that same simulation.
-        simulationListVC.onSimulationRenamed = { [weak propertiesVC] index in
+        simulationListVC.onSimulationAdded = { [weak wholeBoardVC] index in
+            wholeBoardVC?.applyBoardInclusions(toSimulationAt: index)
+        }
+        wholeBoardVC.onSimulationSetChanged = { [weak self, weak simulationListVC, weak wholeBoardVC] templateIndex in
+            guard let self, let wholeBoardVC,
+                  let regeneration = wholeBoardVC.regenerateSimulationSet(atTemplateIndex: templateIndex)
+            else { return }
+            // Every generated configuration is a new template copy, so any cached geometry/results
+            // for it is stale.  Removal also shifts later simulation indices, whose caches can no
+            // longer be associated safely with their old positions.
+            var invalidated = Set(regeneration.changedIndices)
+            if let first = regeneration.firstRemovedIndex {
+                invalidated.formUnion(first..<self.ownerDocument.config.simulations.count)
+            }
+            for index in invalidated where self.ownerDocument.config.simulations.indices.contains(index) {
+                self.invalidate(simulationIndex: index, reason: nil, includingGeometry: true)
+            }
+            simulationListVC?.simulationSetRegenerated(at: templateIndex)
+        }
+        simulationListVC.onSimulationRenamed = { [weak self, weak propertiesVC, weak simulationListVC, weak wholeBoardVC] index in
             propertiesVC?.refreshNameFieldIfSelected(index: index)
+            // Set-generated names include the template name, so renaming a set is itself a
+            // regeneration just as changing its pin pattern is.
+            guard let self, let wholeBoardVC,
+                  self.ownerDocument.config.simulations.indices.contains(index),
+                  self.ownerDocument.config.simulations[index].simulationSet != nil,
+                  let regeneration = wholeBoardVC.regenerateSimulationSet(atTemplateIndex: index)
+            else { return }
+            var invalidated = Set(regeneration.changedIndices)
+            if let first = regeneration.firstRemovedIndex {
+                invalidated.formUnion(first..<self.ownerDocument.config.simulations.count)
+            }
+            for changedIndex in invalidated where self.ownerDocument.config.simulations.indices.contains(changedIndex) {
+                self.invalidate(simulationIndex: changedIndex, reason: nil, includingGeometry: true)
+            }
+            simulationListVC?.simulationSetRegenerated(at: index)
         }
         // See SimulationPropertiesViewController.onGeometryParametersChanged's own doc comment --
         // a hull-padding/via/ground-net edit invalidates whichever simulation it belongs to.
@@ -513,10 +560,18 @@ final class DocumentWindowController: NSWindowController {
             var showsSimulationResults = false
             var showsFieldViewer = false
             switch selection {
+            case .boardSetup:
+                // The same whole-board view, editing the board-wide defaults instead of a simulation.
+                showsSimulationDetail = true
+                self.currentSimulationIndex = nil
+                self.wholeBoardViewController?.setBoardSetupMode(true)
+                self.wholeBoardViewController?.setSelectedSimulationIndex(nil)
+                self.wholeBoardViewController?.refresh()
             case .simulation(let index):
                 showsSimulationDetail = true
                 self.currentSimulationIndex = index
                 self.propertiesViewController?.setSelectedSimulationIndex(index)
+                self.wholeBoardViewController?.setBoardSetupMode(false)
                 self.wholeBoardViewController?.setSelectedSimulationIndex(index)
                 self.wholeBoardViewController?.refresh()
                 self.sourceListViewController?.setSelectedSimulationIndex(index)
@@ -571,6 +626,17 @@ final class DocumentWindowController: NSWindowController {
         let rightRegion = NSView()
         rightRegion.translatesAutoresizingMaskIntoConstraints = false
 
+        let sourceListWidth = simulationListVC.view.widthAnchor.constraint(equalToConstant: 220)
+        sourceListWidth.isActive = true
+        sourceListWidthConstraint = sourceListWidth
+        simulationListVC.onWidthDrag = { [weak self, weak contentView] delta in
+            guard let self, let contentView, let width = self.sourceListWidthConstraint else { return }
+            // Leave enough room for the editor to remain useful, while avoiding an impractically
+            // narrow source list.  The value is the glass card's width (its 8pt outer inset is
+            // deliberately not part of the draggable width).
+            width.constant = min(max(160, width.constant + delta), max(160, contentView.bounds.width - 320))
+        }
+
         mainContentLoadingIndicator.style = .spinning
         mainContentLoadingIndicator.controlSize = .large
         mainContentLoadingIndicator.isDisplayedWhenStopped = false
@@ -595,7 +661,6 @@ final class DocumentWindowController: NSWindowController {
             topSectionView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             topSectionView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
 
-            simulationListVC.view.widthAnchor.constraint(equalToConstant: 220),
             simulationListVC.view.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 8),
             // Overlaps upward into topSectionView by topOverlap -- the glass panel visually runs
             // under the header's hard edge; SimulationListViewController insets its own content by
@@ -876,11 +941,15 @@ final class DocumentWindowController: NSWindowController {
             simulationName = "\(baseName) \(suffix)"
             suffix += 1
         }
-        let simulation = document.config.addSimulationNamed(simulationName)
-        if let groundNetGuess = GroundNetHeuristic.bestGuess(among: availableNets) {
-            simulation.groundNetKind = .net
-            simulation.groundNetName = groundNetGuess
+        // The ground guess goes into Board Setup (unless one is already chosen there), which every
+        // new simulation, including this one, starts from.
+        let boardSetup = document.config.boardSetup
+        if boardSetup.groundNetName == nil, let groundNetGuess = GroundNetHeuristic.bestGuess(among: availableNets) {
+            boardSetup.groundNetKind = .net
+            boardSetup.groundNetName = groundNetGuess
         }
+        _ = document.config.addSimulationNamed(simulationName)
+        wholeBoardViewController?.applyBoardInclusions(toSimulationAt: document.config.simulations.count - 1)
         simulationListViewController?.simulationAddedExternally(at: document.config.simulations.count - 1)
     }
 

@@ -1,4 +1,5 @@
 import Cocoa
+import CopperUtils
 import MetalKit
 import MetalPerformanceShaders
 import QuartzCore
@@ -557,6 +558,15 @@ final class GeometryView: MTKView, MTKViewDelegate {
     private var activityColorBuffer: MTLBuffer?
     private var activityDistanceBuffer: MTLBuffer?
     private var activityVertexCount = 0
+    /// Excitation-path distance at each pin ("reference\tpad") and hull-cut port (identifier)
+    /// reached by the ripple, from rebuildActivityBuffers(). rebuildMarkerBuffers() gives those
+    /// markers a matching pulse overlay so the dots light up as the trace's pulse passes them.
+    private var activityPinDistances: [String: Float] = [:]
+    private var activityHullCutPortDistances: [String: Float] = [:]
+    private var markerPulsePositionBuffer: MTLBuffer?
+    private var markerPulseColorBuffer: MTLBuffer?
+    private var markerPulseDistanceBuffer: MTLBuffer?
+    private var markerPulseVertexCount = 0
 
     private var crossPositionBuffer: MTLBuffer?
     private var crossColorBuffer: MTLBuffer?
@@ -1107,6 +1117,19 @@ final class GeometryView: MTKView, MTKViewDelegate {
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<FieldUniformsGPU>.stride, index: 2)
             encoder.setVertexBuffer(distances, offset: 0, index: 3)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: activityVertexCount)
+        }
+        // Marker dots on the excitation path pulse in step with the trace beneath them.
+        if markerPulseVertexCount > 0, let positions = markerPulsePositionBuffer,
+           let colors = markerPulseColorBuffer, let distances = markerPulseDistanceBuffer,
+           let activityPipelineState, let translucentDepthStencilState {
+            encoder.setRenderPipelineState(activityPipelineState)
+            encoder.setDepthStencilState(translucentDepthStencilState)
+            encoder.setVertexBuffer(positions, offset: 0, index: 0)
+            encoder.setVertexBuffer(colors, offset: 0, index: 1)
+            encoder.setVertexBytes(&uniforms, length: MemoryLayout<FieldUniformsGPU>.stride, index: 2)
+            encoder.setFragmentBytes(&uniforms, length: MemoryLayout<FieldUniformsGPU>.stride, index: 2)
+            encoder.setVertexBuffer(distances, offset: 0, index: 3)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: markerPulseVertexCount)
         }
 
         // Selection is a final, unlit UI overlay. It still depth-tests against the opaque board so
@@ -2298,6 +2321,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
     private func rebuildMarkerBuffers() {
         guard let device, let preview else {
             markerVertexCount = 0
+            markerPulseVertexCount = 0
             crossVertexCount = 0
             return
         }
@@ -2324,8 +2348,38 @@ final class GeometryView: MTKView, MTKViewDelegate {
                             normals: &normals, muteFlags: &muteFlags)
         }
 
+        // Pulse overlays, in the trace's own activity colour, for every marker on an animating
+        // (included) net, sitting just in front of the topmost stacked disc. Markers the excitation
+        // ripple reaches pulse in step with it; the rest share the trace's uniform flash.
+        var pulsePositions: [Position3] = []
+        var pulseColors: [SIMD4<Float>] = []
+        var pulseDistances: [Float] = []
+        let animatingNets = activity?.includedNets ?? []
+        func appendPulse(center: CGPoint, radius: CGFloat, net: String, distance: Float?) {
+            guard animatingNets.contains(net) else { return }
+            var discPositions: [Position3] = []
+            var discColors: [SIMD4<Float>] = []
+            var discNormals: [Position3] = []
+            var discMuteFlags: [Float] = []
+            Self.appendDisc(center: center, radius: radius, z: markerZ + 3 * markerDepthStep,
+                            color: Self.activityColor,
+                            positions: &discPositions, colors: &discColors, normals: &discNormals,
+                            muteFlags: &discMuteFlags)
+            pulsePositions += discPositions
+            pulseColors += discColors
+            pulseDistances += repeatElement(distance ?? -1, count: discPositions.count)
+        }
+
         let shownLayers = Set(visibleLayerNames)
         for spot in activity?.hullCutPortSpots ?? [] where shownLayers.contains(spot.layerName) {
+            let distance = activityHullCutPortDistances[spot.identifier]
+            if spot.absorbing {
+                appendPulse(center: spot.position, radius: Self.absorbingPinMarkerRadius,
+                            net: spot.netName, distance: distance)
+            } else if spot.probed || spot.excited {
+                appendPulse(center: spot.position, radius: Self.excitedPinMarkerRadius,
+                            net: spot.netName, distance: distance)
+            }
             if spot.absorbing {
                 Self.appendDisc(center: spot.position, radius: Self.absorbingPinMarkerRadius, z: markerZ,
                                 color: Self.absorbingPinColor, positions: &positions, colors: &colors,
@@ -2358,6 +2412,9 @@ final class GeometryView: MTKView, MTKViewDelegate {
             guard let centroid = Self.centroid(of: pinPositions(reference: pin.reference,
                                                                 padNumber: pin.padNumber))
             else { continue }
+            appendPulse(center: CGPoint(x: CGFloat(centroid.x), y: CGFloat(centroid.y)),
+                        radius: Self.absorbingPinMarkerRadius, net: pin.netName,
+                        distance: activityPinDistances["\(pin.reference)\t\(pin.padNumber)"])
             Self.appendDisc(center: CGPoint(x: CGFloat(centroid.x), y: CGFloat(centroid.y)),
                              radius: Self.absorbingPinMarkerRadius, z: markerZ,
                              color: Self.absorbingPinColor,
@@ -2369,6 +2426,9 @@ final class GeometryView: MTKView, MTKViewDelegate {
             guard let centroid = Self.centroid(of: pinPositions(reference: pin.reference,
                                                                 padNumber: pin.padNumber))
             else { continue }
+            appendPulse(center: CGPoint(x: CGFloat(centroid.x), y: CGFloat(centroid.y)),
+                        radius: Self.probedPinMarkerRadius, net: pin.netName,
+                        distance: activityPinDistances["\(pin.reference)\t\(pin.padNumber)"])
             Self.appendDisc(center: CGPoint(x: CGFloat(centroid.x), y: CGFloat(centroid.y)),
                              radius: Self.probedPinMarkerRadius, z: markerZ + markerDepthStep,
                              color: Self.probedPinColor,
@@ -2383,11 +2443,22 @@ final class GeometryView: MTKView, MTKViewDelegate {
             guard let centroid = Self.centroid(of: pinPositions(reference: pin.reference,
                                                                 padNumber: pin.padNumber))
             else { continue }
+            appendPulse(center: CGPoint(x: CGFloat(centroid.x), y: CGFloat(centroid.y)),
+                        radius: Self.excitedPinMarkerRadius, net: pin.netName,
+                        distance: activityPinDistances["\(pin.reference)\t\(pin.padNumber)"])
             Self.appendDisc(center: CGPoint(x: CGFloat(centroid.x), y: CGFloat(centroid.y)),
                              radius: Self.excitedPinMarkerRadius, z: markerZ + 2 * markerDepthStep,
                              color: Self.excitedPinColor,
                              positions: &positions, colors: &colors, normals: &normals, muteFlags: &muteFlags)
         }
+
+        markerPulseVertexCount = pulsePositions.count
+        markerPulsePositionBuffer = pulsePositions.isEmpty ? nil : device.makeBuffer(
+            bytes: pulsePositions, length: MemoryLayout<Position3>.stride * pulsePositions.count)
+        markerPulseColorBuffer = pulseColors.isEmpty ? nil : device.makeBuffer(
+            bytes: pulseColors, length: MemoryLayout<SIMD4<Float>>.stride * pulseColors.count)
+        markerPulseDistanceBuffer = pulseDistances.isEmpty ? nil : device.makeBuffer(
+            bytes: pulseDistances, length: MemoryLayout<Float>.stride * pulseDistances.count)
 
         markerVertexCount = positions.count
         markerPositionBuffer = positions.isEmpty ? nil : device.makeBuffer(
@@ -2603,7 +2674,10 @@ final class GeometryView: MTKView, MTKViewDelegate {
     /// used to measure those edge lengths and to produce the per-vertex animation phase.
     private enum ActivityLandmarkKey: Hashable {
         case pin(reference: String, number: String)
-        case via(Int)
+        /// A real whole-board via does not carry its net in the visual preview.  Keep a separate
+        /// landmark for each net it physically touches, rather than accidentally joining two nets
+        /// if a malformed board has overlapping copper.
+        case via(index: Int, netID: Int32)
     }
 
     private struct ActivityLandmark {
@@ -2675,6 +2749,8 @@ final class GeometryView: MTKView, MTKViewDelegate {
             activityColorBuffer = nil
             activityDistanceBuffer = nil
             activityVertexCount = 0
+            activityPinDistances = [:]
+            activityHullCutPortDistances = [:]
             return
         }
 
@@ -2690,6 +2766,10 @@ final class GeometryView: MTKView, MTKViewDelegate {
             relevantNets.insert(names.intern(bridge.firstNet))
             relevantNets.insert(names.intern(bridge.secondNet))
         }
+        // Kept narrowly scoped so this diagnostic is safe in an ordinary app build too.  The
+        // whole-board activity graph is constructed in the UI process, while most existing logs
+        // are emitted by the simulation worker, so DEBUG-only output was not visible in its log.
+        let debugNet = activity.includedNets.contains("DDR_A2") ? "DDR_A2" : nil
 
         struct NodeKey: Hashable { let net: InternedName, layer: InternedName, x: Int32, y: Int32 }
         // Position queries for tracks/vias/pads come from different libkicad calls -- a
@@ -2844,8 +2924,26 @@ final class GeometryView: MTKView, MTKViewDelegate {
             return false
         }
 
+        /// Unlike a track centreline, a plated via is a vertical piece of copper.  Its landmark's
+        /// Z is deliberately neutral, so a pad-to-via contact must be tested in the board plane.
+        func point(x: Float, y: Float, liesIn triangles: [Position3]) -> Bool {
+            let epsilon: Float = 1
+            for index in stride(from: 0, to: triangles.count - 2, by: 3) {
+                let a = triangles[index], b = triangles[index + 1], c = triangles[index + 2]
+                let ab = (b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x)
+                let bc = (c.x - b.x) * (y - b.y) - (c.y - b.y) * (x - b.x)
+                let ca = (a.x - c.x) * (y - c.y) - (a.y - c.y) * (x - c.x)
+                if (ab >= -epsilon && bc >= -epsilon && ca >= -epsilon)
+                    || (ab <= epsilon && bc <= epsilon && ca <= epsilon) {
+                    return true
+                }
+            }
+            return false
+        }
+
         var landmarks: [ActivityLandmark] = []
         var landmarkIndexByKey: [ActivityLandmarkKey: Int] = [:]
+        var viaLandmarkIndices: [Int] = []
         func appendLandmark(key: ActivityLandmarkKey, net: InternedName, position: Position3,
                             attachments: [ActivityGraphAttachment]) -> Int {
             if let existing = landmarkIndexByKey[key] {
@@ -2899,34 +2997,85 @@ final class GeometryView: MTKView, MTKViewDelegate {
             let (x, y) = quantize(nodes[index].x, nodes[index].y)
             rawNodesByNetXY[nodes[index].net, default: [:]][QuantizedXY(x: x, y: y), default: []].append(index)
         }
+        var debugViaAttachments: [(index: Int, x: Float, y: Float, nodes: [Int])] = []
         for (viaIndex, via) in (preview?.vias ?? []).enumerated() {
-            guard let netName = via.netName else { continue }
-            let net = names.intern(netName)
-            guard relevantNets.contains(net) else { continue }
-            // Use the annular-ring centre rather than one end of an oblong drill's centreline.
-            // A track can terminate anywhere inside that copper, including on the interior of a
-            // longer segment, so attach to both segment endpoints with their true along-track cost.
-            let x = Float((via.ringPosition.x + via.ringPosition2.x) / 2)
-            let y = Float((via.ringPosition.y + via.ringPosition2.y) / 2)
-            let (qx, qy) = quantize(x, y)
-            var bestAttachmentByNode: [Int: Float] = [:]
-            for node in rawNodesByNetXY[net]?[QuantizedXY(x: qx, y: qy)] ?? [] {
-                bestAttachmentByNode[node] = 0
+            // Stitching vias retain their explicitly assigned net. Real board vias are built from
+            // KiCad's hole query, which intentionally carries no net name; discover those from
+            // the relevant copper tracks they touch below.
+            let candidateNets: [InternedName]
+            if let netName = via.netName {
+                let net = names.intern(netName)
+                candidateNets = relevantNets.contains(net) ? [net] : []
+            } else {
+                candidateNets = Array(relevantNets)
             }
-            let ringRadius = Float(via.annularRingDiameter / 2)
-            for segment in segmentsByNet[net] ?? [] {
-                let projected = projection(ofX: x, y: y, onto: segment)
-                guard projected.distance <= ringRadius + junctionTolerance else { continue }
-                let fromA = projected.t * segment.length
-                let fromB = (1 - projected.t) * segment.length
-                bestAttachmentByNode[segment.a] = min(bestAttachmentByNode[segment.a] ?? .infinity, fromA)
-                bestAttachmentByNode[segment.b] = min(bestAttachmentByNode[segment.b] ?? .infinity, fromB)
+            for candidate in candidateNets {
+                let net = candidate
+                // Use the annular-ring centre rather than one end of an oblong drill's centreline.
+                // A track can terminate anywhere inside that copper, including on the interior of a
+                // longer segment, so attach to both segment endpoints with their true along-track cost.
+                let x = Float((via.ringPosition.x + via.ringPosition2.x) / 2)
+                let y = Float((via.ringPosition.y + via.ringPosition2.y) / 2)
+                let (qx, qy) = quantize(x, y)
+                var bestAttachmentByNode: [Int: Float] = [:]
+                for node in rawNodesByNetXY[net]?[QuantizedXY(x: qx, y: qy)] ?? [] {
+                    bestAttachmentByNode[node] = 0
+                }
+                // Tracks and plated holes come from independent KiCad queries.  Their nominally
+                // identical positions can differ by several simulation units after conversion;
+                // short flattened arc pieces (as on DDR_A2) made the previous 0.2 µm-only
+                // allowance miss their transition via entirely.  Twenty microns is still far
+                // below normal trace/via clearance and matches the preview's real-hole matcher.
+                let ringRadius = max(Float(via.annularRingDiameter / 2), 200)
+                for segment in segmentsByNet[net] ?? [] {
+                    let projected = projection(ofX: x, y: y, onto: segment)
+                    guard projected.distance <= ringRadius + junctionTolerance else { continue }
+                    let fromA = projected.t * segment.length
+                    let fromB = (1 - projected.t) * segment.length
+                    bestAttachmentByNode[segment.a] = min(bestAttachmentByNode[segment.a] ?? .infinity, fromA)
+                    bestAttachmentByNode[segment.b] = min(bestAttachmentByNode[segment.b] ?? .infinity, fromB)
+                }
+                let attachments = bestAttachmentByNode.map {
+                    ActivityGraphAttachment(index: $0.key, weight: $0.value)
+                }
+                // A no-track via cannot participate in the routed activity graph. This also
+                // prevents an unnetted mechanical hole from creating a landmark.
+                guard !attachments.isEmpty else { continue }
+                let landmarkIndex = appendLandmark(key: .via(index: viaIndex, netID: net.id), net: net,
+                                                   position: Position3(x, y, 0), attachments: attachments)
+                viaLandmarkIndices.append(landmarkIndex)
+                if debugNet == "DDR_A2", net == names.intern("DDR_A2") {
+                    debugViaAttachments.append((viaIndex, x, y, attachments.map(\.index)))
+                }
             }
-            let attachments = bestAttachmentByNode.map {
-                ActivityGraphAttachment(index: $0.key, weight: $0.value)
+        }
+
+        // A through-hole can sit directly in a pad without any intervening track centreline.
+        // DDR_A2's U1 source is exactly that arrangement: the pad and first via are electrically
+        // continuous, yet both their visible copper meshes exclude the drill's centre point. Link
+        // such same-net pad/via landmarks explicitly in the graph below.
+        var padViaLandmarkEdges: [(pin: Int, via: Int)] = []
+        for (pinKey, geometry) in pinGeometry {
+            guard let pinIndex = landmarkIndexByKey[pinKey] else { continue }
+            let pinCenter = Self.centroid(of: geometry.positions)
+            var pinRadius: Float = 0
+            if let pinCenter {
+                for position in geometry.positions {
+                    let offsetX = position.x - pinCenter.x
+                    let offsetY = position.y - pinCenter.y
+                    let distance = (offsetX * offsetX + offsetY * offsetY).squareRoot()
+                    pinRadius = max(pinRadius, distance)
+                }
             }
-            _ = appendLandmark(key: .via(viaIndex), net: net, position: Position3(x, y, 0),
-                               attachments: attachments)
+            for viaIndex in viaLandmarkIndices {
+                let via = landmarks[viaIndex]
+                let dx = via.x - (pinCenter?.x ?? .infinity)
+                let dy = via.y - (pinCenter?.y ?? .infinity)
+                let overlapsPin = point(x: via.x, y: via.y, liesIn: geometry.positions)
+                    || (dx * dx + dy * dy).squareRoot() <= pinRadius + 100
+                guard via.net == geometry.net, overlapsPin else { continue }
+                padViaLandmarkEdges.append((pin: pinIndex, via: viaIndex))
+            }
         }
 
         // Add landmarks to the raw centerline graph with zero-length attachment edges. A pad/via is
@@ -2947,6 +3096,9 @@ final class GeometryView: MTKView, MTKViewDelegate {
             for attachment in landmark.attachments {
                 addGraphEdge(graphIndex, attachment.index, weight: attachment.weight)
             }
+        }
+        for edge in padViaLandmarkEdges {
+            addGraphEdge(graphIndex(forLandmark: edge.pin), graphIndex(forLandmark: edge.via), weight: 0)
         }
 
         // The only cross-net graph edges are real two-pin passives. Net membership was filtered by
@@ -3014,6 +3166,35 @@ final class GeometryView: MTKView, MTKViewDelegate {
         }
         let distanceOfRawNode = Array(graphDistance.prefix(rawNodeCount))
         let landmarkDistance = landmarks.indices.map { graphDistance[graphIndex(forLandmark: $0)] }
+        if let debugNet {
+            let net = names.intern(debugNet)
+            let netNodes = nodes.indices.filter { nodes[$0].net == net }
+            let in5Layer = names.intern("In5.Cu")
+            let in5Nodes = netNodes.filter { nodes[$0].layer == in5Layer }
+            let reachableIn5 = in5Nodes.filter { distanceOfRawNode[$0].isFinite }
+            let sourceLandmarks = landmarks.enumerated().filter {
+                if case let .pin(reference, number) = $0.element.key {
+                    return activity.excitedPins.contains {
+                        $0.netName == debugNet && $0.reference == reference && $0.padNumber == number
+                    }
+                }
+                return false
+            }
+            Cu.logInfo("[ActivityGraph \(debugNet)] nodes=\(netNodes.count), In5 nodes=\(in5Nodes.count), "
+                + "reachable In5=\(reachableIn5.count), pad-via links=\(padViaLandmarkEdges.count), source landmarks=\(sourceLandmarks.map { "\($0.offset): attachments=\($0.element.attachments.count), distance=\(landmarkDistance[$0.offset])" }.joined(separator: "; "))")
+            for via in debugViaAttachments {
+                let detail = via.nodes.map { node in
+                    "\(nodes[node].layer)@(\(nodes[node].x),\(nodes[node].y)) reachable=\(distanceOfRawNode[node].isFinite)"
+                }.joined(separator: ", ")
+                Cu.logInfo("[ActivityGraph \(debugNet)] via \(via.index) @(\(via.x),\(via.y)) attaches: \(detail)")
+            }
+        }
+        activityPinDistances = [:]
+        for (index, landmark) in landmarks.enumerated() where landmarkDistance[index].isFinite {
+            if case let .pin(reference, number) = landmark.key {
+                activityPinDistances["\(reference)\t\(number)"] = landmarkDistance[index]
+            }
+        }
 
         // Visible fill geometry gets phase from its nearest physical centerline. Reachability is
         // decided only after that geometric match: an unreachable fragment must flash, not borrow
@@ -3053,6 +3234,36 @@ final class GeometryView: MTKView, MTKViewDelegate {
                 distances.append(contentsOf: targetDistances)
             }
         }
+        // Phase at a marker with no reachable landmark (a hull-cut port, or a pad the graph never
+        // attached to): the nearest centerline of its net, as the visible copper beneath it uses.
+        func centerlineDistance(net: String, x: Float, y: Float) -> Float? {
+            let netSegments = NearestActivitySegmentIndex(segments: segmentsByNet[names.intern(net)] ?? [])
+            guard let nearest = netSegments.nearest(x: x, y: y, distance: {
+                projection(ofX: x, y: y, onto: $0).distance
+            }) else { return nil }
+            let segment = netSegments.segments[nearest]
+            let t = projection(ofX: x, y: y, onto: segment).t
+            let fromA = distanceOfRawNode[segment.a]
+            let fromB = distanceOfRawNode[segment.b]
+            guard fromA.isFinite || fromB.isFinite else { return nil }
+            return fromA <= fromB ? fromA + t * segment.length : fromB + (1 - t) * segment.length
+        }
+        activityHullCutPortDistances = [:]
+        for spot in activity.hullCutPortSpots {
+            activityHullCutPortDistances[spot.identifier] =
+                centerlineDistance(net: spot.netName, x: Float(spot.position.x), y: Float(spot.position.y))
+        }
+        let markerPins = activity.excitedPins.map { ($0.reference, $0.padNumber, $0.netName) }
+            + activity.absorbingPins.map { ($0.reference, $0.padNumber, $0.netName) }
+            + activity.probedPins.map { ($0.reference, $0.padNumber, $0.netName) }
+        for (reference, number, net) in markerPins where activity.includedNets.contains(net) {
+            let key = "\(reference)\t\(number)"
+            guard activityPinDistances[key] == nil,
+                  let centroid = Self.centroid(of: pinPositions(reference: reference, padNumber: number))
+            else { continue }
+            activityPinDistances[key] = centerlineDistance(net: net, x: centroid.x, y: centroid.y)
+        }
+
         activityVertexCount = positions.count
         activityPositionBuffer = positions.isEmpty ? nil : device.makeBuffer(
             bytes: positions, length: MemoryLayout<Position3>.stride * positions.count)

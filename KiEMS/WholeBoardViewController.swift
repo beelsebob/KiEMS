@@ -24,6 +24,12 @@ final class WholeBoardViewController: NSViewController {
     private static let formFont = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
     private weak var document: Document?
     private let propertiesViewController: SimulationPropertiesViewController
+    /// Takes the Info column over while Board Setup is selected in the sidebar -- see setBoardSetupMode.
+    private let boardSetupViewController: BoardSetupViewController
+    private var isBoardSetupMode = false
+    /// Takes the Info column over (in place of propertiesViewController) while a Simulation Set is
+    /// selected and nothing is picked on the board.
+    private let simulationSetViewController: SimulationSetViewController
     private let boardView = GeometryView()
     private let detailFont = NSFont.systemFont(ofSize: 13)
     private let selectedNetView = NetNameView()
@@ -41,9 +47,7 @@ final class WholeBoardViewController: NSViewController {
     private let componentHullPaddingField = NSTextField(string: "")
     private let componentHullPaddingFormatter = MicrometerValueFormatter()
     private let componentControls = NSStackView()
-    private let componentModelErrorBox = NSBox()
-    /// One row per warning -- see showComponentWarnings(_:note:).
-    private let componentWarningRows = NSStackView()
+    private let componentModelErrorBox = ComponentWarningBox(textWidth: infoPanelWidth - 40)
     private let netHeadingPrefix = NSTextField(labelWithString: "Net:")
     private let netClassHeadingPrefix = NSTextField(labelWithString: "Net Class:")
     private let netHeading = NSStackView()
@@ -88,6 +92,13 @@ final class WholeBoardViewController: NSViewController {
     private var durationModeRow: NSStackView!
     private var durationRow: NSStackView!
     private var pinImpedanceRow: NSStackView!
+    private let pinLoadCapacitanceField = NSTextField(string: "")
+    private let pinLoadCapacitanceFormatter = UnitSuffixValueFormatter(
+        displaySuffix: "F", acceptedSuffixes: ["farads", "farad", "f"],
+        // Case-sensitive and checked first: a bare lowercase "f" is femto, not farads.
+        scaledSuffixes: [(suffix: "fF", factor: 1e-15), (suffix: "f", factor: 1e-15)],
+        autoSelectsSIPrefix: true)
+    private var pinLoadCapacitanceRow: NSStackView!
     private let probedCheckbox = NSButton(checkboxWithTitle: "Probed", target: nil, action: nil)
     private let absorbingCheckbox = NSButton(checkboxWithTitle: "Absorbing", target: nil, action: nil)
     private let netControls = NSStackView()
@@ -119,7 +130,17 @@ final class WholeBoardViewController: NSViewController {
     /// DifferentialPairNetHeuristic-candidate net -- see differentialPairPartnerPin()), the same
     /// board data SourceListViewController's own identically-purposed mirroring logic reads from
     /// allFootprints.
-    private var allFootprints: [KicadFootprintInfo] = []
+    private var allFootprints: [KicadFootprintInfo] = [] {
+        didSet {
+            updateFindIndex()
+            simulationSetViewController.setFootprints(allFootprints)
+        }
+    }
+    /// Every net on the board, for the Find panel (allFootprints misses nets with no pads).
+    private var allNetNames: [String] = [] {
+        didSet { updateFindIndex() }
+    }
+    private var findPanel: FindPanelController?
 
     /// Why each footprint without a usable SPICE model lacks one, by reference -- see
     /// KicadBoardBridge.componentSimModels(). Loaded alongside allFootprints; simModelsLoaded says
@@ -168,7 +189,13 @@ final class WholeBoardViewController: NSViewController {
     init(document: Document, propertiesViewController: SimulationPropertiesViewController) {
         self.document = document
         self.propertiesViewController = propertiesViewController
+        self.boardSetupViewController = BoardSetupViewController(document: document)
+        self.simulationSetViewController = SimulationSetViewController(document: document)
         super.init(nibName: nil, bundle: nil)
+        boardSetupViewController.onChanged = { [weak self] in
+            self?.document?.updateChangeCount(.changeDone)
+            self?.refreshActivityHighlight()
+        }
         propertiesViewController.onDifferentialPairEnabled = { [weak self] simulation in
             self?.reconcileDifferentialPairs(in: simulation)
         }
@@ -228,16 +255,6 @@ final class WholeBoardViewController: NSViewController {
         componentHullPaddingField.alignment = .right
         componentHullPaddingField.widthAnchor.constraint(equalToConstant: 74).isActive = true
 
-        // Rows and colours depend on what the box is saying -- see showComponentWarnings(_:note:).
-        componentWarningRows.orientation = .vertical
-        componentWarningRows.alignment = .leading
-        componentWarningRows.spacing = 6
-        componentModelErrorBox.boxType = .custom
-        componentModelErrorBox.cornerRadius = 5
-        componentModelErrorBox.titlePosition = .noTitle
-        componentModelErrorBox.contentViewMargins = NSSize(width: 8, height: 6)
-        componentModelErrorBox.contentView = componentWarningRows
-        componentModelErrorBox.isHidden = true
         configureHeadingStack(netHeading, views: [netHeadingPrefix, selectedNetView])
         configureHeadingStack(netClassHeading, views: [netClassHeadingPrefix, selectedNetClassView])
         pinSeparator.boxType = .separator
@@ -281,6 +298,14 @@ final class WholeBoardViewController: NSViewController {
         pinImpedanceField.target = self
         pinImpedanceField.action = #selector(pinImpedanceChanged)
         pinImpedanceField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        pinLoadCapacitanceField.formatter = pinLoadCapacitanceFormatter
+        pinLoadCapacitanceField.controlSize = .small
+        pinLoadCapacitanceField.font = Self.formFont
+        pinLoadCapacitanceField.alignment = .right
+        pinLoadCapacitanceField.placeholderString = "None"
+        pinLoadCapacitanceField.target = self
+        pinLoadCapacitanceField.action = #selector(pinLoadCapacitanceChanged)
+        pinLoadCapacitanceField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         excitationTypePopUp.addItems(withTitles: ["Primary", "Adversarial"])
         excitationTypePopUp.controlSize = .small
         excitationTypePopUp.font = Self.formFont
@@ -313,10 +338,13 @@ final class WholeBoardViewController: NSViewController {
 
         pinImpedanceRow = excitationValueRow(title: "Impedance:", field: pinImpedanceField)
         pinImpedanceRow.edgeInsets = NSEdgeInsets(top: 2, left: 16, bottom: 0, right: 0)
+        // The receiver's input capacitance -- a lumped C from the pad to its reference plane.
+        pinLoadCapacitanceRow = excitationValueRow(title: "Load Capacitance:", field: pinLoadCapacitanceField)
+        pinLoadCapacitanceRow.edgeInsets = NSEdgeInsets(top: 2, left: 16, bottom: 0, right: 0)
 
         configureControlStack(pinControls,
                               views: [excitedCheckbox, excitationControls, probedCheckbox, absorbingCheckbox,
-                                      pinImpedanceRow])
+                                      pinImpedanceRow, pinLoadCapacitanceRow])
         includedCheckbox.target = self
         includedCheckbox.action = #selector(includedToggled)
         simulatedCheckbox.target = self
@@ -374,6 +402,12 @@ final class WholeBoardViewController: NSViewController {
         // reparented here, not a second one, so none of that wiring needs duplicating.
         propertiesViewController.view.translatesAutoresizingMaskIntoConstraints = false
         infoPanel.addSubview(propertiesViewController.view)
+        boardSetupViewController.view.translatesAutoresizingMaskIntoConstraints = false
+        boardSetupViewController.view.isHidden = true
+        infoPanel.addSubview(boardSetupViewController.view)
+        simulationSetViewController.view.translatesAutoresizingMaskIntoConstraints = false
+        simulationSetViewController.view.isHidden = true
+        infoPanel.addSubview(simulationSetViewController.view)
 
         boardView.contextMenuForSelection = { [weak self] selection in
             self?.contextMenu(for: selection)
@@ -420,6 +454,7 @@ final class WholeBoardViewController: NSViewController {
             frequencyRow.widthAnchor.constraint(equalTo: infoStack.widthAnchor, constant: -16),
             durationRow.widthAnchor.constraint(equalTo: infoStack.widthAnchor, constant: -16),
             pinImpedanceRow.widthAnchor.constraint(equalTo: infoStack.widthAnchor),
+            pinLoadCapacitanceRow.widthAnchor.constraint(equalTo: infoStack.widthAnchor),
 
             // Below infoStack's own bottom, not infoPanel's top directly -- infoStack's "Info"/
             // "Simulation" title (infoTitle) stays visible even while the rest of infoStack is
@@ -432,6 +467,14 @@ final class WholeBoardViewController: NSViewController {
             propertiesViewController.view.topAnchor.constraint(equalTo: infoStack.bottomAnchor, constant: 10),
             propertiesViewController.view.leadingAnchor.constraint(equalTo: infoPanel.leadingAnchor, constant: 10),
             propertiesViewController.view.trailingAnchor.constraint(equalTo: infoPanel.trailingAnchor, constant: -10),
+
+            boardSetupViewController.view.topAnchor.constraint(equalTo: infoStack.bottomAnchor, constant: 10),
+            boardSetupViewController.view.leadingAnchor.constraint(equalTo: infoPanel.leadingAnchor, constant: 10),
+            boardSetupViewController.view.trailingAnchor.constraint(equalTo: infoPanel.trailingAnchor, constant: -10),
+
+            simulationSetViewController.view.topAnchor.constraint(equalTo: infoStack.bottomAnchor, constant: 10),
+            simulationSetViewController.view.leadingAnchor.constraint(equalTo: infoPanel.leadingAnchor, constant: 10),
+            simulationSetViewController.view.trailingAnchor.constraint(equalTo: infoPanel.trailingAnchor, constant: -10),
         ])
         view = container
     }
@@ -518,24 +561,97 @@ final class WholeBoardViewController: NSViewController {
     @discardableResult
     private func includeNet(named name: String, in simulation: EMSSimulationBridge) -> EMSInvolvedNetBridge {
         if let entry = involvedNet(named: name, in: simulation) {
-            entry.inclusionLevel = .simulationNet
+            if entry.inclusionLevel != .simulationNet {
+                entry.inclusionLevel = .simulationNet
+                addBoardNoiseSources(onNets: [name], in: simulation)
+            }
             return entry
         }
         let entry = simulation.addInvolvedNet(with: .net)
         entry.net = name
         entry.useExplicitPinSelections()
+        applyBoardDefaults(to: entry, nets: [name], in: simulation)
+        addBoardNoiseSources(onNets: [name], in: simulation)
         return entry
     }
 
     @discardableResult
     private func includeNetClass(named name: String, in simulation: EMSSimulationBridge) -> EMSInvolvedNetBridge {
         if let entry = involvedNetClass(named: name, in: simulation) {
-            entry.inclusionLevel = .simulationNet
+            if entry.inclusionLevel != .simulationNet {
+                entry.inclusionLevel = .simulationNet
+                addBoardNoiseSources(onNets: Array(netsByNetClass[name] ?? []), in: simulation)
+            }
             return entry
         }
         let entry = simulation.addInvolvedNet(with: .netClass)
         entry.netClass = name
+        applyBoardDefaults(to: entry, nets: Array(netsByNetClass[name] ?? []), in: simulation)
+        addBoardNoiseSources(onNets: Array(netsByNetClass[name] ?? []), in: simulation)
         return entry
+    }
+
+    // MARK: - Board setup defaults
+
+    /// The net's KiCad class, from the cache if already resolved, else asked of the board directly.
+    private func netClass(forNet name: String) -> String? {
+        let resolved = netClassByNet[name] ?? (try? document?.board?.netClass(forNet: name)) ?? ""
+        netClassByNet[name] = resolved
+        return resolved.isEmpty ? nil : resolved
+    }
+
+    /// Board pins on any of `nets`, as (reference, pad number) pairs.
+    private func boardPins(onNets nets: [String]) -> [(reference: String, number: String)] {
+        let netSet = Set(nets)
+        return allFootprints.flatMap { footprint in
+            footprint.pins.filter { netSet.contains($0.netName) }.map { (footprint.reference, $0.number) }
+        }
+    }
+
+    /// Copies Board Setup's defaults into an involved-net entry just added to `simulation`: the
+    /// entry's impedance (net override, else class, else the signal/power default) and every one of
+    /// its pins' own impedance/absorbing settings. Only ever applied on creation, so a value the
+    /// user then edits in the simulation is never overwritten.
+    private func applyBoardDefaults(to entry: EMSInvolvedNetBridge, nets: [String], in simulation: EMSSimulationBridge) {
+        guard let boardSetup = document?.config.boardSetup else { return }
+        switch entry.kind {
+        case .net:
+            guard let name = entry.net else { return }
+            entry.impedance = boardSetup.effectiveImpedance(forNet: name, netClass: netClass(forNet: name),
+                                                            isPowerNet: PowerNetHeuristic.isPowerNet(name))
+        case .netClass:
+            guard let name = entry.netClass else { return }
+            entry.impedance = boardSetup.impedance(forNetClass: name)?.doubleValue ?? boardSetup.signalImpedance
+        default:
+            return
+        }
+        for pin in boardPins(onNets: nets) {
+            guard let setup = boardSetup.pin(withFootprint: pin.reference, pin: pin.number) else { continue }
+            if let impedance = setup.impedance {
+                entry.setImpedance(impedance, withFootprint: pin.reference, pin: pin.number)
+            }
+            if let absorbing = setup.absorbing {
+                entry.setPinAbsorbOnly(absorbing.boolValue, withFootprint: pin.reference, pin: pin.number)
+            }
+        }
+    }
+
+    /// Board Setup's noise-generating pins on `nets` become adversarial excitations once those nets
+    /// are simulated (an excitation needs a simulated net to resolve a port on). A pin that already
+    /// has an excitation keeps it.
+    private func addBoardNoiseSources(onNets nets: [String], in simulation: EMSSimulationBridge) {
+        guard let boardSetup = document?.config.boardSetup else { return }
+        for pin in boardPins(onNets: nets) {
+            guard let setup = boardSetup.pin(withFootprint: pin.reference, pin: pin.number), setup.noiseGenerating,
+                  excitationIndex(reference: pin.reference, pin: pin.number, in: simulation) == nil
+            else { continue }
+            let excitation = simulation.addExcitation(forFootprint: pin.reference, pin: pin.number)
+            excitation.isMain = false
+            excitation.hasContinuousDuration = true
+            excitation.phaseDegrees = 0
+            excitation.frequency = NSNumber(value: setup.noiseFrequency)
+            excitation.amplitude = NSNumber(value: setup.noiseAmplitude)
+        }
     }
 
     /// The "Included in simulation" checkbox's own minimal effect -- unlike includeNet(), never
@@ -554,7 +670,140 @@ final class WholeBoardViewController: NSViewController {
         entry.net = name
         entry.inclusionLevel = .geometryOnly
         entry.useExplicitPinSelections()
+        applyBoardDefaults(to: entry, nets: [name], in: simulation)
         return entry
+    }
+
+    /// Includes Board Setup's included nets, net classes (geometry only, as the "Included in
+    /// simulation" checkbox does) and components in a simulation just created at `index`.
+    func applyBoardInclusions(toSimulationAt index: Int) {
+        guard let document, document.config.simulations.indices.contains(index) else { return }
+        let simulation = document.config.simulations[index]
+        let boardSetup = document.config.boardSetup
+        for net in boardSetup.includedNets where !net.isEmpty {
+            includeNetGeometryOnly(named: net, in: simulation)
+        }
+        for netClass in boardSetup.includedNetClasses where !netClass.isEmpty {
+            includeNetClassGeometryOnly(named: netClass, in: simulation)
+        }
+        for reference in boardSetup.includedComponents
+            where !reference.isEmpty && includedComponent(reference, in: simulation) == nil {
+            simulation.includeComponent(withReference: reference)
+        }
+    }
+
+    // MARK: - Simulation sets
+
+    /// Fired after every edit made in the Simulation Set panel, with the template's current index.
+    var onSimulationSetChanged: ((Int) -> Void)? {
+        didSet {
+            simulationSetViewController.onChanged = { [weak self] in
+                guard let self, let index = self.selectedSimulationIndex else { return }
+                self.onSimulationSetChanged?(index)
+            }
+        }
+    }
+
+    /// What regenerateSimulationSet(atTemplateIndex:) did to document.config.simulations.
+    struct SimulationSetRegeneration {
+        /// Generated simulations whose configuration is new or different.
+        var changedIndices: [Int] = []
+        /// The lowest index removed, if any were -- every index from here up to `previousCount`
+        /// now holds a different simulation (or none).
+        var firstRemovedIndex: Int?
+        var previousCount = 0
+        /// Simulations were added or removed, so the sidebar's rows need rebuilding.
+        var structureChanged = false
+    }
+
+    /// Rewrites the simulations generated from the Simulation Set template at `templateIndex` (see
+    /// SimulationSetExpansion): one per matching pin, each a fresh copy of the template with that pin
+    /// excited and the set's probes applied. A generated simulation keeps its index when its name is
+    /// unchanged; new ones are appended and ones that no longer match are removed. Nil (and nothing
+    /// changed) when there's no such template or the board's pins haven't loaded yet.
+    func regenerateSimulationSet(atTemplateIndex templateIndex: Int) -> SimulationSetRegeneration? {
+        guard let document, document.config.simulations.indices.contains(templateIndex),
+              let set = document.config.simulations[templateIndex].simulationSet, !allFootprints.isEmpty
+        else { return nil }
+        let config = document.config
+        var result = SimulationSetRegeneration(previousCount: config.simulations.count)
+        let setName = config.simulations[templateIndex].name
+        let entries = SimulationSetExpansion.entries(for: set, footprints: allFootprints)
+            .filter { $0.sourcePin != nil }
+        let names = SimulationSetExpansion.simulationNames(for: entries, setName: setName)
+
+        var existing: [String: Int] = [:]
+        for (index, simulation) in config.simulations.enumerated()
+            where simulation.generatedBySetIdentifier == set.identifier {
+            existing[simulation.name] = index
+        }
+        var kept = Set<Int>()
+        for (entry, name) in zip(entries, names) {
+            let target = existing[name]
+            let previousJSON = target.map { config.simulations[$0].jsonRepresentation }
+            let index = config.generateSimulationFromSet(at: templateIndex, named: name, replacing: target ?? -1)
+            let simulation = config.simulations[index]
+            apply(set, entry: entry, to: simulation)
+            if target == nil { result.structureChanged = true }
+            if simulation.jsonRepresentation != previousJSON { result.changedIndices.append(index) }
+            kept.insert(index)
+        }
+        let removed = existing.values.filter { !kept.contains($0) }.sorted(by: >)
+        for index in removed {
+            config.removeSimulation(at: index)
+        }
+        if let first = removed.last {
+            result.firstRemovedIndex = first
+            result.structureChanged = true
+            // Removal shifted every later simulation down.
+            result.changedIndices = result.changedIndices.map { index in
+                index - removed.filter { $0 < index }.count
+            }
+        }
+        if result.structureChanged || !result.changedIndices.isEmpty {
+            document.updateChangeCount(.changeDone)
+        }
+        return result
+    }
+
+    /// One generated simulation's own additions to its copy of the template -- the same entries the
+    /// Info column's Excited/Probed/Absorbing/Impedance controls make for a picked pin.
+    private func apply(_ set: EMSSimulationSetBridge, entry: SimulationSetExpansion.Entry,
+                       to simulation: EMSSimulationBridge) {
+        let reference = set.excitationFootprintReference
+        guard let pin = entry.sourcePin else { return }
+        applyExcited(true, footprintReference: reference, netName: pin.netName, padNumber: pin.number, in: simulation)
+        if let excitation = excitation(reference: reference, pin: pin.number, in: simulation) {
+            excitation.isMain = true
+            excitation.phaseDegrees = set.phaseDegrees
+            excitation.amplitude = NSNumber(value: set.amplitude)
+        }
+        let net = includeNet(named: pin.netName, in: simulation)
+        net.setImpedance(NSNumber(value: set.driveImpedance), withFootprint: reference, pin: pin.number)
+        _ = applyProbed(set.probed, absorbing: set.absorbing, footprintReference: reference, netName: pin.netName,
+                        padNumber: pin.number, in: simulation)
+        if set.absorbing {
+            net.setLoadCapacitance(set.loadCapacitance, withFootprint: reference, pin: pin.number)
+        }
+        if set.probeNetImpedance {
+            net.probeImpedance = true
+        }
+        for netName in entry.matchingNetNames where netName != pin.netName {
+            _ = includeNet(named: netName, in: simulation)
+        }
+        for probe in entry.probes {
+            let probeReference = probe.probe.footprintReference
+            for probePin in probe.pins {
+                _ = applyProbed(true, absorbing: probe.probe.absorbing, footprintReference: probeReference,
+                                netName: probePin.netName, padNumber: probePin.number, in: simulation)
+                if probe.probe.absorbing, let probeNet = involvedNet(named: probePin.netName, in: simulation) {
+                    probeNet.setImpedance(NSNumber(value: probe.probe.loadImpedance), withFootprint: probeReference,
+                                          pin: probePin.number)
+                    probeNet.setLoadCapacitance(probe.probe.loadCapacitance, withFootprint: probeReference,
+                                                pin: probePin.number)
+                }
+            }
+        }
     }
 
     /// See includeNetGeometryOnly's own doc comment -- the net-class equivalent.
@@ -566,6 +815,7 @@ final class WholeBoardViewController: NSViewController {
         let entry = simulation.addInvolvedNet(with: .netClass)
         entry.netClass = name
         entry.inclusionLevel = .geometryOnly
+        applyBoardDefaults(to: entry, nets: Array(netsByNetClass[name] ?? []), in: simulation)
         return entry
     }
 
@@ -802,15 +1052,28 @@ final class WholeBoardViewController: NSViewController {
 
     private func pinAbsorbsByDefault(reference: String, number: String, netName: String,
                                      in simulation: EMSSimulationBridge) -> Bool {
+        pinAbsorbsByDefault(reference: reference, number: number, netName: netName,
+                            groundKind: simulation.groundNetKind, groundName: simulation.groundNetName)
+    }
+
+    /// The automatic termination rule a pin with no explicit absorbing choice gets. Board Setup
+    /// evaluates it against its own ground selection, which new simulations start with.
+    private func pinAbsorbsByDefault(reference: String, number: String, netName: String,
+                                     groundKind: EMSGroundSelectorKind, groundName: String?) -> Bool {
         guard let pin = allFootprints.first(where: { $0.reference == reference })?.pins
             .first(where: { $0.number == number }),
               pin.pinType == "input" || pin.pinType == "bidirectional" || pin.pinType == "power_in"
         else { return false }
-        switch simulation.groundNetKind {
+        // Mirrors the resolver: a pad alone on its net (an NC ball) has no line to terminate.
+        let padsOnNet = allFootprints.reduce(0) { count, footprint in
+            count + footprint.pins.filter { $0.netName == netName }.count
+        }
+        guard padsOnNet > 1 else { return false }
+        switch groundKind {
         case .net:
-            return simulation.groundNetName != netName
+            return groundName != netName
         case .netClass:
-            guard let groundClass = simulation.groundNetName else { return true }
+            guard let groundClass = groundName else { return true }
             return !(netsByNetClass[groundClass]?.contains(netName) ?? false)
         default:
             return true
@@ -861,10 +1124,34 @@ final class WholeBoardViewController: NSViewController {
         componentHullCheckbox.isEnabled = simulation != nil && usable && entry != nil
         componentHullPaddingField.isEnabled = simulation != nil && usable && entry?.contributesToHull == true
 
+        let (warnings, note) = componentWarnings(reference: reference)
+        componentModelErrorBox.show(warnings, note: note)
+    }
+
+    /// Why one component can't be simulated, or will be simulated without its value.
+    private func componentWarnings(reference: String) -> (warnings: [String], note: String?) {
+        let modelProblem = simModelsLoaded ? unsupportedSimModelReasons[reference] : nil
         // An unreadable value doesn't stop the part being included, but the simulator will skip it.
         let warnings = [modelProblem, valueWarning(for: reference)].compactMap { $0 }
-        showComponentWarnings(warnings,
-                              note: simModelsLoaded ? nil : "Checking the schematic for this component's SPICE model…")
+        return (warnings, simModelsLoaded ? nil : "Checking the schematic for this component's SPICE model…")
+    }
+
+    /// The group equivalent of componentWarnings(reference:); `unusable` are the parts left out.
+    private func componentWarnings(components: [String], unusable: [String]) -> (warnings: [String], note: String?) {
+        func list(_ references: [String]) -> String {
+            let more = references.count > 4 ? " and \(references.count - 4) more" : ""
+            return references.prefix(4).joined(separator: ", ") + more
+        }
+        var warnings: [String] = []
+        if simModelsLoaded && !unusable.isEmpty {
+            warnings.append("Left out, with no SPICE model of only R, L and C: \(list(unusable))")
+        }
+        let unreadable = components.filter { !unusable.contains($0) && valueWarning(for: $0) != nil }
+        if !unreadable.isEmpty {
+            warnings.append("Could not read the value of \(list(unreadable))")
+        }
+        return (warnings, !simModelsLoaded && !components.isEmpty
+                    ? "Checking the schematic for these components' SPICE models…" : nil)
     }
 
     /// One net or component of a group selection, as the group controls see it.
@@ -931,20 +1218,8 @@ final class WholeBoardViewController: NSViewController {
         componentHullPaddingField.placeholderString = paddings.count > 1 ? "Multiple" : nil
         componentHullPaddingField.isEnabled = !parts.contributing.isEmpty
 
-        func list(_ references: [String]) -> String {
-            let more = references.count > 4 ? " and \(references.count - 4) more" : ""
-            return references.prefix(4).joined(separator: ", ") + more
-        }
-        var warnings: [String] = []
-        if simModelsLoaded && !parts.unusable.isEmpty {
-            warnings.append("Left out, with no SPICE model of only R, L and C: \(list(parts.unusable))")
-        }
-        let unreadable = components.filter { !parts.unusable.contains($0) && valueWarning(for: $0) != nil }
-        if !unreadable.isEmpty {
-            warnings.append("Could not read the value of \(list(unreadable))")
-        }
-        showComponentWarnings(warnings, note: !simModelsLoaded && !components.isEmpty
-                                  ? "Checking the schematic for these components' SPICE models…" : nil)
+        let (warnings, note) = componentWarnings(components: components, unusable: parts.unusable)
+        componentModelErrorBox.show(warnings, note: note)
     }
 
     /// The warning for an R/L/C part whose Value the simulator can't read, if it can't.
@@ -957,39 +1232,6 @@ final class WholeBoardViewController: NSViewController {
               !EMSConfigBridge.componentValueIsSensible(footprint.value, unit: unit)
         else { return nil }
         return footprint.value.isEmpty ? "No value given" : "Could not read value \"\(footprint.value)\""
-    }
-
-    /// Fills componentModelErrorBox with one row per warning, each with a caution sign in its
-    /// yellow, then `note` (the schematic still being read, which isn't a problem) in neutral grey
-    /// without one. Hides the box when there's nothing to say.
-    private func showComponentWarnings(_ warnings: [String], note: String?) {
-        for row in componentWarningRows.arrangedSubviews { row.removeFromSuperview() }
-        func row(_ text: String, color: NSColor, caution: Bool) -> NSView {
-            let label = NSTextField(wrappingLabelWithString: text)
-            label.font = Self.formFont
-            label.textColor = color
-            label.preferredMaxLayoutWidth = Self.infoPanelWidth - (caution ? 62 : 40)
-            guard caution else { return label }
-            let icon = NSImageView(image: NSImage(systemSymbolName: "exclamationmark.triangle.fill",
-                                                  accessibilityDescription: "Caution")!)
-            icon.contentTintColor = color
-            icon.setContentHuggingPriority(.required, for: .horizontal)
-            let stack = NSStackView(views: [icon, label])
-            stack.orientation = .horizontal
-            stack.alignment = .top
-            stack.spacing = 6
-            return stack
-        }
-        for warning in warnings {
-            componentWarningRows.addArrangedSubview(row(warning, color: .systemYellow, caution: true))
-        }
-        if let note {
-            componentWarningRows.addArrangedSubview(row(note, color: .secondaryLabelColor, caution: false))
-        }
-        let tint: NSColor = warnings.isEmpty ? .secondaryLabelColor : .systemYellow
-        componentModelErrorBox.borderColor = tint
-        componentModelErrorBox.fillColor = tint.withAlphaComponent(0.1)
-        componentModelErrorBox.isHidden = warnings.isEmpty && note == nil
     }
 
     /// Includes every part unless all are already included, in which case removes them all.
@@ -1029,7 +1271,94 @@ final class WholeBoardViewController: NSViewController {
         return PinKey(simulationIndex: selectedSimulationIndex, reference: reference, number: number)
     }
 
+    /// Board Setup reuses this whole view -- the board, its picking and its selection -- but swaps
+    /// the Info column's simulation controls for BoardSetupViewController's board-wide ones.
+    func setBoardSetupMode(_ enabled: Bool) {
+        guard enabled != isBoardSetupMode else { return }
+        isBoardSetupMode = enabled
+        if enabled { boardSetupViewController.refreshBoardData() }
+        updateConfigurationControls()
+        refreshActivityHighlight()
+    }
+
+    /// Fired when Board Setup's frequency range (the document's own) changes.
+    var onBoardFrequencyRangeChanged: (() -> Void)? {
+        get { boardSetupViewController.onFrequencyRangeChanged }
+        set { boardSetupViewController.onFrequencyRangeChanged = newValue }
+    }
+
+    private func updateBoardSetupControls() {
+        for view in [pinHeading, componentValueLabel, componentControls, componentModelErrorBox, pinControls,
+                     pinSeparator, netHeading, netControls, netSeparator, netClassHeading, netClassControls] {
+            view.isHidden = true
+        }
+        propertiesViewController.view.isHidden = true
+        simulationSetViewController.view.isHidden = true
+        boardSetupViewController.view.isHidden = false
+        guard let selection else {
+            infoTitle.stringValue = "Board"
+            boardSetupViewController.setTarget(nil)
+            return
+        }
+        infoTitle.stringValue = "Info"
+        var target = BoardSetupViewController.Target()
+        switch selection.kind {
+        case .net, .pin:
+            target.nets = selection.netName.map { [$0] } ?? []
+            target.netClasses = selectedNetClassName.map { [$0] } ?? []
+            target.isNetClassLoading = isLoadingSelectedNetClass
+            if case let .pin(reference, number) = selection.kind {
+                target.pins = [BoardPinRef(reference: reference, number: number, net: selection.netName)]
+            }
+        case let .component(reference):
+            pinHeading.isHidden = true
+            target.components = [reference]
+        case let .connectedNets(members, components, pins)
+            where !pins.isEmpty || !members.isEmpty || !components.isEmpty:
+            target.components = components
+            target.pins = pins
+            target.nets = members
+            // Every member's class, in the order nets list them, without duplicates.
+            var seen = Set<String>()
+            target.netClasses = members.compactMap { netClassByNet[$0] }
+                .filter { !$0.isEmpty && seen.insert($0).inserted }
+            target.isNetClassLoading = isLoadingSelectedNetClass
+        case .connectedNets, .hullCutPort:
+            // Board defaults are per net, net class and pin -- nothing to set on these.
+            pinHeading.isHidden = false
+            pinHeading.stringValue = "No board defaults for this"
+        }
+        target.unusableComponents = Set(target.components.filter {
+            !simModelsLoaded || unsupportedSimModelReasons[$0] != nil
+        })
+        if target.components.count == 1 {
+            (target.componentWarnings, target.componentNote) = componentWarnings(reference: target.components[0])
+        } else if !target.components.isEmpty {
+            let unusable = target.components.filter { simModelsLoaded && unsupportedSimModelReasons[$0] != nil }
+            (target.componentWarnings, target.componentNote) = componentWarnings(components: target.components,
+                                                                                 unusable: unusable)
+        }
+        if let boardSetup = document?.config.boardSetup {
+            target.defaultAbsorbing = target.pins.map { pin in
+                pin.net.map {
+                    pinAbsorbsByDefault(reference: pin.reference, number: pin.number, netName: $0,
+                                        groundKind: boardSetup.groundNetKind, groundName: boardSetup.groundNetName)
+                } ?? false
+            }
+        }
+        target.pinLabels = target.pins.map {
+            BoardPinDisplay.label(reference: $0.reference, number: $0.number, footprints: allFootprints)
+        }
+        boardSetupViewController.setTarget(target)
+    }
+
     private func updateConfigurationControls() {
+        if isBoardSetupMode {
+            updateBoardSetupControls()
+            return
+        }
+        boardSetupViewController.view.isHidden = true
+        simulationSetViewController.view.isHidden = true
         let hasSimulation = selectedSimulation != nil
         includedCheckbox.isEnabled = false
         simulatedCheckbox.isEnabled = false
@@ -1044,6 +1373,7 @@ final class WholeBoardViewController: NSViewController {
         probedCheckbox.isEnabled = false
         absorbingCheckbox.isEnabled = false
         pinImpedanceField.isEnabled = false
+        pinLoadCapacitanceField.isEnabled = false
 
         includedCheckbox.state = .off
         simulatedCheckbox.state = .off
@@ -1059,6 +1389,8 @@ final class WholeBoardViewController: NSViewController {
         probedCheckbox.state = .off
         absorbingCheckbox.state = .off
         pinImpedanceField.objectValue = NSNumber(value: 45)
+        pinLoadCapacitanceField.objectValue = nil
+        pinLoadCapacitanceRow.isHidden = false
         componentControls.isHidden = true
         componentModelErrorBox.isHidden = true
 
@@ -1066,7 +1398,8 @@ final class WholeBoardViewController: NSViewController {
             // Nothing picked on the board -- show this simulation's own settings instead of net/pin
             // info, the same panel (reparented, not reimplemented -- see this class's own doc
             // comment) that used to sit permanently above the old source list.
-            infoTitle.stringValue = "Simulation"
+            let isSimulationSet = selectedSimulation?.simulationSet != nil
+            infoTitle.stringValue = isSimulationSet ? "Simulation Set" : "Simulation"
             pinHeading.isHidden = true
             pinSeparator.isHidden = true
             netHeading.isHidden = true
@@ -1076,7 +1409,8 @@ final class WholeBoardViewController: NSViewController {
             netClassControls.isHidden = true
             pinControls.isHidden = true
             componentValueLabel.isHidden = true
-            propertiesViewController.view.isHidden = false
+            propertiesViewController.view.isHidden = isSimulationSet
+            simulationSetViewController.view.isHidden = !isSimulationSet
             return
         }
 
@@ -1197,6 +1531,7 @@ final class WholeBoardViewController: NSViewController {
             probedCheckbox.isEnabled = hasSimulation
             absorbingCheckbox.isEnabled = hasSimulation
             pinImpedanceField.isEnabled = hasSimulation
+            pinLoadCapacitanceRow.isHidden = true
             guard let simulation = selectedSimulation else { return }
             if let port = hullCutPort(identifier: identifier, in: simulation) {
                 probedCheckbox.state = port.probe ? .on : .off
@@ -1212,7 +1547,7 @@ final class WholeBoardViewController: NSViewController {
 
         case let .pin(reference, number):
             pinHeading.isHidden = false
-            pinHeading.stringValue = "Pin: \(reference)/\(number)"
+            pinHeading.stringValue = "Pin: \(BoardPinDisplay.label(reference: reference, number: number, footprints: allFootprints))"
             pinSeparator.isHidden = false
             pinControls.isHidden = false
             // Every isPassive(reference:) pin/pad now selects as .component instead (see
@@ -1224,6 +1559,7 @@ final class WholeBoardViewController: NSViewController {
             probedCheckbox.isEnabled = hasSimulation && hasNet
             absorbingCheckbox.isEnabled = hasSimulation && hasNet
             pinImpedanceField.isEnabled = hasSimulation && hasNet
+            pinLoadCapacitanceField.isEnabled = hasSimulation && hasNet
             guard let simulation = selectedSimulation else { return }
             // This mirrors the resolver's real default termination rule; unlike the previous
             // appearance-only fallback, every checked default here corresponds to a 45-ohm port
@@ -1244,6 +1580,7 @@ final class WholeBoardViewController: NSViewController {
             else { return }
             pinImpedanceField.objectValue = entry.impedance(withFootprint: reference, pin: number)
                 ?? NSNumber(value: entry.impedance)
+            pinLoadCapacitanceField.objectValue = entry.loadCapacitance(withFootprint: reference, pin: number)
             if entry.hasExplicitPinSelections {
                 let probed = entry.isPinProbed(withFootprint: reference, pin: number)
                 probedCheckbox.state = probed ? .on : .off
@@ -1298,6 +1635,7 @@ final class WholeBoardViewController: NSViewController {
     /// BoardActivityHighlight's own doc comment for why this only ever supplies names/identities,
     /// never positions -- GeometryView resolves those from its own already-built pick geometry.
     private func computeActivityHighlight() -> BoardActivityHighlight {
+        if isBoardSetupMode { return boardSetupHighlight() }
         guard let simulation = selectedSimulation else { return BoardActivityHighlight() }
         var highlight = BoardActivityHighlight()
         highlight.hasSelectedSimulation = true
@@ -1370,6 +1708,20 @@ final class WholeBoardViewController: NSViewController {
         var absorbingPins = Set<PinKey>()
         var explicitAbsorbingState: [PinKey: Bool] = [:]
         for entry in simulation.involvedNets {
+            // A Simulation Set writes its receiver pins as explicit probe entries.  Collect those
+            // entries directly rather than making their marker conditional on the enclosing net's
+            // selection-mode flag: the flag is primarily a legacy-resolution concern, whereas an
+            // explicit probe is unambiguously a measured pin.  Geometry-only entries remain the
+            // one exception, matching port_resolution.cpp (they may have absorb-only entries but
+            // cannot produce reportable probes).
+            if entry.inclusionLevel != .geometryOnly {
+                for pin in entry.probedPins where pin.probe {
+                    let netName = footprintByReference[pin.footprintReference]?.pins
+                        .first(where: { $0.number == pin.pin })?.netName ?? entry.net ?? ""
+                    guard !netName.isEmpty else { continue }
+                    probedPins.insert(PinKey(reference: pin.footprintReference, number: pin.pin, net: netName))
+                }
+            }
             if entry.inclusionLevel == .geometryOnly {
                 // Mirrors port_resolution.cpp's separate GeometryOnly pass: ignore legacy defaults
                 // and reportable probes, accepting only explicit probe=false, absorb=true entries.
@@ -1392,9 +1744,6 @@ final class WholeBoardViewController: NSViewController {
                         .first(where: { $0.number == pin.pin })?.netName ?? entry.net ?? ""
                     guard !netName.isEmpty else { continue }
                     let key = PinKey(reference: pin.footprintReference, number: pin.pin, net: netName)
-                    if pin.probe {
-                        probedPins.insert(key)
-                    }
                     // If overlapping selectors describe the same pin, any real absorbing port wins.
                     explicitAbsorbingState[key] = (explicitAbsorbingState[key] ?? false) || pin.absorbSignal
                     if pin.absorbSignal {
@@ -1520,6 +1869,59 @@ final class WholeBoardViewController: NSViewController {
         return highlight
     }
 
+    /// Board Setup has no simulation to flash or mute; it shows only the board-level pin defaults:
+    /// absorbing pins as blue dots and noise-generating pins as red (excited) ones.
+    private func boardSetupHighlight() -> BoardActivityHighlight {
+        var highlight = BoardActivityHighlight()
+        guard let boardSetup = document?.config.boardSetup else { return highlight }
+        // Mute everything Board Setup doesn't include, as a selected simulation mutes what it
+        // doesn't involve.
+        highlight.hasSelectedSimulation = true
+        highlight.configurationIncludedNets = Set(boardSetup.includedNets.filter { !$0.isEmpty })
+        for netClass in boardSetup.includedNetClasses {
+            highlight.configurationIncludedNets.formUnion(netsByNetClass[netClass] ?? [])
+        }
+        var footprintByReference: [String: KicadFootprintInfo] = [:]
+        for footprint in allFootprints {
+            footprintByReference[footprint.reference] = footprint
+        }
+        // A pin with no explicit choice shows the automatic termination rule's answer, which is
+        // what a simulation including its net will actually build.
+        for footprint in allFootprints {
+            for pin in footprint.pins where highlight.configurationIncludedNets.contains(pin.netName) {
+                let explicit = boardSetup.pin(withFootprint: footprint.reference, pin: pin.number)?.absorbing
+                let absorbs = explicit?.boolValue ?? pinAbsorbsByDefault(
+                    reference: footprint.reference, number: pin.number, netName: pin.netName,
+                    groundKind: boardSetup.groundNetKind, groundName: boardSetup.groundNetName)
+                if absorbs {
+                    highlight.absorbingPins.append(BoardActivityHighlight.AbsorbingPin(
+                        reference: footprint.reference, padNumber: pin.number, netName: pin.netName))
+                }
+            }
+        }
+        for setup in boardSetup.pins {
+            guard let pin = footprintByReference[setup.footprintReference]?.pins.first(where: { $0.number == setup.pin })
+            else { continue }
+            if setup.absorbing?.boolValue == true && !highlight.configurationIncludedNets.contains(pin.netName) {
+                highlight.absorbingPins.append(BoardActivityHighlight.AbsorbingPin(
+                    reference: setup.footprintReference, padNumber: setup.pin, netName: pin.netName))
+            }
+            if setup.noiseGenerating {
+                highlight.excitedPins.append(BoardActivityHighlight.ExcitedPin(
+                    reference: setup.footprintReference, padNumber: setup.pin, netName: pin.netName))
+            }
+        }
+        for footprint in allFootprints where footprint.pins.contains(where: {
+            highlight.configurationIncludedNets.contains($0.netName)
+        }) {
+            highlight.involvedComponentReferences.insert(footprint.reference)
+        }
+        highlight.involvedComponentReferences.formUnion(boardSetup.includedComponents)
+        for pin in highlight.absorbingPins { highlight.involvedComponentReferences.insert(pin.reference) }
+        for pin in highlight.excitedPins { highlight.involvedComponentReferences.insert(pin.reference) }
+        return highlight
+    }
+
     /// Not private -- also called from DocumentWindowController's own propertiesVC.
     /// onGeometryParametersChanged wiring: hull padding changes the fast region highlight, while
     /// padding/inset/spacing all change the asynchronously recomputed stitching-via plan.
@@ -1612,15 +2014,20 @@ final class WholeBoardViewController: NSViewController {
     /// any cached classes; each newly completed query refreshes it, so neither board loading nor a
     /// checkbox edit blocks the UI on board parsing.
     private func resolveActivityNetClassesIfNeeded() {
-        guard let simulation = selectedSimulation,
-              let board = document?.board else { return }
-        var requiredClasses = Set(simulation.involvedNets.compactMap { entry -> String? in
-            guard entry.kind == .netClass, let name = entry.netClass, !name.isEmpty else { return nil }
-            return name
-        })
-        if simulation.groundNetKind == .netClass,
-           let groundClass = simulation.groundNetName, !groundClass.isEmpty {
-            requiredClasses.insert(groundClass)
+        guard let document, let board = document.board else { return }
+        var requiredClasses: Set<String>
+        if isBoardSetupMode {
+            requiredClasses = Set(document.config.boardSetup.includedNetClasses.filter { !$0.isEmpty })
+        } else {
+            guard let simulation = selectedSimulation else { return }
+            requiredClasses = Set(simulation.involvedNets.compactMap { entry -> String? in
+                guard entry.kind == .netClass, let name = entry.netClass, !name.isEmpty else { return nil }
+                return name
+            })
+            if simulation.groundNetKind == .netClass,
+               let groundClass = simulation.groundNetName, !groundClass.isEmpty {
+                requiredClasses.insert(groundClass)
+            }
         }
         for netClass in requiredClasses
             where netsByNetClass[netClass] == nil && !resolvingActivityNetClasses.contains(netClass) {
@@ -2055,6 +2462,19 @@ final class WholeBoardViewController: NSViewController {
         configurationChanged()
     }
 
+    @objc private func pinLoadCapacitanceChanged() {
+        guard case let .pin(reference, number)? = selection?.kind,
+              let netName = selection?.netName, !netName.isEmpty,
+              let simulation = selectedSimulation
+        else { return }
+        // An empty or zero field clears it.
+        let value = (pinLoadCapacitanceField.objectValue as? NSNumber)?.doubleValue ?? 0
+        let entry = includeNetGeometryOnly(named: netName, in: simulation)
+        entry.setLoadCapacitance(value > 0 ? NSNumber(value: value) : nil, withFootprint: reference, pin: number)
+        pinLoadCapacitanceField.objectValue = value > 0 ? NSNumber(value: value) : nil
+        configurationChanged()
+    }
+
     // MARK: - Board context menu
 
     /// The board's right-click menu for a picked net or pin. Its items mirror the Info panel's
@@ -2062,6 +2482,7 @@ final class WholeBoardViewController: NSViewController {
     /// so the menu can never disagree with the panel or skip its differential-pair mirroring.
     /// `selection` is always the current one: GeometryView picks before asking for the menu.
     private func contextMenu(for selection: GeometrySelection) -> NSMenu? {
+        guard !isBoardSetupMode else { return nil }
         let menu = NSMenu()
         menu.autoenablesItems = false
         switch selection.kind {
@@ -2450,6 +2871,36 @@ final class WholeBoardViewController: NSViewController {
         }
     }
 
+    // MARK: - Find
+
+    /// Shows this board's Find panel (Edit > Find…).
+    func showFindPanel() {
+        let panel = findPanel ?? FindPanelController()
+        if findPanel == nil {
+            findPanel = panel
+            panel.onSelect = { [weak self] results in self?.selectFindResults(results) }
+            updateFindIndex()
+        }
+        panel.show(relativeTo: view.window)
+    }
+
+    private func updateFindIndex() {
+        findPanel?.index = BoardFindIndex(nets: NetNameFormatting.sortedForDisplay(allNetNames), footprints: allFootprints)
+    }
+
+    private func selectFindResults(_ results: [BoardFindResult]) {
+        var parts = SelectionParts()
+        for result in results {
+            switch result.kind {
+            case let .net(name): parts.formUnion(SelectionParts(nets: [name]))
+            case let .component(reference, _): parts.formUnion(SelectionParts(components: [reference]))
+            case let .pin(pin, _): parts.formUnion(SelectionParts(pins: [pin]))
+            }
+        }
+        guard let target = target(selecting: parts, origin: nil) else { return }
+        boardView.select(target)
+    }
+
     /// The pin mirroring `pin`: on the corresponding passive, the pin on the corresponding net (or
     /// on ground, for a pin on ground); on any other part (a connector carrying both halves, say),
     /// that same part's pin on the corresponding net.
@@ -2510,6 +2961,7 @@ final class WholeBoardViewController: NSViewController {
 
     func setSelectedSimulationIndex(_ index: Int?) {
         selectedSimulationIndex = index
+        simulationSetViewController.setSimulationIndex(index)
         updateConfigurationControls()
         refreshActivityHighlight()
     }
@@ -2525,6 +2977,7 @@ final class WholeBoardViewController: NSViewController {
         guard loadedForPath != kicadPcbPath else { return false }
         loadedForPath = kicadPcbPath
         stitchingViaPlanInputsKey = nil
+        if isBoardSetupMode { boardSetupViewController.refreshBoardData() }
         // References are only meaningful on the board they came from.
         unsupportedSimModelReasons = [:]
         simModelBranchPins = [:]
@@ -2579,10 +3032,12 @@ final class WholeBoardViewController: NSViewController {
             let detailedSignpost = signposter.beginInterval("Detailed board build")
             let detailed = try? board.wholeBoardPreview()
             let footprints = (try? board.footprints()) ?? []
+            let netNames = (try? board.allNets()) ?? []
             signposter.endInterval("Detailed board build", detailedSignpost)
             DispatchQueue.main.async {
                 defer { finished.leave() }
                 guard let self, self.loadedForPath == kicadPcbPath else { return }
+                self.allNetNames = netNames
                 self.allFootprints = footprints
                 self.updateSimModelReasons()
                 self.refreshActivityHighlight()
