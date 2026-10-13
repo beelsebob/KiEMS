@@ -1053,6 +1053,17 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
     _config.grid().setAbsorbingBoundaryCells(static_cast<std::int32_t>(value));
 }
 
+- (double)marginWidth {
+    return _config.grid().margin().xy();
+}
+- (void)setMarginWidth:(double)value {
+    _config.grid().margin().setXy(value);
+}
+- (double)suggestedMarginWidth {
+    const double start = _config.frequency().start();
+    return start > 0 ? kiems::Margin::suggested(start) : 0;
+}
+
 - (EMSSimulationBridge*)_wrapperForSimulationIndex:(NSInteger)index {
     EMSSimulationBridge* wrapper = [[EMSSimulationBridge alloc] init];
     wrapper->_parent = self;

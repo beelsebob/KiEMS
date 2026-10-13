@@ -250,7 +250,7 @@ final class NetListEditorView: NSView, NSTableViewDataSource, NSTableViewDelegat
 
 /// The bordered, pale-filled box behind NetListEditorView's list, modelled on Xcode's inspector
 /// lists (Target Membership).
-private final class ListBoxView: NSView {
+final class ListBoxView: NSView {
     // Explicit translucent colours rather than system ones: inside the vibrant glass panel,
     // tertiaryLabelColor/separatorColor resolve to opaque greys meant for vibrancy blending, which
     // land at the same shade as this fill and vanish. Both are lighter than the panel in either

@@ -446,6 +446,13 @@ typedef NS_ENUM(NSInteger, EMSEyeMaskStandard) {
 /// GridGenerator appends that many dedicated cells beyond the mesh, so changing it changes every
 /// simulation's geometry. Document-level, like gridDensity.
 @property (nonatomic) NSInteger absorbingBoundaryCells;
+/// The vacuum the mesh keeps between the board and the absorbing boundary in X and Y
+/// (kiems::Margin::xy()), in file-unit micrometers. Changes every simulation's geometry.
+/// Document-level, like gridDensity.
+@property (nonatomic) double marginWidth;
+/// A quarter of the vacuum wavelength at frequencyStart, in micrometers (kiems::Margin::suggested()):
+/// the rule-of-thumb margin, offered as a suggestion only. 0 without a positive start frequency.
+@property (nonatomic, readonly) double suggestedMarginWidth;
 
 /// Every copper layer's name, board-top to board-bottom, in the same 0-based order
 /// InvolvedNetConfig::plane()/PortConfig::plane() index into (substrate layers don't count towards

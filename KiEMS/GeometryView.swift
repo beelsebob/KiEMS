@@ -3703,7 +3703,7 @@ final class GeometryView: MTKView, MTKViewDelegate {
                 swatch.widthAnchor.constraint(equalToConstant: 10).isActive = true
                 swatch.heightAnchor.constraint(equalToConstant: 10).isActive = true
 
-                let label = NSTextField(labelWithString: "Grid: \(material.name)")
+                let label = NSTextField(labelWithString: material.name)
                 label.font = .systemFont(ofSize: 11)
                 label.textColor = .white
                 let row = NSStackView(views: [swatch, label])

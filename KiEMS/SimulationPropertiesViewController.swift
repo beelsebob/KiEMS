@@ -6,6 +6,13 @@ import Cocoa
 /// stay editable regardless (they're document-level, not per-simulation), but the rest disable
 /// themselves when nothing is selected.
 final class SimulationPropertiesViewController: NSViewController {
+    /// The Info panel chooses which part of this controller is visible.  Keeping the controls in
+    /// one controller means the Tests tab continues to edit the same simulation and notifications
+    /// as the Simulation tab.
+    enum DisplaySection {
+        case simulation
+        case tests
+    }
     private static let formFont = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
     private weak var document: Document?
     private var selectedIndex: Int?
@@ -59,6 +66,9 @@ final class SimulationPropertiesViewController: NSViewController {
     // The absorbing boundary's depth in cells on every face -- document-level like gridDensityField, and
     // like it changes every simulation's geometry (the grid gains that many cells on each side).
     private let absorbingBoundaryField = NSTextField(string: "")
+    // The vacuum between the board and the absorbing boundary in X/Y -- document-level and
+    // geometry-changing like gridDensityField. Its tooltip carries the quarter-wavelength suggestion.
+    private let marginWidthField = NSTextField(string: "")
     private let maxTimestepValueLabel = NSTextField(labelWithString: "")
     private let simulationRealTimeValueLabel = NSTextField(labelWithString: "")
     private let viaEdgeDistanceField = NSTextField(string: "")
@@ -82,6 +92,7 @@ final class SimulationPropertiesViewController: NSViewController {
     // per-instance state (see MicrometerValueFormatter), so sharing one across fields would make
     // them all switch units together whenever any single field's unit changed.
     private let gridDensityFormatter = MicrometerValueFormatter()
+    private let marginWidthFormatter = MicrometerValueFormatter()
     private let viaEdgeDistanceFormatter = MicrometerValueFormatter()
     private let viaSpacingFormatter = MicrometerValueFormatter()
     private let platingThicknessFormatter = MicrometerValueFormatter()
@@ -127,6 +138,8 @@ final class SimulationPropertiesViewController: NSViewController {
 
     private var groundNetClassNames: [String] = []
     private var groundNetNames: [String] = []
+    private var simulationSettingsStack: NSStackView?
+    private var testsStack: NSStackView?
 
 
     init(document: Document) {
@@ -151,9 +164,9 @@ final class SimulationPropertiesViewController: NSViewController {
     private static let labelWidth: CGFloat = 95
 
     private func labeled(_ title: String, _ control: NSView) -> NSStackView {
-        let label = NSTextField(labelWithString: title)
-        label.font = Self.formFont
-        label.textColor = .labelColor
+        let label = NSTextField(labelWithString: title.hasSuffix(":") ? String(title.dropLast()) : title)
+        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        label.textColor = .white
         label.alignment = .right
         label.lineBreakMode = .byWordWrapping
         label.maximumNumberOfLines = 2
@@ -171,9 +184,9 @@ final class SimulationPropertiesViewController: NSViewController {
     /// Like labeled(), but with the title above the control rather than beside it, and the control
     /// spanning the panel's full width -- for lists, which are too cramped next to a label column.
     private func stacked(_ title: String, _ control: NSView) -> NSStackView {
-        let label = NSTextField(labelWithString: title)
-        label.font = Self.formFont
-        label.textColor = .labelColor
+        let label = NSTextField(labelWithString: title.hasSuffix(":") ? String(title.dropLast()) : title)
+        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        label.textColor = .white
         let column = NSStackView(views: [label, control])
         column.orientation = .vertical
         column.alignment = .leading
@@ -183,19 +196,16 @@ final class SimulationPropertiesViewController: NSViewController {
     }
 
     private func section(_ title: String, views: [NSView]) -> NSStackView {
-        let separator = NSBox()
-        separator.boxType = .separator
         let heading = NSTextField(labelWithString: title)
-        heading.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+        heading.font = .systemFont(ofSize: 12, weight: .semibold)
         heading.textColor = .secondaryLabelColor
 
-        let section = NSStackView(views: [separator, heading] + views)
+        let section = NSStackView(views: [heading] + views)
         section.orientation = .vertical
         section.alignment = .leading
         section.spacing = 6
-        section.setCustomSpacing(8, after: separator)
-        section.setCustomSpacing(10, after: heading)
-        separator.widthAnchor.constraint(equalTo: section.widthAnchor).isActive = true
+        section.setCustomSpacing(8, after: heading)
+        heading.widthAnchor.constraint(equalTo: section.widthAnchor).isActive = true
         for view in views {
             view.widthAnchor.constraint(equalTo: section.widthAnchor).isActive = true
         }
@@ -231,10 +241,12 @@ final class SimulationPropertiesViewController: NSViewController {
         maxStepsField.formatter = maxStepsFormatter
         gridDensityField.formatter = gridDensityFormatter
         absorbingBoundaryField.formatter = absorbingBoundaryFormatter
+        marginWidthField.formatter = marginWidthFormatter
 
         for field in [viaEdgeDistanceField, viaSpacingField, platingThicknessField,
                       fillingEpsilonField, frequencyStartField, frequencyStopField, maxStepsField,
-                      gridDensityField, absorbingBoundaryField, excitationDurationField, eyeDrawCountField] {
+                      gridDensityField, absorbingBoundaryField, marginWidthField, excitationDurationField,
+                      eyeDrawCountField] {
             field.controlSize = .small
             field.font = Self.formFont
             field.alignment = .right
@@ -279,6 +291,7 @@ final class SimulationPropertiesViewController: NSViewController {
         let resolutionSection = section("Resolution", views: [
                 labeled("Min Resolution:", gridDensityField),
                 labeled("Absorbing Boundary (cells):", absorbingBoundaryField),
+                labeled("Margin Width:", marginWidthField),
                 labeled("Timestep Length:", maxTimestepValueLabel),
                 labeled("Max Timesteps:", maxStepsField),
                 labeled("Sim Real Time:", simulationRealTimeValueLabel),
@@ -294,27 +307,47 @@ final class SimulationPropertiesViewController: NSViewController {
                 self.onResultsParametersChanged?(selectedIndex)
             }
         }
-        let testsSection = section("Tests", views: [eyeTestSection])
-        let topLevelViews = [nameRow, networksSection, geometrySection, resolutionSection, testsSection]
-        let stack = NSStackView(views: topLevelViews)
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 14
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        for view in topLevelViews {
-            view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        let simulationViews = [nameRow, networksSection, geometrySection, resolutionSection]
+        let simulationStack = NSStackView(views: simulationViews)
+        simulationStack.orientation = .vertical
+        simulationStack.alignment = .leading
+        simulationStack.spacing = 14
+        simulationStack.translatesAutoresizingMaskIntoConstraints = false
+        for view in simulationViews {
+            view.widthAnchor.constraint(equalTo: simulationStack.widthAnchor).isActive = true
         }
+        simulationSettingsStack = simulationStack
 
-        view.addSubview(stack)
-        // Pinned to all four edges, not just leading/top -- view (a plain NSView with no intrinsic
-        // content size of its own) needs its size fully determined by stack's, or it collapses to
-        // zero when arranged as a subview inside WholeBoardViewController's info column.
+        let tests = NSStackView(views: [eyeTestSection])
+        tests.orientation = .vertical
+        tests.alignment = .leading
+        tests.translatesAutoresizingMaskIntoConstraints = false
+        eyeTestSection.widthAnchor.constraint(equalTo: tests.widthAnchor).isActive = true
+        testsStack = tests
+        tests.isHidden = true
+
+        // An outer stack gives this view a fitting height for whichever tab is visible. Hidden
+        // arranged subviews are removed from that calculation, avoiding a Tests panel that keeps
+        // the much taller Simulation panel's empty space.
+        let content = NSStackView(views: [simulationStack, tests])
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 0
+        content.translatesAutoresizingMaskIntoConstraints = false
+        simulationStack.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+        tests.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+        view.addSubview(content)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 4),
-            stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -4),
+            content.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            content.topAnchor.constraint(equalTo: view.topAnchor, constant: 4),
+            content.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -4),
         ])
+    }
+
+    func setDisplaySection(_ section: DisplaySection) {
+        simulationSettingsStack?.isHidden = section == .tests
+        testsStack?.isHidden = section == .simulation
     }
 
     private static let plainNumberFormatter: NumberFormatter = {
@@ -367,7 +400,9 @@ final class SimulationPropertiesViewController: NSViewController {
         maxStepsField.integerValue = document.config.maxSteps
         gridDensityField.doubleValue = document.config.gridDensity
         absorbingBoundaryField.integerValue = document.config.absorbingBoundaryCells
+        marginWidthField.doubleValue = document.config.marginWidth
         updateDerivedTimingLabels()
+        updateMarginWidthToolTip()
 
         guard let sim = selectedSimulation else {
             nameField.stringValue = ""
@@ -616,6 +651,12 @@ final class SimulationPropertiesViewController: NSViewController {
             // Document-level and geometry-changing, exactly like gridDensityField.
             document.config.absorbingBoundaryCells = sender.integerValue
             affectsAllGeometry = true
+        case marginWidthField:
+            reason = "Margin width changed"
+            // Document-level and geometry-changing, exactly like gridDensityField.
+            document.config.marginWidth = max(0, sender.doubleValue)
+            sender.doubleValue = document.config.marginWidth
+            affectsAllGeometry = true
         default: break
         }
         document.updateChangeCount(.changeDone)
@@ -633,6 +674,20 @@ final class SimulationPropertiesViewController: NSViewController {
             onResultsParametersChanged?(selectedIndex)
         }
         updateDerivedTimingLabels()
+        updateMarginWidthToolTip()
+    }
+
+    /// The margin's rule-of-thumb value -- a quarter of the vacuum wavelength at the start frequency
+    /// -- offered as a suggestion only: for a board's signal integrity the absorber only needs to
+    /// clear the fringing fields, so a few millimetres is usually enough.
+    private func updateMarginWidthToolTip() {
+        let base = "Vacuum between the board and the absorbing boundary in X and Y."
+        guard let suggested = document?.config.suggestedMarginWidth, suggested > 0,
+              let text = marginWidthFormatter.string(for: suggested) else {
+            marginWidthField.toolTip = base
+            return
+        }
+        marginWidthField.toolTip = base + " A quarter of the vacuum wavelength at the start frequency would be \(text)."
     }
 
     private static let speedOfLightMetersPerSecond = 299_792_458.0

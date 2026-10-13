@@ -1036,31 +1036,27 @@ struct MaterialGridBuffers {
 
 class GridMaterialColors {
 public:
-    explicit GridMaterialColors(const EMSConfig& config) : _substrates(config.getSubstrates()) {}
-
     PackedGridColor color(CSProperties* property, bool inPML) {
-        if (inPML) return remember("PML", {0.85f, 0.25f, 0.85f, 1.0f});
-        if (property == nullptr) return remember("Vacuum", {0.62f, 0.67f, 0.72f, 1.0f});
+        if (inPML) return remember("PML", {0.62f, 0.80f, 0.95f, 1.0f});
+        if (property == nullptr) return remember("Vacuum", {0.80f, 0.80f, 0.80f, 1.0f});
 
         const std::string name = property->GetName();
+        // The termination sheets and substrate layers are implementation details of the
+        // simulation.  Show each as one stable, user-facing grid category instead of one
+        // legend entry per physical layer or termination instance.
+        constexpr std::string_view edgeTerminationPrefix = "EdgeTermination_";
+        if (name.rfind(edgeTerminationPrefix, 0) == 0)
+            return remember("Edge Termination", {0.72f, 0.52f, 0.35f, 1.0f});
         if ((property->GetType() & CSProperties::METAL) != 0)
-            return remember("Copper / PEC", {1.0f, 0.56f, 0.12f, 1.0f});
+            return remember("Copper / PEC", {1.0f, 0.89f, 0.45f, 1.0f});
         if (name == "SolderMaskTop" || name == "SolderMaskBottom")
             return remember("Solder mask", {0.1f, 0.78f, 0.32f, 1.0f});
-        if (name == "NPTHVoid") return remember("Vacuum / opening", {0.78f, 0.80f, 0.84f, 1.0f});
+        if (name == "NPTHVoid") return remember("Vacuum", {0.80f, 0.80f, 0.80f, 1.0f});
         if (name == "ViaFilling") return remember("Via filling", {0.0f, 0.50f, 0.50f, 1.0f});
 
         constexpr std::string_view prefix = "Substrate_";
         if (name.rfind(prefix, 0) == 0) {
-            std::size_t index = 0;
-            try { index = static_cast<std::size_t>(std::stoul(name.substr(prefix.size()))); } catch (...) {}
-            static constexpr std::array<PackedGridColor, 6> palette = {{
-                {0.18f, 0.52f, 0.95f, 1.0f}, {0.16f, 0.72f, 0.86f, 1.0f},
-                {0.28f, 0.42f, 0.82f, 1.0f}, {0.20f, 0.66f, 0.62f, 1.0f},
-                {0.42f, 0.48f, 0.92f, 1.0f}, {0.20f, 0.58f, 0.76f, 1.0f},
-            }};
-            const std::string displayName = index < _substrates.size() ? _substrates[index].name() : name;
-            return remember(displayName, palette[index % palette.size()]);
+            return remember("Dielectric", {0.55f, 0.82f, 0.63f, 1.0f});
         }
         return remember(name, {0.92f, 0.72f, 0.22f, 1.0f});
     }
@@ -1081,7 +1077,6 @@ private:
         return color;
     }
 
-    std::vector<kiems::LayerConfig> _substrates;
     std::unordered_set<std::string> _seen;
     std::vector<std::pair<std::string, PackedGridColor>> _legend;
 };
@@ -1249,7 +1244,7 @@ MaterialGridBuffers buildMaterialGrid(const SlicedBoard& sliced, const Simulatio
     const copper::CopperDomainMask domain =
         copper::buildDomainMask(grid.x, grid.y, domainConfig, static_cast<std::uint32_t>(pmlDepth));
 
-    GridMaterialColors colors(config);
+    GridMaterialColors colors;
     MaterialGridBuffers result;
     const double fixedX = grid.x[midpointLineIndex(grid.x)];
     const double fixedY = grid.y[midpointLineIndex(grid.y)];

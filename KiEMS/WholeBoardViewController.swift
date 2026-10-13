@@ -32,9 +32,18 @@ final class WholeBoardViewController: NSViewController {
     private let simulationSetViewController: SimulationSetViewController
     private let boardView = GeometryView()
     private let detailFont = NSFont.systemFont(ofSize: 13)
+    private let selectionHeadingFont = NSFont.systemFont(ofSize: 12, weight: .semibold)
     private let selectedNetView = NetNameView()
     private let selectedNetClassView = NetNameView()
     private let infoTitle = NSTextField(labelWithString: "Info")
+    private let infoHeader = NSView()
+    private let infoTabs = NSSegmentedControl()
+    private enum InfoTab: Int {
+        case simulation
+        case tests
+        case selection
+    }
+    private var selectedInfoTab: InfoTab = .simulation
     private let pinHeading = NSTextField(labelWithString: "")
     /// Shown for a selected passive component -- reference is already in pinHeading, this adds its
     /// Value field text. An unreadable value is called out in componentModelErrorBox.
@@ -223,21 +232,44 @@ final class WholeBoardViewController: NSViewController {
         separator.translatesAutoresizingMaskIntoConstraints = false
         infoPanel.addSubview(separator)
 
-        infoTitle.font = .systemFont(ofSize: 16, weight: .semibold)
-
-        selectedNetView.configure(name: "No net selected", font: detailFont)
-        selectedNetClassView.configure(name: "Loading…", font: detailFont)
-
-        for heading in [pinHeading, netHeadingPrefix, netClassHeadingPrefix] {
-            heading.font = .systemFont(ofSize: 13, weight: .semibold)
+        infoTitle.font = .systemFont(ofSize: 12, weight: .semibold)
+        infoTitle.textColor = .secondaryLabelColor
+        infoTitle.translatesAutoresizingMaskIntoConstraints = false
+        infoHeader.addSubview(infoTitle)
+        NSLayoutConstraint.activate([
+            infoHeader.heightAnchor.constraint(equalToConstant: 20),
+            infoTitle.leadingAnchor.constraint(equalTo: infoHeader.leadingAnchor, constant: 4),
+            infoTitle.centerYAnchor.constraint(equalTo: infoHeader.centerYAnchor),
+        ])
+        infoTabs.segmentCount = 3
+        let tabImages = ["waveform.path.ecg", "checklist", "cursorarrow"]
+        let tabLabels = ["Simulation", "Tests", "Selection"]
+        for (index, symbolName) in tabImages.enumerated() {
+            infoTabs.setImage(NSImage(systemSymbolName: symbolName,
+                                      accessibilityDescription: tabLabels[index]), forSegment: index)
+            infoTabs.setToolTip(tabLabels[index], forSegment: index)
         }
+        infoTabs.selectedSegment = InfoTab.simulation.rawValue
+        infoTabs.controlSize = .small
+        infoTabs.target = self
+        infoTabs.action = #selector(infoTabChanged)
+        infoTabs.translatesAutoresizingMaskIntoConstraints = false
+        infoPanel.addSubview(infoTabs)
+
+        selectedNetView.configure(name: "No net selected", font: selectionHeadingFont)
+        selectedNetClassView.configure(name: "Loading…", font: selectionHeadingFont)
+
+        pinHeading.font = .systemFont(ofSize: 13, weight: .semibold)
+        netHeadingPrefix.font = selectionHeadingFont
+        netClassHeadingPrefix.font = selectionHeadingFont
         componentValueLabel.font = detailFont
         componentValueLabel.isHidden = true
         let componentHullRow = NSStackView(views: [componentHullCheckbox, componentHullPaddingField])
         componentHullRow.orientation = .horizontal
         componentHullRow.alignment = .centerY
         componentHullRow.spacing = 6
-        configureControlStack(componentControls, views: [componentIncludedCheckbox, componentHullRow])
+        configureControlStack(componentControls, views: [alignedCheckbox(componentIncludedCheckbox),
+                                                         alignedCheckbox(componentHullRow)])
         componentControls.isHidden = true
         for checkbox in [componentIncludedCheckbox, componentHullCheckbox] {
             checkbox.controlSize = .small
@@ -268,7 +300,8 @@ final class WholeBoardViewController: NSViewController {
         netClassHullContributionRow.orientation = .horizontal
         netClassHullContributionRow.alignment = .centerY
         netClassHullContributionRow.spacing = 6
-        configureControlStack(netControls, views: [includedCheckbox, hullContributionRow, impedanceProbedCheckbox])
+        configureControlStack(netControls, views: [includedCheckbox, hullContributionRow,
+                                                   impedanceProbedCheckbox])
         configureControlStack(netClassControls,
                               views: [netClassIncludedCheckbox, netClassHullContributionRow,
                                       netClassImpedanceProbedCheckbox])
@@ -343,7 +376,8 @@ final class WholeBoardViewController: NSViewController {
         pinLoadCapacitanceRow.edgeInsets = NSEdgeInsets(top: 2, left: 16, bottom: 0, right: 0)
 
         configureControlStack(pinControls,
-                              views: [excitedCheckbox, excitationControls, probedCheckbox, absorbingCheckbox,
+                              views: [alignedCheckbox(excitedCheckbox), excitationControls,
+                                      alignedCheckbox(probedCheckbox), alignedCheckbox(absorbingCheckbox),
                                       pinImpedanceRow, pinLoadCapacitanceRow])
         includedCheckbox.target = self
         includedCheckbox.action = #selector(includedToggled)
@@ -378,14 +412,14 @@ final class WholeBoardViewController: NSViewController {
         absorbingCheckbox.target = self
         absorbingCheckbox.action = #selector(absorbingToggled)
 
-        let infoStack = NSStackView(views: [infoTitle, pinHeading, componentValueLabel, componentControls,
+        let infoStack = NSStackView(views: [infoHeader, pinHeading, componentValueLabel, componentControls,
                                             componentModelErrorBox, pinControls, pinSeparator,
                                             netHeading, netControls, netSeparator,
                                             netClassHeading, netClassControls])
         infoStack.orientation = .vertical
         infoStack.alignment = .leading
         infoStack.spacing = 6
-        infoStack.setCustomSpacing(16, after: infoTitle)
+        infoStack.setCustomSpacing(8, after: infoHeader)
         infoStack.setCustomSpacing(4, after: pinHeading)
         infoStack.setCustomSpacing(10, after: componentValueLabel)
         infoStack.setCustomSpacing(14, after: componentControls)
@@ -415,7 +449,12 @@ final class WholeBoardViewController: NSViewController {
         boardView.onSelectionChanged = { [weak self] selection in
             guard let self else { return }
             self.selection = selection
-            self.selectedNetView.configure(name: selection?.netName ?? "No net selected", font: self.detailFont)
+            if selection != nil {
+                self.selectInfoTab(.selection)
+            } else if self.selectedInfoTab == .selection {
+                self.selectInfoTab(.simulation)
+            }
+            self.selectedNetView.configure(name: selection?.netName ?? "No net selected", font: self.selectionHeadingFont)
             self.resolveNetClassForSelection()
             self.updateConfigurationControls()
         }
@@ -438,9 +477,14 @@ final class WholeBoardViewController: NSViewController {
             separator.bottomAnchor.constraint(equalTo: infoPanel.bottomAnchor),
             separator.widthAnchor.constraint(equalToConstant: 1),
 
-            infoStack.topAnchor.constraint(equalTo: infoPanel.topAnchor, constant: 16),
+            infoTabs.topAnchor.constraint(equalTo: infoPanel.topAnchor, constant: 12),
+            infoTabs.leadingAnchor.constraint(equalTo: infoPanel.leadingAnchor, constant: 10),
+            infoTabs.trailingAnchor.constraint(equalTo: infoPanel.trailingAnchor, constant: -10),
+
+            infoStack.topAnchor.constraint(equalTo: infoTabs.bottomAnchor, constant: 12),
             infoStack.leadingAnchor.constraint(equalTo: infoPanel.leadingAnchor, constant: 10),
             infoStack.trailingAnchor.constraint(equalTo: infoPanel.trailingAnchor, constant: -10),
+            infoHeader.widthAnchor.constraint(equalTo: infoStack.widthAnchor),
             pinSeparator.widthAnchor.constraint(equalTo: infoStack.widthAnchor),
             componentModelErrorBox.widthAnchor.constraint(equalTo: infoStack.widthAnchor),
             netSeparator.widthAnchor.constraint(equalTo: infoStack.widthAnchor),
@@ -479,6 +523,17 @@ final class WholeBoardViewController: NSViewController {
         view = container
     }
 
+    @objc private func infoTabChanged(_ sender: NSSegmentedControl) {
+        guard let tab = InfoTab(rawValue: sender.selectedSegment) else { return }
+        selectedInfoTab = tab
+        updateConfigurationControls()
+    }
+
+    private func selectInfoTab(_ tab: InfoTab) {
+        selectedInfoTab = tab
+        infoTabs.selectedSegment = tab.rawValue
+    }
+
     private func configureControlStack(_ stack: NSStackView, views: [NSView]) {
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -486,6 +541,18 @@ final class WholeBoardViewController: NSViewController {
         for view in views {
             stack.addArrangedSubview(view)
         }
+    }
+
+    /// Selection checkboxes have no textual field label of their own, but line up with the input
+    /// column used by the labelled controls in this narrow inspector.
+    private func alignedCheckbox(_ control: NSView) -> NSStackView {
+        let spacer = NSView()
+        spacer.widthAnchor.constraint(equalToConstant: 98).isActive = true
+        let row = NSStackView(views: [spacer, control])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 0
+        return row
     }
 
     private func configureHeadingStack(_ stack: NSStackView, views: [NSView]) {
@@ -506,9 +573,10 @@ final class WholeBoardViewController: NSViewController {
     }()
 
     private func excitationValueRow(title: String, field: NSControl) -> NSStackView {
-        let label = NSTextField(labelWithString: title)
-        label.font = Self.formFont
-        label.textColor = .secondaryLabelColor
+        let label = NSTextField(labelWithString: title.hasSuffix(":") ? String(title.dropLast()) : title)
+        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        label.textColor = .white
+        label.alignment = .right
         label.lineBreakMode = .byWordWrapping
         label.maximumNumberOfLines = 2
         label.cell?.wraps = true
@@ -1299,6 +1367,7 @@ final class WholeBoardViewController: NSViewController {
     }
 
     private func updateBoardSetupControls() {
+        infoTabs.isHidden = true
         for view in [pinHeading, componentValueLabel, componentControls, componentModelErrorBox, pinControls,
                      pinSeparator, netHeading, netControls, netSeparator, netClassHeading, netClassControls] {
             view.isHidden = true
@@ -1308,10 +1377,12 @@ final class WholeBoardViewController: NSViewController {
         boardSetupViewController.view.isHidden = false
         guard let selection else {
             infoTitle.stringValue = "Board"
+            infoHeader.isHidden = false
             boardSetupViewController.setTarget(nil)
             return
         }
-        infoTitle.stringValue = "Info"
+        infoTitle.stringValue = ""
+        infoHeader.isHidden = true
         var target = BoardSetupViewController.Target()
         switch selection.kind {
         case .net, .pin:
@@ -1371,6 +1442,30 @@ final class WholeBoardViewController: NSViewController {
         boardSetupViewController.view.isHidden = true
         simulationSetViewController.view.isHidden = true
         let hasSimulation = selectedSimulation != nil
+        let isSimulationSet = selectedSimulation?.simulationSet != nil
+        infoTabs.isHidden = false
+        infoTabs.setEnabled(selection != nil, forSegment: InfoTab.selection.rawValue)
+
+        // The Simulation and Tests tabs deliberately stay available when an object is selected;
+        // this lets someone adjust simulation-wide settings without losing their board selection.
+        if selectedInfoTab != .selection {
+            for view in [pinHeading, componentValueLabel, componentControls, componentModelErrorBox, pinControls,
+                         pinSeparator, netHeading, netControls, netSeparator, netClassHeading, netClassControls] {
+                view.isHidden = true
+            }
+            infoTitle.stringValue = selectedInfoTab == .simulation ? "Simulation" : "Tests"
+            infoHeader.isHidden = false
+            let section: SimulationPropertiesViewController.DisplaySection =
+                selectedInfoTab == .simulation ? .simulation : .tests
+            propertiesViewController.view.isHidden = isSimulationSet
+            simulationSetViewController.view.isHidden = !isSimulationSet
+            if isSimulationSet {
+                simulationSetViewController.setDisplaySection(section)
+            } else {
+                propertiesViewController.setDisplaySection(section)
+            }
+            return
+        }
         includedCheckbox.isEnabled = false
         simulatedCheckbox.isEnabled = false
         hullPaddingField.isEnabled = false
@@ -1406,11 +1501,8 @@ final class WholeBoardViewController: NSViewController {
         componentModelErrorBox.isHidden = true
 
         guard let selection else {
-            // Nothing picked on the board -- show this simulation's own settings instead of net/pin
-            // info, the same panel (reparented, not reimplemented -- see this class's own doc
-            // comment) that used to sit permanently above the old source list.
-            let isSimulationSet = selectedSimulation?.simulationSet != nil
-            infoTitle.stringValue = isSimulationSet ? "Simulation Set" : "Simulation"
+            infoTitle.stringValue = ""
+            infoHeader.isHidden = true
             pinHeading.isHidden = true
             pinSeparator.isHidden = true
             netHeading.isHidden = true
@@ -1420,12 +1512,13 @@ final class WholeBoardViewController: NSViewController {
             netClassControls.isHidden = true
             pinControls.isHidden = true
             componentValueLabel.isHidden = true
-            propertiesViewController.view.isHidden = isSimulationSet
-            simulationSetViewController.view.isHidden = !isSimulationSet
+            propertiesViewController.view.isHidden = true
+            simulationSetViewController.view.isHidden = true
             return
         }
 
-        infoTitle.stringValue = "Info"
+        infoTitle.stringValue = ""
+        infoHeader.isHidden = true
         propertiesViewController.view.isHidden = true
 
         // A picked component (see PickTarget.component's own doc comment) has no single net of
@@ -1466,9 +1559,9 @@ final class WholeBoardViewController: NSViewController {
             return
         }
         if selectionHasMultipleNets {
-            selectedNetView.configure(name: "<Multiple>", font: detailFont, color: .labelColor)
+            selectedNetView.configure(name: "<Multiple>", font: selectionHeadingFont, color: .labelColor)
         } else {
-            selectedNetView.configure(name: netName.isEmpty ? "No net" : netName, font: detailFont,
+            selectedNetView.configure(name: netName.isEmpty ? "No net" : netName, font: selectionHeadingFont,
                                       color: netName.isEmpty ? .secondaryLabelColor : .labelColor)
         }
         includedCheckbox.isEnabled = hasSimulation && !netName.isEmpty
@@ -1490,7 +1583,7 @@ final class WholeBoardViewController: NSViewController {
         } else {
             netClassDisplayName = selectedNetClassIsMultiple ? "<Multiple>" : selectedNetClassName ?? "No net class"
         }
-        selectedNetClassView.configure(name: netClassDisplayName, font: detailFont,
+        selectedNetClassView.configure(name: netClassDisplayName, font: selectionHeadingFont,
                                        color: selectedNetClassName == nil && !selectedNetClassIsMultiple
                                            ? .secondaryLabelColor : .labelColor)
         if let simulation = selectedSimulation, let netClassName = selectedNetClassName,
@@ -1638,6 +1731,12 @@ final class WholeBoardViewController: NSViewController {
         updateConfigurationControls()
         refreshActivityHighlight()
         onConfigurationChanged?()
+        // A Simulation Set's generated simulations are copies of its template, so a board edit to
+        // the template (a net, net class or component contributing to the hull, a pin's ports...)
+        // only reaches them by regenerating them, as an edit in the Simulation Set panel does.
+        if let selectedSimulationIndex, selectedSimulation?.simulationSet != nil {
+            onSimulationSetChanged?(selectedSimulationIndex)
+        }
     }
 
     /// Every included net (subtle flash) and, among those, every real excitation and passive
@@ -2972,6 +3071,9 @@ final class WholeBoardViewController: NSViewController {
 
     func setSelectedSimulationIndex(_ index: Int?) {
         selectedSimulationIndex = index
+        // Entering a simulation starts on its simulation-wide settings, unless a board item is
+        // already selected, in which case that item's controls remain frontmost.
+        selectInfoTab(selection == nil ? .simulation : .selection)
         simulationSetViewController.setSimulationIndex(index)
         updateConfigurationControls()
         refreshActivityHighlight()

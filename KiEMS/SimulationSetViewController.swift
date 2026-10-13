@@ -22,6 +22,7 @@ final class SimulationSetViewController: NSViewController {
     var onEyeTestChanged: (() -> Void)?
 
     private let stack = NSStackView()
+    private let testsStack = NSStackView()
     private let excitationComboBox = NSComboBox()
     private let netSelectionModePopup = NSPopUpButton()
     private let patternField = NSTextField(string: "")
@@ -129,7 +130,7 @@ final class SimulationSetViewController: NSViewController {
         absorbingRows = [loadImpedanceRow, loadCapacitanceRow]
         patternRow = row("Net Name Pattern:", patternField)
         netNamesRow = stacked("Nets to Simulate:", netNamesList)
-        additionalPatternsRow = row("Additional Net Patterns:", additionalPatternsTable)
+        additionalPatternsRow = stacked("Additional Net Patterns:", additionalPatternsTable)
         let rows: [NSView] = [
             row("Excitation IC:", excitationComboBox),
             row("Net Selection:", netSelectionModePopup),
@@ -139,9 +140,9 @@ final class SimulationSetViewController: NSViewController {
             row("Phase:", phaseField, indent: Self.indent),
             row("Amplitude:", amplitudeField, indent: Self.indent),
             row("Drive Impedance:", driveImpedanceField, indent: Self.indent),
-            probedCheckbox,
-            probeNetImpedanceCheckbox,
-            absorbingCheckbox,
+            row("", probedCheckbox),
+            row("", probeNetImpedanceCheckbox),
+            row("", absorbingCheckbox),
             loadImpedanceRow,
             loadCapacitanceRow,
             separator(),
@@ -157,24 +158,27 @@ final class SimulationSetViewController: NSViewController {
         }
         stack.setCustomSpacing(12, after: rows[rows.count - 3])
 
-        let testsHeading = NSTextField(labelWithString: "Tests")
-        testsHeading.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
         eyeTestSection.onChange = { [weak self] in self?.onEyeTestChanged?() }
-        for view in [separator(), testsHeading, eyeTestSection] {
-            stack.addArrangedSubview(view)
-            if view !== testsHeading {
-                view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-            }
-        }
-        stack.setCustomSpacing(12, after: summaryLabel)
+        testsStack.orientation = .vertical
+        testsStack.alignment = .leading
+        testsStack.addArrangedSubview(eyeTestSection)
+        eyeTestSection.widthAnchor.constraint(equalTo: testsStack.widthAnchor).isActive = true
+        testsStack.isHidden = true
 
         let container = NSView()
-        container.addSubview(stack)
+        let content = NSStackView(views: [stack, testsStack])
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 0
+        content.translatesAutoresizingMaskIntoConstraints = false
+        stack.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+        testsStack.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+        container.addSubview(content)
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: container.topAnchor),
-            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            content.topAnchor.constraint(equalTo: container.topAnchor),
+            content.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            content.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
         view = container
         reload()
@@ -185,6 +189,11 @@ final class SimulationSetViewController: NSViewController {
     func setSimulationIndex(_ index: Int?) {
         simulationIndex = index
         reload()
+    }
+
+    func setDisplaySection(_ section: SimulationPropertiesViewController.DisplaySection) {
+        stack.isHidden = section == .tests
+        testsStack.isHidden = section == .simulation
     }
 
     /// The board's footprints -- the IC choices, and what the summary counts matches against.
@@ -395,9 +404,10 @@ final class SimulationSetViewController: NSViewController {
     }
 
     fileprivate func row(_ title: String, _ control: NSView, indent: CGFloat = 0) -> NSStackView {
-        let label = NSTextField(labelWithString: title)
-        label.font = Self.formFont
-        label.textColor = .secondaryLabelColor
+        let label = NSTextField(labelWithString: title.hasSuffix(":") ? String(title.dropLast()) : title)
+        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        label.textColor = .white
+        label.alignment = .right
         label.lineBreakMode = .byWordWrapping
         label.maximumNumberOfLines = 2
         label.cell?.wraps = true
@@ -414,9 +424,9 @@ final class SimulationSetViewController: NSViewController {
     /// A full-width list needs its title above it, matching the layout used by the other
     /// Target Membership-style net editors in the app.
     fileprivate func stacked(_ title: String, _ control: NSView) -> NSStackView {
-        let label = NSTextField(labelWithString: title)
-        label.font = Self.formFont
-        label.textColor = .secondaryLabelColor
+        let label = NSTextField(labelWithString: title.hasSuffix(":") ? String(title.dropLast()) : title)
+        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        label.textColor = .white
         let column = NSStackView(views: [label, control])
         column.orientation = .vertical
         column.alignment = .leading
@@ -480,12 +490,11 @@ private final class ProbeSectionView: NSStackView {
         let loadImpedanceRow = owner.row("Load Impedance:", loadImpedanceField, indent: 16)
         let loadCapacitanceRow = owner.row("Load Capacitance:", loadCapacitanceField, indent: 16)
         absorbingRows = [loadImpedanceRow, loadCapacitanceRow]
+        let absorbingRow = owner.row("", absorbingCheckbox)
         for view in [headingRow, owner.row("Probed Component:", footprintComboBox),
-                     absorbingCheckbox, loadImpedanceRow, loadCapacitanceRow, owner.separator()] {
+                     absorbingRow, loadImpedanceRow, loadCapacitanceRow, owner.separator()] {
             addArrangedSubview(view)
-            if view !== absorbingCheckbox {
-                view.widthAnchor.constraint(equalTo: widthAnchor).isActive = true
-            }
+            view.widthAnchor.constraint(equalTo: widthAnchor).isActive = true
         }
     }
 
@@ -530,17 +539,19 @@ private final class RegexPatternTableView: NSView, NSTableViewDataSource, NSTabl
         didSet {
             guard patterns != oldValue else { return }
             tableView.reloadData()
+            updateControls()
         }
     }
 
     private let tableView = NSTableView()
-    private let addButton = NSButton(image: NSImage(systemSymbolName: "plus", accessibilityDescription: "Add pattern")!,
-                                     target: nil, action: nil)
-    private let removeButton = NSButton(image: NSImage(systemSymbolName: "minus", accessibilityDescription: "Remove pattern")!,
-                                        target: nil, action: nil)
+    private let scrollView = NSScrollView()
+    private let addButton = NSButton()
+    private let removeButton = NSButton()
+    private let editButton = NSButton()
+    private let emptyLabel = NSTextField(labelWithString: "No Patterns")
     private let placeholder: String
 
-    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: 78) }
+    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: 98) }
 
     init(title: String = "", placeholder: String = "e.g. DDR_BA$1") {
         self.placeholder = placeholder
@@ -549,47 +560,98 @@ private final class RegexPatternTableView: NSView, NSTableViewDataSource, NSTabl
         column.title = title
         tableView.addTableColumn(column)
         if title.isEmpty { tableView.headerView = nil }
-        tableView.rowHeight = 22
-        tableView.usesAlternatingRowBackgroundColors = true
+        tableView.rowHeight = 24
+        tableView.intercellSpacing = NSSize(width: 0, height: 0)
+        tableView.style = .plain
+        tableView.backgroundColor = .clear
         tableView.delegate = self
         tableView.dataSource = self
-        tableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        tableView.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
 
-        let scrollView = NSScrollView()
-        scrollView.borderType = .bezelBorder
         scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
         scrollView.documentView = tableView
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
+        scrollView.contentView.drawsBackground = false
+        scrollView.automaticallyAdjustsContentInsets = false
+        scrollView.contentInsets = NSEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
         scrollView.translatesAutoresizingMaskIntoConstraints = false
 
-        for button in [addButton, removeButton] {
+        emptyLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
+        emptyLabel.textColor = .secondaryLabelColor
+        emptyLabel.translatesAutoresizingMaskIntoConstraints = false
+        for (button, symbol, description, action) in [
+            (addButton, "plus", "Add pattern", #selector(addPattern)),
+            (removeButton, "minus", "Remove pattern", #selector(removePattern)),
+            (editButton, "pencil", "Edit pattern", #selector(editPattern)),
+        ] {
             button.isBordered = false
+            button.imagePosition = .imageOnly
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)?
+                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10, weight: .bold))
+            button.contentTintColor = .secondaryLabelColor
+            button.widthAnchor.constraint(equalToConstant: 20).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 18).isActive = true
             button.controlSize = .small
             button.target = self
+            button.action = action
         }
-        addButton.action = #selector(addPattern)
-        removeButton.action = #selector(removePattern)
-        let buttons = NSStackView(views: [addButton, removeButton])
-        buttons.orientation = .vertical
+        func divider() -> NSView {
+            let line = NSBox()
+            line.boxType = .separator
+            line.heightAnchor.constraint(equalToConstant: 10).isActive = true
+            return line
+        }
+        let buttons = NSStackView(views: [addButton, divider(), removeButton, divider(), editButton])
+        buttons.orientation = .horizontal
+        buttons.alignment = .centerY
         buttons.spacing = 2
+        buttons.edgeInsets = NSEdgeInsets(top: 0, left: 4, bottom: 0, right: 4)
         buttons.translatesAutoresizingMaskIntoConstraints = false
 
-        addSubview(scrollView)
-        addSubview(buttons)
+        let separator = NSBox()
+        separator.boxType = .separator
+        separator.translatesAutoresizingMaskIntoConstraints = false
+        let box = ListBoxView()
+        box.translatesAutoresizingMaskIntoConstraints = false
+        let content = NSView()
+        content.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(box)
+        box.addSubview(content)
+        for view in [scrollView, emptyLabel, separator, buttons] { content.addSubview(view) }
         NSLayoutConstraint.activate([
-            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            scrollView.topAnchor.constraint(equalTo: topAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: buttons.leadingAnchor, constant: -3),
-            buttons.trailingAnchor.constraint(equalTo: trailingAnchor),
-            buttons.centerYAnchor.constraint(equalTo: centerYAnchor),
-            widthAnchor.constraint(greaterThanOrEqualToConstant: 180),
+            box.topAnchor.constraint(equalTo: topAnchor), box.leadingAnchor.constraint(equalTo: leadingAnchor),
+            box.trailingAnchor.constraint(equalTo: trailingAnchor), box.bottomAnchor.constraint(equalTo: bottomAnchor),
+            content.topAnchor.constraint(equalTo: box.topAnchor, constant: 1),
+            content.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 1),
+            content.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -1),
+            content.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -1),
+            scrollView.topAnchor.constraint(equalTo: content.topAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            scrollView.heightAnchor.constraint(equalToConstant: 76),
+            emptyLabel.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
+            emptyLabel.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
+            separator.topAnchor.constraint(equalTo: scrollView.bottomAnchor),
+            separator.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            separator.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            buttons.topAnchor.constraint(equalTo: separator.bottomAnchor),
+            buttons.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            buttons.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            buttons.heightAnchor.constraint(equalToConstant: 20),
         ])
+        updateControls()
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func numberOfRows(in tableView: NSTableView) -> Int { patterns.count }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        updateControls()
+    }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let field = NSTextField(string: patterns[row])
@@ -601,7 +663,15 @@ private final class RegexPatternTableView: NSView, NSTableViewDataSource, NSTabl
         field.target = self
         field.action = #selector(patternChanged(_:))
         field.cell?.sendsActionOnEndEditing = true
-        return field
+        let cell = NSTableCellView()
+        field.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(field)
+        NSLayoutConstraint.activate([
+            field.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
+            field.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
+            field.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+        ])
+        return cell
     }
 
     @objc private func addPattern() {
@@ -609,7 +679,7 @@ private final class RegexPatternTableView: NSView, NSTableViewDataSource, NSTabl
         let row = patterns.count - 1
         tableView.reloadData()
         tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-        tableView.editColumn(0, row: row, with: nil, select: true)
+        beginEditing(row: row)
         changed()
     }
 
@@ -621,6 +691,12 @@ private final class RegexPatternTableView: NSView, NSTableViewDataSource, NSTabl
         changed()
     }
 
+    @objc private func editPattern() {
+        let row = tableView.selectedRow
+        guard patterns.indices.contains(row) else { return }
+        beginEditing(row: row)
+    }
+
     @objc private func patternChanged(_ sender: NSTextField) {
         guard patterns.indices.contains(sender.tag) else { return }
         patterns[sender.tag] = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -629,5 +705,16 @@ private final class RegexPatternTableView: NSView, NSTableViewDataSource, NSTabl
 
     private func changed() {
         onChange?(patterns.filter { !$0.isEmpty })
+    }
+
+    private func updateControls() {
+        let hasSelection = patterns.indices.contains(tableView.selectedRow)
+        emptyLabel.isHidden = !patterns.isEmpty
+        removeButton.isEnabled = hasSelection
+        editButton.isEnabled = hasSelection
+    }
+
+    private func beginEditing(row: Int) {
+        tableView.editColumn(0, row: row, with: nil, select: true)
     }
 }

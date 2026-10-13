@@ -249,34 +249,40 @@ private final class EyeMaskShapeView: NSView {
         didSet { needsDisplay = true }
     }
 
-    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: 72) }
+    /// This intentionally has more vertical breathing room than the old inline sketch: it appears
+    /// in narrow inspector panels, where labels drawn directly beside the shape became illegible.
+    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: 170) }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        guard let mask else { return }
+        guard mask != nil else { return }
         let labelAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 9),
-            .foregroundColor: NSColor.secondaryLabelColor,
+            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+            .foregroundColor: NSColor.labelColor.withAlphaComponent(0.88),
         ]
-        let hasKeepOut = mask.y1 > 0 && mask.x1 < 0.5
-        let hasLimit = mask.y2 > 0
-        guard hasKeepOut || hasLimit else {
-            let text = "No mask: eyes aren't tested." as NSString
-            let size = text.size(withAttributes: labelAttributes)
-            text.draw(at: CGPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2),
-                      withAttributes: labelAttributes)
-            return
-        }
+        let titleAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+            .foregroundColor: NSColor.labelColor,
+        ]
+        // This is a key for the fields below, not a thumbnail of their current values.  Keep the
+        // example deliberately sloped so the distinct meanings of X1 and X2 remain visible even
+        // when the selected mask happens to be rectangular.
+        let diagram = (x1: 0.18, x2: 0.32, y1: 0.44, y2: 0.74)
 
-        // The unit interval with a little room either side; the threshold through the middle.
-        let plot = bounds.insetBy(dx: 22, dy: 6)
-        let yExtent = max(hasLimit ? mask.y2 * 1.2 : 0, hasKeepOut ? mask.y1 * 1.6 : 0)
+        // The dimensions attach directly to the feature they describe.  This is deliberately a
+        // technical drawing rather than a legend: the values below it are the authoritative ones.
+        ("Eye mask profile" as NSString).draw(at: CGPoint(x: 0, y: bounds.maxY - 14), withAttributes: titleAttributes)
+        // A generous left gutter is reserved for the vertical dimensions; keeping the entire
+        // construction below the heading lets X2 sit above its own measurement line.
+        let plot = NSRect(x: 60, y: 40, width: max(bounds.width - 66, 1), height: 80)
+        let yExtent = diagram.y2 * 1.2
         func point(_ x: Double, _ y: Double) -> CGPoint {
             CGPoint(x: plot.minX + CGFloat((x + 0.1) / 1.2) * plot.width,
                     y: plot.midY + CGFloat(y / yExtent) * plot.height / 2)
         }
 
-        NSColor.separatorColor.setStroke()
+        let guideColor = NSColor.labelColor.withAlphaComponent(0.34)
+        guideColor.setStroke()
         let threshold = NSBezierPath()
         threshold.move(to: point(-0.1, 0))
         threshold.line(to: point(1.1, 0))
@@ -291,50 +297,145 @@ private final class EyeMaskShapeView: NSView {
             crossing.stroke()
         }
 
-        let fill = NSColor.systemRed.withAlphaComponent(0.18)
-        let stroke = NSColor.systemRed.withAlphaComponent(0.8)
-        if hasLimit {
-            for sign in [1.0, -1.0] {
-                let edge = point(0, sign * mask.y2).y
-                let band = sign > 0 ? NSRect(x: plot.minX, y: edge, width: plot.width, height: plot.maxY - edge)
-                                    : NSRect(x: plot.minX, y: plot.minY, width: plot.width, height: edge - plot.minY)
-                fill.setFill()
-                band.fill()
-                stroke.setStroke()
-                let line = NSBezierPath()
-                line.move(to: CGPoint(x: plot.minX, y: edge))
-                line.line(to: CGPoint(x: plot.maxX, y: edge))
-                line.lineWidth = 1
-                line.stroke()
-            }
-            ("Y2" as NSString).draw(at: CGPoint(x: plot.minX - 16, y: point(0, mask.y2).y - 6),
-                                    withAttributes: labelAttributes)
+        // Name the fixed reference points, with sufficiently strong contrast to remain readable
+        // in the dark inspector appearance.
+        let crossingAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 9),
+            .foregroundColor: NSColor.labelColor.withAlphaComponent(0.7),
+        ]
+        ("Decision threshold" as NSString).draw(at: CGPoint(x: plot.maxX - 76, y: plot.midY + 4),
+                                        withAttributes: crossingAttributes)
+
+        let keepOutFill = NSColor.systemRed.withAlphaComponent(0.34)
+        let keepOutStroke = NSColor.systemRed
+        let limitFill = NSColor.systemOrange.withAlphaComponent(0.28)
+        let limitStroke = NSColor.systemOrange
+        let constructionStroke = NSColor.labelColor.withAlphaComponent(0.9)
+        for sign in [1.0, -1.0] {
+            let edge = point(0, sign * diagram.y2).y
+            let band = sign > 0 ? NSRect(x: plot.minX, y: edge, width: plot.width, height: plot.maxY - edge)
+                                : NSRect(x: plot.minX, y: plot.minY, width: plot.width, height: edge - plot.minY)
+            limitFill.setFill()
+            band.fill()
+            limitStroke.setStroke()
+            let line = NSBezierPath()
+            line.move(to: CGPoint(x: plot.minX, y: edge))
+            line.line(to: CGPoint(x: plot.maxX, y: edge))
+            line.lineWidth = 1.5
+            line.stroke()
         }
-        if hasKeepOut {
-            // Clamped the way kiems::EyeMask's tester clamps it.
-            let x1 = max(mask.x1, 0)
-            let x2 = min(max(mask.x2, x1), 0.5)
+        let y2 = point(0, diagram.y2).y
+        let y2DimensionX = plot.minX - 27
+        let y2Dimension = NSBezierPath()
+        y2Dimension.move(to: CGPoint(x: y2DimensionX, y: plot.midY))
+        y2Dimension.line(to: CGPoint(x: y2DimensionX, y: y2))
+        y2Dimension.move(to: CGPoint(x: y2DimensionX - 3, y: plot.midY))
+        y2Dimension.line(to: CGPoint(x: y2DimensionX + 3, y: plot.midY))
+        y2Dimension.move(to: CGPoint(x: y2DimensionX - 3, y: y2))
+        y2Dimension.line(to: CGPoint(x: y2DimensionX + 3, y: y2))
+        limitStroke.setStroke()
+        y2Dimension.lineWidth = 1.5
+        y2Dimension.stroke()
+        let y2Label = "Y2" as NSString
+        let y2LabelSize = y2Label.size(withAttributes: labelAttributes)
+        y2Label.draw(at: CGPoint(x: y2DimensionX - y2LabelSize.width - 4, y: (plot.midY + y2) / 2 - 6),
+                     withAttributes: labelAttributes)
+        let y2Projection = NSBezierPath()
+        y2Projection.move(to: CGPoint(x: y2DimensionX, y: y2))
+        y2Projection.line(to: CGPoint(x: plot.minX, y: y2))
+        y2Projection.setLineDash([3, 3], count: 2, phase: 0)
+        limitStroke.setStroke()
+        y2Projection.lineWidth = 1
+        y2Projection.stroke()
+        do {
+            let x1 = diagram.x1
+            let x2 = diagram.x2
             let hexagon = NSBezierPath()
             hexagon.move(to: point(x1, 0))
-            hexagon.line(to: point(x2, -mask.y1))
-            hexagon.line(to: point(1 - x2, -mask.y1))
+            hexagon.line(to: point(x2, -diagram.y1))
+            hexagon.line(to: point(1 - x2, -diagram.y1))
             hexagon.line(to: point(1 - x1, 0))
-            hexagon.line(to: point(1 - x2, mask.y1))
-            hexagon.line(to: point(x2, mask.y1))
+            hexagon.line(to: point(1 - x2, diagram.y1))
+            hexagon.line(to: point(x2, diagram.y1))
             hexagon.close()
-            fill.setFill()
+            keepOutFill.setFill()
             hexagon.fill()
-            stroke.setStroke()
-            hexagon.lineWidth = 1
+            keepOutStroke.setStroke()
+            hexagon.lineWidth = 1.5
             hexagon.stroke()
-            let x1Label = "X1" as NSString
-            let x1Size = x1Label.size(withAttributes: labelAttributes)
-            x1Label.draw(at: CGPoint(x: point(x1, 0).x - x1Size.width - 2, y: point(x1, 0).y - x1Size.height / 2),
-                         withAttributes: labelAttributes)
-            ("X2" as NSString).draw(at: CGPoint(x: point(x2, mask.y1).x - 6, y: point(x2, mask.y1).y + 1),
-                                    withAttributes: labelAttributes)
-            ("Y1" as NSString).draw(at: CGPoint(x: plot.minX - 16, y: point(0, mask.y1).y - 6),
-                                    withAttributes: labelAttributes)
+            let leftCrossing = point(0, 0)
+            let x1Point = point(x1, 0)
+            let dimensionY = plot.minY - 8
+            let dimension = NSBezierPath()
+            dimension.move(to: CGPoint(x: leftCrossing.x, y: dimensionY))
+            dimension.line(to: CGPoint(x: x1Point.x, y: dimensionY))
+            dimension.move(to: CGPoint(x: leftCrossing.x, y: dimensionY - 3))
+            dimension.line(to: CGPoint(x: leftCrossing.x, y: dimensionY + 3))
+            dimension.move(to: CGPoint(x: x1Point.x, y: dimensionY - 3))
+            dimension.line(to: CGPoint(x: x1Point.x, y: dimensionY + 3))
+            keepOutStroke.setStroke()
+            dimension.lineWidth = 1.5
+            dimension.stroke()
+            let x1Projection = NSBezierPath()
+            x1Projection.move(to: CGPoint(x: x1Point.x, y: dimensionY))
+            x1Projection.line(to: x1Point)
+            x1Projection.setLineDash([3, 3], count: 2, phase: 0)
+            keepOutStroke.setStroke()
+            x1Projection.lineWidth = 1
+            x1Projection.stroke()
+            let xLabelString = "X1" as NSString
+            let xLabelSize = xLabelString.size(withAttributes: labelAttributes)
+            xLabelString.draw(at: CGPoint(x: (leftCrossing.x + x1Point.x - xLabelSize.width) / 2,
+                                           y: dimensionY - 17), withAttributes: labelAttributes)
+
+            // X2 measures from the same left crossing to the point at which the sloped edge
+            // reaches its full height.  Giving it a parallel dimension line makes that horizontal
+            // relationship unambiguous, including for a rectangular mask where X1 equals X2.
+            let x2Corner = point(x2, diagram.y1)
+            let x2DimensionY = plot.maxY + 8
+            let x2Dimension = NSBezierPath()
+            x2Dimension.move(to: leftCrossing)
+            x2Dimension.line(to: CGPoint(x: leftCrossing.x, y: x2DimensionY))
+            x2Dimension.move(to: CGPoint(x: leftCrossing.x, y: x2DimensionY))
+            x2Dimension.line(to: CGPoint(x: x2Corner.x, y: x2DimensionY))
+            x2Dimension.move(to: CGPoint(x: leftCrossing.x, y: x2DimensionY - 3))
+            x2Dimension.line(to: CGPoint(x: leftCrossing.x, y: x2DimensionY + 3))
+            x2Dimension.move(to: CGPoint(x: x2Corner.x, y: x2DimensionY - 3))
+            x2Dimension.line(to: CGPoint(x: x2Corner.x, y: x2DimensionY + 3))
+            x2Dimension.lineWidth = 1.5
+            x2Dimension.stroke()
+            let x2Projection = NSBezierPath()
+            x2Projection.move(to: CGPoint(x: x2Corner.x, y: x2DimensionY))
+            x2Projection.line(to: x2Corner)
+            x2Projection.setLineDash([3, 3], count: 2, phase: 0)
+            constructionStroke.setStroke()
+            x2Projection.lineWidth = 1
+            x2Projection.stroke()
+            let x2Label = "X2" as NSString
+            let x2LabelSize = x2Label.size(withAttributes: labelAttributes)
+            x2Label.draw(at: CGPoint(x: (leftCrossing.x + x2Corner.x - x2LabelSize.width) / 2,
+                                     y: x2DimensionY + 4), withAttributes: labelAttributes)
+
+            let y1 = point(0, diagram.y1).y
+            let dimensionX = plot.minX - 13
+            let yDimension = NSBezierPath()
+            yDimension.move(to: CGPoint(x: dimensionX, y: plot.midY))
+            yDimension.line(to: CGPoint(x: dimensionX, y: y1))
+            yDimension.move(to: CGPoint(x: dimensionX - 3, y: plot.midY))
+            yDimension.line(to: CGPoint(x: dimensionX + 3, y: plot.midY))
+            yDimension.move(to: CGPoint(x: dimensionX - 3, y: y1))
+            yDimension.line(to: CGPoint(x: dimensionX + 3, y: y1))
+            yDimension.lineWidth = 1.5
+            yDimension.stroke()
+            let y1Projection = NSBezierPath()
+            y1Projection.move(to: CGPoint(x: dimensionX, y: y1))
+            y1Projection.line(to: CGPoint(x: x2Corner.x, y: y1))
+            y1Projection.setLineDash([3, 3], count: 2, phase: 0)
+            constructionStroke.setStroke()
+            y1Projection.lineWidth = 1
+            y1Projection.stroke()
+            ("Y1" as NSString).draw(at: CGPoint(x: dimensionX + 4, y: (plot.midY + y1) / 2 - 6),
+                                      withAttributes: labelAttributes)
         }
     }
 }

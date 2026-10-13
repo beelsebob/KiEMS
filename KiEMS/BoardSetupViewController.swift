@@ -161,8 +161,9 @@ final class BoardSetupViewController: NSViewController, NSTableViewDataSource, N
     // MARK: - Layout
 
     private func labeled(_ title: String, _ control: NSView, indent: CGFloat = 0) -> NSStackView {
-        let label = NSTextField(labelWithString: title)
-        label.font = Self.formFont
+        let label = NSTextField(labelWithString: title.hasSuffix(":") ? String(title.dropLast()) : title)
+        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        label.textColor = .white
         label.alignment = .right
         label.lineBreakMode = .byWordWrapping
         label.maximumNumberOfLines = 2
@@ -291,7 +292,7 @@ final class BoardSetupViewController: NSViewController, NSTableViewDataSource, N
         noiseCheckbox.action = #selector(noiseChanged(_:))
         componentIncludedCheckbox.action = #selector(componentIncludedToggled)
         componentHeading.font = .systemFont(ofSize: 13, weight: .semibold)
-        configureColumn(componentSection, [componentHeading, componentWarningBox, componentIncludedCheckbox,
+        configureColumn(componentSection, [componentHeading, componentWarningBox, labeled("", componentIncludedCheckbox),
                                            separator()])
         configureColumn(noiseControls, [
             labeled("Frequency:", noiseFrequencyField, indent: 16),
@@ -300,11 +301,11 @@ final class BoardSetupViewController: NSViewController, NSTableViewDataSource, N
         noiseControls.spacing = 4
         configureColumn(pinSection, [
             pinHeading,
-            pinIncludedCheckbox,
-            pinAbsorbsAtHullCheckbox,
+            labeled("", pinIncludedCheckbox),
+            labeled("", pinAbsorbsAtHullCheckbox),
             labeled("Impedance:", pinImpedanceField),
-            absorbingCheckbox,
-            noiseCheckbox,
+            labeled("", absorbingCheckbox),
+            labeled("", noiseCheckbox),
             noiseControls,
             separator(),
         ])
@@ -316,14 +317,14 @@ final class BoardSetupViewController: NSViewController, NSTableViewDataSource, N
                        action: #selector(netClassImpedanceChanged))
         configureColumn(netSection, [
             headingRow("Net:", netNameView),
-            netIncludedCheckbox,
-            netAbsorbsAtHullCheckbox,
+            labeled("", netIncludedCheckbox),
+            labeled("", netAbsorbsAtHullCheckbox),
             labeled("Impedance:", netImpedanceField),
             separator(),
         ])
         configureColumn(netClassSection, [
             headingRow("Net Class:", netClassNameView),
-            netClassIncludedCheckbox,
+            labeled("", netClassIncludedCheckbox),
             labeled("Impedance:", netClassImpedanceField),
         ])
 

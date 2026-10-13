@@ -148,7 +148,7 @@ constexpr const char* kCancelledMessage = "Cancelled";
 // not the shape of geometry.json or the S-parameter CSVs, so merely finding those files is not
 // enough to prove they can be reused. Bump this version whenever a solver/serialization change
 // makes otherwise-identical saved products unsafe to restore.
-constexpr const char* kPipelineCacheVersion = "KiEMS-pipeline-cache-v11\n";
+constexpr const char* kPipelineCacheVersion = "KiEMS-pipeline-cache-v12\n";
 constexpr const char* kGeometryCacheInputsName = "cache_inputs.txt";
 constexpr const char* kResultsCacheInputsName = "cache_inputs.txt";
 
