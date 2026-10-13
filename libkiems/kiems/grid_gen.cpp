@@ -1,6 +1,7 @@
 #include "grid_gen.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <functional>
@@ -97,10 +98,11 @@ std::vector<double> _extendPMLBand(std::vector<double> lines, std::int32_t pmlCe
 /// Merge grid lines that are too close to each other.
 std::vector<double> _dedupGrid(std::vector<double> grid, double gridMin, const std::vector<double>& edgeGrid) {
     // Lines closer than gridMin / 2 collapse into one. A protected (edgeGrid) line marks real copper
-    // and never moves: it absorbs an unprotected neighbour, and two protected lines both stay --
-    // shifting a copper edge used to let a ball and the pour across its clearance land on the same
-    // row of nodes and fuse -- unless they're within gridMin / 4, i.e. the same edge, which merge.
-    // Only two unprotected lines are otherwise averaged.
+    // and never moves for an unprotected neighbour, which it absorbs; two lines of the same kind meet
+    // halfway. Merging two copper edges can close the gap between them -- a ball and the pour
+    // across its clearance landing on one row of nodes -- but GridGenerator reopens exactly those
+    // gaps afterwards (grid_detail::resolveCopperJoins()), which costs far fewer cells and far less
+    // timestep than keeping every close pair of edges apart with a sliver cell between them.
     std::vector<double> protectedLines = edgeGrid;
     std::sort(protectedLines.begin(), protectedLines.end());
     const auto isProtected = [&](double line) {
@@ -117,15 +119,9 @@ std::vector<double> _dedupGrid(std::vector<double> grid, double gridMin, const s
         const bool previousProtected = isProtected(result.back());
         const bool lineProtected = isProtected(line);
         if (previousProtected && lineProtected) {
-            // Edges this close are the same edge (a pad outline and a trace end a micron apart);
-            // keeping both would make a sub-micron cell and shrink every timestep with it.
-            if (line - result.back() < gridMin / 4) {
-                result.back() = (result.back() + line) / 2;
-                protectedLines.insert(std::lower_bound(protectedLines.begin(), protectedLines.end(), result.back()),
-                                      result.back());
-            } else {
-                result.push_back(line);
-            }
+            result.back() = (result.back() + line) / 2;
+            protectedLines.insert(std::lower_bound(protectedLines.begin(), protectedLines.end(), result.back()),
+                                  result.back());
         } else if (lineProtected) {
             result.back() = line;
         } else if (!previousProtected) {
@@ -1244,6 +1240,291 @@ std::vector<double> grid_detail::appendUniformPMLCells(std::vector<double> lines
     return _extendPMLBand(std::move(lines), cellCount);
 }
 
+namespace {
+
+/// One copper layer's loops, prepared for the sweeps copperJoins() makes along every mesh line.
+/// Loops only nest (board slicing unions each layer), so the innermost loop containing a point is
+/// the smallest one: an outer loop's copper, or a hole in it.
+struct _LayerLoops {
+    const Cu::PolygonSet* loops = nullptr;
+    std::vector<Cu::BoundingBox<double>> bounds;
+    std::vector<double> area;
+    std::vector<bool> outer;
+    /// The copper a point on each loop's boundary belongs to: the loop itself, or for a hole the
+    /// outer loop round it (Copper paints copper as triangles, boundaries included).
+    std::vector<std::int32_t> boundaryOwner;
+};
+
+/// pointInPolygonSet() for a single loop, without copying it into a set.
+bool _insideLoop(const Position& point, const Cu::Polygon& loop) {
+    bool inside = false;
+    for (std::size_t i = 0, j = loop.size() - 1; i < loop.size(); j = i++) {
+        if (((loop[i].y() > point.y()) != (loop[j].y() > point.y())) &&
+            (point.x() < (loop[j].x() - loop[i].x()) * (point.y() - loop[i].y()) / (loop[j].y() - loop[i].y()) +
+                             loop[i].x())) {
+            inside = !inside;
+        }
+    }
+    return inside;
+}
+
+_LayerLoops _prepareLayerLoops(const Cu::PolygonSet& loops) {
+    _LayerLoops layer;
+    layer.loops = &loops;
+    for (const Cu::Polygon& loop : loops) {
+        layer.bounds.push_back(Cu::bounds(loop));
+        const double signedArea = Cu::signedArea(loop);
+        layer.area.push_back(std::abs(signedArea));
+        layer.outer.push_back(signedArea > 0);
+    }
+    for (std::size_t k = 0; k < loops.size(); ++k) {
+        std::int32_t owner = layer.outer[k] ? static_cast<std::int32_t>(k) : -1;
+        double smallest = std::numeric_limits<double>::infinity();
+        for (std::size_t parent = 0; !layer.outer[k] && !loops[k].empty() && parent < loops.size(); ++parent) {
+            const Cu::BoundingBox<double>& a = layer.bounds[parent];
+            const Cu::BoundingBox<double>& b = layer.bounds[k];
+            if (!layer.outer[parent] || layer.area[parent] >= smallest || a.xMin > b.xMin || a.xMax < b.xMax ||
+                a.yMin > b.yMin || a.yMax < b.yMax) {
+                continue;
+            }
+            if (_insideLoop(loops[k].front(), loops[parent])) {
+                owner = static_cast<std::int32_t>(parent);
+                smallest = layer.area[parent];
+            }
+        }
+        layer.boundaryOwner.push_back(owner);
+    }
+    return layer;
+}
+
+double _coordinate(const Position& point, int axis) { return axis == 0 ? point.x() : point.y(); }
+
+/// For points along one mesh line -- `fixed` on the other axis, `queries` (sorted) along `axis` --
+/// the outer loop whose copper each lies on, boundaries included, or -1 off copper.
+void _lineOwners(const _LayerLoops& layer, int axis, double fixed, const std::vector<double>& queries,
+                 std::int32_t* owners) {
+    struct Crossing {
+        double at;
+        std::size_t loop;
+    };
+    struct Run {
+        double from;
+        double to;
+        std::int32_t owner;
+    };
+    std::vector<Crossing> crossings;
+    std::vector<Run> collinear; // boundary edges lying along the line itself
+    const int other = 1 - axis;
+    for (std::size_t k = 0; k < layer.loops->size(); ++k) {
+        const Cu::BoundingBox<double>& box = layer.bounds[k];
+        if (fixed < (other == 0 ? box.xMin : box.yMin) || fixed > (other == 0 ? box.xMax : box.yMax)) continue;
+        const Cu::Polygon& loop = (*layer.loops)[k];
+        for (std::size_t i = 0, j = loop.size() - 1; i < loop.size(); j = i++) {
+            const double v0 = _coordinate(loop[j], other);
+            const double v1 = _coordinate(loop[i], other);
+            const double u0 = _coordinate(loop[j], axis);
+            const double u1 = _coordinate(loop[i], axis);
+            if (v0 == fixed && v1 == fixed) {
+                collinear.push_back({std::min(u0, u1), std::max(u0, u1), layer.boundaryOwner[k]});
+                continue;
+            }
+            if ((v0 <= fixed) == (v1 <= fixed)) continue;
+            crossings.push_back({u0 + (fixed - v0) * (u1 - u0) / (v1 - v0), k});
+        }
+    }
+    std::sort(crossings.begin(), crossings.end(), [](const Crossing& a, const Crossing& b) { return a.at < b.at; });
+    // The loops containing the current point, smallest first: each crossing passed toggles one.
+    std::set<std::pair<double, std::size_t>> containing;
+    std::size_t next = 0;
+    for (std::size_t q = 0; q < queries.size(); ++q) {
+        for (; next < crossings.size() && crossings[next].at <= queries[q]; ++next) {
+            const std::pair key{layer.area[crossings[next].loop], crossings[next].loop};
+            if (containing.erase(key) == 0) containing.insert(key);
+        }
+        const bool onCopper = !containing.empty() && layer.outer[containing.begin()->second];
+        owners[q] = onCopper ? static_cast<std::int32_t>(containing.begin()->second) : -1;
+        // A point exactly on a boundary the line crosses is that boundary's copper.
+        for (std::size_t k = next; k > 0 && crossings[k - 1].at == queries[q]; --k) {
+            owners[q] = layer.boundaryOwner[crossings[k - 1].loop];
+        }
+    }
+    for (const Run& run : collinear) {
+        const auto first = std::lower_bound(queries.begin(), queries.end(), run.from);
+        const auto last = std::upper_bound(first, queries.end(), run.to);
+        for (auto it = first; it != last; ++it) owners[it - queries.begin()] = run.owner;
+    }
+}
+
+/// The outer loop whose copper `point` lies on, or -1.
+std::int32_t _pointOwner(const _LayerLoops& layer, const Position& point) {
+    std::int32_t owner = -1;
+    double smallest = std::numeric_limits<double>::infinity();
+    for (std::size_t k = 0; k < layer.loops->size(); ++k) {
+        const Cu::BoundingBox<double>& box = layer.bounds[k];
+        if (point.x() < box.xMin || point.x() > box.xMax || point.y() < box.yMin || point.y() > box.yMax) continue;
+        if (layer.area[k] < smallest && _insideLoop(point, (*layer.loops)[k])) {
+            smallest = layer.area[k];
+            owner = layer.outer[k] ? static_cast<std::int32_t>(k) : -1;
+        }
+    }
+    return owner;
+}
+
+} // namespace
+
+bool grid_detail::isViaCircleSegment(const TraceSegment& segment, const std::vector<CopperBarrel>& barrels) {
+    // A via's pad and antipad stay within half a millimetre of it, and a flattened circle's
+    // segments end within a couple of microns of the same radius.
+    constexpr double kReach = 500.0 * constants::unitMultiplier;
+    constexpr double kRadiusTolerance = 2.0 * constants::unitMultiplier;
+    const Position& a = segment.start();
+    const Position& b = segment.stop();
+    const double length = std::hypot(b.x() - a.x(), b.y() - a.y());
+    for (const CopperBarrel& barrel : barrels) {
+        for (const auto& [cx, cy] : {std::pair{barrel.x1, barrel.y1}, std::pair{barrel.x2, barrel.y2}}) {
+            if (std::abs(a.x() - cx) > kReach || std::abs(a.y() - cy) > kReach) continue;
+            const double ra = std::hypot(a.x() - cx, a.y() - cy);
+            const double rb = std::hypot(b.x() - cx, b.y() - cy);
+            if (ra <= kReach && std::abs(ra - rb) < kRadiusTolerance && length <= ra) return true;
+        }
+    }
+    return false;
+}
+
+std::vector<grid_detail::CopperJoin> grid_detail::copperJoins(const std::vector<double>& xLines,
+                                                              const std::vector<double>& yLines,
+                                                              const std::vector<Cu::PolygonSet>& layerCopperLoops,
+                                                              const std::vector<CopperBarrel>& barrels,
+                                                              std::size_t barrelLayers) {
+    std::vector<CopperJoin> joins;
+    const std::size_t nx = xLines.size();
+    const std::size_t ny = yLines.size();
+    if (nx < 2 || ny < 2) return joins;
+    std::vector<double> xMid(nx - 1);
+    std::vector<double> yMid(ny - 1);
+    for (std::size_t i = 0; i + 1 < nx; ++i) xMid[i] = (xLines[i] + xLines[i + 1]) / 2;
+    for (std::size_t j = 0; j + 1 < ny; ++j) yMid[j] = (yLines[j] + yLines[j + 1]) / 2;
+
+    for (std::size_t layerIndex = 0; layerIndex < layerCopperLoops.size(); ++layerIndex) {
+        const _LayerLoops layer = _prepareLayerLoops(layerCopperLoops[layerIndex]);
+        // xOwner[j * (nx - 1) + i] owns the X edge from line i to i + 1 on row j; yOwner[i * (ny - 1)
+        // + j] the Y edge from line j to j + 1 on column i.
+        std::vector<std::int32_t> xOwner(ny * (nx - 1), -1);
+        std::vector<std::int32_t> yOwner(nx * (ny - 1), -1);
+        // nodeOwner[j * nx + i]: the copper the node itself is on.
+        std::vector<std::int32_t> nodeOwner(nx * ny, -1);
+        for (std::size_t j = 0; j < ny; ++j) {
+            _lineOwners(layer, 0, yLines[j], xMid, &xOwner[j * (nx - 1)]);
+            _lineOwners(layer, 0, yLines[j], xLines, &nodeOwner[j * nx]);
+        }
+        for (std::size_t i = 0; i < nx; ++i) _lineOwners(layer, 1, xLines[i], yMid, &yOwner[i * (ny - 1)]);
+
+        // A plated barrel connects to all the copper it overlaps on this layer -- its pad, the copper
+        // round its drill -- so that copper and the barrel count as one; a barrel overlapping none
+        // (passing an antipad) is a conductor of its own. Its centre and rim are sampled.
+        std::vector<std::int32_t> alias(layer.loops->size() + barrels.size());
+        for (std::size_t k = 0; k < alias.size(); ++k) alias[k] = static_cast<std::int32_t>(k);
+        const auto find = [&](std::int32_t owner) {
+            while (alias[static_cast<std::size_t>(owner)] != owner) owner = alias[static_cast<std::size_t>(owner)];
+            return owner;
+        };
+        std::vector<std::int32_t> barrelOwner(nx * ny, -1);
+        for (std::size_t b = 0; layerIndex < barrelLayers && b < barrels.size(); ++b) {
+            const CopperBarrel& barrel = barrels[b];
+            const auto owner = static_cast<std::int32_t>(layer.loops->size() + b);
+            constexpr int kRimSamples = 16;
+            for (int sample = -1; sample < 2 * kRimSamples; ++sample) {
+                // Sample -1 is the first end's centre; then the rim round each end.
+                const bool secondEnd = sample >= kRimSamples;
+                const double angle = 2 * M_PI * (sample % kRimSamples) / kRimSamples;
+                const double r = sample < 0 ? 0.0 : barrel.radius;
+                const Position at((secondEnd ? barrel.x2 : barrel.x1) + r * std::cos(angle),
+                                  (secondEnd ? barrel.y2 : barrel.y1) + r * std::sin(angle));
+                const std::int32_t copper = _pointOwner(layer, at);
+                if (copper >= 0) alias[static_cast<std::size_t>(find(copper))] = find(owner);
+            }
+            const auto range = [&](const std::vector<double>& lines, double a, double c) {
+                const auto first = std::lower_bound(lines.begin(), lines.end(), std::min(a, c) - barrel.radius);
+                const auto last = std::upper_bound(lines.begin(), lines.end(), std::max(a, c) + barrel.radius);
+                return std::pair{static_cast<std::size_t>(first - lines.begin()),
+                                 static_cast<std::size_t>(last - lines.begin())};
+            };
+            const auto [i0, i1] = range(xLines, barrel.x1, barrel.x2);
+            const auto [j0, j1] = range(yLines, barrel.y1, barrel.y2);
+            for (std::size_t j = j0; j < j1; ++j) {
+                for (std::size_t i = i0; i < i1; ++i) {
+                    const double distance = pointSegmentDistance(Position(xLines[i], yLines[j]),
+                                                                 Position(barrel.x1, barrel.y1),
+                                                                 Position(barrel.x2, barrel.y2));
+                    if (distance <= barrel.radius) barrelOwner[j * nx + i] = owner;
+                }
+            }
+        }
+
+        for (std::size_t j = 0; j < ny; ++j) {
+            for (std::size_t i = 0; i < nx; ++i) {
+                const auto resolved = [&](std::int32_t owner) { return owner < 0 ? owner : find(owner); };
+                const std::int32_t left = resolved(i > 0 ? xOwner[j * (nx - 1) + i - 1] : -1);
+                const std::int32_t right = resolved(i + 1 < nx ? xOwner[j * (nx - 1) + i] : -1);
+                const std::int32_t down = resolved(j > 0 ? yOwner[i * (ny - 1) + j - 1] : -1);
+                const std::int32_t up = resolved(j + 1 < ny ? yOwner[i * (ny - 1) + j] : -1);
+                const std::int32_t held = resolved(barrelOwner[j * nx + i]);
+                std::int32_t first = -1;
+                bool joined = false;
+                for (const std::int32_t owner : {left, right, down, up, held}) {
+                    if (owner < 0) continue;
+                    if (first < 0) {
+                        first = owner;
+                    } else if (owner != first) {
+                        joined = true;
+                    }
+                }
+                if (!joined) continue;
+                // Only the edges reaching copper other than the node's own (its barrel's, or what it
+                // stands on) need shortening.
+                const std::int32_t own = held >= 0 ? held : resolved(nodeOwner[j * nx + i]);
+                const auto foreign = [&](std::int32_t owner) { return owner >= 0 && owner != own; };
+                joins.push_back({layerIndex, i, j, foreign(left) || foreign(right), foreign(down) || foreign(up)});
+            }
+        }
+    }
+    return joins;
+}
+
+std::vector<grid_detail::CopperJoin> grid_detail::resolveCopperJoins(
+    std::vector<double>& xLines, std::vector<double>& yLines, const std::vector<Cu::PolygonSet>& layerCopperLoops,
+    const std::vector<CopperBarrel>& barrels, double minimumCell, std::size_t barrelLayers) {
+    // Each pass halves every edge at a join, so copper g apart is separated within log2(cell / g)
+    // passes; the cap only guards against copper closer than minimumCell, which stops shrinking.
+    constexpr int kMaxPasses = 12;
+    std::vector<CopperJoin> joins = copperJoins(xLines, yLines, layerCopperLoops, barrels, barrelLayers);
+    for (int pass = 0; pass < kMaxPasses && !joins.empty(); ++pass) {
+        std::array<std::vector<double>, 2> midpoints;
+        for (const CopperJoin& join : joins) {
+            for (std::size_t axis = 0; axis < 2; ++axis) {
+                if (!(axis == 0 ? join.alongX : join.alongY)) continue;
+                const std::vector<double>& lines = axis == 0 ? xLines : yLines;
+                const std::size_t node = axis == 0 ? join.xIndex : join.yIndex;
+                // Halve the node's edges on this axis, while both halves stay whole cells.
+                for (std::size_t k = node > 0 ? node - 1 : node; k <= node && k + 1 < lines.size(); ++k) {
+                    if (lines[k + 1] - lines[k] >= 2 * minimumCell) {
+                        midpoints[axis].push_back(std::round((lines[k] + lines[k + 1]) / 2));
+                    }
+                }
+            }
+        }
+        if (midpoints[0].empty() && midpoints[1].empty()) break;
+        for (std::size_t axis = 0; axis < 2; ++axis) {
+            std::vector<double>& lines = axis == 0 ? xLines : yLines;
+            lines.insert(lines.end(), midpoints[axis].begin(), midpoints[axis].end());
+            std::sort(lines.begin(), lines.end());
+            lines.erase(std::unique(lines.begin(), lines.end()), lines.end());
+        }
+        joins = copperJoins(xLines, yLines, layerCopperLoops, barrels, barrelLayers);
+    }
+    return joins;
+}
+
 struct GridGenerator::Impl {
     Impl(const EMSConfig& config, double boardXMin, double boardYMin, double boardWidth, double boardHeight,
          const std::vector<std::vector<Position>>& boardCutout,
@@ -1379,8 +1660,17 @@ struct GridGenerator::Impl {
         // The Boolean result from board slicing is the source of truth. In particular, do not reopen
         // the original board to derive ordinary density: even clipping those old hints afterward can
         // preserve line positions demanded only by copper that the hull cut removed.
-        const std::vector<TraceSegment> copperSegments =
-            grid_detail::copperBoundarySegments(_layerCopperLoops);
+        std::vector<TraceSegment> copperSegments = grid_detail::copperBoundarySegments(_layerCopperLoops);
+        // A via's own circles -- its pad, the antipad round it, its drill -- need no lines of their
+        // own: Copper models the barrel conformally wherever it falls, and _resolveCopperJoins()
+        // keeps open every gap those circles bound. On HorizonPC they were over half the boundary
+        // segments and about 8% of the cells.
+        const std::size_t before = copperSegments.size();
+        std::erase_if(copperSegments, [&](const TraceSegment& segment) {
+            return grid_detail::isViaCircleSegment(segment, copperBarrels);
+        });
+        logInfo("### Grid Generator: " + std::to_string(before - copperSegments.size()) +
+                " segment(s) on via-centred circles add no density ###");
         x.addLinesFromTrace(copperSegments);
         y.addLinesFromTrace(copperSegments);
         logInfo("### Grid Generator: density from " + std::to_string(copperSegments.size()) +
@@ -1475,6 +1765,7 @@ struct GridGenerator::Impl {
         x.compileGrid(grid, xmin);
         logInfo("### Grid Generator: generate Y axis ###");
         y.compileGrid(grid, ymin);
+        _resolveCopperJoins(grid);
 
         const std::vector<std::int32_t> zLines = _generateZ();
         addGridLines(grid, "z", std::vector<double>(zLines.begin(), zLines.end()));
@@ -1482,11 +1773,55 @@ struct GridGenerator::Impl {
         return grid;
     }
 
+    /// Refines the X and Y lines just compiled wherever Copper would join copper the board keeps
+    /// apart (see grid_detail::resolveCopperJoins()), and warns about any join it can't remove.
+    void _resolveCopperJoins(CSRectGrid& grid) {
+        std::array<std::vector<double>, 2> lines;
+        for (int axis = 0; axis < 2; ++axis) {
+            unsigned int count = 0;
+            double* raw = grid.GetLines(axis, nullptr, count, true);
+            lines[static_cast<std::size_t>(axis)].assign(raw, raw + count);
+            delete[] raw;
+        }
+        const std::size_t before = lines[0].size() + lines[1].size();
+        const double cellRatio = _config.grid().cellRatio().xy();
+        // The finest cell the ordinary passes leave between two protected copper edges (_dedupGrid()).
+        const double minimumCell = _config.grid().optimal() / cellRatio / 4;
+        std::vector<Cu::PolygonSet> sheets = _layerCopperLoops;
+        sheets.insert(sheets.end(), offBoardSheets.begin(), offBoardSheets.end());
+        const std::vector<grid_detail::CopperJoin> remaining = grid_detail::resolveCopperJoins(
+            lines[0], lines[1], sheets, copperBarrels, minimumCell, _layerCopperLoops.size());
+        const std::size_t added = lines[0].size() + lines[1].size() - before;
+        if (added > 0) {
+            clearGridLines(grid, "x");
+            addGridLines(grid, "x", lines[0]);
+            clearGridLines(grid, "y");
+            addGridLines(grid, "y", lines[1]);
+        }
+        logInfo("Grid: " + std::to_string(added) + " line(s) added so separate copper stays apart");
+        const auto mm = [](double simUnits) { return simUnits * constants::baseUnit / constants::unitMultiplier * 1e3; };
+        constexpr std::size_t kReported = 20;
+        for (std::size_t k = 0; k < std::min(remaining.size(), kReported); ++k) {
+            const grid_detail::CopperJoin& join = remaining[k];
+            const std::string where = join.layer < _layerCopperLoops.size()
+                                          ? "copper on metal layer " + std::to_string(join.layer)
+                                          : std::string("return-bridge metal");
+            logWarning("Grid: " + where + " near (" +
+                       std::to_string(mm(lines[0][join.xIndex])) + ", " + std::to_string(mm(lines[1][join.yIndex])) +
+                       ") mm is closer than the finest cell allowed, so the grid joins it there");
+        }
+        if (remaining.size() > kReported) {
+            logWarning("Grid: " + std::to_string(remaining.size() - kReported) + " more such join(s)");
+        }
+    }
+
     GridGeneratorAxis x;
     GridGeneratorAxis y;
     std::vector<Pad> addPads;
     std::unordered_map<std::string, Aperture> addApertures;
     std::vector<double> additionalZHeights;
+    std::vector<grid_detail::CopperBarrel> copperBarrels;
+    std::vector<Cu::PolygonSet> offBoardSheets;
     double xmin = 0;
     double xmax = 0;
     double ymin = 0;
@@ -1508,6 +1843,8 @@ GridGenerator::~GridGenerator() = default;
 std::vector<Pad>& GridGenerator::addPads() { return _impl->addPads; }
 std::unordered_map<std::string, Aperture>& GridGenerator::addApertures() { return _impl->addApertures; }
 std::vector<double>& GridGenerator::additionalZHeights() { return _impl->additionalZHeights; }
+std::vector<grid_detail::CopperBarrel>& GridGenerator::copperBarrels() { return _impl->copperBarrels; }
+std::vector<Cu::PolygonSet>& GridGenerator::offBoardSheets() { return _impl->offBoardSheets; }
 double GridGenerator::xmin() const { return _impl->xmin; }
 double GridGenerator::ymin() const { return _impl->ymin; }
 

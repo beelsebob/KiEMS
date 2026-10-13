@@ -1122,16 +1122,14 @@ public:
     double z() const { return _z; }
     void setZ(double value) { _z = value; }
 
-    /// Grows xy/z (never shrinks) so the gap between the modeled structure and the PML boundary is
-    /// at least a quarter of `minWavelength` (same micrometer units as _xy/_z, pre-
-    /// scaleToSimulationUnits() -- see Grid::applyFrequencyConstraint()'s own call site). The fixed
-    /// 1.5mm/2mm defaults below were tuned for lower-frequency nets; PML absorbs incoming plane
-    /// waves well but is much less effective against near-field/evanescent content that hasn't
-    /// settled by the time it reaches the boundary, and at several-GHz content (e.g. USB SuperSpeed)
-    /// 1.5mm can be electrically tight enough to show up as a visible reflection artifact right at
-    /// the board edge. Quarter-wavelength is a conservative standard buffer, not a rigorously
-    /// derived value -- a reasonable starting point to tune from if artifacts persist.
-    void applyFrequencyConstraint(double minWavelength);
+    /// A quarter of the vacuum wavelength at `lowestFrequencyHz`, in micrometres (the file units of
+    /// _xy/_z, before scaleToSimulationUnits()): the antenna-modelling rule of thumb for keeping an
+    /// absorber out of the near field, which reaches furthest at the lowest frequency. Only ever
+    /// reported as a suggestion, never applied -- for a board's signal integrity the absorber
+    /// needs to clear the fringing fields, which die off within a few dielectric heights of the
+    /// copper, and at the low end of a typical sweep a quarter wavelength is 0.1-1 m. It used to be
+    /// a floor (in FR4, at the stop frequency) that save() then wrote back into the document.
+    static double suggested(double lowestFrequencyHz);
 
     void scaleToSimulationUnits(std::int32_t unitMultiplier);
 
@@ -1189,7 +1187,8 @@ public:
     void setAbsorbingBoundaryCells(std::int32_t value) { _absorbingBoundaryCells = value; }
 
     /// Clamp max/perpendicular/diagonal/optimal based on the minimum simulated wavelength
-    /// (mirrors the grid-related portion of _Config.__post_init__).
+    /// (mirrors the grid-related portion of _Config.__post_init__). The margin is left alone; see
+    /// Margin::suggested().
     void applyFrequencyConstraint(double stopFrequencyHz);
 
     /// Scales max/diagonal/optimal/perpendicular/margin into simulation units (mirrors the

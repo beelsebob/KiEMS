@@ -94,6 +94,13 @@ bool _pointInPolygon(double x, double y, const std::vector<Position>& polygon) {
     return inside;
 }
 
+// True where (x, y) is on copper: inside an odd number of `loops` (outer rings and the holes in them).
+bool _onCopper(double x, double y, const std::vector<const Cu::Polygon*>& loops) {
+    bool inside = false;
+    for (const Cu::Polygon* loop : loops) inside = inside != _pointInPolygon(x, y, *loop);
+    return inside;
+}
+
 // Shortest distance from (x, y) to the polyline formed by `polygon`'s edges (treated as a closed
 // loop) -- same algorithm as board_slicing.cpp's file-local _distancePointToPolyline, just against
 // Position keeps this geometry in the same double-precision coordinate space as the board model.
@@ -524,6 +531,42 @@ void Simulation::addGrid() {
                                                 _slicedBoard.cutoutLoops, _slicedBoard.layerCopperLoops);
     addPortGrid();
     addLumpedComponentGrid();
+    // Every barrel addVias() will build, so the grid keeps each from joining copper it only passes.
+    if (auto vias = keptVias()) {
+        for (const ViaHole& via : *vias) {
+            _gridGen->copperBarrels().push_back(
+                {via.x, via.y, via.x2, via.y2, via.diameter / 2 + _config.via().platingThickness()});
+        }
+    } else {
+        logWarning("Simulation: couldn't read the board's vias for the grid: " + vias.error());
+    }
+    for (const auto& via : _slicedBoard.stitchingVias) {
+        _gridGen->copperBarrels().push_back({via.x, via.y, via.x, via.y, via.annularRingDiameter / 2});
+    }
+    // Return bridges' metal, kept apart like a copper layer at each height they use: every pin's
+    // pillar, and the ground metal (return pillars and legs, shared freely) the elements return to.
+    std::map<double, std::pair<Cu::PolygonSet, Cu::PolygonSet>> bridgeMetal; // height -> (pins, returns)
+    for (const PortConfig& port : _simConfig.ports()) {
+        if (!port.returnBridge().has_value() || !port.position().has_value()) continue;
+        const auto geometry = returnBridgeGeometry(port);
+        if (!geometry) continue;
+        const PortReturnBridge& bridge = *port.returnBridge();
+        const double half = bridge.width / 2;
+        const auto rectangle = [&](std::pair<double, double> a, std::pair<double, double> b) {
+            const double x0 = std::min(a.first, b.first) - half, x1 = std::max(a.first, b.first) + half;
+            const double y0 = std::min(a.second, b.second) - half, y1 = std::max(a.second, b.second) + half;
+            return Cu::Polygon{{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}};
+        };
+        auto& [pins, returns] = bridgeMetal[geometry->bridgeZ];
+        pins.push_back(rectangle(*port.position(), *port.position()));
+        returns.push_back(rectangle(bridge.position, bridge.position));
+        if (bridge.corner.has_value()) returns.push_back(rectangle(*bridge.corner, bridge.position));
+    }
+    for (auto& [height, metal] : bridgeMetal) {
+        Cu::PolygonSet sheet = Cu::unionPolygons(metal.second);
+        sheet.insert(sheet.end(), metal.first.begin(), metal.first.end());
+        _gridGen->offBoardSheets().push_back(std::move(sheet));
+    }
     logInfo("Compiling grid");
     _gridGen->generate(*_grid, _simConfig, _board);
     printGridStats();
@@ -713,6 +756,66 @@ std::expected<void, std::string> Simulation::addImpedanceProbe(PortConfig& portC
     return {};
 }
 
+std::optional<PadColumnNodes> padColumnOnCopper(const std::vector<double>& xs, const std::vector<double>& ys,
+                                                double centreX, double centreY,
+                                                const std::function<bool(double, double)>& onCopper) {
+    // A node, and the edges joining it to its neighbours in the rectangle.
+    const auto nodeFits = [&](std::size_t i, std::size_t j) { return onCopper(xs[i], ys[j]); };
+    const auto xEdgeFits = [&](std::size_t i, std::size_t j) { return onCopper((xs[i] + xs[i + 1]) / 2, ys[j]); };
+    const auto yEdgeFits = [&](std::size_t i, std::size_t j) { return onCopper(xs[i], (ys[j] + ys[j + 1]) / 2); };
+
+    // Start from the covered node nearest the pad's centre.
+    std::optional<std::pair<std::size_t, std::size_t>> seed;
+    double seedDistance = std::numeric_limits<double>::infinity();
+    for (std::size_t i = 0; i < xs.size(); ++i) {
+        for (std::size_t j = 0; j < ys.size(); ++j) {
+            const double distance = std::hypot(xs[i] - centreX, ys[j] - centreY);
+            if (distance < seedDistance && nodeFits(i, j)) {
+                seed = std::pair{i, j};
+                seedDistance = distance;
+            }
+        }
+    }
+    if (!seed) return std::nullopt;
+
+    // Grow the rectangle a row or column at a time while everything it adds still fits.
+    std::size_t i0 = seed->first, i1 = seed->first, j0 = seed->second, j1 = seed->second;
+    const auto columnFits = [&](std::size_t i, std::size_t joinedTo) {
+        for (std::size_t j = j0; j <= j1; ++j) {
+            if (!nodeFits(i, j) || !xEdgeFits(std::min(i, joinedTo), j)) return false;
+            if (j < j1 && !yEdgeFits(i, j)) return false;
+        }
+        return true;
+    };
+    const auto rowFits = [&](std::size_t j, std::size_t joinedTo) {
+        for (std::size_t i = i0; i <= i1; ++i) {
+            if (!nodeFits(i, j) || !yEdgeFits(i, std::min(j, joinedTo))) return false;
+            if (i < i1 && !xEdgeFits(i, j)) return false;
+        }
+        return true;
+    };
+    for (bool grew = true; grew;) {
+        grew = false;
+        if (i0 > 0 && columnFits(i0 - 1, i0)) {
+            --i0;
+            grew = true;
+        }
+        if (i1 + 1 < xs.size() && columnFits(i1 + 1, i1)) {
+            ++i1;
+            grew = true;
+        }
+        if (j0 > 0 && rowFits(j0 - 1, j0)) {
+            --j0;
+            grew = true;
+        }
+        if (j1 + 1 < ys.size() && rowFits(j1 + 1, j1)) {
+            ++j1;
+            grew = true;
+        }
+    }
+    return PadColumnNodes{i0, i1, j0, j1};
+}
+
 std::expected<std::pair<Point3, Point3>, std::string> Simulation::padColumn(const PortConfig& portConfig) {
     if (!portConfig.position().has_value() || !portConfig.direction().has_value()) {
         return std::unexpected("Port " + portConfig.name() + " has no defined position or rotation");
@@ -748,6 +851,10 @@ std::expected<std::pair<Point3, Point3>, std::string> Simulation::padColumn(cons
     const double length = portConfig.length();
     const double halfExtentX = (std::abs(widthDirX) * width + std::abs(propDirX) * length) / 2.0;
     const double halfExtentY = (std::abs(widthDirY) * width + std::abs(propDirY) * length) / 2.0;
+    if (auto onMesh = _padColumnOnMesh(portConfig, posX - halfExtentX, posX + halfExtentX, posY - halfExtentY,
+                                       posY + halfExtentY, startZ, stopZ)) {
+        return *onMesh;
+    }
     const Point3 start = {
         std::round(posX - halfExtentX),
         std::round(posY - halfExtentY),
@@ -760,6 +867,53 @@ std::expected<std::pair<Point3, Point3>, std::string> Simulation::padColumn(cons
     };
 
     return std::pair<Point3, Point3>{start, stop};
+}
+
+std::optional<std::pair<Point3, Point3>> Simulation::_padColumnOnMesh(const PortConfig& portConfig, double xMin,
+                                                                       double xMax, double yMin, double yMax,
+                                                                       double startZ, double stopZ) const {
+    // The resistor's end caps are PEC, and Copper snaps a lumped box out to the nearest mesh lines.
+    // Drawn round the pad's bounding rectangle, a cap can then sit on nodes past the pad's copper (a
+    // round pad's corners, plus up to half a cell of snapping), and across a narrow clearance reach
+    // the next net's copper: a GND pour 50 um from a BGA ball. So once the mesh exists the column
+    // covers only footprint nodes whose cap edges lie wholly on copper at both of its ends, and
+    // starts and stops exactly on those lines, leaving snapping nothing to move.
+    const auto linesIn = [&](int axis, double lo, double hi) {
+        unsigned int count = 0;
+        double* raw = _grid->GetLines(axis, nullptr, count, true);
+        std::vector<double> kept;
+        for (unsigned int i = 0; i < count; ++i) {
+            if (raw[i] >= lo && raw[i] <= hi) kept.push_back(raw[i]);
+        }
+        delete[] raw;
+        return kept;
+    };
+    const std::vector<double> xs = linesIn(0, xMin, xMax);
+    const std::vector<double> ys = linesIn(1, yMin, yMax);
+    const auto& layers = _slicedBoard.layerCopperLoops;
+    const auto padLayer = static_cast<std::size_t>(portConfig.layer());
+    const auto planeLayer = static_cast<std::size_t>(portConfig.plane());
+    if (xs.empty() || ys.empty() || padLayer >= layers.size() || planeLayer >= layers.size()) return std::nullopt;
+
+    // Only loops reaching the footprint can decide a point inside it.
+    const auto loopsNear = [&](std::size_t layer) {
+        std::vector<const Cu::Polygon*> near;
+        for (const Cu::Polygon& loop : layers[layer]) {
+            const Cu::BoundingBox<double> box = Cu::bounds(loop);
+            if (box.xMax >= xMin && box.xMin <= xMax && box.yMax >= yMin && box.yMin <= yMax) near.push_back(&loop);
+        }
+        return near;
+    };
+    const std::vector<const Cu::Polygon*> padLoops = loopsNear(padLayer);
+    const std::vector<const Cu::Polygon*> planeLoops = loopsNear(planeLayer);
+    const auto [posX, posY] = *portConfig.position();
+    const std::optional<PadColumnNodes> nodes =
+        padColumnOnCopper(xs, ys, posX, posY, [&](double x, double y) {
+            return _onCopper(x, y, padLoops) && _onCopper(x, y, planeLoops);
+        });
+    if (!nodes) return std::nullopt;
+    const auto [i0, i1, j0, j1] = *nodes;
+    return std::pair<Point3, Point3>{{xs[i0], ys[j0], std::round(startZ)}, {xs[i1], ys[j1], std::round(stopZ)}};
 }
 
 std::expected<void, std::string> Simulation::addLoadCapacitor(const PortConfig& portConfig) {
@@ -865,8 +1019,45 @@ std::expected<void, std::string> Simulation::addReturnBridgePort(PortConfig& por
                100);
     }
 
-    const Point3& start = geometry->elementStart;
-    const Point3& stop = geometry->elementStop;
+    // The element's end caps are PEC, and Copper snaps a lumped box out to the nearest lines, which
+    // could carry a cap half a cell past its pillar. So the element runs between mesh lines inside
+    // the pillars (or the corner's leg), across the lines inside its own width, leaving snapping
+    // nothing to move; where a pillar has no line, the warning above has already been given.
+    Point3 start = geometry->elementStart;
+    Point3 stop = geometry->elementStop;
+    {
+        const std::size_t along = geometry->axis == "x" ? 0 : 1;
+        const std::size_t across = 1 - along;
+        const auto linesOf = [&](std::size_t axis) {
+            unsigned int count = 0;
+            double* raw = _grid->GetLines(static_cast<int>(axis), nullptr, count, true);
+            std::vector<double> lines(raw, raw + count);
+            delete[] raw;
+            return lines;
+        };
+        const std::vector<double> alongLines = linesOf(along);
+        const std::vector<double> acrossLines = linesOf(across);
+        const auto nearestWithin = [](const std::vector<double>& lines, double centre, double reach) {
+            std::optional<double> best;
+            for (const double line : lines) {
+                if (std::abs(line - centre) <= reach && (!best || std::abs(line - centre) < std::abs(*best - centre))) {
+                    best = line;
+                }
+            }
+            return best;
+        };
+        const auto from = nearestWithin(alongLines, start[along], half);
+        const auto to = nearestWithin(alongLines, stop[along], half);
+        const double acrossCentre = (start[across] + stop[across]) / 2;
+        const auto first = std::lower_bound(acrossLines.begin(), acrossLines.end(), std::round(acrossCentre - half));
+        const auto last = std::upper_bound(first, acrossLines.end(), std::round(acrossCentre + half));
+        if (from && to && *from != *to && first != last) {
+            start[along] = *from;
+            stop[along] = *to;
+            start[across] = *first;
+            stop[across] = *(last - 1);
+        }
+    }
     logDebug("Adding return-bridged port " + portConfig.name() + " to pin " + bridge.padNumber + " at start: " +
              _point3ToString(start) + " end: " + _point3ToString(stop));
     if (portConfig.absorbSignal()) {
@@ -1155,8 +1346,7 @@ ViaConductionPlan planViaConduction(const MeshLinesXY& mesh, double x1, double y
     return {ViaConduction::ThinWire, nearest};
 }
 
-std::expected<void, std::string> Simulation::addVias() {
-    logInfo("Adding vias from KiCad board geometry");
+std::expected<std::vector<ViaHole>, std::string> Simulation::keptVias() const {
     auto originResult = _boardOrigin(_board);
     if (!originResult) {
         return std::unexpected(originResult.error());
@@ -1172,6 +1362,22 @@ std::expected<void, std::string> Simulation::addVias() {
     // _viaIntersectsOutline's own doc comment). Tested against *both* ends of an elongated via's
     // centerline (a plain round via just tests the same point twice) -- an oblong pad can straddle
     // the cutout boundary at either end independently of the other.
+    std::vector<ViaHole> kept;
+    for (const ViaHole& via : *viasResult) {
+        if (_viaIntersectsOutline(via.x, via.y, via.diameter, _slicedBoard.outline) ||
+            _viaIntersectsOutline(via.x2, via.y2, via.diameter, _slicedBoard.outline)) {
+            kept.push_back(via);
+        }
+    }
+    return kept;
+}
+
+std::expected<void, std::string> Simulation::addVias() {
+    logInfo("Adding vias from KiCad board geometry");
+    auto viasResult = keptVias();
+    if (!viasResult) {
+        return std::unexpected(viasResult.error());
+    }
     MeshLinesXY mesh;
     for (int axis = 0; axis < 2; ++axis) {
         unsigned int count = 0;
@@ -1181,23 +1387,20 @@ std::expected<void, std::string> Simulation::addVias() {
     }
     std::map<ViaConduction, std::size_t> conduction;
     for (const auto& via : *viasResult) {
-        if (_viaIntersectsOutline(via.x, via.y, via.diameter, _slicedBoard.outline) ||
-            _viaIntersectsOutline(via.x2, via.y2, via.diameter, _slicedBoard.outline)) {
-            // A real via's own copper pad on each layer is already modeled separately (it's part
-            // of that layer's copper geometry read directly from KiCad) -- this outer
-            // ring only needs to be wide enough for the drilled barrel's actual conductive wall,
-            // not a full pad, unlike a stitching via below. Cropped to the sliced outline
-            // (cropToOutline=true) since this via was kept precisely because its disc *reaches*
-            // that boundary, not because it's fully inside it -- left uncropped, it would extend
-            // past the hull-padding trim line into the simulation's own PML/boundary region.
-            const double outerDiameter = via.diameter + 2 * _config.via().platingThickness();
-            const ViaConduction result = addVia(mesh, via.x, via.y, via.x2, via.y2, outerDiameter, via.padDiameter,
-                                                /*cropToOutline=*/true);
-            ++conduction[result];
-            if (result == ViaConduction::Open) {
-                logWarning("Simulation: the via at (" + std::to_string(via.x) + ", " + std::to_string(via.y) +
-                           ") has no mesh node on it or its pad, so it can't conduct between its layers");
-            }
+        // A real via's own copper pad on each layer is already modeled separately (it's part
+        // of that layer's copper geometry read directly from KiCad) -- this outer
+        // ring only needs to be wide enough for the drilled barrel's actual conductive wall,
+        // not a full pad, unlike a stitching via below. Cropped to the sliced outline
+        // (cropToOutline=true) since keptVias() keeps a via whose disc merely *reaches* that
+        // boundary -- left uncropped, it would extend past the hull-padding trim line into the
+        // simulation's own PML/boundary region.
+        const double outerDiameter = via.diameter + 2 * _config.via().platingThickness();
+        const ViaConduction result = addVia(mesh, via.x, via.y, via.x2, via.y2, outerDiameter, via.padDiameter,
+                                            /*cropToOutline=*/true);
+        ++conduction[result];
+        if (result == ViaConduction::Open) {
+            logWarning("Simulation: the via at (" + std::to_string(via.x) + ", " + std::to_string(via.y) +
+                       ") has no mesh node on it or its pad, so it can't conduct between its layers");
         }
     }
     logInfo("Vias: " + std::to_string(conduction[ViaConduction::Conformal]) + " modelled as conformal cylinders, " +

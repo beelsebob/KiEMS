@@ -41,7 +41,7 @@ inline constexpr std::int32_t viaPolygon = 12;
 // (docs/copper_field_storage_experiments.md, "A thinner CPML") at ~25% less time per step.
 inline constexpr std::int32_t defaultAbsorbingBoundaryCells = 8;
 
-inline constexpr std::string_view configFormatVersion = "2.0";
+inline constexpr std::string_view configFormatVersion = "2.1";
 
 // Number of frequency-domain sample points S-parameters/impedance/delay are computed and plotted
 // at, spanning [Frequency::start(), Frequency::stop()].

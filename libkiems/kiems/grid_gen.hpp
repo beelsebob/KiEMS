@@ -1,7 +1,9 @@
 // Dynamic simulation grid generation. Ported from kiems/grid_gen.py.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -50,9 +52,8 @@ std::vector<TraceSegment> clipTraceSegmentsToCutout(
     double boundaryTolerance = 0.0);
 
 /// The line-merging pass every density stage ends with, exposed for regression tests: lines closer
-/// than gridMin / 2 collapse, but a `protectedLines` line never moves (it absorbs an unprotected
-/// neighbour; two protected lines both stay unless within gridMin / 4, i.e. the same edge) and only
-/// unprotected pairs are averaged.
+/// than gridMin / 2 collapse. A `protectedLines` line never moves for an unprotected neighbour (it
+/// absorbs it); two lines of the same kind are averaged.
 std::vector<double> dedupGrid(std::vector<double> grid, double gridMin, const std::vector<double>& protectedLines);
 
 /// Meshes one axis ("x" or "y") from `copperSegments` alone, exactly as GridGenerator does for a
@@ -87,6 +88,52 @@ std::vector<double> rebuildExteriorPadding(std::vector<double> lines, double con
 /// Appends `cellCount` uniform CPML cells at both ends, copying the now-coarse outermost core-cell
 /// widths produced by growGridBoundaryCellsToSize().
 std::vector<double> appendUniformPMLCells(std::vector<double> lines, std::int32_t cellCount);
+
+/// A conductor Copper models conformally through every copper layer -- a via barrel: the points
+/// within `radius` of the segment from (x1, y1) to (x2, y2) (the same point for a round via).
+struct CopperBarrel {
+    double x1 = 0;
+    double y1 = 0;
+    double x2 = 0;
+    double y2 = 0;
+    double radius = 0;
+};
+
+/// True when `segment` is a piece of one of a via's own circles -- its pad, the antipad round it,
+/// its drill: an arc (no longer than its radius) whose ends lie the same distance, within half a
+/// millimetre, from the centre of one of `barrels`' ends.
+bool isViaCircleSegment(const TraceSegment& segment, const std::vector<CopperBarrel>& barrels);
+
+/// A mesh node at which Copper's rasterization joins two pieces of copper that are separate on
+/// the board -- see copperJoins().
+struct CopperJoin {
+    std::size_t layer = 0;
+    std::size_t xIndex = 0;
+    std::size_t yIndex = 0;
+    /// Whether the node's X (Y) edges carry the joined copper: shortening those separates it.
+    bool alongX = false;
+    bool alongY = false;
+};
+
+/// Every node where Copper would join separate copper. An in-plane edge is metal when its midpoint
+/// lies on copper (CopperOperator::computePEC()) and metal edges meeting at a node join there, so a
+/// node joins two outer loops of a layer when both reach one of its edges' midpoints. A barrel
+/// holds every node inside it, so it joins whatever copper reaches such a node, unless it's the
+/// copper it stands in. `xLines` and `yLines` must be sorted.
+/// `barrels` cross only the first `barrelLayers` layers (the board's own copper, not metal off it).
+std::vector<CopperJoin> copperJoins(const std::vector<double>& xLines, const std::vector<double>& yLines,
+                                    const std::vector<Cu::PolygonSet>& layerCopperLoops,
+                                    const std::vector<CopperBarrel>& barrels,
+                                    std::size_t barrelLayers = std::numeric_limits<std::size_t>::max());
+
+/// Refines `xLines` and `yLines` (sorted, and kept sorted) at every copperJoins() node until none
+/// is left, halving the node's edges along each axis that reaches foreign copper on every pass: no
+/// copper can reach a node from both sides once its edges are shorter than the gap. Cells never go
+/// below `minimumCell`; the joins that would need them to are returned.
+std::vector<CopperJoin> resolveCopperJoins(std::vector<double>& xLines, std::vector<double>& yLines,
+                                           const std::vector<Cu::PolygonSet>& layerCopperLoops,
+                                           const std::vector<CopperBarrel>& barrels, double minimumCell,
+                                           std::size_t barrelLayers = std::numeric_limits<std::size_t>::max());
 }
 
 /// Manages grid generation. All the geometric-series/region-densification machinery
@@ -116,6 +163,12 @@ public:
     /// corner-bridge, routed through open airspace some distance off the board (see
     /// Simulation::addLumpedComponentGrid()'s own doc comment).
     std::vector<double>& additionalZHeights();
+    /// The via barrels the simulation will build, which generate() keeps from joining copper they
+    /// pass through without connecting to (see grid_detail::copperJoins()).
+    std::vector<grid_detail::CopperBarrel>& copperBarrels();
+    /// Metal sheets off the board -- return bridges' pillars and legs at their own height -- which
+    /// generate() keeps apart like the board's copper layers, though no barrel reaches them.
+    std::vector<Cu::PolygonSet>& offBoardSheets();
 
     double xmin() const;
     double ymin() const;

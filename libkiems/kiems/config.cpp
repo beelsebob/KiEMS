@@ -582,10 +582,9 @@ void from_json(const nlohmann::json& j, Via& v) {
     v._viaClearance = j.value("via_clearance", def._viaClearance);
 }
 
-void Margin::applyFrequencyConstraint(double minWavelength) {
-    const double minimumMargin = minWavelength / 4.0;
-    _xy = std::max(_xy, minimumMargin);
-    _z = std::max(_z, minimumMargin);
+double Margin::suggested(double lowestFrequencyHz) {
+    constexpr double speedOfLightMicrometresPerSecond = 299792458.0 * 1e6;
+    return speedOfLightMicrometresPerSecond / lowestFrequencyHz / 4.0;
 }
 
 void Margin::scaleToSimulationUnits(std::int32_t unitMultiplier) {
@@ -620,7 +619,6 @@ void Grid::applyFrequencyConstraint(double stopFrequencyHz) {
     _perpendicular = std::min(_perpendicular, _max);
     _diagonal = std::min(_diagonal, _perpendicular);
     _optimal = std::min(_diagonal, _optimal);
-    _margin.applyFrequencyConstraint(minWavelength);
 }
 
 void Grid::scaleToSimulationUnits(std::int32_t unitMultiplier) {
@@ -1034,6 +1032,15 @@ void from_json(const nlohmann::json& j, SimulationConfig& p) {
 
 void EMSConfig::_postInit() {
     _grid.applyFrequencyConstraint(_frequency.stop());
+    if (_frequency.start() > 0) {
+        const double suggestedMargin = Margin::suggested(_frequency.start());
+        if (_grid.margin().xy() < suggestedMargin || _grid.margin().z() < suggestedMargin) {
+            logInfo() << "Grid margin is " << _grid.margin().xy() / 1000 << " mm (xy), "
+                      << _grid.margin().z() / 1000 << " mm (z); a quarter of the vacuum wavelength at "
+                      << _frequency.start() / 1e6 << " MHz would be " << suggestedMargin / 1000
+                      << " mm (suggestion only, not applied)";
+        }
+    }
     _formatVersion = std::string(constants::configFormatVersion);
 }
 
@@ -1204,6 +1211,12 @@ std::expected<EMSConfig, std::string> EMSConfig::parse(const std::filesystem::pa
         self._pixelSize = jsonCfg.value("pixel_size", 5);
         self._via = jsonCfg.value("via", Via{});
         self._grid = jsonCfg.value("grid", Grid{});
+        // Format 2.0 saved the margin after raising it to a quarter wavelength at the stop
+        // frequency, so a 2.0 margin is that old floor, ratcheted to the highest it ever reached,
+        // not a choice (the margin has no UI). Start such documents from the default instead.
+        if (std::stoi(_splitDot(*version)[1]) < 1) {
+            self._grid.margin() = Margin{};
+        }
         self._boardSetup = jsonCfg.value("board_setup", BoardSetupConfig{});
 
         self._simulations.clear();

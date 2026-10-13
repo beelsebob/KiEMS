@@ -119,6 +119,17 @@ struct ViaConductionPlan {
 ViaConductionPlan planViaConduction(const MeshLinesXY& mesh, double x1, double y1, double x2, double y2,
                                     double outerDiameter, double padDiameter);
 
+/// Indices into a pad column's footprint lines, first and last X then first and last Y.
+using PadColumnNodes = std::array<std::size_t, 4>;
+
+/// The largest rectangle of the footprint's mesh nodes (`xs` by `ys`, sorted), grown from the node
+/// nearest (`centreX`, `centreY`) that `onCopper` accepts, whose every node and in-plane edge
+/// midpoint `onCopper` accepts -- the nodes a pad column's end caps can cover without reaching off
+/// its copper. Nullopt when no footprint node is on copper.
+std::optional<PadColumnNodes> padColumnOnCopper(const std::vector<double>& xs, const std::vector<double>& ys,
+                                                double centreX, double centreY,
+                                                const std::function<bool(double, double)>& onCopper);
+
 class Simulation {
 public:
     /// `simConfig`/`config`/`options`/`paths`/`board` must all outlive this Simulation (kept by
@@ -195,8 +206,19 @@ public:
     /// through every existing per-port accessor.
     std::expected<void, std::string> addPassiveProbe(PortConfig& portConfig, std::int32_t portNumber);
     /// The pad's own footprint extruded from its copper layer to its reference plane -- the column
-    /// addResistivePort()'s resistor fills and addLoadCapacitor()'s capacitor shares.
+    /// addResistivePort()'s resistor fills and addLoadCapacitor()'s capacitor shares. Once the mesh
+    /// exists it is trimmed to the footprint's mesh nodes whose caps lie on copper at both ends (see
+    /// _padColumnOnMesh()).
     std::expected<std::pair<Point3, Point3>, std::string> padColumn(const PortConfig& portConfig);
+    /// The board's vias this simulation builds: those whose disc still reaches its sliced outline.
+    std::expected<std::vector<ViaHole>, std::string> keptVias() const;
+    /// The largest rectangle of mesh nodes in the footprint `xMin`..`xMax` x `yMin`..`yMax`, grown
+    /// from the pad's centre, whose nodes and cap edges are all on copper on the port's layer and its
+    /// plane, as a box lying exactly on mesh lines. Nullopt before the mesh exists or when no node
+    /// in the footprint is on copper.
+    std::optional<std::pair<Point3, Point3>> _padColumnOnMesh(const PortConfig& portConfig, double xMin, double xMax,
+                                                              double yMin, double yMax, double startZ,
+                                                              double stopZ) const;
     /// PortConfig::loadCapacitance() as a lumped capacitor filling padColumn().
     std::expected<void, std::string> addLoadCapacitor(const PortConfig& portConfig);
     /// Where a return-bridged port's element sits (see PortConfig::returnBridge()), in simulation

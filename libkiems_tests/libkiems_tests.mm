@@ -2778,13 +2778,12 @@ static kiems::BridgePad bridgeBall(const std::string& number, const std::string&
     }
 }
 
-- (void)testDedupNeverMovesProtectedLines {
+- (void)testDedupNeverMovesAProtectedLineForAnUnprotectedOne {
     // gridMin 30 merges lines closer than 15. A protected line absorbs an unprotected neighbour
-    // without moving; two protected lines both stay unless within 7.5 (gridMin / 4: the same edge,
-    // where keeping both would make a sub-micron cell); only unprotected pairs are averaged.
+    // without moving; two lines of the same kind meet halfway.
     const auto lines = kiems::grid_detail::dedupGrid({0, 10, 100, 105, 200, 210, 300, 306, 400, 401}, 30.0,
                                                      {10, 100, 200, 210, 400, 401});
-    const std::vector<double> expected = {10, 100, 200, 210, 303, 400.5};
+    const std::vector<double> expected = {10, 100, 205, 303, 400.5};
     XCTAssertEqual(lines.size(), expected.size());
     for (std::size_t i = 0; i < std::min(lines.size(), expected.size()); ++i) {
         XCTAssertEqualWithAccuracy(lines[i], expected[i], 1e-9);
@@ -2806,6 +2805,110 @@ static kiems::BridgePad bridgeBall(const std::string& number, const std::string&
     const bool lineInsideGap =
         std::any_of(lines.begin(), lines.end(), [](double line) { return line > 300 && line < 340; });
     XCTAssertTrue(lineInsideGap, @"no x mesh line falls inside the 300..340 gap between the two pieces of copper");
+}
+
+// A square loop, counter-clockwise (copper) or clockwise (a hole in it).
+static Cu::Polygon squareLoop(double x0, double y0, double x1, double y1, bool hole = false) {
+    Cu::Polygon loop = {{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}};
+    if (hole) std::reverse(loop.begin(), loop.end());
+    return loop;
+}
+
+static std::vector<double> evenLines(double from, double to, double step) {
+    std::vector<double> lines;
+    for (double line = from; line <= to + 1e-9; line += step) lines.push_back(line);
+    return lines;
+}
+
+- (void)testCopperJoinsFindTheNodeBothSidesOfAGapReach {
+    // Copper 40 apart on 100-wide cells: the node on the left copper's edge has its left edge's
+    // midpoint on that copper and its right edge's on the other, so Copper would join them there.
+    const std::vector<Cu::PolygonSet> copper = {{squareLoop(0, 0, 300, 300), squareLoop(340, 0, 700, 300)}};
+    const auto lines = evenLines(0, 700, 100);
+    const auto joins = kiems::grid_detail::copperJoins(lines, evenLines(0, 300, 100), copper, {});
+    XCTAssertFalse(joins.empty());
+    for (const auto& join : joins) {
+        XCTAssertEqualWithAccuracy(lines[join.xIndex], 300.0, 1e-9);
+        XCTAssertTrue(join.alongX);
+    }
+}
+
+- (void)testResolvedCopperJoinsLeaveNoNodeJoiningSeparateCopper {
+    const std::vector<Cu::PolygonSet> copper = {{squareLoop(0, 0, 300, 300), squareLoop(340, 0, 700, 300)}};
+    std::vector<double> xs = evenLines(0, 700, 100);
+    std::vector<double> ys = evenLines(0, 300, 100);
+    const auto remaining = kiems::grid_detail::resolveCopperJoins(xs, ys, copper, {}, 5.0);
+    XCTAssertTrue(remaining.empty());
+    XCTAssertTrue(kiems::grid_detail::copperJoins(xs, ys, copper, {}).empty());
+    XCTAssertTrue(std::is_sorted(xs.begin(), xs.end()));
+    // Only the gap needed refining: Y, which no join involved, is untouched.
+    XCTAssertEqual(ys.size(), 4U);
+}
+
+- (void)testCopperJoinsReportsCopperCloserThanTheFinestCell {
+    // 2 apart can't be separated by cells no finer than 5.
+    const std::vector<Cu::PolygonSet> copper = {{squareLoop(0, 0, 300, 300), squareLoop(302, 0, 700, 300)}};
+    std::vector<double> xs = evenLines(0, 700, 100);
+    std::vector<double> ys = evenLines(0, 300, 100);
+    XCTAssertFalse(kiems::grid_detail::resolveCopperJoins(xs, ys, copper, {}, 5.0).empty());
+}
+
+- (void)testABarrelJoinsOnlyCopperItDoesNotStandIn {
+    // A plane with a 300-wide antipad round a barrel of radius 60 at (500, 500). Lines at 100 and
+    // 900 put the edges from the barrel's node on the plane beyond the antipad: the barrel, which
+    // passes through without connecting, would join the plane.
+    const std::vector<Cu::PolygonSet> plane = {{squareLoop(0, 0, 1000, 1000), squareLoop(350, 350, 650, 650, true)}};
+    const kiems::grid_detail::CopperBarrel barrel{500, 500, 500, 500, 60};
+    const std::vector<double> lines = {0, 100, 500, 900, 1000};
+    XCTAssertFalse(kiems::grid_detail::copperJoins(lines, lines, plane, {barrel}).empty());
+
+    // On its own pad -- even one with a drill hole at the centre -- it's that copper's barrel.
+    const std::vector<Cu::PolygonSet> pad = {
+        {squareLoop(0, 0, 1000, 1000), squareLoop(450, 450, 550, 550, true)},
+    };
+    XCTAssertTrue(kiems::grid_detail::copperJoins(lines, lines, pad, {barrel}).empty());
+}
+
+- (void)testOnlyAViasOwnCirclesAreViaCircleSegments {
+    const kiems::grid_detail::CopperBarrel via{1000, 1000, 1000, 1000, 680};
+    // A piece of its 0.45 mm pad, flattened from the circle round it.
+    const double r = 2250;
+    const kiems::TraceSegment arc({1000 + r, 1000}, {1000 + r * std::cos(0.1), 1000 + r * std::sin(0.1)}, "", 0.0);
+    XCTAssertTrue(kiems::grid_detail::isViaCircleSegment(arc, {via}));
+    // A trace edge running straight past it, its ends the same distance away.
+    const kiems::TraceSegment edge({-20000, 3000}, {22000, 3000}, "", 0.0);
+    XCTAssertFalse(kiems::grid_detail::isViaCircleSegment(edge, {via}));
+    // A circle round something else.
+    const kiems::TraceSegment far({30000, 1000}, {30000 + r * std::cos(0.1) - r, 1000 + r * std::sin(0.1)}, "", 0.0);
+    XCTAssertFalse(kiems::grid_detail::isViaCircleSegment(far, {via}));
+}
+
+- (void)testPadColumnStaysOnItsRoundPad {
+    // A round pad of radius 125 on 30-wide cells: the footprint is its bounding square, whose
+    // corners (and, snapped outward, its edges) lie off the copper.
+    constexpr double kRadius = 125;
+    const auto onPad = [](double x, double y) { return std::hypot(x, y) <= kRadius; };
+    const auto xs = evenLines(-120, 120, 30);
+    const auto nodes = kiems::padColumnOnCopper(xs, xs, 0, 0, onPad);
+    XCTAssertTrue(nodes.has_value());
+    if (!nodes) return;
+    const auto [i0, i1, j0, j1] = *nodes;
+    XCTAssertLessThanOrEqual(i0, 4U);
+    XCTAssertGreaterThanOrEqual(i1, 4U);
+    XCTAssertLessThanOrEqual(j0, 4U);
+    XCTAssertGreaterThanOrEqual(j1, 4U);
+    for (std::size_t i = i0; i <= i1; ++i) {
+        for (std::size_t j = j0; j <= j1; ++j) {
+            XCTAssertTrue(onPad(xs[i], xs[j]), @"node (%g, %g) is off the pad", xs[i], xs[j]);
+        }
+    }
+    // The rectangle is as large as the pad allows along at least one side.
+    XCTAssertGreaterThan(i1 - i0, 3U);
+}
+
+- (void)testPadColumnIsNoneWhenNoFootprintNodeIsOnCopper {
+    const auto xs = evenLines(200, 300, 50);
+    XCTAssertFalse(kiems::padColumnOnCopper(xs, xs, 250, 250, [](double, double) { return false; }).has_value());
 }
 
 - (void)testSlicedBoardPersistsPostCutCopperLoops {
@@ -2977,6 +3080,52 @@ static kiems::EMSConfig makeSyntheticConfig() {
     XCTAssertEqual(sim.excitations().size(), static_cast<std::size_t>(1));
     if (sim.excitations().size() == 1) {
         XCTAssertTrue(sim.excitations().front().isMain());
+    }
+}
+
+/// Writes `json` to a scratch simulation.json and parses it back.
+static std::expected<kiems::EMSConfig, std::string> parseConfigJSON(const nlohmann::json& json) {
+    const std::filesystem::path path = std::filesystem::temp_directory_path() /
+                                       ("libkiems_tests_config_" + std::to_string(::getpid()) + ".json");
+    {
+        std::ofstream file(path);
+        file << json.dump();
+    }
+    auto result = kiems::EMSConfig::parse(path, false);
+    std::filesystem::remove(path);
+    return result;
+}
+
+- (void)testGridMarginSuggestionIsAQuarterVacuumWavelengthAtTheLowestFrequency {
+    XCTAssertEqualWithAccuracy(kiems::Margin::suggested(200e6), 299792458.0 * 1e6 / 200e6 / 4, 1e-6);
+}
+
+- (void)testFrequencyDoesNotRaiseTheGridMargin {
+    // A 2.5 GHz stop frequency used to raise both margins to a quarter wavelength (~14.8 mm).
+    const auto parsed = parseConfigJSON({{"format_version", std::string(kiems::constants::configFormatVersion)},
+                                         {"frequency", {{"start", 200e6}, {"stop", 2.5e9}}},
+                                         {"grid", {{"margin", {{"xy", 1500}, {"z", 2000}}}}}});
+    XCTAssertTrue(parsed.has_value());
+    if (!parsed.has_value()) return;
+    XCTAssertEqual(parsed->grid().margin().xy(), 1500);
+    XCTAssertEqual(parsed->grid().margin().z(), 2000);
+}
+
+- (void)testFormat20DocumentsDropTheirSavedMarginButLaterOnesKeepIt {
+    const nlohmann::json grid = {{"margin", {{"xy", 14762.034939153687}, {"z", 14762.034939153687}}}};
+    const auto legacy = parseConfigJSON({{"format_version", "2.0"}, {"grid", grid}});
+    XCTAssertTrue(legacy.has_value());
+    if (legacy.has_value()) {
+        XCTAssertEqual(legacy->grid().margin().xy(), kiems::Margin{}.xy());
+        XCTAssertEqual(legacy->grid().margin().z(), kiems::Margin{}.z());
+    }
+
+    const auto current =
+        parseConfigJSON({{"format_version", std::string(kiems::constants::configFormatVersion)}, {"grid", grid}});
+    XCTAssertTrue(current.has_value());
+    if (current.has_value()) {
+        XCTAssertEqual(current->grid().margin().xy(), 14762.034939153687);
+        XCTAssertEqual(current->grid().margin().z(), 14762.034939153687);
     }
 }
 
