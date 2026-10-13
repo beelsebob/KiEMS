@@ -389,9 +389,11 @@ std::expected<ClassifiedCopper, std::string> classifyCopperForSimulation(const S
     // Ports exist only once resolveSimulationPorts() has run, so a caller planning the hull for
     // display must resolve them first to match.
     std::set<std::pair<std::string, std::string>> portPads;
+    std::vector<const PortConfig*> bridgedPorts;
     for (const PortConfig& port : sim.ports()) {
         if (port.isTraceProbe() || port.footprintRef().empty()) continue;
         portPads.emplace(port.footprintRef(), port.padNumber());
+        if (port.returnBridge().has_value()) bridgedPorts.push_back(&port);
     }
     if (!portPads.empty()) {
         ClassifiedCopper::HullContribution contribution;
@@ -399,6 +401,47 @@ std::expected<ClassifiedCopper, std::string> classifyCopperForSimulation(const S
         contribution.onlyWhereTouchingHull = true;
         for (const libkicad::CopperPolygon& polygon : geometry.copper) {
             if (portPads.contains({polygon.footprintRef, polygon.padNumber})) contribution.copper.push_back(polygon);
+        }
+        // A return bridge (see PortConfig::returnBridge()) joins with its port's pad: its return pad
+        // and the footprint of its route, labelled as that pad, so a pad that joins brings in the
+        // ground pad its element returns to and the airspace the bridge runs through.
+        if (!bridgedPorts.empty()) {
+            auto origin = boardBoundsInSimulationUnits(geometry);
+            if (!origin) return std::unexpected(std::move(origin).error());
+            const auto toMm = [](double simUnits) {
+                return simUnits * constants::baseUnit * 1000.0 / constants::unitMultiplier;
+            };
+            for (const PortConfig* port : bridgedPorts) {
+                const PortReturnBridge& bridge = *port->returnBridge();
+                const auto pad = std::ranges::find_if(geometry.copper, [&](const libkicad::CopperPolygon& polygon) {
+                    return polygon.footprintRef == port->footprintRef() && polygon.padNumber == port->padNumber();
+                });
+                if (pad == geometry.copper.end()) continue;
+                const auto asPortPad = [&](libkicad::CopperPolygon polygon) {
+                    polygon.netName = port->netName();
+                    polygon.footprintRef = port->footprintRef();
+                    polygon.padNumber = port->padNumber();
+                    contribution.companions.push_back(std::move(polygon));
+                };
+                for (const libkicad::CopperPolygon& polygon : geometry.copper) {
+                    if (polygon.footprintRef == port->footprintRef() && polygon.padNumber == bridge.padNumber) {
+                        asPortPad(polygon);
+                    }
+                }
+                const std::pair<double, double> from = *port->position();
+                const std::pair<double, double> corner = bridge.corner.value_or(bridge.position);
+                for (const auto& [a, b] : {std::pair{from, corner}, std::pair{corner, bridge.position}}) {
+                    const double half = bridge.width / 2;
+                    const double x0 = toMm(std::min(a.first, b.first) - half + origin->xMin);
+                    const double x1 = toMm(std::max(a.first, b.first) + half + origin->xMin);
+                    const double y0 = toMm(std::min(a.second, b.second) - half + origin->yMin);
+                    const double y1 = toMm(std::max(a.second, b.second) + half + origin->yMin);
+                    libkicad::CopperPolygon leg;
+                    leg.copperLayerName = pad->copperLayerName;
+                    leg.loop.pointsMm = {{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}};
+                    asPortPad(std::move(leg));
+                }
+            }
         }
         result.hullContributions.push_back(std::move(contribution));
     }
@@ -524,6 +567,10 @@ std::expected<CutoutStage, std::string> computeCutoutStage(
         for (const libkicad::CopperPolygon& polygon : contribution.copper) {
             byPad[{polygon.footprintRef, polygon.padNumber}].push_back(polygon);
         }
+        std::map<std::pair<std::string, std::string>, std::vector<libkicad::CopperPolygon>> companionsByPad;
+        for (const libkicad::CopperPolygon& polygon : contribution.companions) {
+            companionsByPad[{polygon.footprintRef, polygon.padNumber}].push_back(polygon);
+        }
         for (const auto& [pad, copper] : byPad) {
             PolygonSet expanded = expandedContribution(copper, contribution.padding);
             // GEOS can hand back a degenerate zero-area loop for a disjoint pair, so test the
@@ -535,6 +582,10 @@ std::expected<CutoutStage, std::string> computeCutoutStage(
             const bool touches = overlapArea > tessellationTolerance * tessellationTolerance;
             if (!touches) continue;
             conditionalAdditions.insert(conditionalAdditions.end(), expanded.begin(), expanded.end());
+            if (const auto companions = companionsByPad.find(pad); companions != companionsByPad.end()) {
+                PolygonSet joined = expandedContribution(companions->second, contribution.padding);
+                conditionalAdditions.insert(conditionalAdditions.end(), joined.begin(), joined.end());
+            }
         }
     }
     if (!conditionalAdditions.empty()) {
@@ -856,6 +907,19 @@ void restrictLumpedComponentsToCutout(SimulationConfig& simulation, const Sliced
     // classifyCopperForSimulation(), so its centre is inside.) Excitations and probes are kept --
     // they are what the user asked to measure. Excitations hold port indices, so remap them.
     auto& ports = simulation.ports();
+    // A return bridge whose ground pad was cut away would leave its element connected to nothing.
+    // (A port whose own pad was cut away is dropped or unaffected below either way.)
+    for (PortConfig& port : ports) {
+        if (!port.returnBridge().has_value() || !port.position().has_value() || !contains(*port.position()) ||
+            contains(port.returnBridge()->position)) {
+            continue;
+        }
+        logWarning("Simulation \"" + simulation.name() + "\": port " + port.name() + "'s return pad " +
+                   port.footprintRef() + " pin " + port.returnBridge()->padNumber +
+                   " lies outside the sliced cutout -- falling back to a pad-to-plane port, whose readings and "
+                   "loading will be wrong on its via-in-pad");
+        port.setReturnBridge(std::nullopt);
+    }
     std::vector<std::int32_t> newIndex(ports.size(), -1);
     std::vector<PortConfig> kept;
     for (std::size_t index = 0; index < ports.size(); ++index) {

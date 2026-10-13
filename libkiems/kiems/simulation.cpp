@@ -12,6 +12,7 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <span>
 #include <sstream>
 #include <utility>
 
@@ -44,6 +45,15 @@ std::string _point3ToString(const Point3& p) {
 // generated) and Simulation::addLumpedComponents() (which actually builds the geometry there), so the
 // two can never drift out of sync with each other.
 constexpr double kCornerBridgeElevationSimUnits = 2000.0; // ~0.2mm clearance above/below the board
+
+// A conformally modelled via is a solid prism with this many sides: the cut fractions Copper
+// derives from it then see the true circle (its area within 0.2%), not the 12-sided outline that is
+// plenty for rasterising nodes.
+constexpr std::int32_t kConformalViaSegments = 64;
+// Copper's own attribute names (CopperOperator::kConformalAttribute/kThinWireRadiusAttribute) --
+// spelled out here because libkiems never depends on Copper itself.
+constexpr const char* kCopperConformalAttribute = "copper:conformal";
+constexpr const char* kCopperThinWireRadiusAttribute = "copper:thin_wire_radius";
 double _cornerBridgeZ(double padZ, std::int32_t layer) {
     // Metal layer 0 is F.Cu, the topmost copper (see Simulation::getMetalLayerOffset()'s own
     // convention: offset 0 there, more negative for every layer below it) -- elevate away from the
@@ -107,6 +117,16 @@ double _distanceToPolygonBoundary(double x, double y, const std::vector<Position
     return best;
 }
 
+// Shortest distance from (x, y) to the segment (x1, y1)-(x2, y2), which may be a single point.
+double _distanceToSegment(double x, double y, double x1, double y1, double x2, double y2) {
+    const double dx = x2 - x1;
+    const double dy = y2 - y1;
+    const double lengthSquared = dx * dx + dy * dy;
+    const double t =
+        lengthSquared > 0 ? std::clamp(((x - x1) * dx + (y - y1) * dy) / lengthSquared, 0.0, 1.0) : 0.0;
+    return std::hypot(x - (x1 + t * dx), y - (y1 + t * dy));
+}
+
 // A via whose *center* has been sliced away can still have real copper overlapping the sliced
 // outline (its pad straddling the cutout boundary) -- checking only the center point (as this used
 // to) silently dropped any such via, which is real copper the board-slicing cutout genuinely
@@ -159,15 +179,16 @@ std::string _normalizeLayerName(std::string name) {
 /// codebase's history, and getting it wrong would be a silent, hard-to-notice regression rather
 /// than a build failure.
 std::pair<std::vector<double>, std::vector<double>> _viaPolygon(double x1, double y1, double x2, double y2,
-                                                                    double diameter, bool reversed) {
+                                                                    double diameter, bool reversed,
+                                                                    std::int32_t segments = constants::viaPolygon) {
     const double radius = diameter / 2;
     std::vector<double> xs;
     std::vector<double> ys;
 
     if (x1 == x2 && y1 == y2) {
-        for (std::int32_t step = 0; step < constants::viaPolygon; ++step) {
-            const std::int32_t i = reversed ? constants::viaPolygon - 1 - step : step;
-            const double angle = static_cast<double>(i) / constants::viaPolygon * 2 * M_PI;
+        for (std::int32_t step = 0; step < segments; ++step) {
+            const std::int32_t i = reversed ? segments - 1 - step : step;
+            const double angle = static_cast<double>(i) / segments * 2 * M_PI;
             xs.push_back(x1 + std::sin(angle) * radius);
             ys.push_back(y1 + std::cos(angle) * radius);
         }
@@ -175,7 +196,7 @@ std::pair<std::vector<double>, std::vector<double>> _viaPolygon(double x1, doubl
     }
 
     const double lineAngle = std::atan2(y2 - y1, x2 - x1);
-    const std::int32_t halfSegments = std::max(std::int32_t{1}, constants::viaPolygon / 2);
+    const std::int32_t halfSegments = std::max(std::int32_t{1}, segments / 2);
     // halfSegments *points* spanning a pi-radian sweep means halfSegments-1 *steps* -- dividing by
     // halfSegments instead undershoots the far endpoint by one step's worth of angle, leaving each
     // semicircle looking like it doesn't quite reach 180 degrees.
@@ -252,15 +273,14 @@ Simulation::Simulation(SimulationConfig& simConfig, const EMSConfig& config, con
       _paths(paths),
       _board(board),
       _planeMaterial(nullptr),
-      _viaMaterial(nullptr),
-      _viaFillingMaterial(nullptr),
+      _conformalViaMaterial(nullptr),
       _npthVoidMaterial(nullptr) {
     _grid = _csx->GetGrid();
     _grid->SetDeltaUnit(constants::baseUnit / constants::unitMultiplier);
 
     _planeMaterial = addMetal(*_csx, "Plane");
-    _viaMaterial = addMetal(*_csx, "Via");
-    _viaFillingMaterial = addMaterial(*_csx, "ViaFilling", _config.via().fillingEpsilon());
+    _conformalViaMaterial = addMetal(*_csx, "Via");
+    _conformalViaMaterial->SetAttributeValue(kCopperConformalAttribute, "1");
     _npthVoidMaterial = addMaterial(*_csx, "NPTHVoid", 1.0);
 }
 
@@ -426,6 +446,22 @@ void Simulation::addPortGrid() {
         _gridGen->addPads().emplace_back(ap, NetName("PORT"), Position(footprint.centerX, footprint.centerY));
         _gridGen->addApertures().insert_or_assign(
             ap, Aperture("", std::make_shared<ApertureRect>(footprint.width, footprint.height)));
+
+        // A return bridge's pillars and legs are built later, in addReturnBridgePort(), so reserve
+        // both heights its pillars span now. They need no X/Y density of their own: each pillar
+        // stands on a real pad, whose copper edges already put mesh lines through it, and the legs
+        // run along those pads' rows and columns. A square per pillar adds edge cells inside every
+        // pad instead; on HorizonPC that was 2% more cells and a 9% shorter time step, for no node
+        // the pads hadn't already placed. addReturnBridgePort() warns if a pillar ever misses one.
+        if (!portConfig.returnBridge().has_value()) continue;
+        const auto geometry = returnBridgeGeometry(portConfig);
+        if (!geometry) {
+            logWarning("Simulation: couldn't place return-bridge density for port " + portConfig.name() + ": " +
+                       geometry.error());
+            continue;
+        }
+        _gridGen->additionalZHeights().push_back(geometry->padZ);
+        _gridGen->additionalZHeights().push_back(geometry->bridgeZ);
     }
 }
 
@@ -742,6 +778,114 @@ std::expected<void, std::string> Simulation::addLoadCapacitor(const PortConfig& 
     return {};
 }
 
+std::expected<Simulation::ReturnBridgeGeometry, std::string> Simulation::returnBridgeGeometry(
+    const PortConfig& portConfig) {
+    if (!portConfig.position().has_value() || !portConfig.returnBridge().has_value()) {
+        return std::unexpected("Port " + portConfig.name() + " has no return bridge to build");
+    }
+    const auto zResult = getMetalLayerOffset(portConfig.layer());
+    if (!zResult) {
+        return std::unexpected(zResult.error());
+    }
+    const PortReturnBridge& bridge = *portConfig.returnBridge();
+    ReturnBridgeGeometry geometry;
+    geometry.padZ = std::round(*zResult);
+    // The same airspace a diagonal lumped component's corner bridge uses, and for the same reason:
+    // nothing else is ever placed there, so the element can't touch another net's copper on the way.
+    geometry.bridgeZ = _cornerBridgeZ(geometry.padZ, portConfig.layer());
+    // The element keeps the pin's own row or column, and ends at the corner or level with the return
+    // pad, inside its pillar.
+    const auto [x, y] = *portConfig.position();
+    const auto [farX, farY] = bridge.corner.value_or(bridge.position);
+    const double half = bridge.width / 2;
+    if (std::abs(farX - x) >= std::abs(farY - y)) {
+        geometry.axis = "x";
+        geometry.elementStart = {std::round(x), std::round(y - half), geometry.bridgeZ};
+        geometry.elementStop = {std::round(farX), std::round(y + half), geometry.bridgeZ};
+    } else {
+        geometry.axis = "y";
+        geometry.elementStart = {std::round(x - half), std::round(y), geometry.bridgeZ};
+        geometry.elementStop = {std::round(x + half), std::round(farY), geometry.bridgeZ};
+    }
+    return geometry;
+}
+
+std::expected<void, std::string> Simulation::addReturnBridgePort(PortConfig& portConfig, std::int32_t portNumber) {
+    const auto geometry = returnBridgeGeometry(portConfig);
+    if (!geometry) {
+        return std::unexpected(geometry.error());
+    }
+    const PortReturnBridge& bridge = *portConfig.returnBridge();
+    const double half = bridge.width / 2;
+    const std::string name = "PortBridge_" + std::to_string(portNumber);
+    const auto pillar = [&](const std::string& suffix, std::pair<double, double> at) {
+        CSPropMetal* metal = addMetal(*_csx, name + "_pillar_" + suffix);
+        const double bottom = std::min(geometry->padZ, geometry->bridgeZ);
+        const double top = std::max(geometry->padZ, geometry->bridgeZ);
+        addBox(*metal, {std::round(at.first - half), std::round(at.second - half), bottom},
+               {std::round(at.first + half), std::round(at.second + half), top}, 100);
+    };
+    // A pillar conducts only through a mesh node inside it. The element and the leg run along the
+    // two pillars' rows and columns (the corner shares one coordinate with each), so a node in
+    // both pillars connects the whole bridge.
+    const auto missesNode = [&](std::pair<double, double> at) {
+        for (int axis = 0; axis < 2; ++axis) {
+            const double centre = axis == 0 ? at.first : at.second;
+            unsigned int count = 0;
+            double* lines = _grid->GetLines(axis, nullptr, count, true);
+            const bool found = std::any_of(lines, lines + count, [&](double line) {
+                return line >= std::round(centre - half) && line <= std::round(centre + half);
+            });
+            delete[] lines;
+            if (!found) return true;
+        }
+        return false;
+    };
+    const auto mm = [](double simUnits) { return simUnits * constants::baseUnit / constants::unitMultiplier * 1e3; };
+    for (const auto& [end, at] : {std::pair{"pin", *portConfig.position()}, std::pair{"return pad", bridge.position}}) {
+        if (missesNode(at)) {
+            logWarning("Port " + portConfig.name() + ": no mesh node inside its return bridge's pillar on the " + end +
+                       " near (" + std::to_string(mm(at.first)) + ", " + std::to_string(mm(at.second)) +
+                       ") mm, so the bridge stays open there");
+        }
+    }
+    pillar("pad", *portConfig.position());
+    pillar("return", bridge.position);
+    if (bridge.corner.has_value()) {
+        // Overlaps the corner and the return pillar by a half-width, so the pieces share cells
+        // however the mesh snaps them.
+        const auto [cornerX, cornerY] = *bridge.corner;
+        const auto [returnX, returnY] = bridge.position;
+        CSPropMetal* leg = addMetal(*_csx, name + "_return_leg");
+        addBox(*leg,
+               {std::round(std::min(cornerX, returnX) - half), std::round(std::min(cornerY, returnY) - half),
+                geometry->bridgeZ},
+               {std::round(std::max(cornerX, returnX) + half), std::round(std::max(cornerY, returnY) + half),
+                geometry->bridgeZ},
+               100);
+    }
+
+    const Point3& start = geometry->elementStart;
+    const Point3& stop = geometry->elementStop;
+    logDebug("Adding return-bridged port " + portConfig.name() + " to pin " + bridge.padNumber + " at start: " +
+             _point3ToString(start) + " end: " + _point3ToString(stop));
+    if (portConfig.absorbSignal()) {
+        _ports.push_back(std::make_unique<LumpedPort>(*_csx, portNumber, portConfig.impedance(), start, stop,
+                                                        geometry->axis, portConfig.excite() ? 1.0 : 0.0, 100));
+        return {};
+    }
+    _ports.push_back(std::make_unique<PassiveProbe>(*_csx, portNumber, start, stop, geometry->axis, 100));
+    if (portConfig.loadCapacitance() > 0) {
+        logInfo("Adding " + std::to_string(portConfig.loadCapacitance() * 1e12) +
+                " pF load capacitance across the return bridge at " + portConfig.name());
+        CSPropLumpedElement* load = addLumpedElement(*_csx, "Load_" + portConfig.name(), axisIndex(geometry->axis),
+                                                       /*caps=*/false, std::nan(""), CSPropLumpedElement::PARALLEL,
+                                                       std::nan(""), portConfig.loadCapacitance());
+        addBox(*load, start, stop, 100);
+    }
+    return {};
+}
+
 std::expected<void, std::string> Simulation::addResistivePort(PortConfig& portConfig, std::int32_t portNumber,
                                                                 bool excite) {
     logDebug("Adding port number " + std::to_string(_ports.size()));
@@ -972,6 +1116,45 @@ void Simulation::addSolderMask() {
     }
 }
 
+ViaConductionPlan planViaConduction(const MeshLinesXY& mesh, double x1, double y1, double x2, double y2,
+                                    double outerDiameter, double padDiameter) {
+    const auto [outerXs, outerYs] = _viaPolygon(x1, y1, x2, y2, outerDiameter, true, kConformalViaSegments);
+    std::vector<Position> outer;
+    for (std::size_t i = 0; i < outerXs.size(); ++i) outer.emplace_back(outerXs[i], outerYs[i]);
+    const auto linesNear = [](const std::vector<double>& lines, double lo, double hi) {
+        return std::span<const double>(std::lower_bound(lines.begin(), lines.end(), lo),
+                                       std::upper_bound(lines.begin(), lines.end(), hi));
+    };
+    const auto nodesWithin = [&](double radius) {
+        return std::pair{linesNear(mesh[0], std::min(x1, x2) - radius, std::max(x1, x2) + radius),
+                         linesNear(mesh[1], std::min(y1, y2) - radius, std::max(y1, y2) + radius)};
+    };
+
+    // The same node-centred test Copper applies to every Z edge.
+    const auto [xs, ys] = nodesWithin(outerDiameter / 2);
+    for (const double x : xs) {
+        for (const double y : ys) {
+            if (_pointInPolygon(x, y, outer)) return {ViaConduction::Conformal, std::nullopt};
+        }
+    }
+
+    const double padRadius = std::max(padDiameter, outerDiameter) / 2;
+    const auto [nearXs, nearYs] = nodesWithin(padRadius);
+    std::optional<std::pair<double, double>> nearest;
+    double nearestDistance = padRadius;
+    for (const double x : nearXs) {
+        for (const double y : nearYs) {
+            const double distance = _distanceToSegment(x, y, x1, y1, x2, y2);
+            if (distance < nearestDistance) {
+                nearestDistance = distance;
+                nearest = {x, y};
+            }
+        }
+    }
+    if (!nearest.has_value()) return {ViaConduction::Open, std::nullopt};
+    return {ViaConduction::ThinWire, nearest};
+}
+
 std::expected<void, std::string> Simulation::addVias() {
     logInfo("Adding vias from KiCad board geometry");
     auto originResult = _boardOrigin(_board);
@@ -989,6 +1172,14 @@ std::expected<void, std::string> Simulation::addVias() {
     // _viaIntersectsOutline's own doc comment). Tested against *both* ends of an elongated via's
     // centerline (a plain round via just tests the same point twice) -- an oblong pad can straddle
     // the cutout boundary at either end independently of the other.
+    MeshLinesXY mesh;
+    for (int axis = 0; axis < 2; ++axis) {
+        unsigned int count = 0;
+        double* lines = _grid->GetLines(axis, nullptr, count, true);
+        mesh[static_cast<std::size_t>(axis)].assign(lines, lines + count);
+        delete[] lines;
+    }
+    std::map<ViaConduction, std::size_t> conduction;
     for (const auto& via : *viasResult) {
         if (_viaIntersectsOutline(via.x, via.y, via.diameter, _slicedBoard.outline) ||
             _viaIntersectsOutline(via.x2, via.y2, via.diameter, _slicedBoard.outline)) {
@@ -1000,10 +1191,18 @@ std::expected<void, std::string> Simulation::addVias() {
             // that boundary, not because it's fully inside it -- left uncropped, it would extend
             // past the hull-padding trim line into the simulation's own PML/boundary region.
             const double outerDiameter = via.diameter + 2 * _config.via().platingThickness();
-            addVia(via.x, via.y, via.x2, via.y2, via.diameter, outerDiameter, /*cropToOutline=*/true, via.capped,
-                   via.filled);
+            const ViaConduction result = addVia(mesh, via.x, via.y, via.x2, via.y2, outerDiameter, via.padDiameter,
+                                                /*cropToOutline=*/true);
+            ++conduction[result];
+            if (result == ViaConduction::Open) {
+                logWarning("Simulation: the via at (" + std::to_string(via.x) + ", " + std::to_string(via.y) +
+                           ") has no mesh node on it or its pad, so it can't conduct between its layers");
+            }
         }
     }
+    logInfo("Vias: " + std::to_string(conduction[ViaConduction::Conformal]) + " modelled as conformal cylinders, " +
+            std::to_string(conduction[ViaConduction::ThinWire]) + " as thin wires; " +
+            std::to_string(conduction[ViaConduction::Open]) + " stay open");
 
     logInfo("Adding " + std::to_string(_slicedBoard.stitchingVias.size()) +
             " ground-net stitching via(s) from board slicing");
@@ -1013,60 +1212,47 @@ std::expected<void, std::string> Simulation::addVias() {
         // conductive wall (see Via::stitchingViaAnnularRingDiameter's own doc comment). Always a
         // plain round hole -- this pipeline only ever invents round stitching vias, never oblong
         // ones.
-        addVia(via.x, via.y, via.x, via.y, via.diameter, via.annularRingDiameter);
+        addVia(mesh, via.x, via.y, via.x, via.y, via.annularRingDiameter, via.annularRingDiameter);
     }
     return {};
 }
 
-void Simulation::addVia(double xPos, double yPos, double x2Pos, double y2Pos, double diameter, double outerDiameter,
-                          bool cropToOutline, bool capped, bool filled) {
+ViaConduction Simulation::addVia(const MeshLinesXY& mesh, double xPos, double yPos, double x2Pos, double y2Pos,
+                                 double outerDiameter, double padDiameter, bool cropToOutline) {
     double thickness = 0;
     for (const auto& layer : _config.getSubstrates()) {
         thickness += layer.thickness();
     }
 
-    auto addCrossSection = [&](CSProperties& material, const std::vector<double>& xs, const std::vector<double>& ys,
-                                std::int32_t priority) {
-        if (!cropToOutline) {
-            addLinPoly(material, xs, ys, axisIndex("z"), -thickness, thickness, priority);
-            return;
-        }
-        // A degenerate (<3-point) loop can fall out of the intersection at a boundary that
-        // grazes the via's disc only tangentially -- skipped rather than fed to addLinPoly, which
-        // expects a genuine polygon.
-        for (const auto& [loopXs, loopYs] : _clipPolygonToOutline(xs, ys, _slicedBoard.outline)) {
-            if (loopXs.size() < 3) {
-                continue;
-            }
-            addLinPoly(material, loopXs, loopYs, axisIndex("z"), -thickness, thickness, priority);
-        }
-    };
+    const ViaConductionPlan plan = planViaConduction(mesh, xPos, yPos, x2Pos, y2Pos, outerDiameter, padDiameter);
+    if (plan.conduction == ViaConduction::Open) return plan.conduction;
+    if (plan.conduction == ViaConduction::ThinWire) {
+        // One node wide in X and Y, so only that node's own Z edges become metal; Copper gives the
+        // edges around it Railton's parameters for the via's real radius.
+        CSPropMetal* wire = addMetal(*_csx, "ViaThinWire_" + std::to_string(_csx->GetQtyProperties()));
+        wire->SetAttributeValue(kCopperThinWireRadiusAttribute, std::to_string(outerDiameter / 2));
+        constexpr double kHalf = 1.0;
+        const auto [columnX, columnY] = *plan.column;
+        addBox(*wire, {columnX - kHalf, columnY - kHalf, -thickness}, {columnX + kHalf, columnY + kHalf, 0.0}, 53);
+        return plan.conduction;
+    }
 
-    auto [fillXs, fillYs] = _viaPolygon(xPos, yPos, x2Pos, y2Pos, diameter, false);
-    // An unfilled drill is air, which still has to override the substrate it passes through.
-    addCrossSection(filled ? *_viaFillingMaterial : *_npthVoidMaterial, fillXs, fillYs, 51);
-
-    auto [outerXs, outerYs] = _viaPolygon(xPos, yPos, x2Pos, y2Pos, outerDiameter, true);
-    addCrossSection(*_viaMaterial, outerXs, outerYs, 50);
-
-    if (capped) {
-        // Plated-over caps on F.Cu (z=0) and the last copper layer (z=-thickness). Priority 52
-        // outranks the drill's own 51, which otherwise reads it as open at both planes.
-        auto addCap = [&](const std::vector<double>& xs, const std::vector<double>& ys) {
-            for (const double z : {0.0, -thickness}) {
-                addPolygon(*_viaMaterial, xs, ys, axisIndex("z"), z, 52);
-            }
-        };
-        if (!cropToOutline) {
-            addCap(outerXs, outerYs);
-        } else {
-            for (const auto& [loopXs, loopYs] : _clipPolygonToOutline(outerXs, outerYs, _slicedBoard.outline)) {
-                if (loopXs.size() >= 3) {
-                    addCap(loopXs, loopYs);
-                }
-            }
+    // A solid cylinder of the barrel's outer diameter: nothing reaches inside a plated barrel at
+    // these frequencies, so the drill, its filling and its caps don't change the fields outside.
+    auto [xs, ys] = _viaPolygon(xPos, yPos, x2Pos, y2Pos, outerDiameter, true, kConformalViaSegments);
+    if (!cropToOutline) {
+        addLinPoly(*_conformalViaMaterial, xs, ys, axisIndex("z"), -thickness, thickness, 50);
+        return plan.conduction;
+    }
+    // A degenerate (<3-point) loop can fall out of the intersection at a boundary that grazes the
+    // via's disc only tangentially -- skipped rather than fed to addLinPoly, which expects a genuine
+    // polygon.
+    for (const auto& [loopXs, loopYs] : _clipPolygonToOutline(xs, ys, _slicedBoard.outline)) {
+        if (loopXs.size() >= 3) {
+            addLinPoly(*_conformalViaMaterial, loopXs, loopYs, axisIndex("z"), -thickness, thickness, 50);
         }
     }
+    return plan.conduction;
 }
 
 void Simulation::addNPTHHoles() {
@@ -1247,6 +1433,9 @@ std::vector<std::string> Simulation::writeMetalShortReport(const MetalRegionAt& 
     for (const PortConfig& port : ports) {
         if (port.isTraceProbe() || !port.position().has_value()) continue;
         label(port.layer(), port.position()->first, port.position()->second, port.netName());
+        if (const auto& bridge = port.returnBridge()) {
+            label(port.layer(), bridge->position.first, bridge->position.second, bridge->netName);
+        }
     }
     for (const LumpedComponentConfig& component : _simConfig.lumpedComponents()) {
         label(component.layer(), component.position1().first, component.position1().second, component.net1());
@@ -1284,6 +1473,27 @@ std::vector<std::string> Simulation::writeMetalShortReport(const MetalRegionAt& 
     };
     for (const PortConfig& port : ports) {
         if (port.isTraceProbe() || !port.position().has_value()) continue;
+        if (port.returnBridge().has_value()) {
+            // The element's pin end must reach only the pin's metal, and its far end (the return
+            // pillar, or the PEC leg at the corner) only the return pad's.
+            const auto geometry = returnBridgeGeometry(port);
+            if (!geometry) continue;
+            const int axis = geometry->axis == "x" ? 0 : 1;
+            std::array<double, 3> lo{}, hi{};
+            for (std::size_t n = 0; n < 3; ++n) {
+                lo[n] = std::min(geometry->elementStart[n], geometry->elementStop[n]);
+                hi[n] = std::max(geometry->elementStart[n], geometry->elementStop[n]);
+            }
+            for (const bool pinEnd : {true, false}) {
+                std::array<double, 3> faceLo = lo, faceHi = hi;
+                const double end = pinEnd ? geometry->elementStart[static_cast<std::size_t>(axis)]
+                                          : geometry->elementStop[static_cast<std::size_t>(axis)];
+                faceLo[static_cast<std::size_t>(axis)] = faceHi[static_cast<std::size_t>(axis)] = end;
+                checkFace("Port " + port.name() + (pinEnd ? "" : " return"),
+                          {pinEnd ? port.netName() : port.returnBridge()->netName}, faceLo, faceHi);
+            }
+            continue;
+        }
         const auto column = padColumn(port);
         if (!column) continue;
         // Only the pad end: the other end is the reference plane, which no net label covers.
@@ -1403,7 +1613,13 @@ void Simulation::writeRunDiagnostics(const std::filesystem::path& directory) con
         if (port.position().has_value()) {
             ports << "\tat=(" << mm(port.position()->first) << ", " << mm(port.position()->second) << ")";
         }
-        ports << "\tlayer=" << port.layer() << "->" << port.plane() << "\n";
+        ports << "\tlayer=" << port.layer() << "->";
+        if (const auto& bridge = port.returnBridge()) {
+            ports << "pin " << bridge->padNumber << " (" << bridge->netName << ")"
+                  << (bridge->corner.has_value() ? " via an L" : " straight") << " above the board\n";
+        } else {
+            ports << port.plane() << "\n";
+        }
     }
 
     std::ofstream lumped(directory / "lumped.txt");
@@ -1488,14 +1704,13 @@ void Simulation::setupPorts(std::int32_t enabledIdx) {
             --digitsStart;
         }
         const std::int32_t idx = std::stoi(pname.substr(digitsStart));
+        // The enabled port keeps the vector its own port built: along its element, with the
+        // polarity its voltage probe expects. A return bridge's element runs in X or Y, so
+        // forcing +Z here zeroed its excitation.
         if (idx != enabledIdx) {
             prop->SetExcitation(0, 0);
             prop->SetExcitation(0, 1);
             prop->SetExcitation(0, 2);
-        } else {
-            prop->SetExcitation(0, 0);
-            prop->SetExcitation(0, 1);
-            prop->SetExcitation(1, 2);
         }
     }
 }
@@ -1720,8 +1935,11 @@ std::expected<void, std::string> Simulation::addPorts() {
         // resistor termination at all -- a passive read-only probe. port_resolution.cpp guarantees
         // excite() is never true here when absorbSignal() is false, so this check alone is enough.
         std::expected<void, std::string> result;
+        const bool bridged = ports[index].returnBridge().has_value();
         if (ports[index].isTraceProbe()) {
             result = addImpedanceProbe(ports[index], portNumber);
+        } else if (bridged) {
+            result = addReturnBridgePort(ports[index], portNumber);
         } else if (ports[index].absorbSignal()) {
             // Component-facing ports model the attached component impedance at its pad. Their S
             // parameters are therefore normalized to that explicit resistance by LumpedPort,
@@ -1737,6 +1955,8 @@ std::expected<void, std::string> Simulation::addPorts() {
             if (ports[index].absorbSignal()) {
                 logWarning("Ignoring the load capacitance on " + ports[index].name() +
                            ": it absorbs the signal, and its resistor already fills the pad's column");
+            } else if (bridged) {
+                // addReturnBridgePort() already put it on the element leg.
             } else if (auto capacitor = addLoadCapacitor(ports[index]); !capacitor) {
                 return capacitor;
             }

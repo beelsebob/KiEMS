@@ -5,8 +5,10 @@
 #pragma once
 
 #include <expected>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "config.hpp"
 #include "paths_config.hpp"
@@ -35,6 +37,32 @@ bool pinTypeAbsorbsByDefault(std::string_view pinType, bool directlyConnectedToG
 /// reportable probes, but an enabled Absorb choice must still load the trace.
 bool geometryOnlyPinNeedsAbsorbingPort(const InvolvedNetConfig& entry,
                                        const std::string& footprint, const std::string& pin);
+
+/// One pad as planReturnBridges() sees it: its centre in the simulation frame, its net, and the
+/// smaller of its two dimensions in simulation units.
+struct BridgePad {
+    std::string padNumber;
+    std::string netName;
+    double x = 0;
+    double y = 0;
+    double size = 0;
+};
+
+/// A pin port that needs a return bridge (see PortConfig::returnBridge()): its own pad, and the
+/// ground pads on its footprint and copper layer that the bridge may return to.
+struct ReturnBridgeRequest {
+    BridgePad pad;
+    std::vector<BridgePad> returnPads;
+};
+
+/// Routes one return bridge per request. All of them sit at one height on one side of the board,
+/// so no two may touch unless both pieces are ground. Each bridge goes to the nearest return pad,
+/// by Manhattan distance and no further than `maxDistance`, whose route is clear. The route runs
+/// straight when the pads share a row or column, and otherwise as an L through either corner. Every
+/// request's own pillar is reserved before any route is chosen, so no leg passes over a pad that is
+/// about to carry one. Requests are routed in order; one with no clear route comes back empty.
+std::vector<std::optional<PortReturnBridge>> planReturnBridges(const std::vector<ReturnBridgeRequest>& requests,
+                                                               double maxDistance);
 
 /// Populates every SimulationConfig's ports() (one PortConfig per pad on each resolved involved
 /// net, always excite()==true), resolves each ExcitationConfig's driven port and each

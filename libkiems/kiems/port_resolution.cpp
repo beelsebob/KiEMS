@@ -6,15 +6,18 @@
 #include <cstdlib>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <iomanip>
 #include <limits>
 #include <map>
 #include <numbers>
+#include <numeric>
 #include <optional>
 #include <sstream>
 #include <set>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -759,12 +762,236 @@ std::expected<std::optional<std::string>, std::string> _validateDiffPairSide(
     return std::nullopt;
 }
 
+/// How far a return bridge may run to reach a ground pad: far enough for every ball of a x16 DDR
+/// package, whose address balls sit up to ~5 mm (Manhattan) from the nearest VSS. A longer route
+/// would add a loop no real package has.
+constexpr double kMaxReturnBridgeDistanceMm = 5.0;
+
+/// One piece of planned bridge metal, as an axis-aligned rectangle already grown by its clearance.
+struct _BridgeShape {
+    double x0 = 0;
+    double y0 = 0;
+    double x1 = 0;
+    double y1 = 0;
+    /// The pin's net for its pillar, the ground net for return metal, and a token unique to each
+    /// element leg, which may touch nothing.
+    std::string net;
+};
+
+/// The rectangle covering a leg of `width` from `a` to `b` (a pillar when they coincide), grown by
+/// a quarter of `width` on every side: two pieces clash with less than about half a width between
+/// them, which is a couple of cells at the density the mesh puts around a port.
+_BridgeShape _bridgeShape(std::pair<double, double> a, std::pair<double, double> b, double width, std::string net) {
+    const double grow = width / 2 + width / 4;
+    return {std::min(a.first, b.first) - grow, std::min(a.second, b.second) - grow,
+            std::max(a.first, b.first) + grow, std::max(a.second, b.second) + grow, std::move(net)};
+}
+
+bool _bridgeShapesClash(const _BridgeShape& a, const _BridgeShape& b) {
+    if (a.net == b.net) return false;
+    constexpr double kTouching = 1.0; // simulation units: pieces that only meet don't clash
+    return a.x0 < b.x1 - kTouching && b.x0 < a.x1 - kTouching && a.y0 < b.y1 - kTouching &&
+           b.y0 < a.y1 - kTouching;
+}
+
+/// Board geometry the return-bridge pass reads, loaded the first time a simulation needs it.
+struct _ReturnBridgeBoard {
+    std::vector<ViaHole> vias;
+    std::unordered_map<std::string, std::vector<PadIdentity>> padsByFootprint;
+};
+
+std::expected<_ReturnBridgeBoard, std::string> _loadReturnBridgeBoard(const libkicad::Board& board,
+                                                                      const Position& origin) {
+    _ReturnBridgeBoard result;
+    auto vias = getVias(board, origin.x(), origin.y());
+    if (!vias) return std::unexpected(std::move(vias).error());
+    result.vias = std::move(*vias);
+    auto pads = board.allPads();
+    if (!pads) return std::unexpected(std::move(pads).error());
+    for (PadIdentity& pad : *pads) result.padsByFootprint[pad.footprintRef].push_back(std::move(pad));
+    return result;
+}
+
+/// Whether any via barrel (drill plus plating) reaches into the XY footprint of `port`'s vertical
+/// column -- the box Simulation::padColumn() would build for it.
+bool _columnHitsViaBarrel(const PortConfig& port, const std::vector<ViaHole>& vias, double plating) {
+    const PortGridFootprint footprint = portGridFootprint(port);
+    const double halfX = footprint.width * constants::unitMultiplier / 2;
+    const double halfY = footprint.height * constants::unitMultiplier / 2;
+    for (const ViaHole& via : vias) {
+        const double radius = via.diameter / 2 + plating;
+        // An oblong hole is sampled along its centreline; a round one is a single point.
+        constexpr int kSamples = 8;
+        for (int i = 0; i <= kSamples; ++i) {
+            const double t = static_cast<double>(i) / kSamples;
+            const double x = via.x + (via.x2 - via.x) * t;
+            const double y = via.y + (via.y2 - via.y) * t;
+            const double dx = std::max(std::abs(x - footprint.centerX) - halfX, 0.0);
+            const double dy = std::max(std::abs(y - footprint.centerY) - halfY, 0.0);
+            if (std::hypot(dx, dy) < radius) return true;
+            if (via.x == via.x2 && via.y == via.y2) break;
+        }
+    }
+    return false;
+}
+
+BridgePad _bridgePad(const PadIdentity& pad, const Position& origin) {
+    const Position centre = _padPositionInSimFrame(pad, origin);
+    return {pad.padNumber, _unescapeForDisplay(pad.netName), centre.x(), centre.y(),
+            _mmToSimUnits(std::min(pad.widthMm, pad.heightMm))};
+}
+
+/// Gives every pin port whose vertical column would swallow a via barrel a return bridge instead
+/// (see PortConfig::returnBridge()). Each side of the board's bridges is planned together, so none
+/// of them can touch. A port with no ground pad close enough, or no clear route to one, keeps its
+/// column, with a warning: its readings and its loading will be wrong.
+void _assignReturnBridges(const EMSConfig& config, SimulationConfig& sim, const _ReturnBridgeBoard& data,
+                          const std::unordered_set<NetName, NetNameHash>& groundNets, const Position& origin) {
+    const auto metalCount = static_cast<std::int32_t>(config.getMetals().size());
+    const double plating = config.via().platingThickness() * constants::unitMultiplier;
+    // Bridges only have open air to run through off the outer copper layers.
+    for (const std::int32_t side : std::set<std::int32_t>{0, metalCount - 1}) {
+        // Excitations and probes are routed ahead of plain absorbers, so the ports actually measured
+        // get the shortest routes -- and absorbers whose pads the hull later drops can't crowd them.
+        std::vector<std::size_t> order(sim.ports().size());
+        std::iota(order.begin(), order.end(), std::size_t{0});
+        std::ranges::stable_sort(order, std::greater{}, [&](std::size_t index) {
+            const PortConfig& port = sim.ports()[index];
+            return (port.excite() ? 2 : 0) + (port.probe() ? 1 : 0);
+        });
+        std::vector<std::size_t> portIndices;
+        std::vector<ReturnBridgeRequest> requests;
+        for (const std::size_t index : order) {
+            const PortConfig& port = sim.ports()[index];
+            if (port.isTraceProbe() || port.footprintRef().empty() || port.layer() != side ||
+                !port.position().has_value() || !port.direction().has_value() ||
+                !_columnHitsViaBarrel(port, data.vias, plating)) {
+                continue;
+            }
+            const auto footprintPads = data.padsByFootprint.find(port.footprintRef());
+            if (footprintPads == data.padsByFootprint.end()) continue;
+            const auto own = std::ranges::find(footprintPads->second, port.padNumber(), &PadIdentity::padNumber);
+            if (own == footprintPads->second.end() || groundNets.contains(NetName(own->netName))) continue;
+            ReturnBridgeRequest request;
+            request.pad = _bridgePad(*own, origin);
+            for (const PadIdentity& candidate : footprintPads->second) {
+                if (candidate.padNumber == own->padNumber || candidate.copperLayerName != own->copperLayerName ||
+                    !groundNets.contains(NetName(candidate.netName))) {
+                    continue;
+                }
+                request.returnPads.push_back(_bridgePad(candidate, origin));
+            }
+            portIndices.push_back(index);
+            requests.push_back(std::move(request));
+        }
+        if (requests.empty()) continue;
+
+        const auto plans = planReturnBridges(requests, _mmToSimUnits(kMaxReturnBridgeDistanceMm));
+        std::size_t bridged = 0;
+        for (std::size_t i = 0; i < plans.size(); ++i) {
+            PortConfig& port = sim.ports()[portIndices[i]];
+            if (!plans[i].has_value()) {
+                logWarning("Simulation \"" + sim.name() + "\": port " + port.name() +
+                           " sits on a via, so a pad-to-plane port would replace the via's barrel, but no ground "
+                           "pad on " + port.footprintRef() + " within " +
+                           std::to_string(static_cast<int>(kMaxReturnBridgeDistanceMm)) +
+                           " mm has a clear route -- its readings and loading will be wrong");
+                continue;
+            }
+            ++bridged;
+            logDebug("Simulation \"" + sim.name() + "\": port " + port.name() + " returns to " +
+                     port.footprintRef() + " pin " + plans[i]->padNumber +
+                     (plans[i]->corner.has_value() ? " through an L route" : " in a straight run"));
+            port.setReturnBridge(plans[i]);
+        }
+        logInfo("Simulation \"" + sim.name() + "\": " + std::to_string(bridged) + " of " +
+                std::to_string(plans.size()) + " port(s) on via-in-pad pads bridged to a ground pad on " +
+                (side == 0 ? "the top" : "the bottom"));
+    }
+}
+
 } // namespace
 
 bool geometryOnlyPinNeedsAbsorbingPort(const InvolvedNetConfig& entry,
                                        const std::string& footprint, const std::string& pin) {
     return entry.inclusionLevel() == NetInclusionLevel::GeometryOnly &&
            entry.probedPinAbsorbs(footprint, pin).value_or(false);
+}
+
+std::vector<std::optional<PortReturnBridge>> planReturnBridges(const std::vector<ReturnBridgeRequest>& requests,
+                                                               double maxDistance) {
+    std::vector<std::optional<PortReturnBridge>> plans(requests.size());
+    // Every pin's pillar is reserved first, at the widest it can be (half its own pad). Entry i of
+    // `placed` is request i's pillar until the reserved block ends.
+    std::vector<_BridgeShape> placed;
+    for (const ReturnBridgeRequest& request : requests) {
+        const std::pair<double, double> at{request.pad.x, request.pad.y};
+        placed.push_back(_bridgeShape(at, at, request.pad.size / 2, request.pad.netName));
+    }
+
+    for (std::size_t index = 0; index < requests.size(); ++index) {
+        const BridgePad& pad = requests[index].pad;
+        const std::pair<double, double> from{pad.x, pad.y};
+        std::vector<const BridgePad*> candidates;
+        for (const BridgePad& candidate : requests[index].returnPads) {
+            const double distance = std::abs(candidate.x - pad.x) + std::abs(candidate.y - pad.y);
+            if (distance > 0 && distance <= maxDistance) candidates.push_back(&candidate);
+        }
+        // Nearest first; at equal distance a straight run beats an L.
+        const auto rank = [&](const BridgePad* candidate) {
+            const double dx = std::abs(candidate->x - pad.x);
+            const double dy = std::abs(candidate->y - pad.y);
+            return std::tuple(dx + dy, std::min(dx, dy), candidate->padNumber);
+        };
+        std::ranges::sort(candidates, [&](const BridgePad* a, const BridgePad* b) { return rank(a) < rank(b); });
+
+        const std::string elementNet = "\x01 element " + std::to_string(index);
+        for (const BridgePad* candidate : candidates) {
+            const double width = std::min(pad.size, candidate->size) / 2;
+            const std::pair<double, double> to{candidate->x, candidate->y};
+            // A straight run keeps the pin's own row or column; the return pillar absorbs a
+            // misalignment of up to a quarter of its width.
+            const bool sameRow = std::abs(to.second - from.second) <= width / 4;
+            const bool sameColumn = std::abs(to.first - from.first) <= width / 4;
+            std::vector<std::optional<std::pair<double, double>>> corners;
+            if (sameRow || sameColumn) {
+                corners.emplace_back(std::nullopt);
+            } else {
+                corners.emplace_back(std::pair{to.first, from.second});
+                corners.emplace_back(std::pair{from.first, to.second});
+            }
+            for (const auto& corner : corners) {
+                const std::pair<double, double> end =
+                    corner.value_or(sameRow ? std::pair{to.first, from.second} : std::pair{from.first, to.second});
+                std::vector<_BridgeShape> shapes;
+                // The element is checked short of its far end, which is return metal (the pillar, or
+                // the corner of the PEC leg) that other routes' return metal may share. The trim
+                // clears the widest pillar another route could stand on this return pad.
+                const double length = std::abs(end.first - from.first) + std::abs(end.second - from.second);
+                const double trim = 0.75 * width + 0.375 * candidate->size;
+                if (length > trim) {
+                    const double kept = (length - trim) / length;
+                    const std::pair<double, double> trimmed{from.first + (end.first - from.first) * kept,
+                                                            from.second + (end.second - from.second) * kept};
+                    shapes.push_back(_bridgeShape(from, trimmed, width, elementNet));
+                }
+                if (corner.has_value()) shapes.push_back(_bridgeShape(*corner, to, width, candidate->netName));
+                shapes.push_back(_bridgeShape(to, to, width, candidate->netName));
+                const bool clear = std::ranges::none_of(shapes, [&](const _BridgeShape& shape) {
+                    for (std::size_t other = 0; other < placed.size(); ++other) {
+                        if (other != index && _bridgeShapesClash(shape, placed[other])) return true;
+                    }
+                    return false;
+                });
+                if (!clear) continue;
+                placed.insert(placed.end(), shapes.begin(), shapes.end());
+                plans[index] = PortReturnBridge{candidate->padNumber, candidate->netName, to, corner, width};
+                break;
+            }
+            if (plans[index].has_value()) break;
+        }
+    }
+    return plans;
 }
 
 std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const libkicad::Board& board) {
@@ -776,6 +1003,8 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
     // validate -- it's one extra whole-board query (see _NetConnectivity::build()) that every
     // other simulation with diff pairs reuses, and simulations without any never pay for at all.
     std::optional<_NetConnectivity> netConnectivity;
+    // Likewise loaded once, the first time a simulation has a pin port to check for a via-in-pad.
+    std::optional<_ReturnBridgeBoard> returnBridgeBoard;
 
     for (SimulationConfig& sim : config.simulations()) {
         // A Simulation Set template is never run itself -- only the simulations generated from it.
@@ -1516,6 +1745,15 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                 pair.setCorrect(false);
             }
         }
+
+        const bool hasPinPorts = std::ranges::any_of(
+            sim.ports(), [](const PortConfig& port) { return !port.isTraceProbe() && !port.footprintRef().empty(); });
+        if (hasPinPorts && !returnBridgeBoard.has_value()) {
+            auto loaded = _loadReturnBridgeBoard(board, edgeCutsOrigin);
+            if (!loaded) return std::unexpected(std::move(loaded).error());
+            returnBridgeBoard = std::move(*loaded);
+        }
+        if (hasPinPorts) _assignReturnBridges(config, sim, *returnBridgeBoard, groundNets, edgeCutsOrigin);
 
         if (auto r = _resolveLumpedComponents(config, sim, board, edgeCutsOrigin, orderedNets); !r) {
             return r;

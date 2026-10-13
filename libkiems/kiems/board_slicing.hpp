@@ -306,6 +306,10 @@ struct ClassifiedCopper {
         /// shape reaches the hull the unconditional contributions build: an absorber whose via-in-
         /// pad punched it out of the hull is pulled back in, one far from the hull is not.
         bool onlyWhereTouchingHull = false;
+        /// Shapes that join along with a pad of `copper` (matched by footprintRef/padNumber) when that
+        /// pad joins, and are never tested for touching themselves -- a return bridge's route and
+        /// return pad, which must not pull in a pad that would otherwise stay out.
+        std::vector<libkicad::CopperPolygon> companions = {};
     };
     std::vector<libkicad::CopperPolygon> involved;
     std::vector<libkicad::CopperPolygon> geometryOnly;

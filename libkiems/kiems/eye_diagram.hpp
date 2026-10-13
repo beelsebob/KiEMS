@@ -58,6 +58,34 @@ struct EyeOpening {
     double amplitudeV() const { return oneLevelV - zeroLevelV; }
 };
 
+/// An eye mask, centred on the eye's decision threshold and spanning the unit interval between the
+/// nominal transitions at 0 and 1 UI. Traces must stay out of the keep-out hexagon through
+/// (x1, 0), (x2, +-y1), (1 - x2, +-y1) and (1 - x1, 0) -- x2 == x1 makes it a rectangle, x2 == 0.5
+/// a diamond -- and within +-y2 of the threshold. Times are in UI, voltages in volts. A zero y1 (or
+/// x1 >= 0.5) means no keep-out region, and a zero y2 no outer limit.
+struct EyeMask {
+    double x1 = 0;
+    double x2 = 0;
+    double y1 = 0;
+    double y2 = 0;
+
+    bool hasKeepOut() const { return y1 > 0 && x1 < 0.5; }
+    bool hasOuterLimit() const { return y2 > 0; }
+    bool isEmpty() const { return !hasKeepOut() && !hasOuterLimit(); }
+    bool operator==(const EyeMask& other) const = default;
+};
+
+/// How an eye's traces fared against its EyeMask: of `traceCount` one-bit traces, how many entered
+/// the keep-out region (`keepOutViolations`) and how many went past the outer limit
+/// (`outerLimitViolations`). A trace that does both counts in both.
+struct EyeMaskResult {
+    std::size_t traceCount = 0;
+    std::size_t keepOutViolations = 0;
+    std::size_t outerLimitViolations = 0;
+
+    bool passed() const { return keepOutViolations == 0 && outerLimitViolations == 0; }
+};
+
 /// How settled a noisy eye's opening is. The draws are split into `replicateCount` independently
 /// randomized low-discrepancy point sets; each replicate's own worst-case opening is an
 /// independent estimate, so their spread (`lowest`/`highest`) shows how much a different set of
@@ -77,19 +105,27 @@ struct EyeNoiseStatistics {
 /// complex channel transfer function. `timeUI` spans -0.5...1.5 unit intervals; every entry in
 /// `traces` is one two-UI slice of the received waveform on that shared axis. When aggressors
 /// were supplied, `noisyTraces` is the same eye with their noise added (a representative subset
-/// of the draws -- `noise`'s opening covers every draw).
+/// of the draws -- `noise`'s opening covers every draw). `thresholdV` is the decision threshold the
+/// openings (and any mask) are measured from. The mask results are set only when a non-empty mask
+/// was supplied; `noisyMaskResult` covers every noisy draw, not just the displayed ones.
 struct EyeDiagramData {
     double bitRate = 0;
+    double thresholdV = 0;
     std::vector<double> timeUI;
     std::vector<std::vector<double>> traces;
     EyeOpening opening;
+    std::optional<EyeMaskResult> maskResult;
     std::vector<std::vector<double>> noisyTraces;
     std::optional<EyeOpening> noisyOpening;
     std::optional<EyeNoiseStatistics> noise;
+    std::optional<EyeMaskResult> noisyMaskResult;
 };
 
 /// Computes a received eye from frequency-domain channel data. Frequencies and transferFunction
-/// must have equal, non-empty lengths and bitRate must be positive; invalid input returns nullopt.
+/// must have equal, non-empty lengths and bitRate and signalLevel must be positive; invalid input
+/// returns nullopt. The PRBS is launched at +-signalLevel volts (incident, and differential for a
+/// differential channel); aggressors keep their own absolute amplitudes. Every trace is tested
+/// against `mask` unless it's empty.
 /// The recovered transition phase is selected from the received waveform before it is folded, so
 /// propagation delay does not move an otherwise-open eye out of the chart window. Aggressors whose
 /// transfer function doesn't match `frequencies` are ignored.
@@ -98,6 +134,8 @@ std::optional<EyeDiagramData> computeEyeDiagram(
     const std::vector<std::complex<double>>& transferFunction,
     double bitRate,
     const std::vector<EyeAggressor>& aggressors = {},
-    const EyeNoiseOptions& options = {});
+    const EyeNoiseOptions& options = {},
+    double signalLevel = 1.0,
+    const EyeMask& mask = {});
 
 } // namespace kiems

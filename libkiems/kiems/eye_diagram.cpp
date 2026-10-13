@@ -225,6 +225,98 @@ void accumulate(EyeExtremes& extremes, const std::vector<double>& trace, bool is
     }
 }
 
+/// Tests one folded trace against an eye mask, positioned on `threshold`. The keep-out test follows
+/// the trace between samples (a straight line, as it's drawn), so a steep edge can't step over a
+/// narrow mask; the outer limit is checked across the trace's own unit interval, 0...1 UI -- its
+/// overhang either side is a neighbouring bit's, tested in that bit's own trace.
+class EyeMaskTester {
+public:
+    EyeMaskTester(const EyeMask& mask, double threshold) : _mask(mask), _threshold(threshold) {
+        if (!mask.hasKeepOut()) {
+            return;
+        }
+        const double x1 = std::max(mask.x1, 0.0);
+        const double x2 = std::clamp(mask.x2, x1, 0.5);
+        // Counter-clockwise (time to the right, voltage up), so the interior is left of every edge.
+        _vertices = {{{x1, 0}, {x2, -mask.y1}, {1 - x2, -mask.y1}, {1 - x1, 0}, {1 - x2, mask.y1}, {x2, mask.y1}}};
+        _left = x1;
+        _right = 1 - x1;
+    }
+
+    void test(EyeMaskResult& result, const std::vector<double>& trace, const std::vector<double>& timeUI) const {
+        ++result.traceCount;
+        if (_mask.hasKeepOut() && entersKeepOut(trace, timeUI)) {
+            ++result.keepOutViolations;
+        }
+        if (_mask.hasOuterLimit()) {
+            for (std::size_t i = 0; i < trace.size(); ++i) {
+                if (timeUI[i] >= 0 && timeUI[i] <= 1 && std::abs(trace[i] - _threshold) > _mask.y2) {
+                    ++result.outerLimitViolations;
+                    break;
+                }
+            }
+        }
+    }
+
+private:
+    bool entersKeepOut(const std::vector<double>& trace, const std::vector<double>& timeUI) const {
+        for (std::size_t i = 1; i < trace.size(); ++i) {
+            if (segmentEntersKeepOut(timeUI[i - 1], trace[i - 1] - _threshold, timeUI[i], trace[i] - _threshold)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Cyrus-Beck: clips the segment to each edge's inside half-plane in turn; it reaches the
+    /// interior iff some stretch of it survives every clip. Touching the boundary isn't entering.
+    bool segmentEntersKeepOut(double ax, double ay, double bx, double by) const {
+        // Most of a trace sits on a rail or near a transition, clear of the mask's bounding box.
+        if ((ax <= _left && bx <= _left) || (ax >= _right && bx >= _right) ||
+            (ay >= _mask.y1 && by >= _mask.y1) || (ay <= -_mask.y1 && by <= -_mask.y1)) {
+            return false;
+        }
+        double enter = 0;
+        double leave = 1;
+        const double dx = bx - ax;
+        const double dy = by - ay;
+        for (std::size_t v = 0; v < _vertices.size(); ++v) {
+            const auto& [px, py] = _vertices[v];
+            const auto& [qx, qy] = _vertices[(v + 1) % _vertices.size()];
+            // The edge's inward (left) normal; a zero-length edge (x2 == 0.5) constrains nothing.
+            const double nx = -(qy - py);
+            const double ny = qx - px;
+            if (nx == 0 && ny == 0) {
+                continue;
+            }
+            const double start = nx * (ax - px) + ny * (ay - py);
+            const double rate = nx * dx + ny * dy;
+            if (rate == 0) {
+                if (start <= 0) {
+                    return false;
+                }
+                continue;
+            }
+            const double crossing = -start / rate;
+            if (rate > 0) {
+                enter = std::max(enter, crossing);
+            } else {
+                leave = std::min(leave, crossing);
+            }
+            if (enter >= leave) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    EyeMask _mask;
+    double _threshold;
+    std::array<std::pair<double, double>, 6> _vertices{};
+    double _left = 0;
+    double _right = 0;
+};
+
 /// Best rational approximation p/q of x > 0 with q <= maxDenominator, within relativeTolerance;
 /// nullopt if none is that close. Continued-fraction convergents are each the best approximation
 /// for their denominator, so the first close-enough one has the smallest such q.
@@ -328,9 +420,11 @@ std::optional<EyeDiagramData> computeEyeDiagram(
     const std::vector<std::complex<double>>& transferFunction,
     double bitRate,
     const std::vector<EyeAggressor>& aggressors,
-    const EyeNoiseOptions& options) {
+    const EyeNoiseOptions& options,
+    double signalLevel,
+    const EyeMask& mask) {
     if (frequencies.empty() || frequencies.size() != transferFunction.size() || !(bitRate > 0) ||
-        !std::isfinite(bitRate)) {
+        !std::isfinite(bitRate) || !(signalLevel > 0) || !std::isfinite(signalLevel)) {
         return std::nullopt;
     }
 
@@ -342,7 +436,7 @@ std::optional<EyeDiagramData> computeEyeDiagram(
     std::vector<double> sourceBits(kBitCount);
     std::uint32_t lfsr = 0x7fU;
     for (std::size_t bitIndex = 0; bitIndex < kBitCount; ++bitIndex) {
-        const double level = (lfsr & 1U) != 0 ? 1.0 : -1.0;
+        const double level = (lfsr & 1U) != 0 ? signalLevel : -signalLevel;
         sourceBits[bitIndex] = level;
         std::fill_n(source.samples.begin() + static_cast<std::ptrdiff_t>(bitIndex * kSamplesPerUI),
                     kSamplesPerUI, level);
@@ -443,6 +537,12 @@ std::optional<EyeDiagramData> computeEyeDiagram(
                                           zeroSum / static_cast<double>(zeroCount))
                                  : 0.0;
 
+    result.thresholdV = threshold;
+    const EyeMaskTester maskTester(mask, threshold);
+    if (!mask.isEmpty()) {
+        result.maskResult.emplace();
+    }
+
     EyeExtremes cleanExtremes;
     for (std::size_t bit = 0; bit < kBitCount; ++bit) {
         std::vector<double> trace(kTraceLength);
@@ -453,6 +553,9 @@ std::optional<EyeDiagramData> computeEyeDiagram(
         }
         if (finite) {
             accumulate(cleanExtremes, trace, isOne[bit], threshold, result.timeUI);
+            if (result.maskResult.has_value()) {
+                maskTester.test(*result.maskResult, trace, result.timeUI);
+            }
             result.traces.push_back(std::move(trace));
         }
     }
@@ -578,6 +681,9 @@ std::optional<EyeDiagramData> computeEyeDiagram(
     std::vector<double> point(dimensions);
     std::vector<std::vector<EyeExtremes>> drawExtremes(kReplicateCount,
                                                        std::vector<EyeExtremes>(drawsPerReplicate));
+    if (!mask.isEmpty()) {
+        result.noisyMaskResult.emplace();
+    }
     for (std::size_t replicate = 0; replicate < kReplicateCount; ++replicate) {
         for (std::size_t draw = 0; draw < drawsPerReplicate; ++draw) {
             for (std::size_t d = 0; d < dimensions; ++d) {
@@ -611,6 +717,9 @@ std::optional<EyeDiagramData> computeEyeDiagram(
                     continue;
                 }
                 accumulate(extremes, trace, isOne[bit], threshold, result.timeUI);
+                if (result.noisyMaskResult.has_value()) {
+                    maskTester.test(*result.noisyMaskResult, trace, result.timeUI);
+                }
                 if (displayed) {
                     result.noisyTraces.push_back(std::move(trace));
                 }

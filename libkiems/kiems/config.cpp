@@ -870,6 +870,79 @@ void from_json(const nlohmann::json& j, SimulationSetConfig& p) {
     p.probes = j.value("probes", std::vector<SimulationSetProbe>{});
 }
 
+namespace {
+
+constexpr std::pair<EyeMaskStandard, const char*> kEyeMaskStandardNames[] = {
+    {EyeMaskStandard::Custom, "custom"},
+    {EyeMaskStandard::UsbHighSpeed, "usb_high_speed"},
+    {EyeMaskStandard::UsbFullSpeed, "usb_full_speed"},
+    {EyeMaskStandard::Usb5Gbps, "usb_5gbps"},
+    {EyeMaskStandard::Usb10Gbps, "usb_10gbps"},
+    {EyeMaskStandard::Usb20Gbps, "usb_20gbps"},
+    {EyeMaskStandard::Ddr, "ddr"},
+    {EyeMaskStandard::Ddr2, "ddr2"},
+    {EyeMaskStandard::Ddr3, "ddr3"},
+    {EyeMaskStandard::Ddr4, "ddr4"},
+    {EyeMaskStandard::Ddr5, "ddr5"},
+    {EyeMaskStandard::FireWireS400, "firewire_s400"},
+    {EyeMaskStandard::FireWireS800, "firewire_s800"},
+    {EyeMaskStandard::FireWireS1600, "firewire_s1600"},
+    {EyeMaskStandard::Thunderbolt1, "thunderbolt_1"},
+    {EyeMaskStandard::Thunderbolt2, "thunderbolt_2"},
+    {EyeMaskStandard::Thunderbolt3, "thunderbolt_3"},
+    {EyeMaskStandard::Thunderbolt4, "thunderbolt_4"},
+    {EyeMaskStandard::Hdmi10, "hdmi_1_0"},
+    {EyeMaskStandard::Hdmi14, "hdmi_1_4"},
+    {EyeMaskStandard::Hdmi20, "hdmi_2_0"},
+    {EyeMaskStandard::DisplayPortRbr, "displayport_rbr"},
+    {EyeMaskStandard::DisplayPortHbr, "displayport_hbr"},
+    {EyeMaskStandard::DisplayPortHbr2, "displayport_hbr2"},
+    {EyeMaskStandard::DisplayPortHbr3, "displayport_hbr3"},
+    {EyeMaskStandard::EthernetSgmii, "ethernet_sgmii"},
+    {EyeMaskStandard::EthernetXaui, "ethernet_xaui"},
+    {EyeMaskStandard::EthernetSfi, "ethernet_sfi"},
+    {EyeMaskStandard::PciExpress1, "pcie_1"},
+    {EyeMaskStandard::PciExpress2, "pcie_2"},
+    {EyeMaskStandard::PciExpress3, "pcie_3"},
+    {EyeMaskStandard::PciExpress4, "pcie_4"},
+    {EyeMaskStandard::PciExpress5, "pcie_5"},
+    {EyeMaskStandard::Ddr3CommandAddress, "ddr3_ca"},
+    {EyeMaskStandard::Ddr4CommandAddress, "ddr4_ca"},
+    {EyeMaskStandard::Ddr5CommandAddress, "ddr5_ca"},
+    {EyeMaskStandard::Lpddr4, "lpddr4"},
+    {EyeMaskStandard::Lpddr4x, "lpddr4x"},
+    {EyeMaskStandard::Lpddr5, "lpddr5"},
+};
+
+} // namespace
+
+void to_json(nlohmann::json& j, const EyeTestConfig& p) {
+    const auto name = std::find_if(std::begin(kEyeMaskStandardNames), std::end(kEyeMaskStandardNames),
+                                   [&](const auto& entry) { return entry.first == p.standard; });
+    j = nlohmann::json{
+        {"standard", name != std::end(kEyeMaskStandardNames) ? name->second : "custom"},
+        {"signal_level", p.signalLevel},
+        {"mask_x1", p.mask.x1},
+        {"mask_x2", p.mask.x2},
+        {"mask_y1", p.mask.y1},
+        {"mask_y2", p.mask.y2},
+    };
+}
+
+void from_json(const nlohmann::json& j, EyeTestConfig& p) {
+    const EyeTestConfig def;
+    const std::string standard = j.value("standard", std::string("custom"));
+    const auto name = std::find_if(std::begin(kEyeMaskStandardNames), std::end(kEyeMaskStandardNames),
+                                   [&](const auto& entry) { return standard == entry.second; });
+    // A standard this build doesn't know keeps its numbers, shown as Custom.
+    p.standard = name != std::end(kEyeMaskStandardNames) ? name->first : EyeMaskStandard::Custom;
+    p.signalLevel = j.value("signal_level", def.signalLevel);
+    p.mask.x1 = j.value("mask_x1", def.mask.x1);
+    p.mask.x2 = j.value("mask_x2", def.mask.x2);
+    p.mask.y1 = j.value("mask_y1", def.mask.y1);
+    p.mask.y2 = j.value("mask_y2", def.mask.y2);
+}
+
 void to_json(nlohmann::json& j, const SimulationConfig& p) {
     std::vector<DifferentialPairConfig> authoredDiffPairs;
     std::copy_if(p._diffPairs.begin(), p._diffPairs.end(), std::back_inserter(authoredDiffPairs),
@@ -895,6 +968,9 @@ void to_json(nlohmann::json& j, const SimulationConfig& p) {
     }
     if (p._adversarialSharedClock) {
         j["adversarial_shared_clock"] = true;
+    }
+    if (p._eyeTest != EyeTestConfig()) {
+        j["eye_test"] = p._eyeTest;
     }
     if (p._isDifferentialPair) {
         j["is_differential_pair"] = true;
@@ -942,6 +1018,7 @@ void from_json(const nlohmann::json& j, SimulationConfig& p) {
     p._eyeBitRate = j.value("eye_bit_rate", def._eyeBitRate);
     p._eyeDrawCount = j.value("eye_draw_count", def._eyeDrawCount);
     p._adversarialSharedClock = j.value("adversarial_shared_clock", def._adversarialSharedClock);
+    p._eyeTest = j.value("eye_test", def._eyeTest);
     p._isDifferentialPair = j.value("is_differential_pair", def._isDifferentialPair);
     p._edgeTerminatedNets = j.value("edge_terminated_nets", std::vector<std::string>{});
     p._includedComponents = j.value("included_components", std::vector<IncludedComponentConfig>{});

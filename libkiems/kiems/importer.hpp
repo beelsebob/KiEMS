@@ -52,6 +52,10 @@ struct ViaHole : Hole {
     /// IPC-4761 filled (types V-VII): the barrel's interior is the via filling material
     /// (Via::fillingEpsilon) rather than air.
     bool filled = false;
+    /// The via's own copper pad (its annular ring's outer diameter, the smaller side of an oblong
+    /// pad), in simulation units -- how far from the hole Simulation::addVia() may look for a mesh
+    /// node to carry the barrel when none lands on it.
+    double padDiameter = 0;
 
     Cu::Polygon path() const override {
         return {{x, y}, {x2, y2}};

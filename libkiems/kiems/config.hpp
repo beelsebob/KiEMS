@@ -14,6 +14,7 @@
 #include <nlohmann/json.hpp>
 
 #include "constants.hpp"
+#include "eye_diagram.hpp"
 
 namespace kiems {
 
@@ -24,6 +25,23 @@ namespace kiems {
 /// own CPU backend instead, kept only so
 /// every existing `--backend cpu`/serialized value stays stable.
 enum class FDTDBackend { OpenEMSCPU, CopperGPU };
+
+/// Where a pin port's element runs when its pad has no usable vertical column -- see
+/// PortConfig::returnBridge(). Entirely board-derived, so every length here is already in
+/// simulation units, like PortConfig::position(); scaleToSimulationUnits() leaves it alone.
+struct PortReturnBridge {
+    /// The ground pad on the same footprint the element returns to, and its net.
+    std::string padNumber;
+    std::string netName;
+    /// That pad's centre.
+    std::pair<double, double> position;
+    /// The corner of an L-shaped route: the element runs from the port's pad to here, then a PEC
+    /// leg runs on to the return pad. Empty when the two pads share a row or column and the element
+    /// runs straight between them.
+    std::optional<std::pair<double, double>> corner;
+    /// Side of each pillar and width of each leg.
+    double width = 0;
+};
 
 /// Class representing a single simulation port. Never (de)serialized directly -- populated by
 /// port_resolution.cpp from a SimulationConfig's InvolvedNetConfig entries, one instance per pad
@@ -85,9 +103,10 @@ public:
     bool absorbSignal() const { return _absorbSignal; }
     void setAbsorbSignal(bool value) { _absorbSignal = value; }
 
-    /// A lumped capacitor, in farads, from the pad to its reference plane alongside whatever else
-    /// this port builds -- the input capacitance of the pin's receiver. Zero for none. Only built
-    /// for a non-absorbing port: an absorbing one's resistor already owns those grid edges.
+    /// A lumped capacitor, in farads, from the pad to its reference plane (or across its
+    /// returnBridge()) alongside whatever else this port builds -- the input capacitance of the
+    /// pin's receiver. Zero for none. Only built for a non-absorbing port: an absorbing one's
+    /// resistor already owns those grid edges.
     double loadCapacitance() const { return _loadCapacitance; }
     void setLoadCapacitance(double value) { _loadCapacitance = value; }
 
@@ -115,11 +134,24 @@ public:
     bool probe() const { return _probe; }
     void setProbe(bool value) { _probe = value; }
 
+    /// Set when the pad's vertical column (pad down to its reference plane) would contain a via
+    /// barrel -- a via-in-pad, typically. Copper paints lumped elements over PEC, so such a column's
+    /// resistor replaces that stretch of barrel, and its plane end lands inside the via's own
+    /// antipad rather than on the plane: the voltage line reads the field inside the via, and the
+    /// termination either floats in series with the barrel or, where its end cap happens to reach
+    /// the plane, shorts the via to ground. With this set, Simulation builds the port the way a
+    /// package connects instead: PEC pillars rise from this pad and the return pad into the air
+    /// just off the board, and the element joins them there (see
+    /// Simulation::addReturnBridgePort()).
+    const std::optional<PortReturnBridge>& returnBridge() const { return _returnBridge; }
+    void setReturnBridge(std::optional<PortReturnBridge> value) { _returnBridge = std::move(value); }
+
     /// Scales width/length into simulation units (mirrors the `*= UNIT_MULTIPLIER` done in
     /// Config.load).
     void scaleToSimulationUnits(std::int32_t unitMultiplier);
 
 private:
+    std::optional<PortReturnBridge> _returnBridge;
     std::string _name = "Unnamed";
     std::string _footprintRef;
     std::string _padNumber;
@@ -1232,6 +1264,66 @@ struct SimulationSetConfig {
 void to_json(nlohmann::json& j, const SimulationSetConfig& p);
 void from_json(const nlohmann::json& j, SimulationSetConfig& p);
 
+/// The signalling standard a simulation's eye test was taken from. It only records which preset
+/// the editor should show; EyeTestConfig's own numbers are what's tested, and editing any of them
+/// away from the preset makes it Custom.
+enum class EyeMaskStandard {
+    Custom,
+    UsbHighSpeed,
+    UsbFullSpeed,
+    Usb5Gbps,
+    Usb10Gbps,
+    Usb20Gbps,
+    Ddr,
+    Ddr2,
+    Ddr3,
+    Ddr4,
+    Ddr5,
+    FireWireS400,
+    FireWireS800,
+    FireWireS1600,
+    Thunderbolt1,
+    Thunderbolt2,
+    Thunderbolt3,
+    Thunderbolt4,
+    Hdmi10,
+    Hdmi14,
+    Hdmi20,
+    DisplayPortRbr,
+    DisplayPortHbr,
+    DisplayPortHbr2,
+    DisplayPortHbr3,
+    EthernetSgmii,
+    EthernetXaui,
+    EthernetSfi,
+    PciExpress1,
+    PciExpress2,
+    PciExpress3,
+    PciExpress4,
+    PciExpress5,
+    Ddr3CommandAddress,
+    Ddr4CommandAddress,
+    Ddr5CommandAddress,
+    Lpddr4,
+    Lpddr4x,
+    Lpddr5,
+};
+
+/// A simulation's eye test: every eye in its results is checked against `mask` (see EyeMask),
+/// with the PRBS launched at +-`signalLevel` volts. Analysis only, like the eye's bit rate --
+/// changing it never invalidates the FDTD run. The default (an empty mask at 1 V) tests nothing
+/// and leaves the eyes exactly as they were before this existed.
+struct EyeTestConfig {
+    EyeMaskStandard standard = EyeMaskStandard::Custom;
+    double signalLevel = 1.0;
+    EyeMask mask;
+
+    bool operator==(const EyeTestConfig& other) const = default;
+};
+
+void to_json(nlohmann::json& j, const EyeTestConfig& p);
+void from_json(const nlohmann::json& j, EyeTestConfig& p);
+
 /// One independent simulation: its own involved-nets-driven port resolution, board slicing
 /// parameters, and excitation list. Replaces the old flat Config::ports()/traces()/diffPairs() for
 /// everything simulation-specific.
@@ -1263,6 +1355,10 @@ public:
     /// Whether the adversarial sources share a clock (see EyeNoiseOptions::sharedClock).
     bool adversarialSharedClock() const { return _adversarialSharedClock; }
     void setAdversarialSharedClock(bool value) { _adversarialSharedClock = value; }
+
+    /// The mask every eye is tested against, and the level the eye's PRBS is launched at.
+    const EyeTestConfig& eyeTest() const { return _eyeTest; }
+    void setEyeTest(EyeTestConfig value) { _eyeTest = value; }
 
     /// Whether this simulation is fundamentally about a differential pair -- gates
     /// resolveSimulationPorts()'s own reciprocal-net-pair auto-detection (which populates
@@ -1346,6 +1442,7 @@ private:
     double _eyeBitRate = 0;
     std::size_t _eyeDrawCount = 64;
     bool _adversarialSharedClock = false;
+    EyeTestConfig _eyeTest;
     bool _isDifferentialPair = false;
     std::vector<std::string> _edgeTerminatedNets;
     std::vector<IncludedComponentConfig> _includedComponents;

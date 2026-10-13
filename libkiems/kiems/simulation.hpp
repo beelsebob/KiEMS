@@ -95,6 +95,30 @@ inline void from_json(const nlohmann::json& j, ComputedGridLines& g) {
 }
 
 /// Builds CSXCAD simulation geometry and orchestrates the selected Copper FDTD backend.
+/// The X and Y mesh lines, sorted.
+using MeshLinesXY = std::array<std::vector<double>, 2>;
+
+/// How a via is modelled on a given mesh -- see planViaConduction().
+enum class ViaConduction { Conformal, ThinWire, Open };
+
+struct ViaConductionPlan {
+    ViaConduction conduction = ViaConduction::Conformal;
+    /// For ViaConduction::ThinWire, the mesh node the wire runs along.
+    std::optional<std::pair<double, double>> column;
+};
+
+/// A via is a solid PEC cylinder of its barrel's outer diameter. Where the mesh resolves it --
+/// some node of `mesh` lies inside it, as for every via on a board meshed for its traces -- Copper
+/// models it conformally (Dey-Mittra / Perfect Boundary Approximation), so each cut edge and face
+/// carries its true open length and area and a via's conduction no longer depends on where it falls
+/// between mesh lines (Conformal). A via smaller than its cells has no node inside; it runs along
+/// the node nearest its centreline as a thin wire with Railton's modified material parameters for
+/// its real radius (ThinWire), provided that node is still on the via's own pad, so it can't reach
+/// other copper; otherwise it stays Open. All lengths in simulation units; (x1, y1)-(x2, y2) is the
+/// hole's centreline, a single point for a round via.
+ViaConductionPlan planViaConduction(const MeshLinesXY& mesh, double x1, double y1, double x2, double y2,
+                                    double outerDiameter, double padDiameter);
+
 class Simulation {
 public:
     /// `simConfig`/`config`/`options`/`paths`/`board` must all outlive this Simulation (kept by
@@ -175,6 +199,22 @@ public:
     std::expected<std::pair<Point3, Point3>, std::string> padColumn(const PortConfig& portConfig);
     /// PortConfig::loadCapacitance() as a lumped capacitor filling padColumn().
     std::expected<void, std::string> addLoadCapacitor(const PortConfig& portConfig);
+    /// Where a return-bridged port's element sits (see PortConfig::returnBridge()), in simulation
+    /// units: the pad's copper height, the bridge height off the board, and the element box -- the
+    /// pin's end first, the LumpedPort/PassiveProbe start/stop convention -- along `axis`.
+    struct ReturnBridgeGeometry {
+        double padZ = 0;
+        double bridgeZ = 0;
+        Point3 elementStart{};
+        Point3 elementStop{};
+        std::string axis;
+    };
+    std::expected<ReturnBridgeGeometry, std::string> returnBridgeGeometry(const PortConfig& portConfig);
+    /// Built instead of addResistivePort()/addPassiveProbe() for a port with a returnBridge(): PEC
+    /// pillars from its pad and its return pad up to the bridge height, the PEC leg of an L route,
+    /// and the port itself on the element leg -- a LumpedPort for an absorbing or excited pin, and a
+    /// PassiveProbe plus any load capacitor otherwise.
+    std::expected<void, std::string> addReturnBridgePort(PortConfig& portConfig, std::int32_t portNumber);
     /// Built instead of addResistivePort()/addPassiveProbe() for a PortConfig with isTraceProbe()==true --
     /// a non-loading, mid-trace characteristic-impedance measurement point (see
     /// PortConfig::isTraceProbe()'s own doc comment). Same transverse-width/propagation-axis box
@@ -200,21 +240,20 @@ public:
     /// from; this just extrudes it through the real mask thickness and adds the dielectric material.
     void addSolderMask();
     std::expected<void, std::string> addVias();
+    /// Builds one via as planViaConduction() decides for `mesh`, and returns that decision.
     /// (xPos, yPos)-(x2Pos, y2Pos) is the via's own capsule/stadium centerline -- a plain round via
     /// is the degenerate case where the two points coincide (see ViaHole's own doc comment).
-    /// `diameter` is the drill hole; `outerDiameter` is the copper conductor's outer edge (the
-    /// "annular ring" OD) -- callers compute this differently per via kind, see addVias().
-    /// `cropToOutline`, when set, clips the via's cross-section to `_slicedBoard.outline` (via
-    /// polygon intersection) before adding it -- for a real board via kept because its disc merely
-    /// *reaches* the cutout boundary (see _viaIntersectsOutline's own doc comment), this prevents
-    /// its geometry from extending past the simulation's own domain. A freshly-placed stitching via
-    /// is always positioned viaEdgeDistance() inward of the boundary by construction, so it never
-    /// needs this -- callers only set it for real board vias. `capped` (IPC-4761 type VII) closes
-    /// both ends of the barrel with a zero-thickness copper disc of `outerDiameter` on the outer
-    /// copper planes, above the filling's priority so the drill no longer reads as open there.
-    /// `filled` makes the drill a cylinder of Via::fillingEpsilon dielectric; otherwise it's air.
-    void addVia(double xPos, double yPos, double x2Pos, double y2Pos, double diameter, double outerDiameter,
-                bool cropToOutline = false, bool capped = false, bool filled = false);
+    /// `outerDiameter` is the barrel's (drill plus plating for a real via, the whole annular ring for
+    /// a stitching via, which has no pad of its own); `padDiameter` bounds how far a thin wire may
+    /// move to reach a node. A real via's filling and caps (IPC-4761) don't enter: they sit inside
+    /// the barrel, where nothing reaches. `cropToOutline`, when set, clips the via's cross-section
+    /// to `_slicedBoard.outline` (via polygon intersection) before adding it -- for a real board via
+    /// kept because its disc merely *reaches* the cutout boundary (see _viaIntersectsOutline's own
+    /// doc comment), this prevents its geometry from extending past the simulation's own domain. A
+    /// freshly-placed stitching via is always positioned viaEdgeDistance() inward of the boundary by
+    /// construction, so it never needs this -- callers only set it for real board vias.
+    ViaConduction addVia(const MeshLinesXY& mesh, double xPos, double yPos, double x2Pos, double y2Pos,
+                         double outerDiameter, double padDiameter, bool cropToOutline = false);
     /// Cuts every non-plated through-hole (see SlicedBoard::npthHoleLoops) out of the substrate
     /// model: an explicit vacuum-epsilon material, extruded through the full substrate stack depth
     /// at a priority above every substrate layer's, so it overrides them wherever it overlaps --
@@ -353,8 +392,8 @@ private:
     std::vector<CSProperties*> _substrateMaterials; // owned by _csx
     std::vector<CSProperties*> _solderMaskMaterials; // owned by _csx -- see addSolderMask()
     CSPropMetal* _planeMaterial;
-    CSPropMetal* _viaMaterial;
-    CSPropMaterial* _viaFillingMaterial;
+    /// Every via's solid barrel, flagged for Copper's conformal treatment -- see addVia().
+    CSPropMetal* _conformalViaMaterial;
     CSPropMaterial* _npthVoidMaterial; // Vacuum (epsilon_r = 1) -- see addNPTHHoles().
 
     std::unique_ptr<GridGenerator> _gridGen;

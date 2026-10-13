@@ -11,6 +11,7 @@
 #include <map>
 #include <limits>
 #include <optional>
+#include <set>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -32,6 +33,7 @@
 #include "kiems/port_resolution.hpp"
 #include "kiems/postprocess.hpp"
 #include "kiems/ports.hpp"
+#include "kiems/simulation.hpp"
 #include "kiems/via_stitching.hpp"
 #include "libkicad/libkicad.hpp"
 #include "libkicad/spice_expression.hpp"
@@ -981,6 +983,81 @@ static kiems::EyeAggressor eyeTestTone(const std::vector<double>& frequencies, d
     XCTAssertFalse(eye->noise.has_value());
     XCTAssertFalse(eye->noisyOpening.has_value());
     XCTAssertTrue(eye->noisyTraces.empty());
+}
+
+- (void)testEyeMaskPassesAnOpenEyeAndCatchesViolations {
+    const auto frequencies = eyeTestFrequencies();
+    const auto channel = eyeTestChannel(frequencies);
+    // The delayed lossless channel's eye sits at +-1 V and is nearly a full UI wide.
+    kiems::EyeMask open;
+    open.x1 = 0.3;
+    open.x2 = 0.4;
+    open.y1 = 0.5;
+    open.y2 = 1.5;
+    const auto passing = kiems::computeEyeDiagram(frequencies, channel, 5e9, {}, {}, 1.0, open);
+    XCTAssertTrue(passing.has_value() && passing->maskResult.has_value());
+    if (!passing.has_value() || !passing->maskResult.has_value()) return;
+    XCTAssertTrue(passing->maskResult->passed());
+    XCTAssertEqual(passing->maskResult->traceCount, passing->traces.size());
+    XCTAssertEqualWithAccuracy(passing->thresholdV, 0.0, 0.05);
+    XCTAssertFalse(passing->noisyMaskResult.has_value());
+
+    // A keep-out region reaching past the levels catches every bit...
+    kiems::EyeMask tall = open;
+    tall.y1 = 1.2;
+    const auto entered = kiems::computeEyeDiagram(frequencies, channel, 5e9, {}, {}, 1.0, tall);
+    XCTAssertTrue(entered.has_value() && entered->maskResult.has_value());
+    if (!entered.has_value() || !entered->maskResult.has_value()) return;
+    XCTAssertEqual(entered->maskResult->keepOutViolations, entered->maskResult->traceCount);
+    XCTAssertEqual(entered->maskResult->outerLimitViolations, static_cast<std::size_t>(0));
+
+    // ...as does an outer limit inside them.
+    kiems::EyeMask tight = open;
+    tight.y2 = 0.8;
+    const auto exceeded = kiems::computeEyeDiagram(frequencies, channel, 5e9, {}, {}, 1.0, tight);
+    XCTAssertTrue(exceeded.has_value() && exceeded->maskResult.has_value());
+    if (!exceeded.has_value() || !exceeded->maskResult.has_value()) return;
+    XCTAssertEqual(exceeded->maskResult->outerLimitViolations, exceeded->maskResult->traceCount);
+    XCTAssertEqual(exceeded->maskResult->keepOutViolations, static_cast<std::size_t>(0));
+
+    // The launch level scales the eye, so the tall keep-out region fits inside a 3 V one.
+    kiems::EyeMask louderMask = tall;
+    louderMask.y2 = 4.5;
+    const auto louder = kiems::computeEyeDiagram(frequencies, channel, 5e9, {}, {}, 3.0, louderMask);
+    XCTAssertTrue(louder.has_value() && louder->maskResult.has_value());
+    if (!louder.has_value() || !louder->maskResult.has_value()) return;
+    XCTAssertTrue(louder->maskResult->passed());
+    XCTAssertEqualWithAccuracy(louder->opening.heightV, 3.0 * passing->opening.heightV,
+                               1e-6 * louder->opening.heightV);
+
+    // An empty mask tests nothing, and a non-positive level is rejected.
+    const auto untested = kiems::computeEyeDiagram(frequencies, channel, 5e9);
+    XCTAssertTrue(untested.has_value() && !untested->maskResult.has_value());
+    XCTAssertFalse(kiems::computeEyeDiagram(frequencies, channel, 5e9, {}, {}, 0.0, open).has_value());
+}
+
+- (void)testEyeMaskTestsEveryNoisyDraw {
+    const auto frequencies = eyeTestFrequencies();
+    const auto channel = eyeTestChannel(frequencies);
+    const std::vector<kiems::EyeAggressor> aggressors = {eyeTestTone(frequencies, 1.37e9, 0.4)};
+    // Clear of the noise-free levels around the eye's centre (over 0.9 V), but not of levels a
+    // 0.4 V tone can pull down by as much again.
+    kiems::EyeMask mask;
+    mask.x1 = 0.4;
+    mask.x2 = 0.45;
+    mask.y1 = 0.7;
+    kiems::EyeNoiseOptions options;
+    options.drawCount = 64;
+    const auto eye = kiems::computeEyeDiagram(frequencies, channel, 5e9, aggressors, options, 1.0, mask);
+    XCTAssertTrue(eye.has_value() && eye->maskResult.has_value() && eye->noisyMaskResult.has_value() &&
+                  eye->noise.has_value());
+    if (!eye.has_value() || !eye->maskResult.has_value() || !eye->noisyMaskResult.has_value() ||
+        !eye->noise.has_value()) {
+        return;
+    }
+    XCTAssertTrue(eye->maskResult->passed());
+    XCTAssertFalse(eye->noisyMaskResult->passed());
+    XCTAssertEqual(eye->noisyMaskResult->traceCount, eye->noise->drawCount * eye->traces.size());
 }
 
 - (void)testContinuousAggressorClosesEyeByTwiceItsAmplitude {
@@ -2435,6 +2512,119 @@ static kiems::EyeAggressor eyeTestTone(const std::vector<double>& frequencies, d
     XCTAssertEqual(kiems::referencePlaneForPortLayer(0, 1, 2), 1);
 }
 
+// A 0.36 mm ball at (x, y), in simulation units.
+static kiems::BridgePad bridgeBall(const std::string& number, const std::string& net, double x, double y) {
+    return {number, net, x, y, 3600};
+}
+
+- (void)testReturnBridgeRunsStraightToAGroundPadInTheSameRow {
+    kiems::ReturnBridgeRequest request;
+    request.pad = bridgeBall("P3", "DDR_A0", 0, 0);
+    request.returnPads = {bridgeBall("A1", "GND", 8000, 8000), bridgeBall("A2", "GND", 8000, 0)};
+    const auto plans = kiems::planReturnBridges({request}, 50000);
+    XCTAssertEqual(plans.size(), 1u);
+    XCTAssertTrue(plans[0].has_value());
+    XCTAssertEqual(plans[0]->padNumber, "A2");
+    XCTAssertEqual(plans[0]->netName, "GND");
+    XCTAssertFalse(plans[0]->corner.has_value());
+    XCTAssertEqualWithAccuracy(plans[0]->width, 1800, 1e-9);
+}
+
+- (void)testReturnBridgeTakesAnLToTheNearestDiagonalGroundPad {
+    kiems::ReturnBridgeRequest request;
+    request.pad = bridgeBall("P3", "DDR_A0", 0, 0);
+    request.returnPads = {bridgeBall("A1", "GND", 8000, 8000), bridgeBall("A2", "GND", 24000, 0)};
+    const auto plans = kiems::planReturnBridges({request}, 50000);
+    XCTAssertTrue(plans[0].has_value());
+    XCTAssertEqual(plans[0]->padNumber, "A1");
+    XCTAssertTrue(plans[0]->corner.has_value());
+    XCTAssertEqual(*plans[0]->corner, (std::pair<double, double>{8000, 0}));
+}
+
+- (void)testReturnBridgeNeverPassesOverAnotherPinsPillar {
+    // A's nearest ground pad lies beyond B's ball, so A has to go the long way round.
+    kiems::ReturnBridgeRequest a;
+    a.pad = bridgeBall("A", "DQ0", 0, 0);
+    a.returnPads = {bridgeBall("G1", "GND", 16000, 0), bridgeBall("G2", "GND", 0, -24000)};
+    kiems::ReturnBridgeRequest b;
+    b.pad = bridgeBall("B", "DQ1", 8000, 0);
+    b.returnPads = {bridgeBall("G1", "GND", 16000, 0)};
+    const auto plans = kiems::planReturnBridges({a, b}, 50000);
+    XCTAssertTrue(plans[0].has_value());
+    XCTAssertEqual(plans[0]->padNumber, "G2");
+    XCTAssertTrue(plans[1].has_value());
+    XCTAssertEqual(plans[1]->padNumber, "G1");
+}
+
+- (void)testReturnBridgesMayShareAGroundPad {
+    kiems::ReturnBridgeRequest a;
+    a.pad = bridgeBall("A", "DQ0", -8000, 0);
+    a.returnPads = {bridgeBall("G", "GND", 0, 0)};
+    kiems::ReturnBridgeRequest b;
+    b.pad = bridgeBall("B", "DQ1", 8000, 0);
+    b.returnPads = {bridgeBall("G", "GND", 0, 0)};
+    const auto plans = kiems::planReturnBridges({a, b}, 50000);
+    XCTAssertTrue(plans[0].has_value());
+    XCTAssertTrue(plans[1].has_value());
+    XCTAssertEqual(plans[0]->padNumber, "G");
+    XCTAssertEqual(plans[1]->padNumber, "G");
+}
+
+- (void)testReturnBridgeTakesTheOtherCornerRatherThanCrossAnotherRoute {
+    // A's L runs along y = 0 and then up x = 8000; B's first corner would cross that upright.
+    kiems::ReturnBridgeRequest a;
+    a.pad = bridgeBall("A", "DQ0", 0, 0);
+    a.returnPads = {bridgeBall("GA", "GND", 8000, 8000)};
+    kiems::ReturnBridgeRequest b;
+    b.pad = bridgeBall("B", "DQ1", 4000, 4000);
+    b.returnPads = {bridgeBall("GB", "GND", 12000, 12000)};
+    const auto plans = kiems::planReturnBridges({a, b}, 50000);
+    XCTAssertTrue(plans[0].has_value());
+    XCTAssertEqual(*plans[0]->corner, (std::pair<double, double>{8000, 0}));
+    XCTAssertTrue(plans[1].has_value());
+    XCTAssertEqual(*plans[1]->corner, (std::pair<double, double>{4000, 12000}));
+}
+
+- (void)testReturnBridgeGivesUpWithNoGroundPadInReach {
+    kiems::ReturnBridgeRequest request;
+    request.pad = bridgeBall("P3", "DDR_A0", 0, 0);
+    request.returnPads = {bridgeBall("A1", "GND", 40000, 20000)};
+    const auto plans = kiems::planReturnBridges({request}, 50000);
+    XCTAssertFalse(plans[0].has_value());
+}
+
+- (void)testViaWithANodeInsideIsModelledConformally {
+    // 0.1 mm drill, 18 um plating: a 1360-unit cylinder, here with one node at its centre.
+    const kiems::MeshLinesXY mesh = {std::vector<double>{-2000, 0, 2000}, std::vector<double>{-2000, 0, 2000}};
+    const auto plan = kiems::planViaConduction(mesh, 0, 0, 0, 0, 1360, 2500);
+    XCTAssertTrue(plan.conduction == kiems::ViaConduction::Conformal);
+    XCTAssertFalse(plan.column.has_value());
+}
+
+- (void)testViaWhoseBarrelMissedEveryNodeIsStillConformal {
+    // The DDR_A1 launch via at (181.75, 97.75) on HorizonPC, with the mesh lines that once left its
+    // 18 um barrel ring without a node: its solid cylinder holds four.
+    const kiems::MeshLinesXY mesh = {std::vector<double>{-1363, -863, -151, 127, 648, 925, 1380},
+                                     std::vector<double>{-1165, -328, 172, 683, 1183, 1461}};
+    const auto plan = kiems::planViaConduction(mesh, 0, 0, 0, 0, 1360, 2500);
+    XCTAssertTrue(plan.conduction == kiems::ViaConduction::Conformal);
+}
+
+- (void)testViaSmallerThanItsCellsIsAThinWireOnItsPad {
+    const kiems::MeshLinesXY mesh = {std::vector<double>{-800, 1500}, std::vector<double>{-800, 1500}};
+    const auto plan = kiems::planViaConduction(mesh, 0, 0, 0, 0, 1360, 2500);
+    XCTAssertTrue(plan.conduction == kiems::ViaConduction::ThinWire);
+    XCTAssertTrue(plan.column.has_value());
+    XCTAssertEqual(*plan.column, (std::pair<double, double>{-800, -800}));
+}
+
+- (void)testViaStaysOpenRatherThanReachPastItsPad {
+    const kiems::MeshLinesXY mesh = {std::vector<double>{-1500, 1500}, std::vector<double>{-1500, 1500}};
+    const auto plan = kiems::planViaConduction(mesh, 0, 0, 0, 0, 1360, 2500);
+    XCTAssertTrue(plan.conduction == kiems::ViaConduction::Open);
+    XCTAssertFalse(plan.column.has_value());
+}
+
 - (void)testReceivingPinTypesDefaultToAbsorbingUnlessTheyAreGrounded {
     XCTAssertTrue(kiems::pinTypeAbsorbsByDefault("input", false));
     XCTAssertTrue(kiems::pinTypeAbsorbsByDefault("bidirectional", false));
@@ -2788,6 +2978,44 @@ static kiems::EMSConfig makeSyntheticConfig() {
     if (sim.excitations().size() == 1) {
         XCTAssertTrue(sim.excitations().front().isMain());
     }
+}
+
+- (void)testEyeTestConfigRoundTripsAndDefaultIsOmitted {
+    kiems::SimulationConfig sim = makeSyntheticConfig().simulations().front();
+    // Omitted by default, so existing documents' saved text (and pipeline cache keys) don't change.
+    XCTAssertFalse(nlohmann::json(sim).contains("eye_test"));
+
+    kiems::EyeTestConfig test;
+    test.standard = kiems::EyeMaskStandard::Ddr4;
+    test.signalLevel = 0.3;
+    test.mask.x1 = 0.4;
+    test.mask.x2 = 0.4;
+    test.mask.y1 = 0.068;
+    sim.setEyeTest(test);
+    const nlohmann::json json = sim;
+    XCTAssertTrue(json.contains("eye_test"));
+    XCTAssertEqual(json.at("eye_test").at("standard").get<std::string>(), "ddr4");
+    const auto reparsed = json.get<kiems::SimulationConfig>();
+    XCTAssertTrue(reparsed.eyeTest() == test);
+
+    // Every standard has a name of its own, so none comes back as another (or as Custom).
+    std::set<std::string> names;
+    const int lastStandard = static_cast<int>(kiems::EyeMaskStandard::Lpddr5);
+    for (int value = 0; value <= lastStandard; ++value) {
+        kiems::EyeTestConfig each;
+        each.standard = static_cast<kiems::EyeMaskStandard>(value);
+        const nlohmann::json eachJSON = each;
+        names.insert(eachJSON.at("standard").get<std::string>());
+        XCTAssertTrue(eachJSON.get<kiems::EyeTestConfig>().standard == each.standard, @"standard %d", value);
+    }
+    XCTAssertEqual(names.size(), static_cast<std::size_t>(lastStandard + 1));
+
+    // A standard this build doesn't know keeps its numbers as Custom.
+    nlohmann::json unknown = json;
+    unknown["eye_test"]["standard"] = "pcie7";
+    const auto custom = unknown.get<kiems::SimulationConfig>();
+    XCTAssertTrue(custom.eyeTest().standard == kiems::EyeMaskStandard::Custom);
+    XCTAssertTrue(custom.eyeTest().mask == test.mask);
 }
 
 // InvolvedNetConfig's legacy-vs-explicit pin-selection mode switch (see its own doc comment).
