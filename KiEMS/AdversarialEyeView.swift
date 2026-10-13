@@ -13,6 +13,11 @@ final class AdversarialEyeView: NSStackView {
     private let modeControl = NSSegmentedControl(labels: ["Noise-Free", "With Adversarial Signals"],
                                                  trackingMode: .selectOne, target: nil, action: nil)
     private let chart = EyeDiagramView()
+    /// The mask test's verdict, above the chart: a red stop sign and what left the valid area, or
+    /// a green pass. Hidden when the simulation has no mask.
+    private let maskIcon = NSImageView()
+    private let maskLabel = NSTextField(wrappingLabelWithString: "")
+    private let maskRow = NSStackView()
     private let openingLabel = NSTextField(wrappingLabelWithString: "")
     private let stabilityLabel = NSTextField(wrappingLabelWithString: "")
     private let statisticsGrid = NSGridView(numberOfColumns: 2, rows: 0)
@@ -29,12 +34,20 @@ final class AdversarialEyeView: NSStackView {
         alignment = .leading
         spacing = 6
 
-        for label in [openingLabel, stabilityLabel] {
+        for label in [openingLabel, stabilityLabel, maskLabel] {
             label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
             label.isSelectable = true
             // Nonzero from the start -- zero means automatic wrapping; see layout().
             label.preferredMaxLayoutWidth = 400
         }
+        maskLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        maskLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        maskIcon.setContentHuggingPriority(.required, for: .horizontal)
+        maskRow.orientation = .horizontal
+        maskRow.alignment = .top
+        maskRow.spacing = 4
+        maskRow.addArrangedSubview(maskIcon)
+        maskRow.addArrangedSubview(maskLabel)
         openingLabel.textColor = .secondaryLabelColor
         statisticsGrid.translatesAutoresizingMaskIntoConstraints = false
         statisticsGrid.rowSpacing = 2
@@ -49,6 +62,7 @@ final class AdversarialEyeView: NSStackView {
             modeControl.selectedSegment = showsAdversarial ? 1 : 0
             addArrangedSubview(modeControl)
         }
+        addArrangedSubview(maskRow)
         addArrangedSubview(chart)
         addArrangedSubview(openingLabel)
         // The table sits at its natural width, centred in a full-width row, so each name stays
@@ -64,7 +78,7 @@ final class AdversarialEyeView: NSStackView {
         ])
         addArrangedSubview(statisticsRow)
         addArrangedSubview(stabilityLabel)
-        for view in [chart, openingLabel, statisticsRow, stabilityLabel] {
+        for view in [maskRow, chart, openingLabel, statisticsRow, stabilityLabel] {
             NSLayoutConstraint.activate([
                 view.leadingAnchor.constraint(equalTo: leadingAnchor),
                 view.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -87,6 +101,10 @@ final class AdversarialEyeView: NSStackView {
         super.layout()
         for label in [openingLabel, stabilityLabel] where label.preferredMaxLayoutWidth != bounds.width {
             label.preferredMaxLayoutWidth = bounds.width
+        }
+        let maskWidth = max(bounds.width - maskIcon.fittingSize.width - maskRow.spacing, 1)
+        if maskLabel.preferredMaxLayoutWidth != maskWidth {
+            maskLabel.preferredMaxLayoutWidth = maskWidth
         }
     }
 
@@ -117,6 +135,7 @@ final class AdversarialEyeView: NSStackView {
     private func update() {
         let timeUI = eye.timeUI.map(\.doubleValue)
         guard let noise = eye.noise, modeControl.selectedSegment == 1 else {
+            showMaskResult(eye.maskResult, otherFailure: eye.noise?.maskResult.flatMap { $0.passed ? nil : "with adversarial signals" })
             chart.setData(timeUI: timeUI, traces: eye.traces.map { $0.map(\.doubleValue) })
             openingLabel.stringValue = "Opening: \(Self.height(eye.heightV)) high, " +
                 "\(Self.width(eye.widthUI)) wide."
@@ -124,6 +143,7 @@ final class AdversarialEyeView: NSStackView {
             stabilityLabel.isHidden = true
             return
         }
+        showMaskResult(noise.maskResult, otherFailure: eye.maskResult.flatMap { $0.passed ? nil : "noise-free" })
         chart.setData(timeUI: timeUI, traces: noise.traces.map { $0.map(\.doubleValue) })
         let signals = noise.aggressorCount == 1 ? "1 adversarial signal" : "\(noise.aggressorCount) adversarial signals"
         openingLabel.stringValue =
@@ -150,6 +170,58 @@ final class AdversarialEyeView: NSStackView {
                 "the opening. Increase Adversarial Draws in the simulation's properties."
             stabilityLabel.textColor = .systemOrange
         }
+    }
+
+    /// Shows how the eye being displayed fared against the mask -- `result` -- and overlays the mask
+    /// on the chart. `otherFailure` names the other mode (noise-free or with adversarial signals)
+    /// when that one fails, so a passing view doesn't hide a failing one.
+    private func showMaskResult(_ result: EMSResultsEyeMaskResult?, otherFailure: String?) {
+        guard let mask = eye.mask, let result else {
+            maskRow.isHidden = true
+            chart.setMask(nil)
+            return
+        }
+        let threshold = eye.thresholdV
+        var keepOut: [CGPoint] = []
+        if mask.y1 > 0 && mask.x1 < 0.5 {
+            // Clamped the way kiems::EyeMask's tester clamps it.
+            let x1 = max(mask.x1, 0)
+            let x2 = min(max(mask.x2, x1), 0.5)
+            keepOut = [(x1, 0.0), (x2, -mask.y1), (1 - x2, -mask.y1), (1 - x1, 0.0), (1 - x2, mask.y1), (x2, mask.y1)]
+                .map { CGPoint(x: $0.0, y: threshold + $0.1) }
+        }
+        let limits = mask.y2 > 0 ? (threshold - mask.y2)...(threshold + mask.y2) : nil
+        chart.setMask(EyeDiagramMask(keepOut: keepOut, limits: limits, violated: !result.passed))
+
+        let name = mask.standard == .custom ? "the eye mask" : "the \(EyeTestPreset.title(for: mask.standard)) eye mask"
+        maskRow.isHidden = false
+        if result.passed {
+            if let otherFailure {
+                maskLabel.stringValue = "Passes \(name) here, but fails it \(otherFailure)."
+                showMaskIcon(failed: true)
+            } else {
+                maskLabel.stringValue = "Passes \(name)."
+                showMaskIcon(failed: false)
+            }
+            return
+        }
+        let traces = result.traceCount.formatted()
+        var failures: [String] = []
+        if result.keepOutViolations > 0 {
+            failures.append("\(result.keepOutViolations.formatted()) of \(traces) bits enter the keep-out region")
+        }
+        if result.outerLimitViolations > 0 {
+            failures.append("\(result.outerLimitViolations.formatted()) of \(traces) go beyond ±\(Self.volts(mask.y2))")
+        }
+        maskLabel.stringValue = "Signal leaves the valid area of \(name): \(failures.joined(separator: "; "))."
+        showMaskIcon(failed: true)
+    }
+
+    private func showMaskIcon(failed: Bool) {
+        let symbol = failed ? "exclamationmark.octagon.fill" : "checkmark.circle.fill"
+        maskIcon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: failed ? "Failed" : "Passed")
+        maskIcon.contentTintColor = failed ? .systemRed : .systemGreen
+        maskLabel.textColor = failed ? .systemRed : .systemGreen
     }
 
     /// The figures a receiver specification is usually written against, as a two-column table.

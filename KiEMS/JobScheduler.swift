@@ -68,8 +68,8 @@ final class Job {
     let kind: JobKind
     var status: JobStatus = .queued
     var progress: EMSPipelineProgress?
-    /// Set once, the moment this job transitions to .running (see JobScheduler.startNextIfIdle()) --
-    /// the shared basis for estimatedSecondsRemaining below, so *any* observer (not just whichever
+    /// Set once, the moment this job transitions to .running (see JobScheduler.startNextIfIdle()), on
+    /// JobScheduler.unpausedNow's clock -- the shared basis for estimatedSecondsRemaining below, so *any* observer (not just whichever
     /// tab VC originally requested this specific job) can show a live time estimate for whatever job
     /// is currently running -- e.g. ProgressStatusView's own "Current Job: ..." sub-section, shown
     /// while a *different* simulation's tab is sitting queued behind this one.
@@ -82,7 +82,7 @@ final class Job {
     /// see EMSPipelineProgressPhase's own doc comment on .settingUp).
     var estimatedSecondsRemaining: Double? {
         guard let startedAt, let fraction = progress?.fraction, fraction > 0 else { return nil }
-        let elapsed = Date().timeIntervalSince(startedAt)
+        let elapsed = JobScheduler.shared.unpausedNow.timeIntervalSince(startedAt)
         return max(0, elapsed / fraction - elapsed)
     }
     /// Set by JobScheduler.invalidate(...) when a config edit needs to invalidate a stage this job
@@ -141,6 +141,21 @@ final class JobScheduler {
     /// in-flight job (if any) has genuinely returned and executionQueue has drained.
     private var isShuttingDown = false
     private var shutdownCompletion: (() -> Void)?
+
+    /// Set by setPaused(_:): no queued job starts, and the running one stops at its next progress
+    /// report (see PauseGate) until the queue is resumed.
+    private(set) var isPaused = false
+    /// Whether the running job has actually reached a progress report and stopped since the queue
+    /// was paused -- an FDTD run reports only every few seconds, so it keeps going until then.
+    private(set) var isHoldingRunningJob = false
+    private let pauseGate = PauseGate()
+
+    /// Wall-clock time with every pause taken out -- what any elapsed-time measurement of a running
+    /// job (time estimates, step timing) should use, so time spent held by a pause doesn't read as a
+    /// very slow stretch of the run.
+    var unpausedNow: Date {
+        Date().addingTimeInterval(-pauseGate.heldSeconds)
+    }
 
     private struct SimKey: Hashable {
         let document: ObjectIdentifier
@@ -281,10 +296,39 @@ final class JobScheduler {
         if job.status == .running {
             job.status = .cancelling
             job.document?.pipeline(forSimulationNamed: job.simulationName).requestCancellation()
+            // A job held by a pause has to get back to its cancellation check to stop at all.
+            pauseGate.release(job.id)
         } else {
             jobs.removeAll { $0.id == job.id }
         }
         notifyObservers()
+    }
+
+    /// Pauses or resumes the whole queue -- app-wide, like the queue itself. While paused nothing new
+    /// starts, and the running job holds at its next progress report with all of its state intact;
+    /// resuming carries on from there. Jobs can still be requested (they queue) or cancelled.
+    func setPaused(_ paused: Bool) {
+        guard paused != isPaused, !isShuttingDown else { return }
+        isPaused = paused
+        pauseGate.setPaused(paused)
+        if !paused {
+            isHoldingRunningJob = false
+            startNextIfIdle()
+        }
+        notifyObservers()
+    }
+
+    /// Called on executionQueue, from inside the running pipeline call's own progress handler --
+    /// blocks there for as long as the queue stays paused (see PauseGate).
+    private func holdIfPaused(_ job: Job) {
+        pauseGate.waitWhilePaused(jobID: job.id) {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isPaused,
+                      self.jobs.contains(where: { $0.id == job.id && $0.status == .running }) else { return }
+                self.isHoldingRunningJob = true
+                self.notifyObservers()
+            }
+        }
     }
 
     /// Discards `simulationName`'s pipeline cache from `fromStage` onward -- the JobScheduler-aware
@@ -330,6 +374,7 @@ final class JobScheduler {
     func cancelAll(for document: Document) {
         for job in jobs where job.document === document && job.status == .running {
             job.document?.pipeline(forSimulationNamed: job.simulationName).requestCancellation()
+            pauseGate.release(job.id)
         }
         jobs.removeAll { $0.document === document }
         notifyObservers()
@@ -350,6 +395,7 @@ final class JobScheduler {
         for job in jobs where job.status == .running {
             job.status = .cancelling
             job.document?.pipeline(forSimulationNamed: job.simulationName).requestCancellation()
+            pauseGate.release(job.id)
         }
         jobs.removeAll { $0.status == .queued }
         notifyObservers()
@@ -424,10 +470,12 @@ final class JobScheduler {
     /// mutating JobScheduler method is -- see this class's own top comment), which is what makes it
     /// safe to build ExecutionContext here.
     private func startNextIfIdle() {
-        guard !isExecuting, !isShuttingDown, let next = jobs.first(where: { $0.status == .queued }) else { return }
+        guard !isExecuting, !isShuttingDown, !isPaused, let next = jobs.first(where: { $0.status == .queued }) else {
+            return
+        }
         isExecuting = true
         next.status = .running
-        next.startedAt = Date()
+        next.startedAt = unpausedNow
         guard let document = next.document else {
             // The document this job belonged to is already gone -- nothing left to run against.
             // Treated as a plain, silent success (removes the job, lets the next one start) rather
@@ -460,6 +508,7 @@ final class JobScheduler {
                         DispatchQueue.main.async {
                             self?.updateProgress(job, progress)
                         }
+                        self?.holdIfPaused(job)
                     })
                 let wroteOutput = context.pipeline.lastEnsureStageWroteOutput()
                 DispatchQueue.main.async { [weak self] in
@@ -499,6 +548,8 @@ final class JobScheduler {
 
     private func finishExecution(_ job: Job, error: Error?) {
         isExecuting = false
+        isHoldingRunningJob = false
+        pauseGate.forget(job.id)
         if let error {
             if EMSSimulationPipelineBridge.isCancellationError(error as NSError) {
                 jobs.removeAll { $0.id == job.id }
@@ -560,5 +611,62 @@ final class JobScheduler {
         } else {
             alert.runModal()
         }
+    }
+}
+
+/// Holds the running job's background thread at its next progress report while JobScheduler is
+/// paused. The pipeline has no pause of its own, but it calls its progress handler synchronously
+/// from inside the run -- between FDTD timesteps, or between geometry phases -- so blocking there
+/// stops the run with its GPU and pipeline state intact. Thread-safe: the scheduler drives it from
+/// the main thread while the running job waits on it from executionQueue.
+private final class PauseGate {
+    private let condition = NSCondition()
+    private var isPaused = false
+    /// Jobs cancelled while paused: let through, so they can reach their own cancellation check.
+    private var releasedJobIDs: Set<UUID> = []
+    private var holdStartedAt: Date?
+    private var completedHoldSeconds: TimeInterval = 0
+
+    /// Total time any job has spent held here, including a hold still in progress.
+    var heldSeconds: TimeInterval {
+        condition.lock()
+        defer { condition.unlock() }
+        return completedHoldSeconds + (holdStartedAt.map { Date().timeIntervalSince($0) } ?? 0)
+    }
+
+    func setPaused(_ paused: Bool) {
+        condition.lock()
+        isPaused = paused
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    func release(_ jobID: UUID) {
+        condition.lock()
+        releasedJobIDs.insert(jobID)
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    func forget(_ jobID: UUID) {
+        condition.lock()
+        releasedJobIDs.remove(jobID)
+        condition.unlock()
+    }
+
+    /// Returns at once unless paused; otherwise calls `onHold` and blocks until resumed or `jobID`
+    /// is released.
+    func waitWhilePaused(jobID: UUID, onHold: () -> Void) {
+        condition.lock()
+        defer { condition.unlock() }
+        guard isPaused, !releasedJobIDs.contains(jobID) else { return }
+        let start = Date()
+        holdStartedAt = start
+        onHold()
+        while isPaused, !releasedJobIDs.contains(jobID) {
+            condition.wait()
+        }
+        holdStartedAt = nil
+        completedHoldSeconds += Date().timeIntervalSince(start)
     }
 }

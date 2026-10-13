@@ -18,6 +18,17 @@ using kiems::SimulationConfig;
 
 NSErrorDomain const EMSConfigErrorDomain = @"EMSConfigErrorDomain";
 
+// EMSEyeMaskStandard is cast straight to and from kiems::EyeMaskStandard.
+static_assert(static_cast<NSInteger>(kiems::EyeMaskStandard::Custom) == EMSEyeMaskStandardCustom);
+static_assert(static_cast<NSInteger>(kiems::EyeMaskStandard::UsbHighSpeed) == EMSEyeMaskStandardUSBHighSpeed);
+static_assert(static_cast<NSInteger>(kiems::EyeMaskStandard::Usb20Gbps) == EMSEyeMaskStandardUSB20Gbps);
+static_assert(static_cast<NSInteger>(kiems::EyeMaskStandard::Ddr5) == EMSEyeMaskStandardDDR5);
+static_assert(static_cast<NSInteger>(kiems::EyeMaskStandard::Thunderbolt1) == EMSEyeMaskStandardThunderbolt1);
+static_assert(static_cast<NSInteger>(kiems::EyeMaskStandard::DisplayPortRbr) == EMSEyeMaskStandardDisplayPortRBR);
+static_assert(static_cast<NSInteger>(kiems::EyeMaskStandard::EthernetSfi) == EMSEyeMaskStandardEthernetSFI);
+static_assert(static_cast<NSInteger>(kiems::EyeMaskStandard::PciExpress1) == EMSEyeMaskStandardPCIExpress1);
+static_assert(static_cast<NSInteger>(kiems::EyeMaskStandard::Lpddr5) == EMSEyeMaskStandardLPDDR5);
+
 // Forward declarations so EMSSimulationBridge and EMSInvolvedNetBridge's implementations (below)
 // can reference each other's ivars/private methods regardless of which is defined first.
 @interface EMSSimulationBridge () {
@@ -662,6 +673,69 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
 }
 - (void)setAdversarialSharedClock:(BOOL)value {
     self.cxxSim.setAdversarialSharedClock(value);
+}
+
+- (EMSEyeMaskStandard)eyeMaskStandard {
+    return static_cast<EMSEyeMaskStandard>(self.cxxSim.eyeTest().standard);
+}
+- (void)setEyeMaskStandard:(EMSEyeMaskStandard)value {
+    kiems::EyeTestConfig test = self.cxxSim.eyeTest();
+    test.standard = static_cast<kiems::EyeMaskStandard>(value);
+    self.cxxSim.setEyeTest(test);
+}
+
+- (double)eyeSignalLevel {
+    return self.cxxSim.eyeTest().signalLevel;
+}
+- (void)setEyeSignalLevel:(double)value {
+    kiems::EyeTestConfig test = self.cxxSim.eyeTest();
+    test.signalLevel = value;
+    self.cxxSim.setEyeTest(test);
+}
+
+- (double)eyeMaskX1 {
+    return self.cxxSim.eyeTest().mask.x1;
+}
+- (void)setEyeMaskX1:(double)value {
+    kiems::EyeTestConfig test = self.cxxSim.eyeTest();
+    test.mask.x1 = value;
+    self.cxxSim.setEyeTest(test);
+}
+
+- (double)eyeMaskX2 {
+    return self.cxxSim.eyeTest().mask.x2;
+}
+- (void)setEyeMaskX2:(double)value {
+    kiems::EyeTestConfig test = self.cxxSim.eyeTest();
+    test.mask.x2 = value;
+    self.cxxSim.setEyeTest(test);
+}
+
+- (double)eyeMaskY1 {
+    return self.cxxSim.eyeTest().mask.y1;
+}
+- (void)setEyeMaskY1:(double)value {
+    kiems::EyeTestConfig test = self.cxxSim.eyeTest();
+    test.mask.y1 = value;
+    self.cxxSim.setEyeTest(test);
+}
+
+- (double)eyeMaskY2 {
+    return self.cxxSim.eyeTest().mask.y2;
+}
+- (void)setEyeMaskY2:(double)value {
+    kiems::EyeTestConfig test = self.cxxSim.eyeTest();
+    test.mask.y2 = value;
+    self.cxxSim.setEyeTest(test);
+}
+
+- (void)copyEyeAnalysisSettingsFromSimulation:(EMSSimulationBridge*)simulation {
+    const SimulationConfig& source = simulation.cxxSim;
+    SimulationConfig& target = self.cxxSim;
+    target.setEyeBitRate(source.eyeBitRate());
+    target.setEyeDrawCount(source.eyeDrawCount());
+    target.setAdversarialSharedClock(source.adversarialSharedClock());
+    target.setEyeTest(source.eyeTest());
 }
 
 - (BOOL)isDifferentialPair {

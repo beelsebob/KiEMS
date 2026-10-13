@@ -16,6 +16,10 @@ final class SimulationSetViewController: NSViewController {
 
     /// Fired after every edit to the set, once it's been written back to the simulation.
     var onChanged: (() -> Void)?
+    /// Fired after an edit to the template's Tests section. Those settings only affect the eye
+    /// analysis, so they're copied to the generated simulations rather than regenerating them
+    /// (which would discard their results).
+    var onEyeTestChanged: (() -> Void)?
 
     private let stack = NSStackView()
     private let excitationComboBox = NSComboBox()
@@ -46,6 +50,9 @@ final class SimulationSetViewController: NSViewController {
     private var patternRow: NSView?
     private var netNamesRow: NSView?
     private var additionalPatternsRow: NSView?
+    private lazy var eyeTestSection = EyeTestSectionView { [unowned self] title, control in
+        self.row(title, control)
+    }
 
     private static func ohmsFormatter() -> UnitSuffixValueFormatter {
         UnitSuffixValueFormatter(displaySuffix: "Ω", acceptedSuffixes: ["ohms", "ohm", "Ω"], autoSelectsSIPrefix: true)
@@ -150,6 +157,17 @@ final class SimulationSetViewController: NSViewController {
         }
         stack.setCustomSpacing(12, after: rows[rows.count - 3])
 
+        let testsHeading = NSTextField(labelWithString: "Tests")
+        testsHeading.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        eyeTestSection.onChange = { [weak self] in self?.onEyeTestChanged?() }
+        for view in [separator(), testsHeading, eyeTestSection] {
+            stack.addArrangedSubview(view)
+            if view !== testsHeading {
+                view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+            }
+        }
+        stack.setCustomSpacing(12, after: summaryLabel)
+
         let container = NSView()
         container.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -199,8 +217,10 @@ final class SimulationSetViewController: NSViewController {
         excitationComboBox.addItems(withObjectValues: references)
         guard let set = simulation?.simulationSet else {
             probesStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+            eyeTestSection.simulation = nil
             return
         }
+        eyeTestSection.simulation = simulation
         excitationComboBox.stringValue = set.excitationFootprintReference
         netSelectionModePopup.selectItem(at: set.netSelectionMode == .list ? 1 : 0)
         patternField.stringValue = set.netNamePattern

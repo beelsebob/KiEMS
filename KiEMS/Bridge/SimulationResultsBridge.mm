@@ -251,6 +251,33 @@ private:
 }
 @end
 
+@implementation EMSResultsEyeMask
+- (instancetype)initWithTest:(const kiems::EyeTestConfig&)test {
+    self = [super init];
+    if (self) {
+        _standard = static_cast<EMSEyeMaskStandard>(test.standard);
+        _x1 = test.mask.x1;
+        _x2 = test.mask.x2;
+        _y1 = test.mask.y1;
+        _y2 = test.mask.y2;
+    }
+    return self;
+}
+@end
+
+@implementation EMSResultsEyeMaskResult
+- (instancetype)initWithResult:(const kiems::EyeMaskResult&)result {
+    self = [super init];
+    if (self) {
+        _traceCount = static_cast<NSInteger>(result.traceCount);
+        _keepOutViolations = static_cast<NSInteger>(result.keepOutViolations);
+        _outerLimitViolations = static_cast<NSInteger>(result.outerLimitViolations);
+        _passed = result.passed() ? YES : NO;
+    }
+    return self;
+}
+@end
+
 @implementation EMSResultsEyeNoise
 - (instancetype)initWithEye:(const kiems::EyeDiagramData&)eye aggressorCount:(NSInteger)aggressorCount {
     self = [super init];
@@ -274,6 +301,9 @@ private:
         _convergenceHeightV = toNSArray(eye.noise->convergenceHeightV);
         _convergenceHeightLowestV = toNSArray(eye.noise->convergenceHeightLowestV);
         _convergenceHeightHighestV = toNSArray(eye.noise->convergenceHeightHighestV);
+        if (eye.noisyMaskResult.has_value()) {
+            _maskResult = [[EMSResultsEyeMaskResult alloc] initWithResult:*eye.noisyMaskResult];
+        }
     }
     return self;
 }
@@ -283,7 +313,8 @@ private:
 - (instancetype)initWithName:(NSString*)name
                  differential:(BOOL)differential
                           eye:(const kiems::EyeDiagramData&)eye
-               aggressorCount:(NSInteger)aggressorCount {
+               aggressorCount:(NSInteger)aggressorCount
+                         test:(const kiems::EyeTestConfig&)test {
     self = [super init];
     if (self) {
         _name = [name copy];
@@ -301,8 +332,19 @@ private:
         if (eye.noise.has_value() && eye.noisyOpening.has_value()) {
             _noise = [[EMSResultsEyeNoise alloc] initWithEye:eye aggressorCount:aggressorCount];
         }
+        _thresholdV = eye.thresholdV;
+        if (!test.mask.isEmpty()) {
+            _mask = [[EMSResultsEyeMask alloc] initWithTest:test];
+        }
+        if (eye.maskResult.has_value()) {
+            _maskResult = [[EMSResultsEyeMaskResult alloc] initWithResult:*eye.maskResult];
+        }
     }
     return self;
+}
+
+- (BOOL)failsMask {
+    return (_maskResult != nil && !_maskResult.passed) || (_noise.maskResult != nil && !_noise.maskResult.passed);
 }
 @end
 
@@ -356,6 +398,13 @@ private:
         _eyeDiagrams = [eyeDiagrams copy];
     }
     return self;
+}
+
+- (BOOL)failsEyeTest {
+    for (EMSResultsEyeDiagram* eye in _eyeDiagrams) {
+        if (eye.failsMask) return YES;
+    }
+    return NO;
 }
 @end
 
@@ -620,6 +669,12 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
     kiems::EyeNoiseOptions noiseOptions;
     noiseOptions.drawCount = simConfig.eyeDrawCount();
     noiseOptions.sharedClock = simConfig.adversarialSharedClock();
+    kiems::EyeTestConfig eyeTest = simConfig.eyeTest();
+    // computeEyeDiagram() rejects a non-positive level outright; fall back to its own default
+    // rather than losing every eye to a bad value.
+    if (!(eyeTest.signalLevel > 0) || !std::isfinite(eyeTest.signalLevel)) {
+        eyeTest.signalLevel = 1.0;
+    }
 
     // The channel from `input` to the voltage at `output`, per unit incident voltage at `input`: the
     // S-parameter for an absorbing output, the equivalent probe transfer for a passive one (see
@@ -672,14 +727,15 @@ EMSResultsPreview* buildResultsPreview(Postprocessor& postprocessor, const Simul
         }
 
         const auto eye = kiems::computeEyeDiagram(postprocessor.frequencies(), transfer, eyeBitRate, aggressors,
-                                                  noiseOptions);
+                                                  noiseOptions, eyeTest.signalLevel, eyeTest.mask);
         if (!eye.has_value()) {
             return;
         }
         [eyeDiagrams addObject:[[EMSResultsEyeDiagram alloc] initWithName:name
                                                              differential:differential ? YES : NO
                                                                       eye:*eye
-                                                           aggressorCount:static_cast<NSInteger>(aggressors.size())]];
+                                                           aggressorCount:static_cast<NSInteger>(aggressors.size())
+                                                                     test:eyeTest]];
     };
 
     // Mixed-mode first. All four constituent ports are suppressed from the single-ended loop

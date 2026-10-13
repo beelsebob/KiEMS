@@ -704,6 +704,17 @@ final class WholeBoardViewController: NSViewController {
         }
     }
 
+    /// Fired after an edit to the Simulation Set panel's Tests section, with the template's current
+    /// index -- see SimulationSetViewController.onEyeTestChanged.
+    var onSimulationSetEyeTestChanged: ((Int) -> Void)? {
+        didSet {
+            simulationSetViewController.onEyeTestChanged = { [weak self] in
+                guard let self, let index = self.selectedSimulationIndex else { return }
+                self.onSimulationSetEyeTestChanged?(index)
+            }
+        }
+    }
+
     /// What regenerateSimulationSet(atTemplateIndex:) did to document.config.simulations.
     struct SimulationSetRegeneration {
         /// Generated simulations whose configuration is new or different.

@@ -148,7 +148,7 @@ constexpr const char* kCancelledMessage = "Cancelled";
 // not the shape of geometry.json or the S-parameter CSVs, so merely finding those files is not
 // enough to prove they can be reused. Bump this version whenever a solver/serialization change
 // makes otherwise-identical saved products unsafe to restore.
-constexpr const char* kPipelineCacheVersion = "KiEMS-pipeline-cache-v8\n";
+constexpr const char* kPipelineCacheVersion = "KiEMS-pipeline-cache-v11\n";
 constexpr const char* kGeometryCacheInputsName = "cache_inputs.txt";
 constexpr const char* kResultsCacheInputsName = "cache_inputs.txt";
 
@@ -184,10 +184,35 @@ std::optional<std::string> pipelineCacheInputs(const PathsConfig& paths) {
            (project.has_value() ? sha256Hex(*project) : std::string("none")) + "\n" + *config;
 }
 
+// The eye settings only feed the results preview, built afresh from the saved products, so they're
+// left out when deciding whether those products still match: changing a mask must not throw away an
+// FDTD run the next time the document opens. Inputs that don't parse are compared verbatim.
+std::string withoutEyeAnalysisSettings(const std::string& cacheInputs) {
+    // The header is three lines (version, board digest, project digest); simulation.json follows.
+    std::size_t configStart = 0;
+    for (int line = 0; line < 3; ++line) {
+        configStart = cacheInputs.find('\n', configStart);
+        if (configStart == std::string::npos) return cacheInputs;
+        ++configStart;
+    }
+    nlohmann::json config = nlohmann::json::parse(cacheInputs.substr(configStart), nullptr, false);
+    if (config.is_discarded() || !config.contains("simulations") || !config["simulations"].is_array()) {
+        return cacheInputs;
+    }
+    for (auto& simulation : config["simulations"]) {
+        if (!simulation.is_object()) continue;
+        for (const char* key : {"eye_bit_rate", "eye_draw_count", "adversarial_shared_clock", "eye_test"}) {
+            simulation.erase(key);
+        }
+    }
+    return cacheInputs.substr(0, configStart) + config.dump();
+}
+
 bool cacheInputsMatch(const std::filesystem::path& marker, const std::optional<std::string>& current) {
     if (!current.has_value()) return false;
     const auto saved = readWholeFile(marker);
-    return saved.has_value() && *saved == *current;
+    return saved.has_value() &&
+           (*saved == *current || withoutEyeAnalysisSettings(*saved) == withoutEyeAnalysisSettings(*current));
 }
 
 void saveCacheInputs(const std::filesystem::path& marker, const std::optional<std::string>& current) {
@@ -1184,11 +1209,13 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
     return _resultsPreviewCache;
 }
 
-- (void)updateEyeBitRate:(double)bitRate drawCount:(NSInteger)drawCount sharedClock:(BOOL)sharedClock {
+- (void)updateEyeAnalysisFromSimulation:(EMSSimulationBridge*)simulation {
     if (_simConfig != nullptr) {
-        _simConfig->setEyeBitRate(bitRate);
-        _simConfig->setEyeDrawCount(static_cast<std::size_t>(std::max<NSInteger>(drawCount, 1)));
-        _simConfig->setAdversarialSharedClock(sharedClock);
+        // Through the bridge's own getter, which reads an unset bit rate as the frequency stop.
+        _simConfig->setEyeBitRate(simulation.eyeBitRate);
+        _simConfig->setEyeDrawCount(simulation.cxxSim.eyeDrawCount());
+        _simConfig->setAdversarialSharedClock(simulation.cxxSim.adversarialSharedClock());
+        _simConfig->setEyeTest(simulation.cxxSim.eyeTest());
     }
     _resultsPreviewCache = nil;
 }

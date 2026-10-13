@@ -34,6 +34,49 @@ typedef NS_ENUM(NSInteger, EMSSimulationSetNetSelectionMode) {
     EMSSimulationSetNetSelectionModeList,
 };
 
+/// Mirrors kiems::EyeMaskStandard -- which preset a simulation's eye test was taken from.
+typedef NS_ENUM(NSInteger, EMSEyeMaskStandard) {
+    EMSEyeMaskStandardCustom,
+    EMSEyeMaskStandardUSBHighSpeed,
+    EMSEyeMaskStandardUSBFullSpeed,
+    EMSEyeMaskStandardUSB5Gbps,
+    EMSEyeMaskStandardUSB10Gbps,
+    EMSEyeMaskStandardUSB20Gbps,
+    EMSEyeMaskStandardDDR,
+    EMSEyeMaskStandardDDR2,
+    EMSEyeMaskStandardDDR3,
+    EMSEyeMaskStandardDDR4,
+    EMSEyeMaskStandardDDR5,
+    EMSEyeMaskStandardFireWireS400,
+    EMSEyeMaskStandardFireWireS800,
+    EMSEyeMaskStandardFireWireS1600,
+    EMSEyeMaskStandardThunderbolt1,
+    EMSEyeMaskStandardThunderbolt2,
+    EMSEyeMaskStandardThunderbolt3,
+    EMSEyeMaskStandardThunderbolt4,
+    EMSEyeMaskStandardHDMI10,
+    EMSEyeMaskStandardHDMI14,
+    EMSEyeMaskStandardHDMI20,
+    EMSEyeMaskStandardDisplayPortRBR,
+    EMSEyeMaskStandardDisplayPortHBR,
+    EMSEyeMaskStandardDisplayPortHBR2,
+    EMSEyeMaskStandardDisplayPortHBR3,
+    EMSEyeMaskStandardEthernetSGMII,
+    EMSEyeMaskStandardEthernetXAUI,
+    EMSEyeMaskStandardEthernetSFI,
+    EMSEyeMaskStandardPCIExpress1,
+    EMSEyeMaskStandardPCIExpress2,
+    EMSEyeMaskStandardPCIExpress3,
+    EMSEyeMaskStandardPCIExpress4,
+    EMSEyeMaskStandardPCIExpress5,
+    EMSEyeMaskStandardDDR3CommandAddress,
+    EMSEyeMaskStandardDDR4CommandAddress,
+    EMSEyeMaskStandardDDR5CommandAddress,
+    EMSEyeMaskStandardLPDDR4,
+    EMSEyeMaskStandardLPDDR4X,
+    EMSEyeMaskStandardLPDDR5,
+};
+
 /// One ProbedPin entry -- a plain value snapshot (not index-forwarding like EMSInvolvedNetBridge
 /// itself), since kiems::ProbedPin has no separate identity to look up by index; a fresh array
 /// of these is built from InvolvedNetConfig::probedPins() on every read of
@@ -255,6 +298,21 @@ typedef NS_ENUM(NSInteger, EMSSimulationSetNetSelectionMode) {
 @property (nonatomic) NSInteger eyeDrawCount;
 /// Whether the adversarial sources share a clock. See kiems::EyeNoiseOptions::sharedClock.
 @property (nonatomic) BOOL adversarialSharedClock;
+
+/// The eye test -- see kiems::EyeTestConfig and kiems::EyeMask. Times are in unit intervals,
+/// voltages in volts; a zero eyeMaskY1 means no keep-out region and a zero eyeMaskY2 no outer limit.
+@property (nonatomic) EMSEyeMaskStandard eyeMaskStandard;
+/// The +- level the eye's PRBS is launched at (differential for a pair). Must be positive.
+@property (nonatomic) double eyeSignalLevel;
+@property (nonatomic) double eyeMaskX1;
+@property (nonatomic) double eyeMaskX2;
+@property (nonatomic) double eyeMaskY1;
+@property (nonatomic) double eyeMaskY2;
+/// Copies every analysis-only eye setting (bit rate, draw count, shared clock and eye test) from
+/// `simulation` -- how a Simulation Set's edits reach the simulations it generated without
+/// regenerating them, which would discard their results.
+- (void)copyEyeAnalysisSettingsFromSimulation:(EMSSimulationBridge *)simulation
+    NS_SWIFT_NAME(copyEyeAnalysisSettings(from:));
 
 /// Whether this simulation is fundamentally about a differential pair -- see
 /// kiems::SimulationConfig::isDifferentialPair()'s own doc comment for exactly what toggling this

@@ -395,7 +395,7 @@ final class GeometryViewController: NSViewController {
             case .running, .cancelling:
                 if !wasRunning {
                     runningIndices.insert(index)
-                    runStartTime[index] = Date()
+                    runStartTime[index] = JobScheduler.shared.unpausedNow
                     onRunStateChanged?(index, true)
                     if currentIndex == index {
                         banner.showTransient(style: .success, title: "Processing Geometry")
@@ -458,7 +458,7 @@ final class GeometryViewController: NSViewController {
         // Simple linear extrapolation from elapsed time and how far through this run we are.
         let secondsRemaining: Double?
         if let start = runStartTime[index], progress.fraction > 0 {
-            let elapsed = Date().timeIntervalSince(start)
+            let elapsed = JobScheduler.shared.unpausedNow.timeIntervalSince(start)
             secondsRemaining = max(0, elapsed / progress.fraction - elapsed)
         } else {
             secondsRemaining = nil

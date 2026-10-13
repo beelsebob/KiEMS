@@ -74,7 +74,6 @@ final class SimulationPropertiesViewController: NSViewController {
     // ExcitationConfig carries its own duration; this sets them all at once). Shows "Mixed" as a
     // placeholder if they've been given different values individually in the source list.
     private let excitationDurationField = NSTextField(string: "")
-    private let eyeBitRateField = NSTextField(string: "")
     private let eyeDrawCountField = NSTextField(string: "")
     private let sharedClockCheckbox = NSButton(checkboxWithTitle: "Adversarial Signals Share a Clock",
                                                target: nil, action: nil)
@@ -92,17 +91,6 @@ final class SimulationPropertiesViewController: NSViewController {
         displaySuffix: "Hz", acceptedSuffixes: ["hertz", "hz"], autoSelectsSIPrefix: true)
     private let excitationDurationFormatter = UnitSuffixValueFormatter(
         displaySuffix: "s", acceptedSuffixes: ["seconds", "second", "secs", "sec", "s"],
-        autoSelectsSIPrefix: true)
-    private let eyeBitRateFormatter = UnitSuffixValueFormatter(
-        displaySuffix: "bit/s", acceptedSuffixes: ["bit/s", "bps"],
-        scaledSuffixes: SIPrefix.allCases.flatMap { prefix in
-            prefix.inputSymbols.flatMap { symbol in
-                [
-                    (suffix: "\(symbol)b/s", factor: prefix.factor),
-                    (suffix: "\(symbol)B/s", factor: 8 * prefix.factor),
-                ]
-            }
-        },
         autoSelectsSIPrefix: true)
     private let maxStepsFormatter: NumberFormatter = {
         let formatter = NumberFormatter()
@@ -131,6 +119,11 @@ final class SimulationPropertiesViewController: NSViewController {
         formatter.maximum = 64
         return formatter
     }()
+
+    // The eye mask, bit rate and signal level every eye in the results is built and tested with.
+    private lazy var eyeTestSection = EyeTestSectionView { [unowned self] title, control in
+        self.labeled(title, control)
+    }
 
     private var groundNetClassNames: [String] = []
     private var groundNetNames: [String] = []
@@ -234,7 +227,6 @@ final class SimulationPropertiesViewController: NSViewController {
         frequencyStartField.formatter = frequencyStartFormatter
         frequencyStopField.formatter = frequencyStopFormatter
         excitationDurationField.formatter = excitationDurationFormatter
-        eyeBitRateField.formatter = eyeBitRateFormatter
         eyeDrawCountField.formatter = eyeDrawCountFormatter
         maxStepsField.formatter = maxStepsFormatter
         gridDensityField.formatter = gridDensityFormatter
@@ -242,7 +234,7 @@ final class SimulationPropertiesViewController: NSViewController {
 
         for field in [viaEdgeDistanceField, viaSpacingField, platingThicknessField,
                       fillingEpsilonField, frequencyStartField, frequencyStopField, maxStepsField,
-                      gridDensityField, absorbingBoundaryField, excitationDurationField, eyeBitRateField, eyeDrawCountField] {
+                      gridDensityField, absorbingBoundaryField, excitationDurationField, eyeDrawCountField] {
             field.controlSize = .small
             field.font = Self.formFont
             field.alignment = .right
@@ -292,11 +284,18 @@ final class SimulationPropertiesViewController: NSViewController {
                 labeled("Sim Real Time:", simulationRealTimeValueLabel),
                 labeled("Frequency Range:", frequencyRange),
                 labeled("Excitation Duration:", excitationDurationField),
-                labeled("Digital Bitrate:", eyeBitRateField),
                 labeled("Adversarial Draws:", eyeDrawCountField),
                 labeled("", sharedClockCheckbox),
             ])
-        let topLevelViews = [nameRow, networksSection, geometrySection, resolutionSection]
+        eyeTestSection.onChange = { [weak self] in
+            guard let self else { return }
+            self.document?.updateChangeCount(.changeDone)
+            if let selectedIndex = self.selectedIndex {
+                self.onResultsParametersChanged?(selectedIndex)
+            }
+        }
+        let testsSection = section("Tests", views: [eyeTestSection])
+        let topLevelViews = [nameRow, networksSection, geometrySection, resolutionSection, testsSection]
         let stack = NSStackView(views: topLevelViews)
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -376,7 +375,7 @@ final class SimulationPropertiesViewController: NSViewController {
             viaSpacingField.stringValue = ""
             excitationDurationField.stringValue = ""
             excitationDurationField.placeholderString = nil
-            eyeBitRateField.stringValue = ""
+            eyeTestSection.simulation = nil
             eyeDrawCountField.stringValue = ""
             sharedClockCheckbox.state = .off
             differentialPairCheckbox.state = .off
@@ -393,7 +392,7 @@ final class SimulationPropertiesViewController: NSViewController {
         viaEdgeDistanceField.doubleValue = sim.viaEdgeDistance
         viaSpacingField.doubleValue = sim.viaSpacing
         reloadExcitationDuration(for: sim)
-        eyeBitRateField.doubleValue = sim.eyeBitRate
+        eyeTestSection.simulation = sim
         eyeDrawCountField.integerValue = sim.eyeDrawCount
         sharedClockCheckbox.state = sim.adversarialSharedClock ? .on : .off
         edgeTerminationList.rows = sim.edgeTerminatedNets
@@ -440,7 +439,7 @@ final class SimulationPropertiesViewController: NSViewController {
 
     private func setPerSimulationFieldsEnabled(_ enabled: Bool) {
         for control in [nameField, differentialPairCheckbox, groundNameComboBox,
-                         viaEdgeDistanceField, viaSpacingField, eyeBitRateField, eyeDrawCountField,
+                         viaEdgeDistanceField, viaSpacingField, eyeDrawCountField,
                          sharedClockCheckbox] as [NSControl] {
             control.isEnabled = enabled
         }
@@ -572,9 +571,6 @@ final class SimulationPropertiesViewController: NSViewController {
             reason = "Via stitching changed"
             selectedSimulation?.viaSpacing = sender.doubleValue
             affectsGeometry = true
-        case eyeBitRateField:
-            selectedSimulation?.eyeBitRate = sender.doubleValue
-            affectsResults = true
         case excitationDurationField:
             // Only the postprocessed stimulus (see ExcitationPostprocessor) uses a main
             // excitation's duration, so this invalidates results, not the FDTD run.

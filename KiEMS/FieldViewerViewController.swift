@@ -642,7 +642,7 @@ final class FieldViewerViewController: NSViewController {
                 runningJobKind[index] = activeJob.kind
                 if !wasRunning {
                     runningIndices.insert(index)
-                    runStartTime[index] = Date()
+                    runStartTime[index] = JobScheduler.shared.unpausedNow
                     onRunStateChanged?(index, activeJob.kind, true)
                     refreshDisplay()
                 }
@@ -698,7 +698,7 @@ final class FieldViewerViewController: NSViewController {
         if progress.phase != .settingUp {
             let secondsRemaining: Double?
             if let start = runStartTime[index], progress.fraction > 0 {
-                let elapsed = Date().timeIntervalSince(start)
+                let elapsed = JobScheduler.shared.unpausedNow.timeIntervalSince(start)
                 secondsRemaining = max(0, elapsed / progress.fraction - elapsed)
             } else {
                 secondsRemaining = nil

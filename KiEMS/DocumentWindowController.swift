@@ -1,8 +1,9 @@
 import Cocoa
 import UniformTypeIdentifiers
 
-/// Owns the KiCad project/board picker at the top of the window (this phase's scope) and hosts a
-/// placeholder for Phases 6-8's editor content below it.
+/// A document's window: the simulation source list, the editor content for whatever is selected in
+/// it, and a toolbar holding the run/run all/pause buttons and an Xcode-style status display -- which
+/// also carries the KiCad project/board picker.
 final class DocumentWindowController: NSWindowController {
     // Set explicitly at init, not read back via the inherited `document` property: that property
     // is only guaranteed to be set by NSDocument.addWindowController(_:) *after* this object has
@@ -13,16 +14,25 @@ final class DocumentWindowController: NSWindowController {
     // document as a constructor parameter instead removes the race entirely.
     private let ownerDocument: Document
 
-    private let projectPathField = NSPathControl()
-    private let projectSelectionButton = NSButton()
-    private let boardPopUp = NSPopUpButton()
-    private let statusLabel = NSTextField(labelWithString: "")
-    private let progressIndicator = NSProgressIndicator()
+    private let statusView = ToolbarStatusView()
+    private var projectPathField: NSPathControl { statusView.projectPathControl }
+    private var projectSelectionButton: NSButton { statusView.projectSelectionButton }
+    private var boardPopUp: NSPopUpButton { statusView.boardPopUp }
+    /// The status display's message while none of this document's jobs is running -- the outcome of
+    /// the last board link or run, as Xcode shows its last build's.
+    private var lastEventMessage = ""
+    /// A board link in progress -- spins the status display's activity indicator.
+    private var isLinking = false
+    private var runItem: NSToolbarItem?
+    private var runAllItem: NSToolbarItem?
+    private var pauseItem: NSToolbarItem?
+    /// The source list's selection, kept for the run buttons and issue navigation.
+    private var currentSelection: SimulationListSelection?
     private let mainContentLoadingIndicator = NSProgressIndicator()
     private var simulationListViewController: SimulationListViewController?
-    /// The source-list card's width.  Its trailing edge is draggable directly on the glass card,
-    /// rather than using a separate split-view divider.
-    private var sourceListWidthConstraint: NSLayoutConstraint?
+    /// Source list (sidebar) | editor. A real split-view sidebar is what lets the source list's
+    /// glass panel run up through the toolbar, with the run buttons on it, as in Xcode.
+    private let splitViewController = NSSplitViewController()
     private var propertiesViewController: SimulationPropertiesViewController?
     private var wholeBoardViewController: WholeBoardViewController?
 
@@ -57,14 +67,40 @@ final class DocumentWindowController: NSWindowController {
         ownerDocument = document
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 760, height: 760),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            // Full-size content so the source list's glass card can run up under the title bar.
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         window.title = "KiEMS Simulation"
-        window.center()
+        // The status display says what's open; the title would only crowd the toolbar.
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        // A unified toolbar is what makes the title bar double height.
+        window.toolbarStyle = .unified
         super.init(window: window)
+        let toolbar = NSToolbar(identifier: "KiEMSDocumentToolbar")
+        toolbar.delegate = self
+        window.delegate = self
+        toolbar.displayMode = .iconOnly
+        toolbar.allowsUserCustomization = false
+        toolbar.centeredItemIdentifiers = [.statusDisplay]
+        window.toolbar = toolbar
         buildUI()
+        window.center()
+    }
+
+    private static let minimumSidebarWidth: CGFloat = 230
+    private static let initialSidebarWidth: CGFloat = 240
+    private var hasAppliedInitialSidebarWidth = false
+
+    /// The split view ignores a divider position set before its first real layout.
+    override func showWindow(_ sender: Any?) {
+        super.showWindow(sender)
+        guard !hasAppliedInitialSidebarWidth else { return }
+        hasAppliedInitialSidebarWidth = true
+        splitViewController.splitView.layoutSubtreeIfNeeded()
+        splitViewController.splitView.setPosition(Self.initialSidebarWidth, ofDividerAt: 0)
     }
 
     @available(*, unavailable)
@@ -97,165 +133,26 @@ final class DocumentWindowController: NSWindowController {
     }
     
     private func buildUI() {
-        guard let contentView = window?.contentView else { return }
+        guard let window else { return }
+        // Everything right of the sidebar.
+        let editorViewController = NSViewController()
+        let editorView = NSView()
+        editorViewController.view = editorView
 
         kicadFileWatcher.onChange = { [weak self] in self?.handleLinkedKicadFilesChanged() }
 
-        let projectPathLabel = NSTextField(labelWithString: "Project: ")
-        projectPathLabel.setContentHuggingPriority(.required, for: .horizontal)
-        projectPathLabel.alignment = .right
-        projectPathLabel.widthAnchor.constraint(equalToConstant: 80).isActive = true
-        
-        projectPathField.placeholderString = "None Selected"
-        projectPathField.focusRingType = .none
-        // Unlike its siblings (projectPathLabel's NSTextField, projectSelectionButton's explicit
-        // 16pt), NSPathControl doesn't reliably report a usable intrinsic height on its own --
-        // exactly the same class of missing-constraint bug as boardPopUp above, just surfacing on
-        // a different view once that one was fixed.
-        projectPathField.heightAnchor.constraint(equalToConstant: 16).isActive = true
-        
-        projectSelectionButton.isEnabled = true
-        projectSelectionButton.isBordered = false
-        projectSelectionButton.imageScaling = .scaleProportionallyDown
-        projectSelectionButton.widthAnchor.constraint(equalToConstant: 16).isActive = true
-        projectSelectionButton.heightAnchor.constraint(equalToConstant: 16).isActive = true
-        projectSelectionButton.imagePosition = .imageOnly
-        projectSelectionButton.image = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: "Choose a project")
         projectSelectionButton.target = self
         projectSelectionButton.action = #selector(chooseProject)
-        
-        let projectPathStack = NSStackView(views: [projectPathLabel, projectPathField, projectSelectionButton])
-        projectPathStack.orientation = .horizontal
-        projectPathStack.alignment = .centerY
-        projectPathStack.spacing = 8
-        projectPathStack.setContentHuggingPriority(.required, for: .vertical)
-        
-        let projectPathLabelConstraint = projectPathLabel.topAnchor.constraint(equalTo: projectPathStack.topAnchor)
-        let projectPathFieldConstraint = projectPathField.topAnchor.constraint(equalTo: projectPathStack.topAnchor)
-        let projectSelectionButtonConstraint = projectSelectionButton.topAnchor.constraint(equalTo: projectPathStack.topAnchor)
-        projectPathLabelConstraint.priority = NSLayoutConstraint.Priority(rawValue: 800)
-        projectPathFieldConstraint.priority = NSLayoutConstraint.Priority(rawValue: 800)
-        projectSelectionButtonConstraint.priority = NSLayoutConstraint.Priority(rawValue: 800)
-        NSLayoutConstraint.activate([
-            projectPathLabel.leadingAnchor.constraint(equalTo: projectPathStack.leadingAnchor),
-            projectSelectionButton.trailingAnchor.constraint(equalTo: projectPathStack.trailingAnchor),
-            
-            projectPathLabelConstraint,
-            projectPathFieldConstraint,
-            projectSelectionButtonConstraint
-        ])
-        
         boardPopUp.target = self
         boardPopUp.action = #selector(boardSelected)
         boardPopUp.isEnabled = false
         boardPopUp.addItem(withTitle: "Select a board…")
-        
-        progressIndicator.style = .spinning
-        progressIndicator.isDisplayedWhenStopped = false
-        progressIndicator.controlSize = .small
-        
-        statusLabel.textColor = .secondaryLabelColor
-        statusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        
-        let boardSelectionView = NSStackView(views: [statusLabel, boardPopUp, progressIndicator])
-        boardSelectionView.orientation = .horizontal
-        boardSelectionView.alignment = .centerY
-        boardSelectionView.spacing = 8
-        boardSelectionView.setContentHuggingPriority(.required, for: .vertical)
-        boardPopUp.isHidden = true
-        // NSStackView deactivates a hidden arranged subview's own automatic alignment constraint --
-        // that left boardPopUp with no real vertical constraint at all whenever it's hidden (its
-        // initial state), which was the actual underconstrained view letting this whole header
-        // balloon: the missing pin gave Auto Layout a genuine spare degree of freedom, and it opened
-        // up boardSelectionView (then topStack, then topSectionView) to fill it. Pinning boardPopUp's
-        // centerY explicitly, independent of the stack's own hidden-view handling, closes that gap
-        // regardless of whether it's currently shown or hidden.
-        boardPopUp.centerYAnchor.constraint(equalTo: boardSelectionView.centerYAnchor).isActive = true
-        
-        let statusLabelConstraint = statusLabel.topAnchor.constraint(equalTo: boardSelectionView.topAnchor)
-        let boardPopUpConstraint = boardPopUp.topAnchor.constraint(equalTo: boardSelectionView.topAnchor)
-        let progressIndicatorConstraint = progressIndicator.topAnchor.constraint(equalTo: boardSelectionView.topAnchor)
-        statusLabelConstraint.priority = NSLayoutConstraint.Priority(rawValue: 800)
-        boardPopUpConstraint.priority = NSLayoutConstraint.Priority(rawValue: 800)
-        progressIndicatorConstraint.priority = NSLayoutConstraint.Priority(rawValue: 800)
-
-        let topStack = NSStackView(views: [projectPathStack, boardSelectionView])
-        topStack.orientation = .vertical
-        topStack.alignment = .leading
-        topStack.spacing = 4
-        topStack.translatesAutoresizingMaskIntoConstraints = false
-        topStack.setContentHuggingPriority(.required, for: .vertical)
-        NSLayoutConstraint.activate([
-            projectPathStack.leadingAnchor.constraint(equalTo: topStack.leadingAnchor),
-            projectPathStack.trailingAnchor.constraint(equalTo: topStack.trailingAnchor),
-            projectPathStack.topAnchor.constraint(equalTo: topStack.topAnchor),
-            // projectPathStack's bottom was never explicitly pinned to anything -- it relied entirely
-            // on topStack's own automatic inter-subview spacing to position boardSelectionView below
-            // it, same underconstrained-gap pattern as topStack/topSectionSeparator above, just one
-            // level further in. Pinning it directly closes that gap explicitly instead of trusting
-            // the stack's own arrangement to hold it (spacing constant matches topStack.spacing).
-            boardSelectionView.topAnchor.constraint(equalTo: projectPathStack.bottomAnchor, constant: 4),
-            boardSelectionView.leadingAnchor.constraint(equalTo: topStack.leadingAnchor, constant: 96),
-            boardSelectionView.trailingAnchor.constraint(equalTo: topStack.trailingAnchor),
-            boardSelectionView.bottomAnchor.constraint(equalTo: topStack.bottomAnchor),
-            
-            statusLabelConstraint,
-            boardPopUpConstraint,
-            progressIndicatorConstraint
-        ])
-
-        // The project/board picker bar -- just a touch darker than the rest of the window (not a
-        // forced dark-mode panel, which read as far too heavy) with a hard, 1pt edge at its bottom
-        // rather than a soft fade, so it's unambiguous where it ends.
-        let topSectionView = NSVisualEffectView()
-        topSectionView.material = .headerView
-        topSectionView.blendingMode = .withinWindow
-        topSectionView.state = .active
-        topSectionView.translatesAutoresizingMaskIntoConstraints = false
-
-        // A light tint over the header material -- headerView material alone barely differs from
-        // the window background, so this is what actually makes the bar read as separate.
-        let topSectionTint = NSView()
-        topSectionTint.wantsLayer = true
-        topSectionTint.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.1).cgColor
-        topSectionTint.translatesAutoresizingMaskIntoConstraints = false
-
-        let topSectionSeparator = NSView()
-        topSectionSeparator.wantsLayer = true
-        topSectionSeparator.layer?.backgroundColor = NSColor.separatorColor.cgColor
-        topSectionSeparator.translatesAutoresizingMaskIntoConstraints = false
-
-        // Tint added before topStack so it sits behind the controls, not over them.
-        topSectionView.addSubview(topSectionTint)
-        topSectionView.addSubview(topStack)
-        topSectionView.addSubview(topSectionSeparator)
-        topSectionView.setContentHuggingPriority(.required, for: .vertical)
-        
-        // topStack's bottom used to be pinned to topSectionView.bottomAnchor directly -- the same
-        // anchor simulationListVC.view.top and rightColumn.top also hang off of, below. That made
-        // topSectionView.bottomAnchor a shared hub with several unrelated downstream readers, and
-        // topStack's own height (a low-priority hug preference, not a hard value) was the only thing
-        // ever pinning it -- nothing independent. Pinning topStack's bottom straight to the
-        // separator's top instead makes topStack -> separator -> topSectionView.bottom a single,
-        // private, exclusive chain: topSectionView's height stays fully dynamic (no baked-in
-        // constant, so it still grows correctly with larger accessibility text sizes), and nothing
-        // else sharing that hub anchor can pull on the chain that actually determines it.
-        NSLayoutConstraint.activate([
-            topSectionTint.leadingAnchor.constraint(equalTo: topSectionView.leadingAnchor),
-            topSectionTint.trailingAnchor.constraint(equalTo: topSectionView.trailingAnchor),
-            topSectionTint.topAnchor.constraint(equalTo: topSectionView.topAnchor),
-            topSectionTint.bottomAnchor.constraint(equalTo: topSectionView.bottomAnchor),
-
-            topStack.topAnchor.constraint(equalTo: topSectionView.topAnchor, constant: 16),
-            topStack.leadingAnchor.constraint(equalTo: topSectionView.leadingAnchor, constant: 16),
-            topStack.trailingAnchor.constraint(equalTo: topSectionView.trailingAnchor, constant: -16),
-            topStack.bottomAnchor.constraint(equalTo: topSectionSeparator.topAnchor, constant: -16),
-
-            topSectionSeparator.leadingAnchor.constraint(equalTo: topSectionView.leadingAnchor),
-            topSectionSeparator.trailingAnchor.constraint(equalTo: topSectionView.trailingAnchor),
-            topSectionSeparator.bottomAnchor.constraint(equalTo: topSectionView.bottomAnchor),
-            topSectionSeparator.heightAnchor.constraint(equalToConstant: 1),
-        ])
+        statusView.onShowErrors = { [weak self] in self?.showNextIssue(errors: true) }
+        statusView.onShowWarnings = { [weak self] in self?.showNextIssue(errors: false) }
+        JobScheduler.shared.addChangeObserver { [weak self] in
+            self?.updateToolbarItems()
+            self?.refreshStatusDisplay()
+        }
 
         let propertiesVC = SimulationPropertiesViewController(document: ownerDocument)
         propertiesViewController = propertiesVC
@@ -417,8 +314,24 @@ final class DocumentWindowController: NSWindowController {
                 self.invalidate(simulationIndex: index, reason: reason, includingGeometry: false)
             }
         }
-        propertiesVC.onResultsParametersChanged = { [weak simulationResultsVC] index in
+        propertiesVC.onResultsParametersChanged = { [weak self, weak simulationResultsVC] index in
             simulationResultsVC?.eyeSettingsChanged(forSimulationIndex: index)
+            self?.refreshEyeTestStatus(forSimulationIndex: index)
+        }
+        // A Simulation Set's Tests section only changes the eye analysis: copy it to the simulations
+        // the set generated and re-analyse their results in place, rather than regenerating them
+        // (onSimulationSetChanged), which would discard those results.
+        wholeBoardVC.onSimulationSetEyeTestChanged = { [weak self, weak simulationResultsVC] templateIndex in
+            guard let self else { return }
+            let simulations = self.ownerDocument.config.simulations
+            guard simulations.indices.contains(templateIndex),
+                  let identifier = simulations[templateIndex].simulationSet?.identifier else { return }
+            self.ownerDocument.updateChangeCount(.changeDone)
+            for (index, simulation) in simulations.enumerated() where simulation.generatedBySetIdentifier == identifier {
+                simulation.copyEyeAnalysisSettings(from: simulations[templateIndex])
+                simulationResultsVC?.eyeSettingsChanged(forSimulationIndex: index)
+                self.refreshEyeTestStatus(forSimulationIndex: index)
+            }
         }
         // See GeometryViewController.onRunStateChanged's doc comment -- the spinner next to a
         // simulation's "Geometry" row has no other way to know a background pipeline run started/
@@ -471,12 +384,16 @@ final class DocumentWindowController: NSWindowController {
         // onRunFinished's own doc comment) -- attribute the outcome to whichever row was actually in
         // flight when it stopped. A failure during .geometry never reached the Simulation Results row
         // at all, so that row is left untouched (still .invalid).
-        simulationResultsVC.onRunFinished = { [weak simulationListVC] index, reachedPhase, success in
+        simulationResultsVC.onRunFinished = { [weak self, weak simulationListVC] index, reachedPhase, success in
+            self?.showRunOutcome(forSimulationIndex: index, success: success)
             switch reachedPhase {
             case .geometry:
                 simulationListVC?.setCompleted(success, forSimulationIndex: index, kind: .geometryGeneration)
             case .settingUp, .simulation:
                 simulationListVC?.setCompleted(true, forSimulationIndex: index, kind: .geometryGeneration)
+                if success {
+                    self?.refreshEyeTestStatus(forSimulationIndex: index)
+                }
                 simulationListVC?.setCompleted(success, forSimulationIndex: index, kind: .simulation)
                 // Field post-processing is near-instant once .results exists (see JobKind's own doc
                 // comment), so a finished simulation means the Field Viewer is ready too.
@@ -545,6 +462,8 @@ final class DocumentWindowController: NSWindowController {
         }
         simulationListVC.onSelectionChanged = { [weak self] selection in
             guard let self else { return }
+            self.currentSelection = selection
+            self.updateToolbarItems()
 
             // The outline owns a valid initial selection before the linked board's asynchronous
             // preview exists. Retain that selection, but never reveal any of its content until the
@@ -618,7 +537,32 @@ final class DocumentWindowController: NSWindowController {
                 self.noSelectionLabel?.isHidden = selection != nil
             }
         }
-        simulationListVC.view.translatesAutoresizingMaskIntoConstraints = false
+        // Set before the list's view loads: loading it builds the rows, which already reports.
+        simulationListVC.onStatusChanged = { [weak self] in
+            self?.updateToolbarItems()
+            self?.refreshIssueCounts()
+        }
+
+        let sidebarItem = NSSplitViewItem(sidebarWithViewController: simulationListVC)
+        // Wide enough for the traffic lights and all three run buttons; narrower pushes Pause into
+        // the toolbar's overflow menu.
+        sidebarItem.minimumThickness = Self.minimumSidebarWidth
+        sidebarItem.maximumThickness = 420
+        sidebarItem.canCollapse = false
+        let editorItem = NSSplitViewItem(viewController: editorViewController)
+        // Leaves the editor enough room to stay useful.
+        editorItem.minimumThickness = 320
+        splitViewController.addSplitViewItem(sidebarItem)
+        splitViewController.addSplitViewItem(editorItem)
+        // Installing a content view controller resizes the window to fit it; keep the window's own
+        // size. The sidebar's starting width is applied once the window is on screen (showWindow).
+        let frame = window.frame
+        window.contentViewController = splitViewController
+        window.setFrame(frame, display: false)
+        NotificationCenter.default.addObserver(self, selector: #selector(sidebarDidResize(_:)),
+                                               name: NSSplitView.didResizeSubviewsNotification,
+                                               object: splitViewController.splitView)
+        sidebarDidResize(nil)
 
         // An invisible container spanning the whole area right of the sidebar, purely so
         // noSelectionLabel can be centered in that region rather than in the whole window (which
@@ -626,58 +570,33 @@ final class DocumentWindowController: NSWindowController {
         let rightRegion = NSView()
         rightRegion.translatesAutoresizingMaskIntoConstraints = false
 
-        let sourceListWidth = simulationListVC.view.widthAnchor.constraint(equalToConstant: 220)
-        sourceListWidth.isActive = true
-        sourceListWidthConstraint = sourceListWidth
-        simulationListVC.onWidthDrag = { [weak self, weak contentView] delta in
-            guard let self, let contentView, let width = self.sourceListWidthConstraint else { return }
-            // Leave enough room for the editor to remain useful, while avoiding an impractically
-            // narrow source list.  The value is the glass card's width (its 8pt outer inset is
-            // deliberately not part of the draggable width).
-            width.constant = min(max(160, width.constant + delta), max(160, contentView.bounds.width - 320))
-        }
-
         mainContentLoadingIndicator.style = .spinning
         mainContentLoadingIndicator.controlSize = .large
         mainContentLoadingIndicator.isDisplayedWhenStopped = false
         mainContentLoadingIndicator.translatesAutoresizingMaskIntoConstraints = false
         mainContentLoadingIndicator.isHidden = true
 
-        contentView.addSubview(topSectionView)
-        contentView.addSubview(simulationListVC.view)
-        contentView.addSubview(rightRegion)
+        editorView.addSubview(rightRegion)
         rightRegion.addSubview(wholeBoardVC.view)
         rightRegion.addSubview(sourceListVC.view)
         rightRegion.addSubview(geometryVC.view)
         rightRegion.addSubview(simulationResultsVC.view)
         rightRegion.addSubview(fieldViewerVC.view)
         rightRegion.addSubview(noSelectionLabel)
-        // The sidebar is hidden while a board loads (see setBoardLoading), so the spinner is
-        // centred in the whole area below the header rather than in rightRegion.
-        contentView.addSubview(mainContentLoadingIndicator)
+        editorView.addSubview(mainContentLoadingIndicator)
 
+        // The editor pane runs under the title bar (.fullSizeContentView); its safe area starts
+        // below the toolbar.
         NSLayoutConstraint.activate([
-            topSectionView.topAnchor.constraint(equalTo: contentView.topAnchor),
-            topSectionView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            topSectionView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-
-            simulationListVC.view.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 8),
-            // Overlaps upward into topSectionView by topOverlap -- the glass panel visually runs
-            // under the header's hard edge; SimulationListViewController insets its own content by
-            // a matching-plus-margin amount so the first row still reads clearly below the cutoff.
-            simulationListVC.view.topAnchor.constraint(
-                equalTo: topSectionView.bottomAnchor, constant: -SimulationListViewController.topOverlap),
-            simulationListVC.view.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
-
-            rightRegion.topAnchor.constraint(equalTo: topSectionView.bottomAnchor),
-            rightRegion.leadingAnchor.constraint(equalTo: simulationListVC.view.trailingAnchor),
-            rightRegion.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            rightRegion.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+            rightRegion.topAnchor.constraint(equalTo: editorView.safeAreaLayoutGuide.topAnchor),
+            rightRegion.leadingAnchor.constraint(equalTo: editorView.leadingAnchor),
+            rightRegion.trailingAnchor.constraint(equalTo: editorView.trailingAnchor),
+            rightRegion.bottomAnchor.constraint(equalTo: editorView.bottomAnchor),
 
             noSelectionLabel.centerXAnchor.constraint(equalTo: rightRegion.centerXAnchor),
             noSelectionLabel.centerYAnchor.constraint(equalTo: rightRegion.centerYAnchor),
 
-            mainContentLoadingIndicator.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+            mainContentLoadingIndicator.centerXAnchor.constraint(equalTo: editorView.centerXAnchor),
             mainContentLoadingIndicator.centerYAnchor.constraint(equalTo: rightRegion.centerYAnchor),
 
             // wholeBoardVC.view now fills the *whole* region, same as geometryVC.view/
@@ -725,6 +644,9 @@ final class DocumentWindowController: NSWindowController {
         if ownerDocument.config.kicadPcbPath != nil {
             wholeBoardVC.refresh()
         }
+        updateToolbarItems()
+        refreshStatusDisplay()
+        refreshIssueCounts()
     }
 
     private func setBoardLoading(_ isLoading: Bool) {
@@ -744,11 +666,12 @@ final class DocumentWindowController: NSWindowController {
             mainContentLoadingIndicator.stopAnimation(nil)
             simulationListViewController?.notifyCurrentSelection()
         }
+        updateToolbarItems()
     }
 
-    /// Restores the project/board picker header and net lists for a document that was opened from
-    /// disk with a board already linked (config.kicadPcbPath set by a previous session's
-    /// importBoard/projectSelected). Without this, buildUI() only ever left the header in its
+    /// Restores the status display's project/board picker and net lists for a document that was
+    /// opened from disk with a board already linked (config.kicadPcbPath set by a previous session's
+    /// importBoard/projectSelected). Without this, buildUI() only ever left the picker in its
     /// freshly-created, nothing-picked state -- projectPathField/boardPopUp are local UI state, not
     /// derived from the document, so simply having a saved kicadPcbPath never reached them on its
     /// own, and propertiesVC/sourceListVC's net lists are populated only by importSucceeded, which
@@ -763,7 +686,7 @@ final class DocumentWindowController: NSWindowController {
         let siblings = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
 
         let projectURL = Self.siblingProjectURL(among: siblings)
-        projectPathField.stringValue = (projectURL ?? pcbURL).lastPathComponent
+        statusView.setProjectURL(projectURL ?? pcbURL)
 
         let siblingPCBs = siblings.filter { $0.pathExtension == "kicad_pcb" }
         boardCandidates = siblingPCBs
@@ -779,11 +702,11 @@ final class DocumentWindowController: NSWindowController {
             boardPopUp.addItems(withTitles: siblingPCBs.map { $0.lastPathComponent })
         }
         boardPopUp.isEnabled = true
-        boardPopUp.isHidden = false
+        statusView.setBoardVisible(true)
         if let currentIndex = boardCandidates.firstIndex(where: { $0.path == pcbURL.path }) {
             boardPopUp.selectItem(at: currentIndex)
         }
-        statusLabel.stringValue = "Linked \(pcbURL.lastPathComponent)."
+        showEvent("")
 
         propertiesViewController?.refreshNetLists()
         sourceListViewController?.refreshBoardData()
@@ -807,8 +730,9 @@ final class DocumentWindowController: NSWindowController {
     private func projectSelected(_ url: URL) {
         let ext = url.pathExtension
         
+        statusView.setBoardVisible(true)
         if ext == "kicad_pro" {
-            projectPathField.stringValue = url.path(percentEncoded: false)
+            statusView.setProjectURL(url)
             let directory = url.deletingLastPathComponent()
             let siblingPCBs =
             (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil))?
@@ -819,12 +743,12 @@ final class DocumentWindowController: NSWindowController {
             if siblingPCBs.isEmpty {
                 boardPopUp.addItem(withTitle: "No .kicad_pcb found next to this project")
                 boardPopUp.isEnabled = false
-                statusLabel.stringValue = "No board file found alongside \"\(url.lastPathComponent)\"."
+                showEvent("No board file found alongside “\(url.lastPathComponent)”")
                 return
             }
             boardPopUp.addItems(withTitles: siblingPCBs.map { $0.lastPathComponent })
             boardPopUp.isEnabled = true
-            statusLabel.stringValue = ""
+            showEvent("")
             
             // The common case (one board per project) skips the extra click.
             if siblingPCBs.count == 1 {
@@ -837,7 +761,7 @@ final class DocumentWindowController: NSWindowController {
                 .filter { $0.pathExtension == "kicad_pro" } ?? []
             let projectName = directory.lastPathComponent
             let projectUrl = siblingProjects.first(where: { $0.lastPathComponent == projectName }) ?? siblingProjects.first
-            projectPathField.stringValue = projectUrl?.path(percentEncoded: false) ?? ""
+            statusView.setProjectURL(projectUrl)
 
             let siblingPCBs =
             (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil))?
@@ -847,8 +771,7 @@ final class DocumentWindowController: NSWindowController {
             boardPopUp.removeAllItems()
             boardPopUp.addItems(withTitles: siblingPCBs.map { $0.lastPathComponent })
             boardPopUp.isEnabled = true
-            statusLabel.stringValue = url.lastPathComponent
-            
+
             importBoard(url)
         } else {
             let directory = url
@@ -857,7 +780,7 @@ final class DocumentWindowController: NSWindowController {
                 .filter { $0.pathExtension == "kicad_pro" } ?? []
             let projectName = directory.lastPathComponent
             let projectUrl = projects.first(where: { $0.lastPathComponent == projectName }) ?? projects.first
-            projectPathField.stringValue = projectUrl?.path(percentEncoded: false) ?? ""
+            statusView.setProjectURL(projectUrl)
             
             let siblingPCBs =
             (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil))?
@@ -867,8 +790,7 @@ final class DocumentWindowController: NSWindowController {
             boardPopUp.removeAllItems()
             boardPopUp.addItems(withTitles: siblingPCBs.map { $0.lastPathComponent })
             boardPopUp.isEnabled = true
-            statusLabel.stringValue = url.lastPathComponent
-            
+
             importBoard(url)
         }
     }
@@ -883,8 +805,8 @@ final class DocumentWindowController: NSWindowController {
         let doc = ownerDocument
 
         setBoardLoading(true)
-        statusLabel.stringValue = "Linking \(boardURL.lastPathComponent)…"
-        progressIndicator.startAnimation(nil)
+        isLinking = true
+        showEvent("Linking \(boardURL.lastPathComponent)…")
         projectPathField.isEnabled = false
         boardPopUp.isEnabled = false
 
@@ -912,10 +834,11 @@ final class DocumentWindowController: NSWindowController {
     }
 
     private func importSucceeded(boardURL: URL, document: Document, availableNets: [String]) {
-        progressIndicator.stopAnimation(nil)
+        isLinking = false
         projectPathField.isEnabled = true
         boardPopUp.isEnabled = true
-        statusLabel.stringValue = "Linked \(boardURL.lastPathComponent)."
+        // The board pop-up already names the linked board.
+        showEvent("")
         document.updateChangeCount(.changeDone)
         propertiesViewController?.refreshNetLists()
         sourceListViewController?.refreshBoardData()
@@ -955,10 +878,10 @@ final class DocumentWindowController: NSWindowController {
 
     private func importFailed(error: Error) {
         setBoardLoading(false)
-        progressIndicator.stopAnimation(nil)
+        isLinking = false
         projectPathField.isEnabled = true
         boardPopUp.isEnabled = true
-        statusLabel.stringValue = "Link failed: \(error.localizedDescription)"
+        showEvent("Link failed: \(error.localizedDescription)")
         NSApp.presentError(error)
     }
 
@@ -1004,6 +927,13 @@ final class DocumentWindowController: NSWindowController {
         }
         resetRow(forSimulationIndex: index, kind: .simulation)
         resetRow(forSimulationIndex: index, kind: .fieldPostProcessing)
+    }
+
+    /// Re-checks `index`'s results against its eye mask, for the sidebar's stop sign on its
+    /// Simulation Results row. Results that don't exist (yet) don't fail.
+    private func refreshEyeTestStatus(forSimulationIndex index: Int) {
+        let failed = simulationResultsViewController?.eyeTestFails(forSimulationIndex: index) ?? false
+        simulationListViewController?.setTestsFailed(failed, forSimulationIndex: index)
     }
 
     /// Puts `kind`'s sidebar row back to whatever its view controller has left to show once nothing
@@ -1064,5 +994,271 @@ final class DocumentWindowController: NSWindowController {
         raw.replacingOccurrences(of: "_", with: " ")
             .replacingOccurrences(of: "-", with: " ")
             .capitalized
+    }
+
+    // MARK: - Toolbar
+
+    /// Run: the selected simulation, or every simulation a selected Simulation Set generated.
+    @objc private func runSelectedSimulations(_ sender: Any?) {
+        run(simulationListViewController?.selectedRunTargets ?? [])
+    }
+
+    @objc private func runAllSimulations(_ sender: Any?) {
+        run(simulationListViewController?.allRunTargets ?? [])
+    }
+
+    /// Queues each of `indices` whose results aren't already current or queued. JobScheduler runs
+    /// the most recent request first, so they're requested last first to run in list order.
+    private func run(_ indices: [Int]) {
+        guard let list = simulationListViewController else { return }
+        for index in indices.reversed() where list.canRun(simulationIndex: index) {
+            simulationResultsViewController?.runSimulation(forSimulationIndex: index)
+        }
+    }
+
+    /// Pauses or resumes the job queue -- app-wide, like the queue itself (see JobScheduler.setPaused).
+    @objc private func togglePause(_ sender: Any?) {
+        JobScheduler.shared.setPaused(!JobScheduler.shared.isPaused)
+    }
+
+    /// Enables Run/Run All only while they'd queue something, and Pause while this document has jobs
+    /// to pause (or the queue is already paused, to resume it). Called on every selection, row status
+    /// and scheduler change.
+    private func updateToolbarItems() {
+        let list = simulationListViewController
+        let isReady = ownerDocument.config.kicadPcbPath != nil && !isLoadingBoard
+        let canRunAny = { (indices: [Int]) in
+            isReady && indices.contains { list?.canRun(simulationIndex: $0) ?? false }
+        }
+        runItem?.isEnabled = canRunAny(list?.selectedRunTargets ?? [])
+        runAllItem?.isEnabled = canRunAny(list?.allRunTargets ?? [])
+
+        let scheduler = JobScheduler.shared
+        let hasActiveJobs = scheduler.jobs.contains { job in
+            guard job.document === ownerDocument else { return false }
+            if case .failed = job.status { return false }
+            return true
+        }
+        guard let pauseItem else { return }
+        pauseItem.isEnabled = scheduler.isPaused || hasActiveJobs
+        let isPaused = scheduler.isPaused
+        guard (pauseItem.style == .prominent) != isPaused else { return }
+        // Paused, the button stays lit until it's pressed again to resume.
+        pauseItem.style = isPaused ? .prominent : .plain
+        pauseItem.backgroundTintColor = isPaused ? .systemOrange : nil
+        pauseItem.label = isPaused ? "Resume" : "Pause"
+        pauseItem.toolTip = isPaused ? "Resume running simulations" : "Pause running simulations"
+    }
+
+    private func makeButtonItem(_ identifier: NSToolbarItem.Identifier, label: String, symbolName: String,
+                                toolTip: String, action: Selector) -> NSToolbarItem {
+        let item = NSToolbarItem(itemIdentifier: identifier)
+        item.label = label
+        item.toolTip = toolTip
+        item.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: label)
+        item.isBordered = true
+        item.target = self
+        item.action = action
+        // Enabled explicitly by updateToolbarItems() as the selection and job states change.
+        item.autovalidates = false
+        item.isEnabled = false
+        return item
+    }
+
+    // MARK: - Status display
+
+    /// The status display fits in the toolbar beside the sidebar, so it tracks the sidebar's width.
+    @objc private func sidebarDidResize(_ notification: Notification?) {
+        guard let sidebar = splitViewController.splitViewItems.first?.viewController.view else { return }
+        statusView.leadingToolbarWidth = sidebar.frame.width
+        if let window { statusView.updateWidth(forWindowWidth: window.frame.width) }
+    }
+
+    private static let eventTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        formatter.doesRelativeDateFormatting = true
+        return formatter
+    }()
+
+    /// Sets the message the status display shows once nothing of this document's is running.
+    private func showEvent(_ message: String) {
+        lastEventMessage = message
+        refreshStatusDisplay()
+    }
+
+    /// Like Xcode's "Build Succeeded | Today at 10:42", for a finished simulation run.
+    private func showRunOutcome(forSimulationIndex index: Int, success: Bool) {
+        guard ownerDocument.config.simulations.indices.contains(index) else { return }
+        let name = ownerDocument.config.simulations[index].name
+        let outcome = success ? "Simulated “\(name)”" : "Simulating “\(name)” failed"
+        showEvent("\(outcome) | \(Self.eventTimeFormatter.string(from: Date()))")
+    }
+
+    /// The status display's activity: a board link in progress; otherwise this document's running
+    /// job and how many of its simulations are queued behind it (or that the queue is paused, or
+    /// waiting on another document's job); otherwise the outcome of the last link or run.
+    private func refreshStatusDisplay() {
+        if isLinking {
+            statusView.setActivity(lastEventMessage, isBusy: true, fraction: nil)
+            return
+        }
+        let scheduler = JobScheduler.shared
+        let ownJobs = scheduler.jobs.filter { $0.document === ownerDocument }
+        let current = ownJobs.first { $0.status == .running || $0.status == .cancelling }
+        var queuedSimulations = Set(ownJobs.filter { $0.status == .queued }.map(\.simulationName))
+        if let current { queuedSimulations.remove(current.simulationName) }
+        let queuedCount = queuedSimulations.count
+        let queued = queuedCount == 0 ? nil
+            : "\(queuedCount) \(current == nil ? "" : "more ")simulation\(queuedCount == 1 ? "" : "s") queued"
+
+        guard let current else {
+            if let queued {
+                let reason = scheduler.isPaused ? "Paused" : "Waiting for another document"
+                statusView.setActivity("\(reason) · \(queued)", isBusy: false, fraction: nil)
+            } else {
+                statusView.setActivity(lastEventMessage, isBusy: false, fraction: nil)
+            }
+            return
+        }
+        let description = "\(current.kind.progressVerbPhrase) “\(current.simulationName)”"
+        var parts: [String]
+        var isBusy = false
+        var fraction: Double?
+        if current.status == .cancelling {
+            parts = ["Cancelling: \(description)"]
+            isBusy = true
+        } else if scheduler.isPaused {
+            // Held runs keep their progress line, frozen where they stopped.
+            parts = [scheduler.isHoldingRunningJob ? "Paused: \(description)" : "Pausing: \(description)…"]
+            fraction = current.progress?.phase == .settingUp ? nil : current.progress?.fraction
+        } else {
+            let info = current.progressStatusInfo
+            fraction = info?.fraction
+            parts = [description]
+            if let fraction { parts[0] += " — \(Int((fraction * 100).rounded()))%" }
+            if let estimate = info?.timeEstimateText { parts.append(estimate) }
+            isBusy = true
+        }
+        if let queued { parts.append(queued) }
+        statusView.setActivity(parts.joined(separator: " · "), isBusy: isBusy, fraction: fraction)
+    }
+
+    /// The source-list rows showing each failed eye test (errors) and each warning, in list order --
+    /// what the status display counts, and steps through when a count is clicked. Warnings are what
+    /// the source list and banners flag in yellow: failed or out-of-date steps, and current results
+    /// carrying a warning (unsaved KiCad changes used, grid shorts between nets).
+    private func currentIssues() -> (errors: [SimulationListSelection], warnings: [SimulationListSelection]) {
+        guard let list = simulationListViewController else { return ([], []) }
+        let simulations = ownerDocument.config.simulations
+        var errors: [SimulationListSelection] = []
+        var warnings: [SimulationListSelection] = []
+        for index in list.allRunTargets where simulations.indices.contains(index) {
+            let geometry = list.phaseState(forSimulationIndex: index, kind: .geometryGeneration)
+            let results = list.phaseState(forSimulationIndex: index, kind: .simulation)
+            let fields = list.phaseState(forSimulationIndex: index, kind: .fieldPostProcessing)
+            if list.showsFailedTests(forSimulationIndex: index) {
+                errors.append(.simulationResults(simulationIndex: index))
+            }
+            if geometry == .failed || geometry == .outOfDate {
+                warnings.append(.geometry(simulationIndex: index))
+            }
+            if results == .failed || results == .outOfDate {
+                warnings.append(.simulationResults(simulationIndex: index))
+            }
+            if fields == .failed {
+                warnings.append(.fieldViewer(simulationIndex: index))
+            }
+            // Only a simulation with something current has pipeline warnings to report -- and its
+            // pipeline is then idle, so safe to ask.
+            guard geometry == .succeeded || results == .succeeded else { continue }
+            let pipeline = ownerDocument.pipeline(forSimulationNamed: simulations[index].name)
+            if pipeline.kicadSourcesWarning() != nil {
+                warnings.append(results == .succeeded ? .simulationResults(simulationIndex: index)
+                                                      : .geometry(simulationIndex: index))
+            }
+            if results == .succeeded, pipeline.metalShortsWarning() != nil {
+                warnings.append(.simulationResults(simulationIndex: index))
+            }
+        }
+        return (errors, warnings)
+    }
+
+    private func refreshIssueCounts() {
+        let issues = currentIssues()
+        statusView.setIssueCounts(errors: issues.errors.count, warnings: issues.warnings.count)
+    }
+
+    /// Selects the row of the next failed test (or warning) after the selected one, wrapping round,
+    /// so clicking a count repeatedly steps through them all.
+    private func showNextIssue(errors: Bool) {
+        let issues = currentIssues()
+        // One row can carry more than one warning; each row is a single stop.
+        let rows = (errors ? issues.errors : issues.warnings).reduce(into: [SimulationListSelection]()) { rows, row in
+            if !rows.contains(row) { rows.append(row) }
+        }
+        guard !rows.isEmpty else { return }
+        let next = currentSelection.flatMap { rows.firstIndex(of: $0) }.map { ($0 + 1) % rows.count } ?? 0
+        simulationListViewController?.select(rows[next])
+    }
+}
+
+private extension NSToolbarItem.Identifier {
+    static let runSimulation = NSToolbarItem.Identifier("KiEMS.runSimulation")
+    static let runAllSimulations = NSToolbarItem.Identifier("KiEMS.runAllSimulations")
+    static let pauseSimulations = NSToolbarItem.Identifier("KiEMS.pauseSimulations")
+    static let statusDisplay = NSToolbarItem.Identifier("KiEMS.statusDisplay")
+}
+
+extension DocumentWindowController: NSToolbarDelegate {
+    // Items before the tracking separator sit on the sidebar; it follows the sidebar's width.
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.runSimulation, .runAllSimulations, .pauseSimulations, .sidebarTrackingSeparator, .statusDisplay]
+    }
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        toolbarDefaultItemIdentifiers(toolbar)
+    }
+
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
+                 willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        switch itemIdentifier {
+        case .runSimulation:
+            let item = makeButtonItem(itemIdentifier, label: "Run", symbolName: "play.fill",
+                                      toolTip: "Run the selected simulation, or every simulation in the selected set",
+                                      action: #selector(runSelectedSimulations(_:)))
+            runItem = item
+            return item
+        case .runAllSimulations:
+            let item = makeButtonItem(itemIdentifier, label: "Run All", symbolName: "forward.fill",
+                                      toolTip: "Run every simulation", action: #selector(runAllSimulations(_:)))
+            runAllItem = item
+            return item
+        case .pauseSimulations:
+            let item = makeButtonItem(itemIdentifier, label: "Pause", symbolName: "pause.fill",
+                                      toolTip: "Pause running simulations", action: #selector(togglePause(_:)))
+            pauseItem = item
+            return item
+        case .statusDisplay:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "Status"
+            item.view = statusView
+            // The display draws its own glass capsule.
+            item.isBordered = false
+            item.visibilityPriority = .high
+            return item
+        default:
+            return nil
+        }
+    }
+}
+
+extension DocumentWindowController: NSWindowDelegate {
+    /// Resizes the status display before the toolbar lays out at the new width -- sized afterwards,
+    /// a shrinking window found it still too wide and pushed every item into the overflow menu.
+    func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
+        statusView.updateWidth(forWindowWidth: frameSize.width)
+        return frameSize
     }
 }

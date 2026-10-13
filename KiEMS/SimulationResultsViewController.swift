@@ -388,17 +388,24 @@ final class SimulationResultsViewController: NSViewController {
         }
     }
 
-    /// Eye settings (bit rate, adversarial-noise draws, shared clock) affect only PRBS post-analysis.
-    /// Keep the completed FDTD/S-parameter cache and rebuild the lightweight results preview.
+    /// Eye settings (bit rate, adversarial-noise draws, shared clock, eye test) affect only PRBS
+    /// post-analysis. Keep the completed FDTD/S-parameter cache and rebuild the lightweight results
+    /// preview.
     func eyeSettingsChanged(forSimulationIndex index: Int) {
         guard let document, index < document.config.simulations.count else { return }
         let simulation = document.config.simulations[index]
-        document.pipeline(forSimulationNamed: simulation.name)
-            .updateEyeBitRate(simulation.eyeBitRate, drawCount: simulation.eyeDrawCount,
-                              sharedClock: simulation.adversarialSharedClock)
+        document.pipeline(forSimulationNamed: simulation.name).updateEyeAnalysis(from: simulation)
         if currentIndex == index {
             refreshDisplay()
         }
+    }
+
+    /// Whether `index`'s current results have an eye that leaves its mask -- false without results.
+    /// Builds the results preview if it isn't already, which the eye analysis makes the slow part.
+    func eyeTestFails(forSimulationIndex index: Int) -> Bool {
+        guard let document, index < document.config.simulations.count else { return false }
+        return document.pipeline(forSimulationNamed: document.config.simulations[index].name)
+            .resultsPreview()?.failsEyeTest ?? false
     }
 
     private func updateProgressGroupCentering() {
@@ -453,6 +460,9 @@ final class SimulationResultsViewController: NSViewController {
             let isSettingUp = progress?.phase == .settingUp
             let statusText: String
             switch progress?.phase {
+            // Only one job runs at a time, so a held job is this one (see JobScheduler.setPaused).
+            case _ where JobScheduler.shared.isHoldingRunningJob:
+                statusText = "Paused"
             case .simulation:
                 statusText = "Running simulation…"
             case .settingUp:
@@ -647,7 +657,7 @@ final class SimulationResultsViewController: NSViewController {
         if lastReportedPhase[index] != progress.phase {
             phaseJustChanged = true
             lastReportedPhase[index] = progress.phase
-            phaseStartTime[index] = Date()
+            phaseStartTime[index] = JobScheduler.shared.unpausedNow
         }
         // .settingUp has no fraction to extrapolate a remaining time from at all (see
         // EMSPipelineProgressPhase's own doc comment) -- refreshDisplay() shows a plain indeterminate
@@ -655,7 +665,7 @@ final class SimulationResultsViewController: NSViewController {
         if progress.phase != .settingUp {
             let secondsRemaining: Double?
             if let start = phaseStartTime[index], progress.fraction > 0 {
-                let elapsed = Date().timeIntervalSince(start)
+                let elapsed = JobScheduler.shared.unpausedNow.timeIntervalSince(start)
                 secondsRemaining = max(0, elapsed / progress.fraction - elapsed)
             } else {
                 secondsRemaining = nil
@@ -678,7 +688,8 @@ final class SimulationResultsViewController: NSViewController {
             StepTimingModel.shared.beginRun()
             lastStepSample[index] = nil
         case .simulation:
-            let now = Date()
+            // A pause between two reports isn't time spent stepping.
+            let now = JobScheduler.shared.unpausedNow
             let sample = StepSample(portsCompleted: progress.portsCompleted, step: progress.currentStep, time: now)
             defer { lastStepSample[index] = sample }
             guard let previous = lastStepSample[index], previous.portsCompleted == sample.portsCompleted,
@@ -875,6 +886,9 @@ final class SimulationResultsViewController: NSViewController {
         categoryControl.segmentCount = categories.count
         for (i, category) in categories.enumerated() {
             categoryControl.setLabel(category.title, forSegment: i)
+            categoryControl.setImage(category == .eyeDiagrams && preview.failsEyeTest ? Self.failedTestImage : nil,
+                                     forSegment: i)
+            categoryControl.setImageScaling(.scaleProportionallyDown, forSegment: i)
             categoryControl.setWidth(0, forSegment: i)
         }
         if !categories.contains(where: { $0.title == selectedCategory.title }) {
@@ -886,6 +900,12 @@ final class SimulationResultsViewController: NSViewController {
 
         rebuildStack(for: preview)
     }
+
+    /// Marks the Eye diagrams tab when an eye fails its mask -- the same red stop sign the sidebar
+    /// shows on the Simulation Results row.
+    private static let failedTestImage: NSImage? = NSImage(
+        systemSymbolName: "exclamationmark.octagon.fill", accessibilityDescription: "Eye mask test failed")?
+        .withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [.white, .systemRed]))
 
     @objc private func categoryChanged() {
         guard categoryControl.selectedSegment >= 0, categoryControl.selectedSegment < availableCategories.count,

@@ -63,24 +63,6 @@ private final class SimulationOutlineView: NSOutlineView {
     }
 }
 
-/// A transparent hit target at the glass source list's trailing edge. It preserves the card's
-/// appearance while letting its edge act as a resize boundary.
-private final class SourceListResizeEdgeView: NSView {
-    var onDrag: ((CGFloat) -> Void)?
-
-    override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .resizeLeftRight)
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        window?.makeFirstResponder(self)
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        onDrag?(event.deltaX)
-    }
-}
-
 /// One row in SimulationListViewController's outline view -- the Board Setup row, the separator
 /// beneath it (kind == nil), a simulation itself (a top-level row) or one of its 3 fixed sub-entries
 /// (a child row). Node objects are only rebuilt by
@@ -104,20 +86,12 @@ private final class SimulationListNode {
 /// which DocumentWindowController presents its own (currently-empty) view controller for. Selecting
 /// a simulation's own row drives which simulation SimulationPropertiesViewController/
 /// SourceListViewController edit -- see DocumentWindowController, which wires this controller's
-/// onSelectionChanged into both, and which positions this panel to overlap the header bar above it
-/// by `topOverlap`.
+/// onSelectionChanged into both, and which shows this as its window's split-view sidebar.
 final class SimulationListViewController: NSViewController {
-    /// How far this panel is positioned to overlap upward into the header bar above it -- a purely
-    /// visual effect (the glass material extending under the header's hard edge). Shared with
-    /// DocumentWindowController, which uses the same value to place the panel's top anchor.
-    static let topOverlap: CGFloat = 20
-    /// Clearance below the header's cutoff line so the first row reads clearly below it rather than
-    /// sitting flush against it -- topOverlap alone would put row 1 exactly at the boundary.
-    private static let contentTopInset: CGFloat = topOverlap + 10
-
     private weak var document: Document?
 
     private let outlineView = SimulationOutlineView()
+    private let scrollView = NSScrollView()
     private let addButton = NSButton()
     private let removeButton = NSButton()
     /// Simulations only make sense once a board is actually linked -- add/remove stay disabled
@@ -143,14 +117,19 @@ final class SimulationListViewController: NSViewController {
     /// what keeps one phase's progress from leaking into another row's indicator (the bug this
     /// central store replaces 3 independently-derived dictionaries to fix).
     private var phaseStates: [Int: [JobKind: PhaseState]] = [:]
+    /// Simulations whose current results fail their eye test -- their Simulation Results row shows a
+    /// red stop sign in place of the green "succeeded" dot. Set by DocumentWindowController, which
+    /// can look at the results; only consulted while that row is `.succeeded`.
+    private var failedTests: Set<Int> = []
 
     /// Fired whenever the selected row changes, including to nil when the list is empty or nothing
     /// is selected.
     var onSelectionChanged: ((SimulationListSelection?) -> Void)?
 
-    /// Horizontal drag deltas from the card's trailing edge. The window controller owns the
-    /// adjacent editor region, so it applies these to the card's width constraint.
-    var onWidthDrag: ((CGFloat) -> Void)?
+    /// Fired whenever a row's status changes (other than a running phase's progress ticking along),
+    /// a simulation's eye test passes or fails, or simulations are added or removed -- what the
+    /// window's run buttons and issue counts are derived from.
+    var onStatusChanged: (() -> Void)?
 
     /// Fired (with the renamed simulation's index) after a rename performed directly in this list --
     /// SimulationPropertiesViewController's own name field has no other way to notice, the same way
@@ -181,37 +160,10 @@ final class SimulationListViewController: NSViewController {
     }
 
     override func loadView() {
-        // NSGlassEffectView (macOS 26+'s actual "Liquid Glass" material) -- an earlier headless test
-        // run (no attached display/window session in that environment) showed this corrupting the
-        // whole window's layout, but that's plausibly an artifact of testing without a real Window
-        // Server session rather than a real bug, since Liquid Glass rendering leans on the live
-        // display. Its content MUST go through `contentView`, not as a regular subview -- per
-        // Apple's docs, arbitrary direct subviews of a glass view aren't guaranteed correct z-order
-        // or legibility treatment against the glass. (Confirmed innocent: a bisection investigation
-        // into a real window-corruption bug swapped this out as a suspect and the bug persisted --
-        // the actual cause was DGCharts, a since-removed third-party charting dependency.)
-        let glassView = NSGlassEffectView()
-        // Matches the standard macOS window corner radius (no public API reports it -- this is the
-        // long-standing value used since the Big Sur redesign) so the bottom-left corner, which sits
-        // flush against the window's own bottom-left edge, reads as concentric with it rather than
-        // as a second, mismatched curve nested inside the window's. cornerRadius rounds all four
-        // corners uniformly (no per-corner control in the public API); the other three aren't
-        // against a real window corner, but uniform rounding still reads as an intentional card.
-        glassView.cornerRadius = 10
-        view = glassView
-
+        // A plain view: as a split-view sidebar it already sits on the system's own floating glass
+        // panel, which runs up through the toolbar (see DocumentWindowController).
         let content = NSView()
-        content.translatesAutoresizingMaskIntoConstraints = false
-        content.setContentHuggingPriority(NSLayoutConstraint.Priority.defaultLow, for: .vertical)
-        glassView.contentView = content
-        // contentView isn't implicitly pinned to fill glassView's bounds -- without this, content
-        // (and everything under it) has no constraint tying its size to glassView at all.
-        NSLayoutConstraint.activate([
-            content.leadingAnchor.constraint(equalTo: glassView.leadingAnchor),
-            content.trailingAnchor.constraint(equalTo: glassView.trailingAnchor),
-            content.topAnchor.constraint(equalTo: glassView.topAnchor),
-            content.bottomAnchor.constraint(equalTo: glassView.bottomAnchor),
-        ])
+        view = content
 
         buildUI(in: content)
         reloadData()
@@ -246,21 +198,17 @@ final class SimulationListViewController: NSViewController {
         outlineView.backgroundColor = .clear
         // NOT .sourceList style/selectionHighlightStyle -- either one makes the enclosing
         // NSScrollView insert its own opaque NSVisualEffectView behind the rows (vibrancy meant for
-        // a plain window background), which fights the NSGlassEffectView this whole panel sits in.
+        // a plain window background), which fights the sidebar's own glass panel.
         // .plain style + the default (.regular) selectionHighlightStyle has no such side effect.
         outlineView.style = .plain
         outlineView.autoresizesOutlineColumn = true
 
-        let scroll = NSScrollView()
+        let scroll = scrollView
         scroll.documentView = outlineView
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
         scroll.contentView.drawsBackground = false
         scroll.translatesAutoresizingMaskIntoConstraints = false
-
-        let resizeEdge = SourceListResizeEdgeView()
-        resizeEdge.onDrag = { [weak self] delta in self?.onWidthDrag?(delta) }
-        resizeEdge.translatesAutoresizingMaskIntoConstraints = false
 
         addButton.bezelStyle = .circular
         addButton.isBordered = true
@@ -289,26 +237,16 @@ final class SimulationListViewController: NSViewController {
 
         content.addSubview(scroll)
         content.addSubview(buttonRow)
-        content.addSubview(resizeEdge)
-        // scroll's height is intentionally left undetermined here -- DocumentWindowController pins
-        // this whole panel's bottom straight to the window's content view, with no fixed height, so
-        // the list always fills whatever vertical space is available as the window resizes.
+        // The sidebar runs up under the toolbar; its safe area starts below it.
         NSLayoutConstraint.activate([
             scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 8),
             scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -8),
-            scroll.topAnchor.constraint(equalTo: content.topAnchor, constant: Self.contentTopInset),
+            scroll.topAnchor.constraint(equalTo: content.safeAreaLayoutGuide.topAnchor, constant: 4),
             scroll.bottomAnchor.constraint(equalTo: buttonRow.topAnchor, constant: -8),
 
             // On the right, not the left -- see DocumentWindowController's call site for why.
             buttonRow.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -8),
             buttonRow.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -8),
-
-            // A thin, invisible strip directly inside the glass edge: no system splitter or
-            // visible handle, just the normal horizontal-resize cursor and drag behavior.
-            resizeEdge.topAnchor.constraint(equalTo: content.topAnchor),
-            resizeEdge.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            resizeEdge.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-            resizeEdge.widthAnchor.constraint(equalToConstant: 5),
         ])
     }
 
@@ -388,6 +326,7 @@ final class SimulationListViewController: NSViewController {
             outlineView.expandItem(nil, expandChildren: true)
         }
         updateButtonEnabledState()
+        onStatusChanged?()
     }
 
     /// Expansion is held by NSOutlineView against node identity, but a structural rebuild creates
@@ -516,8 +455,12 @@ final class SimulationListViewController: NSViewController {
     }
 
     private func setPhaseState(_ state: PhaseState, forSimulationIndex index: Int, kind: JobKind) {
+        let previous = phaseState(forSimulationIndex: index, kind: kind)
         phaseStates[index, default: [:]][kind] = state
         reloadRow(forSimulationIndex: index, kind: kind)
+        // A running phase's progress ticking along changes nothing onStatusChanged reports.
+        if case .inProgress = previous, case .inProgress = state { return }
+        onStatusChanged?()
     }
 
     /// Called by DocumentWindowController whenever a simulation's `kind` phase starts running (from
@@ -561,6 +504,52 @@ final class SimulationListViewController: NSViewController {
     /// not keep showing once the cache it was reporting on is gone.
     func setInvalid(forSimulationIndex index: Int, kind: JobKind) {
         setPhaseState(.invalid, forSimulationIndex: index, kind: kind)
+    }
+
+    /// Records whether `index`'s results fail their eye test -- see failedTests.
+    func setTestsFailed(_ failed: Bool, forSimulationIndex index: Int) {
+        guard failedTests.contains(index) != failed else { return }
+        if failed {
+            failedTests.insert(index)
+        } else {
+            failedTests.remove(index)
+        }
+        reloadRow(forSimulationIndex: index, kind: .simulation)
+        onStatusChanged?()
+    }
+
+    /// Whether `index`'s Simulation Results row shows the failed-tests stop sign -- its eye test
+    /// fails on results that are current.
+    func showsFailedTests(forSimulationIndex index: Int) -> Bool {
+        failedTests.contains(index) && phaseState(forSimulationIndex: index, kind: .simulation) == .succeeded
+    }
+
+    /// The simulations the window's Run button runs for the current selection: the selected
+    /// simulation (whichever of its rows is selected), or every simulation a selected Simulation Set
+    /// generated -- a set's own template isn't runnable. Empty for Board Setup or no selection.
+    var selectedRunTargets: [Int] {
+        guard let node = outlineView.item(atRow: outlineView.selectedRow) as? SimulationListNode,
+              let index = node.kind?.simulationIndex else { return [] }
+        if let simulationNode = simulationNode(forIndex: index), simulationNode.isSimulationSet {
+            return simulationNode.children.compactMap { $0.kind?.simulationIndex }
+        }
+        return [index]
+    }
+
+    /// Every runnable simulation -- all but Simulation Set templates -- in list order.
+    var allRunTargets: [Int] {
+        allSimulationNodes.filter { !$0.isSimulationSet }.compactMap { $0.kind?.simulationIndex }
+    }
+
+    /// Whether running `index` would do anything: its results aren't current, being computed, or
+    /// already waiting in the queue.
+    func canRun(simulationIndex index: Int) -> Bool {
+        guard let document, index < document.config.simulations.count else { return false }
+        let state = phaseState(forSimulationIndex: index, kind: .simulation)
+        if state == .succeeded { return false }
+        if case .inProgress = state { return false }
+        return JobScheduler.shared.job(document: document, simulationName: document.config.simulations[index].name,
+                                       kind: .simulation) == nil
     }
 
     /// Marks `kind`'s own phase `.outOfDate` for `index` -- a config edit invalidated it, but its
@@ -701,7 +690,8 @@ extension SimulationListViewController: NSOutlineViewDelegate {
         case .simulationResults(let simulationIndex):
             return Self.makeChildCell(in: outlineView, owner: self, title: "Simulation Results",
                                        symbolName: "chart.bar",
-                                       status: phaseState(forSimulationIndex: simulationIndex, kind: .simulation))
+                                       status: phaseState(forSimulationIndex: simulationIndex, kind: .simulation),
+                                       testsFailed: failedTests.contains(simulationIndex))
         case .fieldViewer(let simulationIndex):
             return Self.makeChildCell(in: outlineView, owner: self, title: "Field Viewer", symbolName: "waveform",
                                        status: phaseState(forSimulationIndex: simulationIndex, kind: .fieldPostProcessing))
@@ -864,6 +854,11 @@ extension SimulationListViewController: NSOutlineViewDelegate {
         image.isTemplate = true
         return image
     }()
+    private static let testFailedImage: NSImage = {
+        let image = NSImage(systemSymbolName: "exclamationmark.octagon.fill", accessibilityDescription: "Tests failed")!
+        image.isTemplate = true
+        return image
+    }()
     private static let failedImage: NSImage = {
         let image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Failed")!
         image.isTemplate = true
@@ -875,10 +870,12 @@ extension SimulationListViewController: NSOutlineViewDelegate {
     /// `status` drives the row's trailing indicator: a determinate circular progress ring while
     /// `.inProgress`, otherwise a small tinted status glyph (blue outline "invalid", green filled
     /// "succeeded", yellow filled "out of date", yellow triangle "failed") -- every child row gets one, including Field Viewer.
+    /// `testsFailed` turns a succeeded row's green dot into a red stop sign.
     /// Both indicator subviews are built once and reused alongside the rest of the cell, just
     /// re-valued/re-toggled fresh on every call.
     private static func makeChildCell(
-        in outlineView: NSOutlineView, owner: Any?, title: String, symbolName: String, status: PhaseState
+        in outlineView: NSOutlineView, owner: Any?, title: String, symbolName: String, status: PhaseState,
+        testsFailed: Bool = false
     ) -> NSTableCellView {
         let identifier = NSUserInterfaceItemIdentifier("SimulationListChildCell-\(symbolName)")
         let cell: NSTableCellView
@@ -971,8 +968,8 @@ extension SimulationListViewController: NSOutlineViewDelegate {
         case .succeeded:
             spinner.isHidden = true
             statusImageView.isHidden = false
-            statusImageView.image = Self.succeededImage
-            statusImageView.contentTintColor = .systemGreen
+            statusImageView.image = testsFailed ? Self.testFailedImage : Self.succeededImage
+            statusImageView.contentTintColor = testsFailed ? .systemRed : .systemGreen
         case .outOfDate:
             spinner.isHidden = true
             statusImageView.isHidden = false

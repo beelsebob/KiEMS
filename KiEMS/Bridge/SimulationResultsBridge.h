@@ -126,6 +126,26 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) double jitterUI;
 @end
 
+/// The mask an eye was tested against (see kiems::EyeMask): positioned on the eye's thresholdV,
+/// across 0...1 UI. Zero y1 means no keep-out region, zero y2 no outer limit.
+@interface EMSResultsEyeMask : NSObject
+@property (nonatomic, readonly) EMSEyeMaskStandard standard;
+@property (nonatomic, readonly) double x1;
+@property (nonatomic, readonly) double x2;
+@property (nonatomic, readonly) double y1;
+@property (nonatomic, readonly) double y2;
+@end
+
+/// How one eye's traces fared against its mask (see kiems::EyeMaskResult).
+@interface EMSResultsEyeMaskResult : NSObject
+@property (nonatomic, readonly) NSInteger traceCount;
+/// Traces that entered the keep-out region.
+@property (nonatomic, readonly) NSInteger keepOutViolations;
+/// Traces that went past the outer limit.
+@property (nonatomic, readonly) NSInteger outerLimitViolations;
+@property (nonatomic, readonly) BOOL passed;
+@end
+
 /// An eye's adversarial noise: the same eye with every adversarial excitation's noise added at
 /// sampled transmission times (see kiems::computeEyeDiagram). `traces` is a representative subset
 /// of the draws; the openings cover every draw. The lowest/highest openings are the spread between
@@ -148,6 +168,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, readonly) NSArray<NSNumber *> *convergenceHeightV;
 @property (nonatomic, copy, readonly) NSArray<NSNumber *> *convergenceHeightLowestV;
 @property (nonatomic, copy, readonly) NSArray<NSNumber *> *convergenceHeightHighestV;
+/// The noisy eye against the mask, over every draw; nil without a mask.
+@property (nonatomic, readonly, nullable) EMSResultsEyeMaskResult *maskResult;
 @end
 
 /// One received PRBS7 eye. `timeUI` is the common -0.5...1.5 unit-interval axis and each nested
@@ -165,6 +187,14 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) EMSResultsEyeStatistics *statistics;
 /// Nil when the simulation has no adversarial excitation reaching this eye.
 @property (nonatomic, readonly, nullable) EMSResultsEyeNoise *noise;
+/// The decision threshold the openings and the mask are measured from.
+@property (nonatomic, readonly) double thresholdV;
+/// The simulation's eye mask; nil when it has none (an empty mask tests nothing).
+@property (nonatomic, readonly, nullable) EMSResultsEyeMask *mask;
+/// The noise-free eye against the mask; nil without a mask.
+@property (nonatomic, readonly, nullable) EMSResultsEyeMaskResult *maskResult;
+/// Whether the noise-free eye, or the eye with adversarial noise, leaves the mask's valid area.
+@property (nonatomic, readonly) BOOL failsMask;
 @end
 
 /// A renderable snapshot of one simulation's post-processed results -- everything a results view
@@ -180,6 +210,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, readonly) NSArray<EMSResultsTrace *> *traces;
 @property (nonatomic, copy, readonly) NSArray<EMSResultsProbe *> *probes;
 @property (nonatomic, copy, readonly) NSArray<EMSResultsEyeDiagram *> *eyeDiagrams;
+/// Whether any eye fails its mask -- see EMSResultsEyeDiagram.failsMask.
+@property (nonatomic, readonly) BOOL failsEyeTest;
 @end
 
 NS_ASSUME_NONNULL_END
