@@ -811,7 +811,7 @@ final class FieldView: MTKView, MTKViewDelegate {
     private static let gradientAlphaAtOne: Float = 0.75
 
     private static func gradientColor(t: Float) -> SIMD4<Float> {
-        let clamped = min(max(t, 0), 1)
+        let clamped = t.isNaN ? 1 : min(max(t, 0), 1)
         let rgb = EnergyColorMap.rgb(at: CGFloat(clamped))
         let alpha = gradientAlphaAtZero + (gradientAlphaAtOne - gradientAlphaAtZero) * clamped
         return SIMD4(Float(rgb.red), Float(rgb.green), Float(rgb.blue), alpha)
@@ -1106,7 +1106,7 @@ final class FieldView: MTKView, MTKViewDelegate {
 
         let orderedZ = buckets.keys.sorted()
         let allEnergy = orderedZ.flatMap { buckets[$0, default: []].map(\.1) }
-        if let frameMax = allEnergy.max() { seriesOnBoardMaxEnergy = max(seriesOnBoardMaxEnergy, frameMax) }
+        if let frameMax = allEnergy.lazy.filter(\.isFinite).max() { seriesOnBoardMaxEnergy = max(seriesOnBoardMaxEnergy, frameMax) }
         let maxEnergy = seriesOnBoardMaxEnergy
         let floorEnergy = maxEnergy > 0 ? maxEnergy * 1e-6 : 0
         let logMax = log10(max(maxEnergy, Float.leastNormalMagnitude))
@@ -1175,7 +1175,9 @@ final class FieldView: MTKView, MTKViewDelegate {
         let displayedEnergy = voxelCachedEnergyIndices.compactMap { index in
             index >= onBoardStart && index < onBoardEnd ? cellEnergy[index] : nil
         }
-        if let frameMax = displayedEnergy.max() {
+        // Non-finite cells (a diverged run) must not enter the scale: one inf peak makes logSpan
+        // NaN and paints every cell, every frame, white. They're shown saturated instead.
+        if let frameMax = displayedEnergy.lazy.filter(\.isFinite).max() {
             seriesOnBoardMaxEnergy = max(seriesOnBoardMaxEnergy, frameMax)
         }
         let maxEnergy = seriesOnBoardMaxEnergy

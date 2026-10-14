@@ -58,6 +58,9 @@ private final class FieldSeriesMenuItemView: NSView {
 /// comment on stage sharing). Renders the result with FieldView once available.
 final class FieldViewerViewController: NSViewController {
     private weak var document: Document?
+    /// Set instead of `document` when showing a `.kemsf` package opened on its own -- its series are
+    /// complete and fixed, so nothing is ever requested from or tracked in the JobScheduler.
+    private let package: EMSFieldFramePackage?
 
     private let fieldView = FieldView()
     private let progressStatus = ProgressStatusView()
@@ -134,8 +137,15 @@ final class FieldViewerViewController: NSViewController {
 
     init(document: Document) {
         self.document = document
+        package = nil
         super.init(nibName: nil, bundle: nil)
         JobScheduler.shared.addChangeObserver { [weak self] in self?.syncFromScheduler() }
+    }
+
+    init(package: EMSFieldFramePackage) {
+        self.package = package
+        currentIndex = 0
+        super.init(nibName: nil, bundle: nil)
     }
 
     @available(*, unavailable)
@@ -338,6 +348,10 @@ final class FieldViewerViewController: NSViewController {
         // that can replace FieldView.fieldSnapshot and rebuild its multi-megabyte voxel colour
         // buffer. Scheduler updates deliberately stop here while another pane is selected.
         guard isViewerVisible else { return }
+        if let package {
+            show(snapshots: package.fieldSnapshots, simulationIndex: 0, preview: package.geometryPreview)
+            return
+        }
         guard let currentIndex, let document, currentIndex < document.config.simulations.count else { return }
         let name = document.config.simulations[currentIndex].name
         let pipeline = document.pipeline(forSimulationNamed: name)
@@ -346,16 +360,7 @@ final class FieldViewerViewController: NSViewController {
         // A completed SWMR block is viewable while the results stage is still running. Before the
         // first block is published, fieldSnapshots() is empty and the normal progress UI remains.
         if !snapshots.isEmpty {
-            currentSnapshots = snapshots
-            let preferredPort = selectedExcitedPortBySimulation[currentIndex]
-            let selectedIndex = snapshots.firstIndex(where: { $0.excitedPort == preferredPort }) ?? 0
-            let snapshot = snapshots[selectedIndex]
-            selectedExcitedPortBySimulation[currentIndex] = snapshot.excitedPort
-            updateSeriesSelector(snapshots: snapshots, selectedIndex: selectedIndex)
-            updateLiveSeriesStatus(runningIndices.contains(currentIndex) ? latestProgress[currentIndex] : nil)
-            display(snapshot: snapshot, preview: pipeline.geometryPreview())
-            fieldView.isHidden = false
-            progressStatus.setState(.hidden)
+            show(snapshots: snapshots, simulationIndex: currentIndex, preview: pipeline.geometryPreview())
         } else if let error = errors[currentIndex] {
             fieldView.isHidden = true
             progressStatus.setState(.error(error))
@@ -394,6 +399,26 @@ final class FieldViewerViewController: NSViewController {
             progressStatus.setState(.hidden)
             hideFieldSeriesControls()
         }
+    }
+
+    private func show(snapshots: [EMSFieldSnapshot], simulationIndex: Int, preview: EMSGeometryPreview?) {
+        currentSnapshots = snapshots
+        let preferredPort = selectedExcitedPortBySimulation[simulationIndex]
+        let selectedIndex = snapshots.firstIndex(where: { $0.excitedPort == preferredPort }) ?? 0
+        let snapshot = snapshots[selectedIndex]
+        selectedExcitedPortBySimulation[simulationIndex] = snapshot.excitedPort
+        updateSeriesSelector(snapshots: snapshots, selectedIndex: selectedIndex)
+        updateLiveSeriesStatus(runningIndices.contains(simulationIndex) ? latestProgress[simulationIndex] : nil)
+        display(snapshot: snapshot, preview: preview)
+        fieldView.isHidden = false
+        progressStatus.setState(.hidden)
+    }
+
+    /// The board under the current simulation's fields.
+    private func currentPreview() -> EMSGeometryPreview? {
+        if let package { return package.geometryPreview }
+        guard let currentIndex, let document, currentIndex < document.config.simulations.count else { return nil }
+        return document.pipeline(forSimulationNamed: document.config.simulations[currentIndex].name).geometryPreview()
     }
 
     private func updateSeriesSelector(snapshots: [EMSFieldSnapshot], selectedIndex: Int) {
@@ -464,14 +489,11 @@ final class FieldViewerViewController: NSViewController {
     }
 
     private func selectSeries(at index: Int) {
-        guard let currentIndex, index >= 0,
-              index < currentSnapshots.count,
-              let document, currentIndex < document.config.simulations.count else { return }
+        guard let currentIndex, index >= 0, index < currentSnapshots.count else { return }
         seriesPopUp.selectItem(at: index)
         let snapshot = currentSnapshots[index]
         selectedExcitedPortBySimulation[currentIndex] = snapshot.excitedPort
-        let simulationName = document.config.simulations[currentIndex].name
-        display(snapshot: snapshot, preview: document.pipeline(forSimulationNamed: simulationName).geometryPreview())
+        display(snapshot: snapshot, preview: currentPreview())
     }
 
     // MARK: - Playback transport

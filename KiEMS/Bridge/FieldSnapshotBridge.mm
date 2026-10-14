@@ -194,8 +194,10 @@ static NSData* energyData(const std::vector<float>& ex, const std::vector<float>
             [refinements addObject:[[EMSFieldFrameRefinement alloc]
                 initWithPreviewCellIndex:detail.previewCellIndex
                 nx:detail.nx ny:detail.ny nz:detail.nz
-                energyData:energyData(detail.components[0], detail.components[1], detail.components[2],
-                                      detail.components[3], detail.components[4], detail.components[5])]];
+                energyData:detail.energy.empty()
+                    ? energyData(detail.components[0], detail.components[1], detail.components[2],
+                                 detail.components[3], detail.components[4], detail.components[5])
+                    : [NSData dataWithBytes:detail.energy.data() length:detail.energy.size() * sizeof(float)]]];
         }
         orderIndex = batchEnd;
     }
@@ -712,7 +714,15 @@ EMSFieldSnapshot* buildCombinedFieldSnapshot(NSArray<EMSFieldSnapshot*>* legs, c
         // Every leg is always built by buildFieldSnapshot() (see this function's own doc comment and
         // its caller in EMSSimulationPipelineBridge.mm), never by this function, so each leg's own
         // first-frame data source is always the concrete single-reader kind here.
-        sources.push_back((EMSFieldFrameDataSource*)leg.frames.firstObject.dataSource);
+        EMSFieldFrameDataSource* source = (EMSFieldFrameDataSource*)leg.frames.firstObject.dataSource;
+        // Combining legs sums their signed fields; a series that kept only energy has none.
+        if ([source reader].header().storage.channels != copper::FieldChannels::Components) {
+            Cu::logWarning() << "Field combine '" << name.UTF8String
+                             << "': its runs stored only field energy, so they can't be combined. Store all "
+                                "six channels (KiEMS Settings) and rerun to see it.";
+            return nil;
+        }
+        sources.push_back(source);
         frameCount = std::min(frameCount, leg.frames.count);
     }
     EMSCombinedFieldFrameDataSource* combined =
@@ -761,4 +771,175 @@ EMSFieldSnapshot* buildCombinedFieldSnapshot(NSArray<EMSFieldSnapshot*>* legs, c
                                           frames:frames
                                    minCellEnergy:minEnergy
                                    maxCellEnergy:maxEnergy];
+}
+
+NSData* encodeFieldSeriesLayout(const FieldSeriesLayout& layout) {
+    NSMutableDictionary<NSString*, NSString*>* names = [NSMutableDictionary dictionary];
+    for (const auto& [port, name] : layout.excitationNames) names[@(port).stringValue] = @(name.c_str());
+    NSMutableArray* pairs = [NSMutableArray array];
+    for (const auto& pair : layout.differentialPairs) {
+        [pairs addObject:@{@"name": @(pair.name.c_str()), @"positive": @(pair.positivePort),
+                           @"negative": @(pair.negativePort)}];
+    }
+    NSMutableArray<NSNumber*>* primary = [NSMutableArray array];
+    for (const NSInteger port : layout.primaryPorts) [primary addObject:@(port)];
+    NSMutableDictionary<NSString*, NSNumber*>* adversarial = [NSMutableDictionary dictionary];
+    for (const auto& [port, amplitude] : layout.adversarialAmplitudes) adversarial[@(port).stringValue] = @(amplitude);
+    NSMutableArray* series = [NSMutableArray array];
+    for (const auto& [port, file] : layout.seriesFiles) [series addObject:@{@"port": @(port), @"file": @(file.c_str())}];
+    NSDictionary* root = @{
+        @"version": @1,
+        @"simulation": @(layout.simulationName.c_str()),
+        @"excitationNames": names,
+        @"differentialPairs": pairs,
+        @"primaryPorts": primary,
+        @"adversarialAmplitudes": adversarial,
+        @"series": series,
+    };
+    return [NSJSONSerialization dataWithJSONObject:root
+                                           options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
+}
+
+std::optional<FieldSeriesLayout> decodeFieldSeriesLayout(NSData* data) {
+    NSDictionary* root = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![root isKindOfClass:NSDictionary.class] || ![root[@"version"] isEqual:@1]) return std::nullopt;
+    auto stringValue = [](id value) -> std::string {
+        return [value isKindOfClass:NSString.class] ? std::string([value UTF8String]) : std::string();
+    };
+    auto isNumber = [](id value) { return [value isKindOfClass:NSNumber.class]; };
+    FieldSeriesLayout layout;
+    layout.simulationName = stringValue(root[@"simulation"]);
+    NSDictionary* names = root[@"excitationNames"];
+    if ([names isKindOfClass:NSDictionary.class]) {
+        for (NSString* key in names) {
+            const NSInteger port = key.integerValue;
+            if (port >= 0 && port <= INT32_MAX) layout.excitationNames[static_cast<std::int32_t>(port)] = stringValue(names[key]);
+        }
+    }
+    NSArray* pairs = root[@"differentialPairs"];
+    if ([pairs isKindOfClass:NSArray.class]) {
+        for (NSDictionary* pair in pairs) {
+            if (![pair isKindOfClass:NSDictionary.class] || !isNumber(pair[@"positive"]) || !isNumber(pair[@"negative"])) continue;
+            layout.differentialPairs.push_back({stringValue(pair[@"name"]), [pair[@"positive"] integerValue],
+                                                [pair[@"negative"] integerValue]});
+        }
+    }
+    NSArray* primary = root[@"primaryPorts"];
+    if ([primary isKindOfClass:NSArray.class]) {
+        for (id port in primary) if (isNumber(port)) layout.primaryPorts.insert([port integerValue]);
+    }
+    NSDictionary* adversarial = root[@"adversarialAmplitudes"];
+    if ([adversarial isKindOfClass:NSDictionary.class]) {
+        for (NSString* key in adversarial) {
+            if (isNumber(adversarial[key])) layout.adversarialAmplitudes[key.integerValue] = [adversarial[key] doubleValue];
+        }
+    }
+    NSArray* series = root[@"series"];
+    if ([series isKindOfClass:NSArray.class]) {
+        for (NSDictionary* entry in series) {
+            if (![entry isKindOfClass:NSDictionary.class] || !isNumber(entry[@"port"])) continue;
+            const NSInteger port = [entry[@"port"] integerValue];
+            const std::string file = stringValue(entry[@"file"]);
+            // Package-relative names only: a series.json can't point the reader outside its package.
+            if (port < 0 || port > INT32_MAX || file.empty() || std::filesystem::path(file).filename() != file) continue;
+            layout.seriesFiles.emplace_back(static_cast<std::int32_t>(port), file);
+        }
+    }
+    return layout;
+}
+
+NSArray<EMSFieldSnapshot*>* assembleFieldSnapshots(NSArray<EMSFieldSnapshot*>* singleEnded,
+                                                   const FieldSeriesLayout& layout,
+                                                   FieldSnapshotCombinationCache& cache) {
+    auto leg = [singleEnded](NSInteger port) -> EMSFieldSnapshot* {
+        for (EMSFieldSnapshot* snapshot in singleEnded) {
+            if (snapshot.excitedPort == port) return snapshot;
+        }
+        return nil;
+    };
+
+    // Differential pairs: both legs excited independently at the pair's driven end, combined
+    // +0.5/-0.5 (Postprocessor::getDiffPairSdd()'s mixed-mode convention). A pair whose legs aren't
+    // both present yet simply has no entry until they are.
+    NSMutableArray<EMSFieldSnapshot*>* all = [NSMutableArray array];
+    NSMutableDictionary<NSString*, EMSFieldSnapshot*>* differential = [NSMutableDictionary dictionary];
+    for (const auto& pair : layout.differentialPairs) {
+        EMSFieldSnapshot* legP = leg(pair.positivePort);
+        EMSFieldSnapshot* legN = leg(pair.negativePort);
+        if (legP == nil || legN == nil) {
+            Cu::logDebug() << "fieldSnapshots: differential pair '" << pair.name << "' wants excited ports "
+                           << pair.positivePort << " (P, " << (legP == nil ? "missing" : "present") << ") and "
+                           << pair.negativePort << " (N, " << (legN == nil ? "missing" : "present") << "), skipping";
+            continue;
+        }
+        NSString* key = [NSString stringWithFormat:@"%ld|%ld", (long)pair.positivePort, (long)pair.negativePort];
+        const NSUInteger frameCount = MIN(legP.frames.count, legN.frames.count);
+        EMSFieldSnapshot* combined = cache.differential[key];
+        if (combined == nil || combined.frames.count != frameCount) {
+            combined = buildCombinedFieldSnapshot(@[ legP, legN ], {0.5, -0.5}, @(pair.name.c_str()),
+                                                  differentialSeriesKey(pair.positivePort, pair.negativePort));
+        }
+        if (combined != nil) {
+            [all addObject:combined];
+            differential[key] = combined;
+        }
+    }
+    cache.differential = differential;
+    [all addObjectsFromArray:singleEnded];
+
+    // Adversarial variants: each primary series (or pair of primaries) with every adversarial run
+    // superposed, weighted by its configured amplitude.
+    std::map<NSInteger, double> adversarialAmplitudes = layout.adversarialAmplitudes;
+    for (const NSInteger port : layout.primaryPorts) adversarialAmplitudes.erase(port);
+    NSMutableArray<EMSFieldSnapshot*>* adversarialLegs = [NSMutableArray array];
+    std::vector<double> adversarialCoefficients;
+    for (EMSFieldSnapshot* snapshot in singleEnded) {
+        const auto found = adversarialAmplitudes.find(snapshot.excitedPort);
+        if (found != adversarialAmplitudes.end()) {
+            [adversarialLegs addObject:snapshot];
+            adversarialCoefficients.push_back(found->second);
+        }
+    }
+    NSMutableDictionary<NSString*, EMSFieldSnapshot*>* adversarial = [NSMutableDictionary dictionary];
+    for (EMSFieldSnapshot* snapshot in all) {
+        snapshot.withAdversarialSignals = nil;
+        if (adversarialLegs.count == 0) continue;
+        NSArray<EMSFieldSnapshot*>* baseLegs = nil;
+        std::vector<double> coefficients;
+        if (layout.primaryPorts.contains(snapshot.excitedPort)) {
+            baseLegs = @[ snapshot ];
+            coefficients = {1.0};
+        } else if (snapshot.excitedPort < 0) {
+            for (const auto& pair : layout.differentialPairs) {
+                if (snapshot.excitedPort != differentialSeriesKey(pair.positivePort, pair.negativePort)) continue;
+                EMSFieldSnapshot* legP = leg(pair.positivePort);
+                EMSFieldSnapshot* legN = leg(pair.negativePort);
+                if (layout.primaryPorts.contains(pair.positivePort) && layout.primaryPorts.contains(pair.negativePort) &&
+                    legP != nil && legN != nil) {
+                    baseLegs = @[ legP, legN ];
+                    coefficients = {0.5, -0.5};
+                }
+                break;
+            }
+        }
+        if (baseLegs == nil) continue;
+
+        NSArray<EMSFieldSnapshot*>* legs = [baseLegs arrayByAddingObjectsFromArray:adversarialLegs];
+        coefficients.insert(coefficients.end(), adversarialCoefficients.begin(), adversarialCoefficients.end());
+        NSUInteger frameCount = NSUIntegerMax;
+        for (EMSFieldSnapshot* each in legs) frameCount = MIN(frameCount, each.frames.count);
+        NSString* key = [NSString stringWithFormat:@"%ld|%lu", (long)snapshot.excitedPort,
+                                                   (unsigned long)adversarialLegs.count];
+        EMSFieldSnapshot* variant = cache.adversarial[key];
+        if (variant == nil || variant.frames.count != frameCount) {
+            NSString* name = [snapshot.excitationName stringByAppendingString:@" + adversarial"];
+            variant = buildCombinedFieldSnapshot(legs, coefficients, name, snapshot.excitedPort);
+        }
+        if (variant != nil) {
+            snapshot.withAdversarialSignals = variant;
+            adversarial[key] = variant;
+        }
+    }
+    cache.adversarial = adversarial;
+    return [all copy];
 }

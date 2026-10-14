@@ -3,7 +3,11 @@
 // Objective-C interface boundary, which Swift can't see at all.
 #import "FieldSnapshotBridge.h"
 
+#include <cstdint>
 #include <filesystem>
+#include <map>
+#include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -37,6 +41,52 @@ EMSFieldSnapshot* _Nullable buildFieldSnapshot(const std::filesystem::path& seri
 EMSFieldSnapshot* _Nullable buildCombinedFieldSnapshot(NSArray<EMSFieldSnapshot*>* legs,
                                                         const std::vector<double>& coefficients,
                                                         NSString* name, NSInteger excitedPort);
+
+/// How a simulation's per-port field series combine for viewing: each excited port's name, the
+/// differential pairs shown as combined series, and which runs are primary or adversarial. Taken
+/// from the simulation's config by the pipeline, and saved into each `.kemsf` package
+/// (series.json) so the package plays back the same views without that config.
+/// A `.kemsf` package's metadata files, beside its per-port `port_N_S.h5` series.
+static NSString* const kFieldFramePackageLayoutName = @"series.json";
+static NSString* const kFieldFramePackageBoardName = @"board.kemsg";
+
+struct FieldSeriesLayout {
+    struct DifferentialPair {
+        std::string name;
+        NSInteger positivePort = 0;
+        NSInteger negativePort = 0;
+    };
+    std::string simulationName;
+    std::map<std::int32_t, std::string> excitationNames;
+    std::vector<DifferentialPair> differentialPairs;
+    std::set<NSInteger> primaryPorts;
+    std::map<NSInteger, double> adversarialAmplitudes;
+    /// Each excited port's series file, relative to the package -- empty until the run finishes.
+    std::vector<std::pair<std::int32_t, std::string>> seriesFiles;
+};
+
+NSData* _Nullable encodeFieldSeriesLayout(const FieldSeriesLayout& layout);
+std::optional<FieldSeriesLayout> decodeFieldSeriesLayout(NSData* data);
+
+/// Combined snapshots kept between assembleFieldSnapshots() calls so a live refresh reuses their
+/// readers and caches; rebuilt when a leg's frame count changes.
+struct FieldSnapshotCombinationCache {
+    NSDictionary<NSString*, EMSFieldSnapshot*>* _Nullable differential;
+    NSDictionary<NSString*, EMSFieldSnapshot*>* _Nullable adversarial;
+};
+
+/// The viewer's series list from already-built single-ended snapshots: one combined entry per
+/// differential pair whose legs are both present (listed first), then the single-ended series,
+/// each primary (or primary pair) with withAdversarialSignals attached. Updates `cache` in place.
+NSArray<EMSFieldSnapshot*>* assembleFieldSnapshots(NSArray<EMSFieldSnapshot*>* singleEnded,
+                                                   const FieldSeriesLayout& layout,
+                                                   FieldSnapshotCombinationCache& cache);
+
+/// The excited-port key a differential pair's combined series uses -- distinct from every real
+/// port index (always >= 0) and from every other pair's.
+inline NSInteger differentialSeriesKey(NSInteger positivePort, NSInteger negativePort) {
+    return -(positivePort * 100000 + negativePort + 1);
+}
 
 @interface EMSFieldSnapshot ()
 @property (nonatomic, strong, nullable, readwrite) EMSFieldSnapshot* withAdversarialSignals;
