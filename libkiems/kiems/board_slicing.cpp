@@ -942,6 +942,24 @@ void restrictLumpedComponentsToCutout(SimulationConfig& simulation, const Sliced
                 excitation.setDrivenPortIndex(newIndex[static_cast<std::size_t>(*excitation.drivenPortIndex())]);
             }
         }
+        // Traces and differential pairs reference ports by resolved index too. Only pure absorbers
+        // are dropped, which a pair or trace shouldn't name, but should one, it can't be analysed.
+        const auto remap = [&](PortRef& ref) {
+            if (!ref.resolvedIndex().has_value()) return false;
+            const std::int32_t index = newIndex[static_cast<std::size_t>(*ref.resolvedIndex())];
+            if (index < 0) return false;
+            ref.setResolvedIndex(index);
+            return true;
+        };
+        for (SingleEndedConfig& trace : simulation.traces()) {
+            if (!(remap(trace.start()) & remap(trace.stop()))) trace.setCorrect(false);
+        }
+        for (DifferentialPairConfig& pair : simulation.diffPairs()) {
+            if (!(remap(pair.positiveExcitation()) & remap(pair.negativeExcitation()) &
+                  remap(pair.positiveProbe()) & remap(pair.negativeProbe()))) {
+                pair.setCorrect(false);
+            }
+        }
     }
 }
 

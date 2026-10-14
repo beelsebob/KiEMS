@@ -1004,6 +1004,7 @@ public:
     PortRef& stop() { return _stop; }
     const std::optional<std::string>& name() const { return _name; }
     bool correct() const { return _correct; }
+    void setCorrect(bool value) { _correct = value; }
 
     /// Validate that both PortRefs resolved to real ports (mirrors __post_init__, now
     /// resolution-based instead of index-range-based).
