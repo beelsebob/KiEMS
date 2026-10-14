@@ -904,11 +904,11 @@ extension SimulationListViewController: NSOutlineViewDelegate {
         let identifier = NSUserInterfaceItemIdentifier("SimulationListChildCell-\(symbolName)")
         let cell: NSTableCellView
         let imageView: NSImageView
-        let spinner: NSProgressIndicator
+        let spinner: PieProgressView
         let statusImageView: NSImageView
         if let reused = outlineView.makeView(withIdentifier: identifier, owner: owner) as? NSTableCellView,
            let reusedImageView = reused.imageView,
-           let reusedSpinner = reused.subviews.first(where: { $0.identifier == spinnerIdentifier }) as? NSProgressIndicator,
+           let reusedSpinner = reused.subviews.first(where: { $0.identifier == spinnerIdentifier }) as? PieProgressView,
            let reusedStatusImageView = reused.subviews.first(where: { $0.identifier == statusImageIdentifier }) as? NSImageView {
             cell = reused
             imageView = reusedImageView
@@ -927,14 +927,8 @@ extension SimulationListViewController: NSOutlineViewDelegate {
             textField.textColor = .secondaryLabelColor
             textField.translatesAutoresizingMaskIntoConstraints = false
 
-            spinner = NSProgressIndicator()
+            spinner = PieProgressView()
             spinner.identifier = spinnerIdentifier
-            spinner.style = .spinning
-            spinner.controlSize = .small
-            spinner.isDisplayedWhenStopped = false
-            spinner.isIndeterminate = false
-            spinner.minValue = 0
-            spinner.maxValue = 1
             spinner.translatesAutoresizingMaskIntoConstraints = false
 
             statusImageView = NSImageView()
@@ -982,7 +976,7 @@ extension SimulationListViewController: NSOutlineViewDelegate {
         switch status {
         case .inProgress(let fraction):
             spinner.isHidden = false
-            spinner.doubleValue = fraction
+            spinner.fraction = fraction
             statusImageView.isHidden = true
         case .invalid:
             spinner.isHidden = true
@@ -1083,5 +1077,34 @@ extension SimulationListViewController: NSTextFieldDelegate {
         endRenaming(textField, committing: false)
         outlineView.window?.makeFirstResponder(outlineView)
         return true
+    }
+}
+
+/// A small determinate pie: an outlined circle filled clockwise from 12 o'clock. Drawn by hand
+/// because a determinate `.spinning` NSProgressIndicator only renders as a pie on a selected
+/// (emphasized) row and falls back to a chunky ring elsewhere. NSTableCellView forwards its
+/// `backgroundStyle` here, so the pie turns white on a selected row.
+final class PieProgressView: NSView {
+    var fraction: Double = 0 { didSet { if fraction != oldValue { needsDisplay = true } } }
+    @objc var backgroundStyle: NSView.BackgroundStyle = .normal { didSet { needsDisplay = true } }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let color: NSColor = backgroundStyle == .emphasized ? .alternateSelectedControlTextColor : .controlAccentColor
+        color.set()
+        let rect = bounds.insetBy(dx: 1, dy: 1)
+        let ring = NSBezierPath(ovalIn: rect.insetBy(dx: 0.5, dy: 0.5))
+        ring.lineWidth = 1
+        ring.stroke()
+
+        let clamped = min(max(fraction, 0), 1)
+        guard clamped > 0 else { return }
+        let center = NSPoint(x: rect.midX, y: rect.midY)
+        let radius = rect.width / 2 - 2
+        let pie = NSBezierPath()
+        pie.move(to: center)
+        pie.appendArc(withCenter: center, radius: radius, startAngle: 90,
+                      endAngle: 90 - 360 * clamped, clockwise: true)
+        pie.close()
+        pie.fill()
     }
 }
