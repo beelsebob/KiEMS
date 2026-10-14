@@ -104,12 +104,41 @@ typedef void (^EMSPipelineProgressHandler)(EMSPipelineProgress *progress);
 /// never redo work a *different* row already paid for -- e.g. asking for Results after Geometry has
 /// already been shown reuses that same sliced board/grid lines instead of re-slicing/re-gridding
 /// from scratch, and re-selecting an already-computed row is a pure, instant cache hit.
+/// How finely a run's field frames keep each full-resolution sample (see copper::FieldSamplePrecision).
+typedef NS_ENUM(NSInteger, EMSFieldFramePrecision) {
+    EMSFieldFramePrecisionInt8,
+    EMSFieldFramePrecisionInt12,
+    EMSFieldFramePrecisionFloat16,
+    EMSFieldFramePrecisionFloat32,
+};
+
+/// Which channels a run's field frames keep (see copper::FieldChannels).
+typedef NS_ENUM(NSInteger, EMSFieldFrameChannels) {
+    /// Ex, Ey, Ez, Hx, Hy and Hz.
+    EMSFieldFrameChannelsAllComponents,
+    /// Only the combined energy density.
+    EMSFieldFrameChannelsEnergy,
+};
+
 @interface EMSSimulationPipelineBridge : NSObject
 
 /// `runtime` is held for the bridge's lifetime -- it owns the KiCad board this pipeline loads.
 - (instancetype)initWithSimulationName:(NSString *)simulationName
                                runtime:(KicadRuntime *)runtime NS_DESIGNATED_INITIALIZER;
 - (instancetype)init NS_UNAVAILABLE;
+
+/// How the next Results run stores its field frames, read as each excited port's run starts.
+/// Defaults: Float32, all six channels, a frame every 1000 steps.
+@property (atomic) EMSFieldFramePrecision fieldFramePrecision;
+@property (atomic) EMSFieldFrameChannels fieldFrameChannels;
+/// Timesteps between stored frames (the first and last steps are always stored). Zero means one.
+@property (atomic) NSUInteger fieldFrameIntervalSteps;
+/// Where the next Results run writes its field frames: a `<seriesName>.kemsf` package inside this
+/// directory. Nil keeps them inside the document (ems/simulation/<name>/field_frames.kemsf).
+@property (atomic, copy, nullable) NSString *fieldFrameDirectory;
+/// The external package's name (without extension) when fieldFrameDirectory is set -- typically
+/// "<document> - <simulation>", so several documents can share one frame directory.
+@property (atomic, copy, nullable) NSString *fieldFrameSeriesName;
 
 /// Whether `stage`'s data is already cached -- a cheap, synchronous, main-thread-safe check that
 /// never touches the C++ pipeline. A caller can use this to decide whether a background dispatch
@@ -124,6 +153,10 @@ typedef void (^EMSPipelineProgressHandler)(EMSPipelineProgress *progress);
 /// Set by the first stage run when KiCad holds unsaved (autosaved) changes, or their check failed:
 /// what the run used instead of the saved files. Nil when the saved files were used as they are.
 - (nullable NSString *)kicadSourcesWarning;
+/// Why the last attempt to restore this simulation's saved results left it without any, or nil.
+- (nullable NSString *)savedResultsUnavailableReason;
+/// Set while the loaded results were saved under an older port numbering and renumbered to fit.
+- (nullable NSString *)renumberedResultsWarning;
 
 /// What the simulation runs' metal check found (see Simulation::writeMetalShortReport()): nets the
 /// solver's grid joins that the board keeps apart, one per line after a summary. Nil when none.
@@ -153,6 +186,16 @@ typedef void (^EMSPipelineProgressHandler)(EMSPipelineProgress *progress);
        kicadCliPath:(NSString *)kicadCliPath
            progress:(nullable EMSPipelineProgressHandler)progressHandler
               error:(NSError **)error;
+
+/// Restores whatever stages the document package saved whose cache inputs still match `config`
+/// (the same restore ensureStage: starts with) without computing anything further -- never runs
+/// geometry, grid or FDTD, though it does export and resolve the board the first time. Afterwards
+/// hasStage:EMSPipelineStageResults says whether valid saved results exist. Synchronous; callers
+/// must run this off the main thread.
+- (BOOL)restoreSavedStagesWithConfig:(EMSConfigBridge *)config
+                          packageDir:(NSString *)packageDir
+                        kicadCliPath:(NSString *)kicadCliPath
+                               error:(NSError **)error;
 
 /// Requests that an in-flight ensureStage: call on this pipeline stop as soon as possible --
 /// callable from any thread (JobScheduler calls it from the main thread while ensureStage: itself
@@ -195,6 +238,10 @@ typedef void (^EMSPipelineProgressHandler)(EMSPipelineProgress *progress);
 /// restored (e.g. after reopening), from the FDTD port data on disk. No new FDTD pass either way.
 /// A no-op if there are no results yet. Cheap, synchronous, main-thread safe.
 - (void)invalidatePostprocessing;
+/// Drops every loaded stage from memory, as -invalidateFromStage: would for Geometry, but keeps
+/// the saved products on disk so a later -restoreSavedStages: or job brings them back. For a
+/// pipeline no job is using -- e.g. one a report loaded only to read its results.
+- (void)releaseLoadedStages;
 
 /// Discards this stage and every stage after it (e.g. after an edit that could change the sliced
 /// geometry or FDTD results) -- the next ensureStage: call recomputes from here on. Cheap,

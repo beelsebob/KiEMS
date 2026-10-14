@@ -4,7 +4,9 @@ import Cocoa
 /// settings. Edits whichever simulation SimulationListViewController has selected (see
 /// setSelectedSimulationIndex) -- viaPlatingThickness/viaFillingEpsilon/frequencyStart/frequencyStop
 /// stay editable regardless (they're document-level, not per-simulation), but the rest disable
-/// themselves when nothing is selected.
+/// themselves when nothing is selected. For a Simulation Set template it shows only the Geometry
+/// and Resolution sections, below SimulationSetViewController, and its edits reach the generated
+/// simulations through the same callbacks (see DocumentWindowController).
 final class SimulationPropertiesViewController: NSViewController {
     /// The Info panel chooses which part of this controller is visible.  Keeping the controls in
     /// one controller means the Tests tab continues to edit the same simulation and notifications
@@ -140,6 +142,10 @@ final class SimulationPropertiesViewController: NSViewController {
     private var groundNetNames: [String] = []
     private var simulationSettingsStack: NSStackView?
     private var testsStack: NSStackView?
+    // Hidden for a Simulation Set template: it's named in the sidebar, and shows only the
+    // Geometry and Resolution sections its generated simulations share.
+    private var nameRow: NSView?
+    private var networksSection: NSView?
 
 
     init(document: Document) {
@@ -307,6 +313,8 @@ final class SimulationPropertiesViewController: NSViewController {
                 self.onResultsParametersChanged?(selectedIndex)
             }
         }
+        self.nameRow = nameRow
+        self.networksSection = networksSection
         let simulationViews = [nameRow, networksSection, geometrySection, resolutionSection]
         let simulationStack = NSStackView(views: simulationViews)
         simulationStack.orientation = .vertical
@@ -404,6 +412,10 @@ final class SimulationPropertiesViewController: NSViewController {
         updateDerivedTimingLabels()
         updateMarginWidthToolTip()
 
+        let isSimulationSet = selectedSimulation?.simulationSet != nil
+        nameRow?.isHidden = isSimulationSet
+        networksSection?.isHidden = isSimulationSet
+
         guard let sim = selectedSimulation else {
             nameField.stringValue = ""
             viaEdgeDistanceField.stringValue = ""
@@ -460,8 +472,19 @@ final class SimulationPropertiesViewController: NSViewController {
         reloadExcitationDuration(for: sim)
     }
 
+    /// A Simulation Set template has no excitation of its own: it shows the main excitations of the
+    /// simulations generated from it, and an edit sets the set's own duration for them (see
+    /// EMSSimulationSetBridge.excitationDuration).
     private func reloadExcitationDuration(for sim: EMSSimulationBridge) {
-        let durations = sim.excitations.filter(\.isMain).map(\.duration)
+        let mainExcitations: [EMSExcitationBridge]
+        if let identifier = sim.simulationSet?.identifier, let document {
+            mainExcitations = document.config.simulations
+                .filter { $0.generatedBySetIdentifier == identifier }
+                .flatMap { $0.excitations.filter(\.isMain) }
+        } else {
+            mainExcitations = sim.excitations.filter(\.isMain)
+        }
+        let durations = mainExcitations.map(\.duration)
         excitationDurationField.isEnabled = !durations.isEmpty
         if let first = durations.first, durations.allSatisfy({ $0 == first }) {
             excitationDurationField.doubleValue = first
@@ -609,8 +632,13 @@ final class SimulationPropertiesViewController: NSViewController {
         case excitationDurationField:
             // Only the postprocessed stimulus (see ExcitationPostprocessor) uses a main
             // excitation's duration, so this invalidates results, not the FDTD run.
-            for excitation in selectedSimulation?.excitations ?? [] where excitation.isMain {
-                excitation.duration = sender.doubleValue
+            if let sim = selectedSimulation, let set = sim.simulationSet {
+                set.excitationDuration = NSNumber(value: sender.doubleValue)
+                sim.simulationSet = set
+            } else {
+                for excitation in selectedSimulation?.excitations ?? [] where excitation.isMain {
+                    excitation.duration = sender.doubleValue
+                }
             }
             affectsResults = true
         case eyeDrawCountField:
@@ -661,7 +689,8 @@ final class SimulationPropertiesViewController: NSViewController {
         }
         document.updateChangeCount(.changeDone)
         if affectsAllGeometry {
-            for index in document.config.simulations.indices {
+            // A Simulation Set template never runs, and its generated simulations are among these.
+            for (index, simulation) in document.config.simulations.enumerated() where simulation.simulationSet == nil {
                 onGeometryParametersChanged?(index, reason)
             }
         } else if affectsGeometry, let selectedIndex {

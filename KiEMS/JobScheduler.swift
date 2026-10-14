@@ -68,6 +68,9 @@ final class Job {
     let kind: JobKind
     var status: JobStatus = .queued
     var progress: EMSPipelineProgress?
+    /// Every report since the current excitation's .settingUp, so a view that starts watching
+    /// mid-run (e.g. the energy-history chart) can rebuild what it missed.
+    private(set) var progressHistory: [EMSPipelineProgress] = []
     /// Set once, the moment this job transitions to .running (see JobScheduler.startNextIfIdle()), on
     /// JobScheduler.unpausedNow's clock -- the shared basis for estimatedSecondsRemaining below, so *any* observer (not just whichever
     /// tab VC originally requested this specific job) can show a live time estimate for whatever job
@@ -90,6 +93,11 @@ final class Job {
     /// JobScheduler.finishExecution(_:error:)), never before, so the invalidation can never race
     /// the background call that's still reading/writing the same pipeline state.
     fileprivate var pendingInvalidation: EMSPipelineStage?
+
+    fileprivate func recordProgress(_ progress: EMSPipelineProgress) {
+        if progress.phase == .settingUp { progressHistory.removeAll() }
+        progressHistory.append(progress)
+    }
 
     fileprivate init(document: Document, simulationName: String, kind: JobKind) {
         self.document = document
@@ -176,7 +184,25 @@ final class JobScheduler {
         changeObservers.append(observer)
     }
     private func notifyObservers() {
+        updatePowerActivity()
         for observer in changeObservers { observer() }
+    }
+
+    /// Held while a job is actually running (not while the queue is paused or idle) and the user
+    /// wants the Mac kept awake -- see PowerPreferences.
+    private var powerActivity: NSObjectProtocol?
+
+    /// Begins or ends `powerActivity` to match the current state. Main thread only, like every
+    /// other mutating method here; called on every change notification and when the preference flips.
+    func updatePowerActivity() {
+        let wanted = isExecuting && !isPaused && PowerPreferences.keepAwakeWhileJobsRun
+        if wanted, powerActivity == nil {
+            powerActivity = ProcessInfo.processInfo.beginActivity(
+                options: PowerPreferences.activityOptions, reason: "Running KiEMS simulation jobs")
+        } else if !wanted, let activity = powerActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            powerActivity = nil
+        }
     }
 
     /// The job (if any) for this exact (document, simulationName, kind) -- for a VC to check its own
@@ -459,6 +485,7 @@ final class JobScheduler {
         let config: EMSConfigBridge
         let packageDir: String
         let kicadCliPath: String
+        let documentName: String
     }
 
     /// Marks the next queued job `.running` and dispatches its execution, if nothing else is
@@ -485,7 +512,8 @@ final class JobScheduler {
         }
         let context = ExecutionContext(
             pipeline: document.pipeline(forSimulationNamed: next.simulationName), config: document.config,
-            packageDir: document.pipelineDirectory.path, kicadCliPath: AppPaths.resolveKicadCli())
+            packageDir: document.pipelineDirectory.path, kicadCliPath: AppPaths.resolveKicadCli(),
+            documentName: document.displayName)
         executionQueue.async { [weak self] in
             self?.execute(next, context: context)
         }
@@ -500,6 +528,9 @@ final class JobScheduler {
         switch job.kind {
         case .geometryGeneration, .simulation:
             let stage: EMSPipelineStage = job.kind == .geometryGeneration ? .grid : .results
+            // Settings' field-frame choices as they stand when this run starts.
+            FieldFramePreferences.apply(to: context.pipeline, documentName: context.documentName,
+                                       simulationName: job.simulationName)
             do {
                 try context.pipeline.ensureStage(
                     stage, config: context.config, packageDir: context.packageDir,
@@ -543,6 +574,7 @@ final class JobScheduler {
 
     private func updateProgress(_ job: Job, _ progress: EMSPipelineProgress) {
         job.progress = progress
+        job.recordProgress(progress)
         notifyObservers()
     }
 

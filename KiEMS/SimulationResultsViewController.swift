@@ -62,9 +62,17 @@ private final class DisclosureGraphView: NSStackView {
     }
 }
 
+/// One results section's heading and charts, before it's laid out -- on screen by
+/// SimulationResultsViewController.makeSection, or on a page by ResultsReport.
+struct ResultsSection {
+    var title: String
+    var graphs: [(title: String, view: NSView)]
+    var collapsedGraphs: [(title: String, view: NSView)] = []
+}
+
 /// Which group of charts is currently shown -- an NSSegmentedControl lets the user switch between
 /// them; only categories with at least one section to show ever appear (see showCategories).
-private enum ResultsCategory: CaseIterable {
+enum ResultsCategory: CaseIterable {
     case sParameters
     case eyeDiagrams
     case impedance
@@ -322,6 +330,21 @@ final class SimulationResultsViewController: NSViewController {
         staleResults[index] != nil
     }
 
+    /// What File > Save Report shows for `index`: its current results, or failing that the
+    /// out-of-date ones kept for display along with why they're out of date; nil without either.
+    func reportResults(forSimulationIndex index: Int) -> (preview: EMSResultsPreview, staleReasons: [String])? {
+        guard let document, index < document.config.simulations.count else { return nil }
+        if let preview = document.pipeline(forSimulationNamed: document.config.simulations[index].name).resultsPreview() {
+            return (preview, [])
+        }
+        return staleResults[index].map { ($0, staleReasons[index] ?? []) }
+    }
+
+    /// The error `index`'s last run failed with, if it did.
+    func runError(forSimulationIndex index: Int) -> String? {
+        errors[index]
+    }
+
     /// The banner's "Run Simulation" button: runs the full pipeline (geometry first if needed) in
     /// the background for whichever simulation is showing.
     private func runSimulation() {
@@ -561,6 +584,16 @@ final class SimulationResultsViewController: NSViewController {
             case .running, .cancelling:
                 if !wasRunning {
                     runningIndices.insert(index)
+                    // The job may have been running long before this VC saw it; rebuild the
+                    // energy history from every report it has made rather than starting mid-run.
+                    if let history = activeJob?.progressHistory {
+                        energyHistory[index] = []
+                        energyHistoryFullRunNanoseconds[index] = nil
+                        energyHistoryExcitationBands[index] = nil
+                        for progress in history where progress.phase == .simulation {
+                            recordEnergyHistory(progress, forSimulationIndex: index)
+                        }
+                    }
                     if currentIndex == index {
                         banner.showTransient(style: .success, title: "Simulation Started")
                     }
@@ -857,7 +890,8 @@ final class SimulationResultsViewController: NSViewController {
 
     // MARK: - Category/chart building
 
-    private func showCategories(for preview: EMSResultsPreview) {
+    /// The chart categories `preview` has anything to show for, in display order.
+    static func categories(for preview: EMSResultsPreview) -> [ResultsCategory] {
         var categories: [ResultsCategory] = []
         let hasDifferentialSParameters = preview.diffPairs.contains { $0.sdd11Db != nil || $0.sdd21Db != nil }
         let hasDifferentialImpedance = preview.diffPairs.contains {
@@ -870,6 +904,11 @@ final class SimulationResultsViewController: NSViewController {
         if !preview.smithCharts.isEmpty { categories.append(.smith) }
         if !preview.traces.isEmpty || hasDifferentialDelay { categories.append(.traceDelays) }
         if !preview.probes.isEmpty { categories.append(.probes) }
+        return categories
+    }
+
+    private func showCategories(for preview: EMSResultsPreview) {
+        let categories = Self.categories(for: preview)
         availableCategories = categories
 
         guard !categories.isEmpty else {
@@ -930,7 +969,7 @@ final class SimulationResultsViewController: NSViewController {
         let removalTime = Date().timeIntervalSince(removalStart)
         let buildStart = Date()
         #endif
-        let newSections = sections(for: selectedCategory, preview: preview)
+        let newSections = sections(for: selectedCategory, preview: preview).map(makeSection)
         for section in newSections {
             stack.addArrangedSubview(section)
             // See stack.alignment's own comment -- width isn't propagated automatically.
@@ -963,12 +1002,16 @@ final class SimulationResultsViewController: NSViewController {
         #endif
     }
 
-    private func sections(for category: ResultsCategory, preview: EMSResultsPreview) -> [NSView] {
+    /// The sections `category` shows for `preview`. `forReport` builds static charts for the PDF
+    /// report (see ResultsReport): every eye in each mode it has, with no mode switch, and nothing
+    /// collapsed.
+    func sections(for category: ResultsCategory, preview: EMSResultsPreview,
+                  forReport: Bool = false) -> [ResultsSection] {
         let freqGHz = preview.frequenciesGHz.map(\.doubleValue)
 
         switch category {
         case .sParameters:
-            var sections: [NSView] = preview.diffPairs.compactMap { pair in
+            var sections: [ResultsSection] = preview.diffPairs.compactMap { pair in
                 var curves: [ChartCurve] = []
                 if let sdd11 = pair.sdd11Db {
                     curves.append(ChartCurve(label: "Returned to Source", values: sdd11.map(\.doubleValue),
@@ -983,7 +1026,7 @@ final class SimulationResultsViewController: NSViewController {
                 chart.configure(yAxisLabel: "Magnitude (dB)", showsLabel: false)
                 // Matches postprocess.cpp's own renderDiffPairSParams ylim convention.
                 chart.setStyledCurves(xValuesGHz: freqGHz, curves: curves, minRange: (-60, 5))
-                return makeSection(title: pair.name, graphs: [("Magnitude (dB)", chart)])
+                return ResultsSection(title: pair.name, graphs: [("Magnitude (dB)", chart)])
             }
             sections += preview.sParamSets.map { set in
                 let magChart = MultiCurveLineChartView()
@@ -1025,7 +1068,7 @@ final class SimulationResultsViewController: NSViewController {
                 }
                 phaseChart.setStyledCurves(xValuesGHz: freqGHz, curves: phaseCurves)
 
-                return makeSection(
+                return ResultsSection(
                     title: "Excited Port: \(portDisplayName(index: set.excitedPort, preview: preview))",
                     graphs: [("Magnitude (dB)", magChart), ("Phase (°)", phaseChart)])
             }
@@ -1035,19 +1078,35 @@ final class SimulationResultsViewController: NSViewController {
             // Differential eyes first; stable within each group.
             let eyes = preview.eyeDiagrams.filter(\.isDifferential) + preview.eyeDiagrams.filter { !$0.isDifferential }
             return eyes.map { eye in
+                let kind = eye.isDifferential ? "Differential received signal" : "Received signal"
+                let rate = String(format: "%.4g Gb/s", eye.bitRateGbps)
+                let title = "\(eye.name) — \(kind), \(rate)"
+                if forReport {
+                    let noiseFree = AdversarialEyeView(eye: eye, showsAdversarial: false, showsModeControl: false,
+                                                       chartHeight: 380, usesPrintColors: true) { _ in }
+                    var graphs: [(title: String, view: NSView)] = [
+                        (eye.noise == nil ? "Eye Diagram" : "Eye Diagram, Noise-Free", noiseFree)]
+                    if eye.noise != nil {
+                        let noisy = AdversarialEyeView(eye: eye, showsAdversarial: true, showsModeControl: false,
+                                                    chartHeight: 380, usesPrintColors: true) { _ in }
+                        graphs.append(("Eye Diagram, With Adversarial Signals", noisy))
+                        if let convergence = noisy.makeConvergenceChart() {
+                            graphs.append(("Adversarial Draw Convergence", convergence))
+                        }
+                    }
+                    return ResultsSection(title: title, graphs: graphs)
+                }
                 let eyeView = AdversarialEyeView(eye: eye, showsAdversarial: showsAdversarialEyes) { [weak self] shows in
                     self?.showsAdversarialEyes = shows
                 }
-                let kind = eye.isDifferential ? "Differential received signal" : "Received signal"
-                let rate = String(format: "%.4g Gb/s", eye.bitRateGbps)
                 // Collapsed: it only matters when judging whether more draws are needed.
                 let convergence = eyeView.makeConvergenceChart().map { [("Adversarial Draw Convergence", $0)] } ?? []
-                return makeSection(title: "\(eye.name) — \(kind), \(rate)", graphs: [("Eye Diagram", eyeView)],
-                                   collapsedGraphs: convergence)
+                return ResultsSection(title: title, graphs: [("Eye Diagram", eyeView)],
+                                      collapsedGraphs: convergence)
             }
 
         case .impedance:
-            var sections: [NSView] = preview.diffPairs.compactMap { pair in
+            var sections: [ResultsSection] = preview.diffPairs.compactMap { pair in
                 guard let mag = pair.impedanceMagnitudeOhm, let angle = pair.impedanceAngleDeg else { return nil }
                 let magnitudeChart = MultiCurveLineChartView()
                 magnitudeChart.configure(yAxisLabel: "Magnitude (Ω)", showsLabel: false)
@@ -1064,7 +1123,7 @@ final class SimulationResultsViewController: NSViewController {
                     curves: [(label: "Phase", values: angle.map(\.doubleValue))],
                     minRange: (-90, 90))
 
-                return makeSection(title: pair.name,
+                return ResultsSection(title: pair.name,
                                    graphs: [("Magnitude (Ω)", magnitudeChart), ("Phase (°)", phaseChart)])
             }
             // Per net (a direct characteristic-impedance measurement from one or more non-loading
@@ -1083,7 +1142,7 @@ final class SimulationResultsViewController: NSViewController {
                     xValuesGHz: freqGHz,
                     probeCurves: zip(probeLabels, probeMagnitudes).map { ($0, $1) },
                     averageLabel: "Average |Z|", average: magStats.average, band: magStats.band,
-                    minRange: (0, 100), xAxisLabel: nil)
+                    minRange: (0, 100), xAxisLabel: nil, drawsAverageOnTop: forReport)
 
                 let angleChart = MultiCurveLineChartView()
                 angleChart.configure(yAxisLabel: "Phase (°)", showsLabel: false)
@@ -1092,11 +1151,11 @@ final class SimulationResultsViewController: NSViewController {
                     xValuesGHz: freqGHz,
                     probeCurves: zip(probeLabels, probeAngles).map { ($0, $1) },
                     averageLabel: "Average arg(Z)", average: angleStats.average, band: angleStats.band,
-                    minRange: (-90, 90))
+                    minRange: (-90, 90), drawsAverageOnTop: forReport)
 
                 // Matches postprocess.cpp's own two vertically stacked impedance subplots and its
                 // 0...100Ω / ±90° minimum display ranges.
-                return makeSection(title: "Net: \(netImpedance.netName)",
+                return ResultsSection(title: "Net: \(netImpedance.netName)",
                                    graphs: [("Magnitude (Ω)", magnitudeChart), ("Phase (°)", angleChart)])
             }
             return sections
@@ -1106,12 +1165,12 @@ final class SimulationResultsViewController: NSViewController {
                 let chart = SmithChartView()
                 chart.setData(port: smith.port, reGamma: smith.reGamma.map(\.doubleValue),
                                imGamma: smith.imGamma.map(\.doubleValue), vswrMarginGamma: smith.vswrMarginGamma)
-                return makeSection(title: "Port: \(portDisplayName(index: smith.port, preview: preview))",
+                return ResultsSection(title: "Port: \(portDisplayName(index: smith.port, preview: preview))",
                                    graphs: [("Smith Chart", chart)])
             }
 
         case .traceDelays:
-            var sections: [NSView] = preview.diffPairs.compactMap { pair in
+            var sections: [ResultsSection] = preview.diffPairs.compactMap { pair in
                 var curves: [(label: String, values: [Double])] = []
                 if let n = pair.nDelayNs { curves.append((label: "N", values: n.map(\.doubleValue))) }
                 if let p = pair.pDelayNs { curves.append((label: "P", values: p.map(\.doubleValue))) }
@@ -1119,13 +1178,13 @@ final class SimulationResultsViewController: NSViewController {
                 let chart = MultiCurveLineChartView()
                 chart.configure(yAxisLabel: "Delay (ns)", showsLabel: false)
                 chart.setCurves(xValuesGHz: freqGHz, curves: curves)
-                return makeSection(title: pair.name, graphs: [("Delay (ns)", chart)])
+                return ResultsSection(title: pair.name, graphs: [("Delay (ns)", chart)])
             }
             sections += preview.traces.map { trace in
                 let chart = MultiCurveLineChartView()
                 chart.configure(yAxisLabel: "Delay (ns)", showsLabel: false)
                 chart.setCurves(xValuesGHz: freqGHz, curves: [(label: trace.name, values: trace.delayNs.map(\.doubleValue))])
-                return makeSection(title: trace.name, graphs: [("Delay (ns)", chart)])
+                return ResultsSection(title: trace.name, graphs: [("Delay (ns)", chart)])
             }
             return sections
 
@@ -1144,13 +1203,13 @@ final class SimulationResultsViewController: NSViewController {
                     xValuesGHz: freqGHz,
                     curves: transferCurves,
                     minRange: Self.nonnegativeMagnitudeRange(for: transferCurves.map { $0.values }))
-                return makeSection(title: "Probe: \(probe.name)", graphs: [("|V / V_inc|", transferChart)])
+                return ResultsSection(title: "Probe: \(probe.name)", graphs: [("|V / V_inc|", transferChart)])
             }
         }
     }
 
-    private func makeSection(title: String, graphs: [(title: String, view: NSView)],
-                             collapsedGraphs: [(title: String, view: NSView)] = []) -> NSView {
+    private func makeSection(_ section: ResultsSection) -> NSView {
+        let (title, graphs, collapsedGraphs) = (section.title, section.graphs, section.collapsedGraphs)
         // Result headings frequently embed a net name inside surrounding context ("Net: …",
         // "Excited Port: …", differential-pair labels, and eye/probe descriptions). Route the
         // complete heading through the shared net-name renderer so KiCad sub/superscript,

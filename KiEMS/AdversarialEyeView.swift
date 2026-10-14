@@ -22,12 +22,22 @@ final class AdversarialEyeView: NSStackView {
     private let stabilityLabel = NSTextField(wrappingLabelWithString: "")
     private let statisticsGrid = NSGridView(numberOfColumns: 2, rows: 0)
     private let onModeChanged: (Bool) -> Void
+    /// Green for a pass: ResultsReport's darker one when printing.
+    private let passColor: NSColor
+    /// Red for a failure, likewise.
+    private let failColor: NSColor
 
     /// `showsAdversarial` picks the initial mode; `onModeChanged` reports the user's later choices
     /// so the owner can carry them over to the next eyes it builds.
-    init(eye: EMSResultsEyeDiagram, showsAdversarial: Bool, onModeChanged: @escaping (Bool) -> Void) {
+    /// `showsModeControl` false leaves out the mode switch and `chartHeight` replaces the chart's
+    /// own height, for a fixed rendering such as the PDF report's, and `usesPrintColors` colours the
+    /// traces for paper.
+    init(eye: EMSResultsEyeDiagram, showsAdversarial: Bool, showsModeControl: Bool = true,
+         chartHeight: CGFloat? = nil, usesPrintColors: Bool = false, onModeChanged: @escaping (Bool) -> Void) {
         self.eye = eye
         self.onModeChanged = onModeChanged
+        passColor = usesPrintColors ? ResultsReport.passGreen : .systemGreen
+        failColor = usesPrintColors ? ResultsReport.failRed : .systemRed
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         orientation = .vertical
@@ -60,7 +70,13 @@ final class AdversarialEyeView: NSStackView {
             modeControl.target = self
             modeControl.action = #selector(modeChanged)
             modeControl.selectedSegment = showsAdversarial ? 1 : 0
-            addArrangedSubview(modeControl)
+            if showsModeControl {
+                addArrangedSubview(modeControl)
+            }
+        }
+        chart.usesPrintColors = usesPrintColors
+        if let chartHeight {
+            chart.constraints.first { $0.firstAttribute == .height && $0.secondItem == nil }?.constant = chartHeight
         }
         addArrangedSubview(maskRow)
         addArrangedSubview(chart)
@@ -164,7 +180,7 @@ final class AdversarialEyeView: NSStackView {
         stabilityLabel.isHidden = false
         if stable {
             stabilityLabel.stringValue = "Stable: the replicates agree to within \(percent)% of the opening."
-            stabilityLabel.textColor = .systemGreen
+            stabilityLabel.textColor = passColor
         } else {
             stabilityLabel.stringValue = "Not yet stable: the replicates differ by more than \(percent)% of " +
                 "the opening. Increase Adversarial Draws in the simulation's properties."
@@ -220,8 +236,8 @@ final class AdversarialEyeView: NSStackView {
     private func showMaskIcon(failed: Bool) {
         let symbol = failed ? "exclamationmark.octagon.fill" : "checkmark.circle.fill"
         maskIcon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: failed ? "Failed" : "Passed")
-        maskIcon.contentTintColor = failed ? .systemRed : .systemGreen
-        maskLabel.textColor = failed ? .systemRed : .systemGreen
+        maskIcon.contentTintColor = failed ? failColor : passColor
+        maskLabel.textColor = failed ? failColor : passColor
     }
 
     /// The figures a receiver specification is usually written against, as a two-column table.

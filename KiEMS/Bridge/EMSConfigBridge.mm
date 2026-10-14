@@ -2,6 +2,10 @@
 #import "EMSConfigBridge+Private.h"
 
 #include <algorithm>
+#include <CommonCrypto/CommonDigest.h>
+#include <fstream>
+#include <iterator>
+#include <optional>
 #include "kiems/component_value.hpp"
 
 using kiems::EMSConfig;
@@ -96,6 +100,24 @@ static_assert(static_cast<NSInteger>(kiems::EyeMaskStandard::Lpddr5) == EMSEyeMa
 @end
 
 namespace {
+
+std::string sha256Hex(const std::string& data) {
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(data.data(), static_cast<CC_LONG>(data.size()), digest);
+    static constexpr char hex[] = "0123456789abcdef";
+    std::string out;
+    for (unsigned char byte : digest) {
+        out.push_back(hex[byte >> 4]);
+        out.push_back(hex[byte & 0xF]);
+    }
+    return out;
+}
+
+std::optional<std::string> readFileDigest(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in.is_open()) return std::nullopt;
+    return sha256Hex(std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()));
+}
 
 NSError* makeError(const std::string& message) {
     return [NSError errorWithDomain:EMSConfigErrorDomain
@@ -540,6 +562,7 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
         _phaseDegrees = set.phaseDegrees;
         _amplitude = set.amplitude;
         _driveImpedance = set.driveImpedance;
+        _excitationDuration = set.excitationDuration ? @(*set.excitationDuration) : nil;
         _probed = set.probed;
         _probeNetImpedance = set.probeNetImpedance;
         _absorbing = set.absorbing;
@@ -566,6 +589,7 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
     set.phaseDegrees = _phaseDegrees;
     set.amplitude = _amplitude;
     set.driveImpedance = _driveImpedance;
+    if (_excitationDuration) set.excitationDuration = _excitationDuration.doubleValue;
     set.probed = _probed;
     set.probeNetImpedance = _probeNetImpedance;
     set.absorbing = _absorbing;
@@ -967,6 +991,31 @@ std::vector<std::string> toStdStringVector(NSArray<NSString*>* values) {
     EMSConfigBridge* bridge = [[EMSConfigBridge alloc] init];
     bridge->_config = std::move(*result);
     return bridge;
+}
+
+- (NSDictionary<NSString*, NSString*>*)completionFingerprints {
+    NSMutableDictionary<NSString*, NSString*>* fingerprints = [NSMutableDictionary dictionary];
+    if (!_config.kicadPcbPath().has_value()) return fingerprints;
+    const std::filesystem::path boardPath = *_config.kicadPcbPath();
+    const auto board = readFileDigest(boardPath);
+    if (!board.has_value()) return fingerprints;
+    const auto project = readFileDigest(std::filesystem::path(boardPath).replace_extension(".kicad_pro"));
+    // Bump when something these digests don't cover starts changing what a run produces.
+    std::string header = "KiEMS-completion-v1\nboard " + *board + "\nproject " + project.value_or("none") + "\n";
+
+    nlohmann::json shared = _config.toJson();
+    const nlohmann::json simulations = shared["simulations"];
+    shared.erase("simulations");
+    header += shared.dump() + "\n";
+    for (const auto& simulation : simulations) {
+        if (!simulation.is_object() || !simulation.contains("name") || simulation.contains("simulation_set")) continue;
+        nlohmann::json own = simulation;
+        for (const char* key : {"eye_bit_rate", "eye_draw_count", "adversarial_shared_clock", "eye_test"}) {
+            own.erase(key);
+        }
+        fingerprints[@(simulation["name"].get<std::string>().c_str())] = @(sha256Hex(header + own.dump()).c_str());
+    }
+    return fingerprints;
 }
 
 - (BOOL)saveToFile:(NSString*)path error:(NSError**)error {

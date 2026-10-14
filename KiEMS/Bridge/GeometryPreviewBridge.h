@@ -284,4 +284,12 @@ typedef NS_ENUM(NSInteger, EMSGeometryTriangleKind) {
 - (void)mergeLoadedPreview:(EMSGeometryPreview *)preview;
 @end
 
+@interface EMSGeometryPreview (Archiving)
+/// A self-contained, compressed binary copy of this preview -- written into a `.kemsf` field-frame
+/// package so its fields can be played back over the board without the original document.
+- (nullable NSData *)archivedData;
+/// Reads archivedData back; nil if `data` is not a (compatible) geometry archive.
++ (nullable instancetype)previewWithArchivedData:(NSData *)data;
+@end
+
 NS_ASSUME_NONNULL_END

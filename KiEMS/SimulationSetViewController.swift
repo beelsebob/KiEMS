@@ -1,8 +1,8 @@
 import Cocoa
 
-/// The Info column's Simulation Set setup, shown in place of SimulationPropertiesViewController when
-/// a Simulation Set is selected in the sidebar and nothing is picked on the board (see
-/// WholeBoardViewController.updateConfigurationControls()). Edits the set's
+/// The Info column's Simulation Set setup, shown above SimulationPropertiesViewController's Geometry
+/// and Resolution sections when a Simulation Set is selected in the sidebar and nothing is picked
+/// on the board (see WholeBoardViewController.updateConfigurationControls()). Edits the set's
 /// EMSSimulationSetBridge -- which pin of which IC is excited, and which pins of other ICs are
 /// probed -- and reports each edit through onChanged, which regenerates the set's simulations.
 final class SimulationSetViewController: NSViewController {

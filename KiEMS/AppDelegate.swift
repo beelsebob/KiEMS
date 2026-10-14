@@ -20,6 +20,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         super.init()
     }
 
+    /// Created on first use and kept, so reopening Settings shows the same window.
+    private lazy var settingsWindowController = SettingsWindowController()
+
+    @objc func showSettings(_ sender: Any?) {
+        settingsWindowController.showWindow(sender)
+        settingsWindowController.window?.makeKeyAndOrderFront(sender)
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         Document.removeStaleScratchDirectories()
         NSApp.mainMenu = buildMainMenu()
@@ -30,7 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if JobScheduler.shared.jobs.contains(where: { $0.status == .running || $0.status == .cancelling }) {
             for window in sender.windows where window.isVisible {
-                window.contentView = Self.stoppingJobsView()
+                Self.showStoppingJobsOverlay(in: window)
             }
         }
         JobScheduler.shared.shutDown {
@@ -39,8 +47,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateLater
     }
 
-    /// Shown in place of every window's content while quitting waits for a running job to stop.
-    private static func stoppingJobsView() -> NSView {
+    /// Covers a window while quitting waits for a running job to stop.  This must remain an
+    /// overlay rather than replacing `window.contentView`: a document window's content-view
+    /// controller is an NSSplitViewController, and AppKit still consults that controller's
+    /// sidebar/title-bar state during the termination layout pass.  Replacing its content view
+    /// left those two sides out of sync and could make NSTitlebarView send a private sidebar
+    /// selector to the wrong view while quitting.
+    private static func showStoppingJobsOverlay(in window: NSWindow) {
+        guard let contentView = window.contentView,
+              !contentView.subviews.contains(where: {
+                  $0.identifier == NSUserInterfaceItemIdentifier("KiEMSStoppingJobsOverlay")
+              })
+        else { return }
+
         let label = NSTextField(labelWithString: "Stopping Jobs…")
         label.font = .systemFont(ofSize: 28, weight: .semibold)
         let spinner = NSProgressIndicator()
@@ -52,13 +71,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         stack.orientation = .vertical
         stack.spacing = 16
         stack.translatesAutoresizingMaskIntoConstraints = false
-        let container = NSView()
+        let container = NSVisualEffectView()
+        container.identifier = NSUserInterfaceItemIdentifier("KiEMSStoppingJobsOverlay")
+        container.material = .underWindowBackground
+        container.blendingMode = .withinWindow
+        container.state = .active
+        container.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(stack)
+        contentView.addSubview(container)
         NSLayoutConstraint.activate([
+            container.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            container.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            container.topAnchor.constraint(equalTo: contentView.topAnchor),
+            container.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
             stack.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             stack.centerYAnchor.constraint(equalTo: container.centerYAnchor),
         ])
-        return container
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -74,6 +102,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenuItem.submenu = appMenu
         appMenu.addItem(withTitle: "About KiEMS",
                          action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(withTitle: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",")
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Quit KiEMS", action: #selector(NSApplication.terminate(_:)),
                          keyEquivalent: "q")
@@ -103,6 +133,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fileMenu.addItem(NSMenuItem.separator())
         fileMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         fileMenu.addItem(withTitle: "Save", action: #selector(NSDocument.save(_:)), keyEquivalent: "s")
+        fileMenu.addItem(withTitle: "Save Report…", action: #selector(DocumentWindowController.saveReport(_:)),
+                         keyEquivalent: "")
         fileMenu.addItem(NSMenuItem.separator())
         // No explicit target -- routed through the responder chain to the frontmost document
         // window's own DocumentWindowController, same as Close/Save above (see

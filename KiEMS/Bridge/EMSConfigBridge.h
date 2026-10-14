@@ -273,6 +273,8 @@ typedef NS_ENUM(NSInteger, EMSEyeMaskStandard) {
 @property (nonatomic) double phaseDegrees;
 @property (nonatomic) double amplitude;
 @property (nonatomic) double driveImpedance;
+/// Every generated main excitation's duration, in seconds; nil leaves each with its default.
+@property (nonatomic, nullable) NSNumber *excitationDuration;
 @property (nonatomic) BOOL probed;
 @property (nonatomic) BOOL probeNetImpedance;
 @property (nonatomic) BOOL absorbing;
@@ -415,6 +417,13 @@ typedef NS_ENUM(NSInteger, EMSEyeMaskStandard) {
 + (instancetype)configWithDefaults;
 + (nullable instancetype)configWithContentsOfFile:(NSString *)path error:(NSError **)error;
 - (BOOL)saveToFile:(NSString *)path error:(NSError **)error;
+
+/// Simulation name -> a digest of everything a simulation's saved geometry and results depend on
+/// that's known without loading the board: the document-wide settings, that simulation's own
+/// settings (less its eye analysis, which is re-run on saved results) and the linked board and
+/// project files. Equal digests mean a completion recorded under one still holds. Simulation Set
+/// templates are left out. Empty when no board is linked or it can't be read.
+- (NSDictionary<NSString *, NSString *> *)completionFingerprints;
 
 /// The .kicad_pcb this document is linked to -- nil until the board picker sets it. See
 /// kiems::EMSConfig::kicadPcbPath()'s doc comment for why this is a stored path rather than a

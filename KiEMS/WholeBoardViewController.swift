@@ -27,8 +27,9 @@ final class WholeBoardViewController: NSViewController {
     /// Takes the Info column over while Board Setup is selected in the sidebar -- see setBoardSetupMode.
     private let boardSetupViewController: BoardSetupViewController
     private var isBoardSetupMode = false
-    /// Takes the Info column over (in place of propertiesViewController) while a Simulation Set is
-    /// selected and nothing is picked on the board.
+    /// Shown while a Simulation Set is selected and nothing is picked on the board: the set's own
+    /// setup, above propertiesViewController's Geometry and Resolution sections, which the
+    /// simulations generated from it share.
     private let simulationSetViewController: SimulationSetViewController
     private let boardView = GeometryView()
     private let detailFont = NSFont.systemFont(ofSize: 13)
@@ -427,21 +428,44 @@ final class WholeBoardViewController: NSViewController {
         infoStack.setCustomSpacing(10, after: netHeading)
         infoStack.setCustomSpacing(12, after: netControls)
         infoStack.setCustomSpacing(10, after: netClassHeading)
-        infoStack.translatesAutoresizingMaskIntoConstraints = false
-        infoPanel.addSubview(infoStack)
 
-        // Shown instead of infoStack whenever nothing's selected on the board -- see
-        // updateConfigurationControls(). The exact same instance/state DocumentWindowController
-        // itself wires up (name/ground-net/frequency/etc. edits, net-list refreshes on board link) --
-        // reparented here, not a second one, so none of that wiring needs duplicating.
-        propertiesViewController.view.translatesAutoresizingMaskIntoConstraints = false
-        infoPanel.addSubview(propertiesViewController.view)
-        boardSetupViewController.view.translatesAutoresizingMaskIntoConstraints = false
+        // Shown below infoStack (whose board-selection controls are then hidden) -- see
+        // updateConfigurationControls(). propertiesViewController is the exact same instance/state
+        // DocumentWindowController itself wires up (name/ground-net/frequency/etc. edits, net-list
+        // refreshes on board link) -- reparented here, not a second one, so none of that wiring
+        // needs duplicating. A Simulation Set shows its own setup first, then the settings its
+        // generated simulations share. Hidden ones drop out of the stack.
         boardSetupViewController.view.isHidden = true
-        infoPanel.addSubview(boardSetupViewController.view)
-        simulationSetViewController.view.translatesAutoresizingMaskIntoConstraints = false
         simulationSetViewController.view.isHidden = true
-        infoPanel.addSubview(simulationSetViewController.view)
+        let settingsStack = NSStackView(views: [boardSetupViewController.view, simulationSetViewController.view,
+                                                propertiesViewController.view])
+        settingsStack.orientation = .vertical
+        settingsStack.alignment = .leading
+        settingsStack.spacing = 14
+        for settingsView in settingsStack.arrangedSubviews {
+            settingsView.widthAnchor.constraint(equalTo: settingsStack.widthAnchor).isActive = true
+        }
+
+        // Everything below the tabs scrolls: a Simulation Set's setup and probes, above the
+        // settings its simulations share, is taller than a small window.
+        let infoContent = NSStackView(views: [infoStack, settingsStack])
+        infoContent.orientation = .vertical
+        infoContent.alignment = .leading
+        infoContent.spacing = 10
+        infoContent.translatesAutoresizingMaskIntoConstraints = false
+        infoStack.widthAnchor.constraint(equalTo: infoContent.widthAnchor).isActive = true
+        settingsStack.widthAnchor.constraint(equalTo: infoContent.widthAnchor).isActive = true
+        let infoDocument = FlippedView()
+        infoDocument.translatesAutoresizingMaskIntoConstraints = false
+        infoDocument.addSubview(infoContent)
+        let infoScrollView = NSScrollView()
+        infoScrollView.drawsBackground = false
+        infoScrollView.borderType = .noBorder
+        infoScrollView.hasVerticalScroller = true
+        infoScrollView.autohidesScrollers = true
+        infoScrollView.translatesAutoresizingMaskIntoConstraints = false
+        infoScrollView.documentView = infoDocument
+        infoPanel.addSubview(infoScrollView)
 
         boardView.contextMenuForSelection = { [weak self] selection in
             self?.contextMenu(for: selection)
@@ -481,9 +505,17 @@ final class WholeBoardViewController: NSViewController {
             infoTabs.leadingAnchor.constraint(equalTo: infoPanel.leadingAnchor, constant: 10),
             infoTabs.trailingAnchor.constraint(equalTo: infoPanel.trailingAnchor, constant: -10),
 
-            infoStack.topAnchor.constraint(equalTo: infoTabs.bottomAnchor, constant: 12),
-            infoStack.leadingAnchor.constraint(equalTo: infoPanel.leadingAnchor, constant: 10),
-            infoStack.trailingAnchor.constraint(equalTo: infoPanel.trailingAnchor, constant: -10),
+            infoScrollView.topAnchor.constraint(equalTo: infoTabs.bottomAnchor, constant: 12),
+            infoScrollView.leadingAnchor.constraint(equalTo: infoPanel.leadingAnchor),
+            infoScrollView.trailingAnchor.constraint(equalTo: infoPanel.trailingAnchor),
+            infoScrollView.bottomAnchor.constraint(equalTo: infoPanel.bottomAnchor),
+            infoDocument.topAnchor.constraint(equalTo: infoScrollView.contentView.topAnchor),
+            infoDocument.leadingAnchor.constraint(equalTo: infoScrollView.contentView.leadingAnchor),
+            infoDocument.widthAnchor.constraint(equalTo: infoScrollView.contentView.widthAnchor),
+            infoContent.topAnchor.constraint(equalTo: infoDocument.topAnchor),
+            infoContent.leadingAnchor.constraint(equalTo: infoDocument.leadingAnchor, constant: 10),
+            infoContent.trailingAnchor.constraint(equalTo: infoDocument.trailingAnchor, constant: -10),
+            infoContent.bottomAnchor.constraint(equalTo: infoDocument.bottomAnchor, constant: -12),
             infoHeader.widthAnchor.constraint(equalTo: infoStack.widthAnchor),
             pinSeparator.widthAnchor.constraint(equalTo: infoStack.widthAnchor),
             componentModelErrorBox.widthAnchor.constraint(equalTo: infoStack.widthAnchor),
@@ -499,26 +531,6 @@ final class WholeBoardViewController: NSViewController {
             durationRow.widthAnchor.constraint(equalTo: infoStack.widthAnchor, constant: -16),
             pinImpedanceRow.widthAnchor.constraint(equalTo: infoStack.widthAnchor),
             pinLoadCapacitanceRow.widthAnchor.constraint(equalTo: infoStack.widthAnchor),
-
-            // Below infoStack's own bottom, not infoPanel's top directly -- infoStack's "Info"/
-            // "Simulation" title (infoTitle) stays visible even while the rest of infoStack is
-            // hidden in settings mode (see updateConfigurationControls()), so anchoring here (rather
-            // than to infoPanel.topAnchor, which would start at the same Y as that still-visible
-            // title) is what keeps propertiesViewController.view's own first row ("Name") from
-            // drawing right on top of it. infoStack collapses to roughly infoTitle's own height once
-            // its other children are hidden, so this still sits directly under the title, not with a
-            // large gap.
-            propertiesViewController.view.topAnchor.constraint(equalTo: infoStack.bottomAnchor, constant: 10),
-            propertiesViewController.view.leadingAnchor.constraint(equalTo: infoPanel.leadingAnchor, constant: 10),
-            propertiesViewController.view.trailingAnchor.constraint(equalTo: infoPanel.trailingAnchor, constant: -10),
-
-            boardSetupViewController.view.topAnchor.constraint(equalTo: infoStack.bottomAnchor, constant: 10),
-            boardSetupViewController.view.leadingAnchor.constraint(equalTo: infoPanel.leadingAnchor, constant: 10),
-            boardSetupViewController.view.trailingAnchor.constraint(equalTo: infoPanel.trailingAnchor, constant: -10),
-
-            simulationSetViewController.view.topAnchor.constraint(equalTo: infoStack.bottomAnchor, constant: 10),
-            simulationSetViewController.view.leadingAnchor.constraint(equalTo: infoPanel.leadingAnchor, constant: 10),
-            simulationSetViewController.view.trailingAnchor.constraint(equalTo: infoPanel.trailingAnchor, constant: -10),
         ])
         view = container
     }
@@ -881,6 +893,11 @@ final class WholeBoardViewController: NSViewController {
                     probeNet.setLoadCapacitance(probe.probe.loadCapacitance, withFootprint: probeReference,
                                                 pin: probePin.number)
                 }
+            }
+        }
+        if let duration = set.excitationDuration?.doubleValue {
+            for excitation in simulation.excitations where excitation.isMain {
+                excitation.duration = duration
             }
         }
     }
@@ -1457,13 +1474,13 @@ final class WholeBoardViewController: NSViewController {
             infoHeader.isHidden = false
             let section: SimulationPropertiesViewController.DisplaySection =
                 selectedInfoTab == .simulation ? .simulation : .tests
-            propertiesViewController.view.isHidden = isSimulationSet
+            // A set's Tests are its own (copied to its generated simulations, see
+            // SimulationSetViewController.onEyeTestChanged); its Simulation tab adds the shared
+            // Geometry and Resolution sections below its setup.
+            propertiesViewController.view.isHidden = isSimulationSet && section == .tests
             simulationSetViewController.view.isHidden = !isSimulationSet
-            if isSimulationSet {
-                simulationSetViewController.setDisplaySection(section)
-            } else {
-                propertiesViewController.setDisplaySection(section)
-            }
+            simulationSetViewController.setDisplaySection(section)
+            propertiesViewController.setDisplaySection(section)
             return
         }
         includedCheckbox.isEnabled = false
@@ -3070,10 +3087,13 @@ final class WholeBoardViewController: NSViewController {
     }
 
     func setSelectedSimulationIndex(_ index: Int?) {
-        selectedSimulationIndex = index
         // Entering a simulation starts on its simulation-wide settings, unless a board item is
-        // already selected, in which case that item's controls remain frontmost.
-        selectInfoTab(selection == nil ? .simulation : .selection)
+        // already selected, in which case that item's controls remain frontmost. Reselecting the
+        // same one (a Simulation Set reselects its template after every edit) keeps the tab.
+        if index != selectedSimulationIndex {
+            selectInfoTab(selection == nil ? .simulation : .selection)
+        }
+        selectedSimulationIndex = index
         simulationSetViewController.setSimulationIndex(index)
         updateConfigurationControls()
         refreshActivityHighlight()
@@ -3265,4 +3285,9 @@ private final class ClosureMenuItem: NSMenuItem {
     @objc private func run() {
         handler()
     }
+}
+
+/// A scroll view's document view that lays its content out from the top.
+private final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
 }

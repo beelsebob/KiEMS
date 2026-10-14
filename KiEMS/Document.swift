@@ -15,6 +15,25 @@ final class Document: NSDocument {
     private(set) var packageURL: URL?
     private(set) var config: EMSConfigBridge = .configWithDefaults()
 
+    /// One simulation's entry in the package's completion.json: what had finished when it was saved,
+    /// valid only while EMSConfigBridge.completionFingerprints still gives the same `fingerprint`.
+    /// Lets a reopened document show its finished rows without loading the board or saved stages.
+    struct Completion: Codable, Equatable {
+        var fingerprint: String
+        var geometry: Bool
+        var results: Bool
+        var testsFailed: Bool
+    }
+    private static let completionFileName = "completion.json"
+    /// completion.json as read from the package, keyed by simulation name.
+    private(set) var savedCompletions: [String: Completion] = [:]
+    /// Whether the package had a completion.json -- one saved before it existed needs its saved
+    /// stages restored once to find out what had finished (see recordCompletions()).
+    private(set) var hasCompletionRecord = false
+    /// What has finished now, by simulation name, without fingerprints -- supplied by the window
+    /// controller, whose sidebar tracks it, and recorded on every save.
+    var currentCompletions: (() -> [String: (geometry: Bool, results: Bool, testsFailed: Bool)])?
+
     /// Where the geometry/simulation pipeline writes its fab/ems output -- see pipelineDirectory.
     /// Lives for this Document object's whole lifetime, saved or not: the pipeline (kicad-cli,
     /// kiems_fdtd_worker) never writes into the real package directly, only
@@ -114,6 +133,11 @@ final class Document: NSDocument {
         }
         let configURL = url.appendingPathComponent("simulation.json")
         config = try EMSConfigBridge.config(withContentsOfFile: configURL.path)
+        // Best-effort: without it every row just starts not run.
+        if let data = try? Data(contentsOf: url.appendingPathComponent(Self.completionFileName)) {
+            savedCompletions = (try? JSONDecoder().decode([String: Completion].self, from: data)) ?? [:]
+            hasCompletionRecord = true
+        }
         packageURL = url
     }
 
@@ -122,7 +146,34 @@ final class Document: NSDocument {
         let configURL = url.appendingPathComponent("simulation.json")
         try config.save(toFile: configURL.path)
         migrateScratchDirectory(into: url)
+        writeCompletions(into: url)
         packageURL = url
+    }
+
+    /// Writes completion.json into the saved package now, rather than at the next save -- for a
+    /// package that predates it, once its saved stages have been restored. A no-op if never saved.
+    func recordCompletions() {
+        guard let packageURL else { return }
+        writeCompletions(into: packageURL)
+    }
+
+    /// Records what has finished alongside the saved stages migrateScratchDirectory just copied in.
+    private func writeCompletions(into url: URL) {
+        let fileURL = url.appendingPathComponent(Self.completionFileName)
+        let fingerprints = config.completionFingerprints()
+        var completions: [String: Completion] = [:]
+        for (name, state) in currentCompletions?() ?? [:] where state.geometry || state.results {
+            guard let fingerprint = fingerprints[name] else { continue }
+            completions[name] = Completion(fingerprint: fingerprint, geometry: state.geometry,
+                                           results: state.results, testsFailed: state.testsFailed)
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let data = try? encoder.encode(completions) {
+            try? data.write(to: fileURL, options: .atomic)
+        }
+        savedCompletions = completions
+        hasCompletionRecord = true
     }
 
     /// Where the geometry/simulation pipeline should write its fab/ems output: always a private

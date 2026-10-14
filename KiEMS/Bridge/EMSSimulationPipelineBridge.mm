@@ -6,6 +6,9 @@
 #import "SimulationResultsBridge+Private.h"
 
 #include <CommonCrypto/CommonDigest.h>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
@@ -14,6 +17,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <regex>
 #include <set>
@@ -184,6 +188,28 @@ std::optional<std::string> pipelineCacheInputs(const PathsConfig& paths) {
            (project.has_value() ? sha256Hex(*project) : std::string("none")) + "\n" + *config;
 }
 
+// Every pipeline of a document shares its scratch package's fab/ export, so a report restoring
+// saved results in the background must not export (or digest) it while a job's own preparation is
+// rewriting it. flock() locks belong to the open file description, so this serializes threads of
+// this process as well as other processes, with no shared in-memory state.
+class ScratchPackageLock {
+public:
+    explicit ScratchPackageLock(const std::filesystem::path& packageDir)
+        : _descriptor(::open((packageDir / ".prepare.lock").c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0644)) {
+        if (_descriptor >= 0) {
+            while (::flock(_descriptor, LOCK_EX) != 0 && errno == EINTR) {}
+        }
+    }
+    ~ScratchPackageLock() {
+        if (_descriptor >= 0) ::close(_descriptor);
+    }
+    ScratchPackageLock(const ScratchPackageLock&) = delete;
+    ScratchPackageLock& operator=(const ScratchPackageLock&) = delete;
+
+private:
+    int _descriptor;
+};
+
 // The eye settings only feed the results preview, built afresh from the saved products, so they're
 // left out when deciding whether those products still match: changing a mask must not throw away an
 // FDTD run the next time the document opens. Inputs that don't parse are compared verbatim.
@@ -350,6 +376,8 @@ std::expected<std::uint32_t, std::string> runGPUPortInProcess(Simulation& sim, s
                                                        double boardZMinMeters, double boardZMaxMeters,
                                                        const std::filesystem::path& fieldFrameSeriesPath,
                                                        std::function<void(const std::filesystem::path&)> onWriterReady,
+                                                       const copper::FieldFrameStorage& fieldFrameStorage,
+                                                       std::uint32_t fieldFrameIntervalSteps,
                                                        std::filesystem::path* outFieldFrameSeriesPath,
                                                        const std::atomic<bool>& cancelRequested) {
     // Checked before doing any work for this port at all -- a multi-port simulation's excited
@@ -470,6 +498,8 @@ std::expected<std::uint32_t, std::string> runGPUPortInProcess(Simulation& sim, s
     fieldSeries.boardZMin = boardZMinMeters;
     fieldSeries.boardZMax = boardZMaxMeters;
     fieldSeries.onWriterReady = std::move(onWriterReady);
+    fieldSeries.storage = fieldFrameStorage;
+    fieldSeries.captureIntervalSteps = fieldFrameIntervalSteps;
     // Keep the writer's default multi-frame compression chunk. FieldFrameSeriesReader requests only
     // the displayed frame's hyperslab and retains that frame plus one prefetched successor, so the
     // viewer's resident memory remains bounded independently of the series length.
@@ -512,9 +542,27 @@ struct SavedFieldFrameSeries {
 };
 
 constexpr const char* kFieldFrameManifestName = "field_frames_current.txt";
+// Field-frame series live in a `.kemsf` package directory -- one series file per excited port, in
+// two alternating slots (see fieldFrameSeriesSlot in ensureStage:). Inside the document by default,
+// or in the frame directory chosen in Settings.
+constexpr const char* kFieldFramePackageExtension = ".kemsf";
+constexpr const char* kDefaultFieldFramePackageName = "field_frames";
 
+/// Writes one metadata file into a `.kemsf` package, replacing it atomically. Best-effort: the
+/// frames themselves still play inside the document if this fails.
+void writeFieldFramePackageFile(const std::filesystem::path& package, NSString* name, NSData* _Nullable data) {
+    NSString* path = [@(package.c_str()) stringByAppendingPathComponent:name];
+    NSError* error = nil;
+    if (data == nil || ![data writeToFile:path options:NSDataWritingAtomic error:&error]) {
+        Cu::logWarning("Could not write " + std::string(path.UTF8String) + ": " +
+                       (error ? std::string(error.localizedDescription.UTF8String) : "nothing to write"));
+    }
+}
+
+// Accepts both the `.kemsf` package's `port_N_S.h5` and the loose `field_frames_port_N_S.h5` files
+// older documents kept directly in the simulation directory.
 std::optional<std::pair<std::int32_t, std::uint64_t>> fieldFrameIdentity(const std::filesystem::path& path) {
-    static const std::regex pattern(R"(^field_frames_port_([0-9]+)_([01])\.h5$)");
+    static const std::regex pattern(R"(^(?:field_frames_)?port_([0-9]+)_([01])\.h5$)");
     std::smatch match;
     const std::string filename = path.filename().string();
     if (!std::regex_match(filename, match, pattern)) {
@@ -541,8 +589,12 @@ void saveFieldFrameManifest(
         Cu::logWarning("Could not write field-frame manifest " + temporary.string());
         return;
     }
+    // Paths relative to the simulation directory when inside it (so the document stays movable),
+    // absolute when the frames live in an external frame directory.
     for (const auto& [port, path] : series) {
-        out << port << ' ' << path.filename().string() << '\n';
+        const std::filesystem::path relative = path.lexically_relative(simulationDirectory);
+        const bool inside = !relative.empty() && *relative.begin() != "..";
+        out << port << ' ' << (inside ? relative : path).string() << '\n';
     }
     out.close();
     if (!out) {
@@ -564,9 +616,11 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
     std::ifstream in(manifest);
     if (in.is_open()) {
         std::int32_t declaredPort = -1;
-        std::string filename;
-        while (in >> declaredPort >> filename) {
-            const std::filesystem::path path = simulationDirectory / std::filesystem::path(filename).filename();
+        std::string entry;
+        // The rest of each line is the path -- an external frame directory's may contain spaces.
+        while (in >> declaredPort && std::getline(in >> std::ws, entry)) {
+            const std::filesystem::path entryPath(entry);
+            const std::filesystem::path path = entryPath.is_absolute() ? entryPath : simulationDirectory / entryPath;
             const auto identity = fieldFrameIdentity(path);
             if (!identity.has_value() || identity->first != declaredPort || !std::filesystem::is_regular_file(path)) {
                 restored.files.clear();
@@ -625,6 +679,14 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
     std::optional<EMSConfig> _scaledConfig;
     SimulationConfig* _simConfig;
     std::optional<PathsConfig> _paths;
+    // pipelineCacheInputs() as of preparation, taken while this pipeline's own export and config
+    // were the ones on disk. Stamps are written from this rather than re-read later, because other
+    // pipelines rewrite the shared fab/ export whenever they're prepared. Reset with `_paths`.
+    std::optional<std::string> _cacheInputs;
+    NSString* _savedResultsUnavailableReason;
+    // Set while the loaded results were saved under an older port numbering (see
+    // kiems::savedPortRenumbering()); reset whenever they're discarded or replaced by a fresh run.
+    std::optional<kiems::PortRenumbering> _savedRenumbering;
     NSString* _kicadSourcesWarning;
     // The fab/ copy of the KiCad board under `_paths` -- loaded on first use, reset with `_paths`.
     std::optional<libkicad::Board> _board;
@@ -684,6 +746,9 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
     // constructed to false (C++20 std::atomic's default constructor value-initializes) -- no
     // in-class initializer here, Objective-C's ivar block doesn't support one the way a plain C++
     // class body would.
+    // Held for the whole of -ensureStage: and -restoreSavedStages:, so a report restoring saved
+    // results off JobScheduler's queue can't race a job that starts on this pipeline meanwhile.
+    std::mutex _stageMutex;
     std::atomic<bool> _cancelRequested;
     std::atomic<bool> _lastEnsureStageWroteOutput;
 }
@@ -696,6 +761,9 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
         _simConfig = nullptr;
         _cancelRequested.store(false);
         _lastEnsureStageWroteOutput.store(false);
+        _fieldFramePrecision = EMSFieldFramePrecisionFloat32;
+        _fieldFrameChannels = EMSFieldFrameChannelsAllComponents;
+        _fieldFrameIntervalSteps = 1000;
     }
     return self;
 }
@@ -738,7 +806,7 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
 // ports (redone again, wastefully, the next time each of those tabs was opened) and could fail this
 // tab over a completely unrelated simulation's bad involved_nets/excitation config. Trimming first
 // means this pipeline only ever does and depends on the one simulation's own work. The scratch
-// package's own simulation.json (saved below) ends up holding just this trimmed copy too -- a
+// package's own "simulation <name>.json" (saved below) ends up holding just this trimmed copy too -- a
 // genuinely temporary, single-simulation file, distinct from the real project package's own.
 - (nullable NSString*)kicadSourcesWarning {
     return _kicadSourcesWarning;
@@ -759,6 +827,21 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
     std::string text = "The simulation grid joins nets the board keeps apart -- refine the mesh there:";
     for (const std::string& finding : findings) text += "\n" + finding;
     return @(text.c_str());
+}
+
+- (BOOL)restoreSavedStagesWithConfig:(EMSConfigBridge*)config
+                          packageDir:(NSString*)packageDir
+                        kicadCliPath:(NSString*)kicadCliPath
+                               error:(NSError**)error {
+    std::lock_guard stageLock(_stageMutex);
+    if (_paths.has_value()) {
+        // Already prepared, perhaps when the saved products couldn't be matched; try again rather
+        // than leave a completed simulation reading as not run.
+        [self hydrateSavedStages];
+        return YES;
+    }
+    _cancelRequested.store(false);
+    return [self ensurePrepared:config packageDir:packageDir kicadCliPath:kicadCliPath error:error];
 }
 
 - (BOOL)ensurePrepared:(EMSConfigBridge*)config
@@ -788,11 +871,15 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
     }
     trimmedConfig.simulations() = {std::move(*trimmedSimIt)};
 
-    PathsConfig paths = PathsConfig::forConfigFile(std::filesystem::path(packageDir.UTF8String) / "simulation.json",
+    // Each pipeline writes its own trimmed config (FDTD workers read it back by path mid-run), so
+    // preparing one simulation can't swap the config out from under another's run or cache check.
+    const std::filesystem::path scratchPackage(packageDir.UTF8String);
+    PathsConfig paths = PathsConfig::forConfigFile(scratchPackage / ("simulation " + _simulationName + ".json"),
                                                     kicadCliPath.UTF8String, "");
+    std::optional<ScratchPackageLock> scratchLock(std::in_place, scratchPackage);
 
     // Simulate what KiCad has, including changes it has only autosaved (see resolveKicadSources()).
-    // The trimmed config, and so every worker reading the scratch simulation.json, then points at
+    // The trimmed config, and so every worker reading its scratch config file, then points at
     // the same snapshot.
     const kiems::KicadSources sources =
         kiems::resolveKicadSources(_runtime.cxxRuntime, *trimmedConfig.kicadPcbPath(), paths.fabDir / "kicad-source");
@@ -802,7 +889,15 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
         if (error) *error = makeError(result.error());
         return NO;
     }
-    libkicad::Board board(_runtime.cxxRuntime, paths.kicadBoardPaths());
+    // Open the board fab/ was exported from rather than fab/'s copy: KiCad holds one project at a
+    // time, so a board on fab's copy of the project and the document's own board (the whole-board
+    // view, net lists, previews) unloaded each other on every alternating query -- a full re-parse
+    // each time, about a minute per simulation on a large board. Sharing the project lets both stay
+    // loaded.
+    const std::filesystem::path sourceProjectPath = std::filesystem::path(sources.boardPath).replace_extension(".kicad_pro");
+    libkicad::Board board = std::filesystem::is_regular_file(sourceProjectPath)
+        ? libkicad::Board(_runtime.cxxRuntime, sourceProjectPath.string(), sources.boardPath.string())
+        : libkicad::Board(_runtime.cxxRuntime, paths.kicadBoardPaths());
     if (auto result = kiems::importStackup(board, trimmedConfig); !result) {
         if (error) *error = makeError(result.error());
         return NO;
@@ -814,7 +909,7 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
     // packageDir is always a private scratch directory (see Document.pipelineDirectory's own doc
     // comment) that only ever gets fab/ems written into it; simulation.json itself is only ever
     // saved into the real, user-visible package. Saving the trimmed, already-port-resolved
-    // single-simulation config here keeps this pipeline's own scratch simulation.json self-contained
+    // single-simulation config here keeps this pipeline's own scratch config file self-contained
     // -- e.g. for a worker subprocess later spawned against paths.configFile -- without pulling in
     // every other simulation the live document happens to also contain.
     if (auto result = trimmedConfig.save(paths.configFile); !result) {
@@ -823,21 +918,43 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
     }
 
     EMSConfig scaled = trimmedConfig.scaledToSimulationUnits();
+    // Scaling drops Simulation Set templates, which only generate other simulations.
+    if (scaled.simulations().empty()) {
+        if (error) *error = makeError("\"" + _simulationName + "\" is a Simulation Set; it isn't run itself.");
+        return NO;
+    }
     _scaledConfig.emplace(std::move(scaled));
-    // trimmedConfig.simulations() (and so scaled.simulations()) always has exactly one entry --
-    // the trim above already found the one named _simulationName, or bailed out if it didn't exist.
+    // trimmedConfig.simulations() (and so scaled.simulations()) has exactly one entry -- the trim
+    // above found the one named _simulationName, and the check above rejected a Simulation Set.
     _simConfig = &_scaledConfig->simulations().front();
     _paths.emplace(std::move(paths));
     _board.emplace(std::move(board));
     _configured.emplace(*_simConfig);
+    _cacheInputs = pipelineCacheInputs(*_paths);
+    scratchLock.reset();
+    [self hydrateSavedStages];
+    return YES;
+}
 
-    const std::optional<std::string> currentCacheInputs = pipelineCacheInputs(*_paths);
+// Restores whichever stages the scratch package holds products for that match `_cacheInputs`, and
+// that aren't in memory already. A missing, stale or malformed product is a normal cache miss: the
+// stage is left for ensureStage to regenerate. Requires -ensurePrepared: to have succeeded.
+- (void)hydrateSavedStages {
+    // A pending -invalidatePostprocessing asked for results rebuilt from the FDTD data instead.
+    if (!_paths.has_value() || _postprocessor != nullptr) {
+        return;
+    }
+    if (_reloadResultsFromDisk) {
+        [self noteSavedResultsUnavailable:"postprocessing is waiting to be rerun from the FDTD data"];
+        return;
+    }
+    const std::optional<std::string>& currentCacheInputs = _cacheInputs;
     const std::filesystem::path geometryCacheInputs =
         _paths->geometryDir / _simulationName / kGeometryCacheInputsName;
     if (!cacheInputsMatch(geometryCacheInputs, currentCacheInputs)) {
-        Cu::logDebug("Saved geometry/results ignored for " + _simulationName +
-                     ": cache inputs differ from the current simulation configuration");
-        return YES;
+        [self noteSavedResultsUnavailable:"Saved geometry/results ignored for " + _simulationName +
+                     ": cache inputs differ from the current simulation configuration"];
+        return;
     }
 
     // A reopened Document seeds this scratch package from its saved fab/ems directories before the
@@ -845,23 +962,52 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
     // from those files now, so ensureStage's post-prepare cache check can return before performing
     // another expensive FDTD run. A missing/malformed cache remains a normal cache miss: ensureStage
     // continues below and regenerates it instead of making the document unopenable.
-    auto loadedGrid = kiems::loadSimulationData(*_simConfig, kiems::simulationDataFile(*_paths, _simulationName));
-    if (!loadedGrid) {
-        Cu::logDebug("No saved pipeline data restored for " + _simulationName + ": " + loadedGrid.error());
-        return YES;
+    if (!_grid.has_value()) {
+        auto loadedGrid = kiems::loadSimulationData(*_simConfig, kiems::simulationDataFile(*_paths, _simulationName));
+        if (!loadedGrid) {
+            [self noteSavedResultsUnavailable:"No saved pipeline data restored for " + _simulationName + ": " + loadedGrid.error()];
+            return;
+        }
+        kiems::SimulationGeometry geometry = loadedGrid->geometry();
+        kiems::SimulationGrid grid = loadedGrid->grid();
+        _geometry.emplace(*_configured, std::move(geometry));
+        _grid.emplace(*_geometry, std::move(grid));
     }
-    kiems::SimulationGeometry geometry = loadedGrid->geometry();
-    kiems::SimulationGrid grid = loadedGrid->grid();
-    _geometry.emplace(*_configured, std::move(geometry));
-    _grid.emplace(*_geometry, std::move(grid));
 
     const std::filesystem::path resultsCacheInputs =
         _paths->simulationDir / _simulationName / kResultsCacheInputsName;
     if (!cacheInputsMatch(resultsCacheInputs, currentCacheInputs)) {
-        Cu::logDebug("Saved simulation results ignored for " + _simulationName +
-                     ": cache inputs differ from the current simulation configuration");
-        return YES;
+        [self noteSavedResultsUnavailable:"Saved simulation results ignored for " + _simulationName +
+                     ": cache inputs differ from the current simulation configuration"];
+        return;
     }
+
+    // The stamps cover the config, not how its ports resolve: check each run against the ports
+    // it was simulated with. Runs from before absorb-only terminations were dropped still load,
+    // renumbered onto the current ports.
+    std::optional<kiems::PortRenumbering> renumbering;
+    {
+        std::error_code runsError;
+        for (const auto& run : std::filesystem::directory_iterator(_paths->simulationDir / _simulationName, runsError)) {
+            if (!run.is_directory()) continue;
+            const std::filesystem::path portsTxt = run.path() / "ports.txt";
+            const auto mismatch = kiems::resolvedPortsMismatch(*_simConfig, portsTxt);
+            if (!mismatch) continue;
+            auto runRenumbering = kiems::savedPortRenumbering(*_simConfig, portsTxt);
+            if (!runRenumbering) {
+                [self noteSavedResultsUnavailable:"Saved simulation results for " + _simulationName +
+                                                  " are out of date: " + *mismatch + "; " + runRenumbering.error()];
+                return;
+            }
+            if (renumbering && renumbering->savedFromCurrent != runRenumbering->savedFromCurrent) {
+                [self noteSavedResultsUnavailable:"Saved simulation results for " + _simulationName +
+                                                  " are out of date: its runs were simulated with different ports"];
+                return;
+            }
+            renumbering = std::move(*runRenumbering);
+        }
+    }
+    const kiems::PortRenumbering* const renumberingPtr = renumbering ? &*renumbering : nullptr;
 
     const std::vector<double> frequencies =
         linspace(_scaledConfig->frequency().start(), _scaledConfig->frequency().stop(),
@@ -869,29 +1015,59 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
     auto restoredPostprocessor = std::make_shared<Postprocessor>(frequencies, *_simConfig);
     const std::filesystem::path simulationDirectory = _paths->simulationDir / _simulationName;
     try {
-        if (auto result = restoredPostprocessor->loadSparams(simulationDirectory); !result) {
-            Cu::logDebug("No saved simulation results restored for " + _simulationName + ": " + result.error());
-            return YES;
+        if (auto result = restoredPostprocessor->loadSparams(simulationDirectory, renumberingPtr); !result) {
+            [self noteSavedResultsUnavailable:"No saved simulation results restored for " + _simulationName + ": " + result.error()];
+            return;
         }
-        if (auto result = restoredPostprocessor->loadProbes(simulationDirectory); !result) {
-            Cu::logDebug("Saved probe results could not be restored for " + _simulationName + ": " + result.error());
-            return YES;
+        if (auto result = restoredPostprocessor->loadProbes(simulationDirectory, renumberingPtr); !result) {
+            [self noteSavedResultsUnavailable:"Saved probe results could not be restored for " + _simulationName + ": " + result.error()];
+            return;
         }
         restoredPostprocessor->processData();
     } catch (const std::exception& exception) {
-        Cu::logWarning("Saved simulation results could not be restored for " + _simulationName + ": " +
-                       exception.what());
-        return YES;
+        [self noteSavedResultsUnavailable:"Saved simulation results could not be restored for " + _simulationName + ": " +
+                       exception.what()];
+        return;
     }
     _postprocessor = std::move(restoredPostprocessor);
+    _savedResultsUnavailableReason = nil;
+    _savedRenumbering = std::move(renumbering);
 
     SavedFieldFrameSeries restoredFields = loadFieldFrameSeries(simulationDirectory);
+    if (_savedRenumbering) {
+        std::vector<std::pair<std::int32_t, std::filesystem::path>> renumbered;
+        for (auto& [port, path] : restoredFields.files) {
+            if (const auto current = _savedRenumbering->current(port)) renumbered.emplace_back(*current, std::move(path));
+        }
+        restoredFields.files = std::move(renumbered);
+    }
     {
         std::lock_guard lock(_fieldFrameSeriesMutex);
         _fieldFrameSeries = std::move(restoredFields.files);
         _fieldFrameSeriesGeneration = restoredFields.generation;
     }
-    return YES;
+}
+
+// Why -hydrateSavedStages left this simulation without results -- shown by the report in place
+// of "not run", and logged where a Release build's console doesn't filter it out.
+- (void)noteSavedResultsUnavailable:(const std::string&)reason {
+    _savedResultsUnavailableReason = @(reason.c_str());
+    NSLog(@"[restore] %s: %s", _simulationName.c_str(), reason.c_str());
+}
+
+- (nullable NSString*)renumberedResultsWarning {
+    if (!_savedRenumbering || _postprocessor == nullptr) return nil;
+    std::string dropped;
+    for (const std::string& name : _savedRenumbering->droppedPorts) {
+        dropped += (dropped.empty() ? "" : ", ") + name;
+    }
+    return @(("Simulated with absorbing terminations port resolution has since dropped (" + dropped +
+              "); its results were renumbered onto the current ports. Rerun it for results from the current model.")
+                 .c_str());
+}
+
+- (nullable NSString*)savedResultsUnavailableReason {
+    return _savedResultsUnavailableReason;
 }
 
 - (BOOL)ensureStage:(EMSPipelineStage)stage
@@ -900,6 +1076,7 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
        kicadCliPath:(NSString*)kicadCliPath
            progress:(nullable EMSPipelineProgressHandler)progressHandler
               error:(NSError**)error {
+    std::lock_guard stageLock(_stageMutex);
     _lastEnsureStageWroteOutput.store(false);
     if ([self hasStage:stage]) {
         return YES;
@@ -1019,7 +1196,7 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
             return NO;
         }
         saveCacheInputs(_paths->geometryDir / _simulationName / kGeometryCacheInputsName,
-                        pipelineCacheInputs(*_paths));
+                        _cacheInputs);
         _lastEnsureStageWroteOutput.store(true);
     }
     // Reported unconditionally here (not just inside the !_grid.has_value() branch above) -- geometry
@@ -1076,13 +1253,47 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
         // begins, so truncating one fixed path is unsafe. Two slots avoid that collision without
         // leaving one potentially-large series behind for every rerun during the document's life.
         const std::uint64_t fieldFrameSeriesSlot = ++_fieldFrameSeriesGeneration % 2;
-        const std::filesystem::path fieldFrameSeriesDirectory = _paths->simulationDir / _simulationName;
+        const std::filesystem::path simulationDirectory = _paths->simulationDir / _simulationName;
+        std::filesystem::path fieldFrameSeriesDirectory =
+            simulationDirectory / (std::string(kDefaultFieldFramePackageName) + kFieldFramePackageExtension);
+        if (NSString* frameDirectory = self.fieldFrameDirectory; frameDirectory.length > 0) {
+            NSString* seriesName = self.fieldFrameSeriesName.length > 0 ? self.fieldFrameSeriesName
+                                                                         : @(_simulationName.c_str());
+            // A '/' would silently nest the package one level deeper.
+            seriesName = [seriesName stringByReplacingOccurrencesOfString:@"/" withString:@"-"];
+            fieldFrameSeriesDirectory = std::filesystem::path(frameDirectory.fileSystemRepresentation) /
+                                        (std::string(seriesName.UTF8String) + kFieldFramePackageExtension);
+        }
+        {
+            std::error_code directoryError;
+            std::filesystem::create_directories(fieldFrameSeriesDirectory, directoryError);
+            if (directoryError) {
+                if (error) {
+                    *error = makeError("Could not create the field-frame package " +
+                                       fieldFrameSeriesDirectory.string() + ": " + directoryError.message());
+                }
+                return NO;
+            }
+        }
         {
             std::lock_guard lock(_fieldFrameSeriesMutex);
             _fieldFrameSeries.clear();
             _fieldSnapshotCache = nil;
             _combinedFieldSnapshotCache = nil;
             _adversarialFieldSnapshotCache = nil;
+        }
+        // Everything a `.kemsf` needs to play back without this document: how its series combine,
+        // and the board to draw them over. Written before the first port runs so a package left
+        // by an interrupted run still opens; series.json gains the series list when the run ends.
+        FieldSeriesLayout packageLayout = [self fieldSeriesLayout];
+        writeFieldFramePackageFile(fieldFrameSeriesDirectory, kFieldFramePackageLayoutName,
+                                   encodeFieldSeriesLayout(packageLayout));
+        {
+            const kiems::ComputedGridLines* gridLines = _grid.has_value() ? &_grid->grid().gridLines : nullptr;
+            EMSGeometryPreview* boardPreview =
+                buildGeometryPreview(_geometry->geometry().slicedBoard, *_simConfig, *_scaledConfig, *_paths, *_board,
+                                     gridLines);
+            writeFieldFramePackageFile(fieldFrameSeriesDirectory, kFieldFramePackageBoardName, [boardPreview archivedData]);
         }
         auto portRunner = [self, progressHandler, totalExcitedPorts, &portsCompleted,
                            boardZMinMeters, fieldFrameSeriesDirectory,
@@ -1092,7 +1303,7 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
                 self->_simConfig->ports().at(static_cast<std::size_t>(excitedPortNumber)).netName();
             const std::filesystem::path requestedPath =
                 fieldFrameSeriesDirectory /
-                ("field_frames_port_" + std::to_string(excitedPortNumber) + "_" +
+                ("port_" + std::to_string(excitedPortNumber) + "_" +
                  std::to_string(fieldFrameSeriesSlot) + ".h5");
             // Advertise only after Copper has created and entered SWMR mode. The alternating path
             // may still contain an older run before H5Fcreate truncates it, so publishing it sooner
@@ -1101,11 +1312,22 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
                 std::lock_guard lock(self->_fieldFrameSeriesMutex);
                 self->_fieldFrameSeries.emplace_back(excitedPortNumber, readyPath);
             };
+            copper::FieldFrameStorage storage;
+            switch (self.fieldFramePrecision) {
+                case EMSFieldFramePrecisionInt8: storage.precision = copper::FieldSamplePrecision::Int8; break;
+                case EMSFieldFramePrecisionInt12: storage.precision = copper::FieldSamplePrecision::Int12; break;
+                case EMSFieldFramePrecisionFloat16: storage.precision = copper::FieldSamplePrecision::Float16; break;
+                case EMSFieldFramePrecisionFloat32: storage.precision = copper::FieldSamplePrecision::Float32; break;
+            }
+            storage.channels = self.fieldFrameChannels == EMSFieldFrameChannelsEnergy
+                ? copper::FieldChannels::Energy : copper::FieldChannels::Components;
+            const auto intervalSteps = static_cast<std::uint32_t>(
+                std::clamp<NSUInteger>(self.fieldFrameIntervalSteps, 1, std::numeric_limits<std::uint32_t>::max()));
             std::filesystem::path completedPath;
             auto result = runGPUPortInProcess(sim, excitedPortNumber, progressHandler, totalExcitedPorts,
                                                portsCompleted, self->_simulationName, excitedNetName,
                                                boardZMinMeters, 0.0, requestedPath, std::move(onWriterReady),
-                                               &completedPath,
+                                               storage, intervalSteps, &completedPath,
                                                self->_cancelRequested);
             return result;
         };
@@ -1131,7 +1353,12 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
             std::lock_guard lock(_fieldFrameSeriesMutex);
             completedSeries = _fieldFrameSeries;
         }
-        saveFieldFrameManifest(fieldFrameSeriesDirectory, completedSeries);
+        saveFieldFrameManifest(simulationDirectory, completedSeries);
+        for (const auto& [port, path] : completedSeries) {
+            packageLayout.seriesFiles.emplace_back(port, path.filename().string());
+        }
+        writeFieldFramePackageFile(fieldFrameSeriesDirectory, kFieldFramePackageLayoutName,
+                                   encodeFieldSeriesLayout(packageLayout));
     }
 
     if (_postprocessor == nullptr) {
@@ -1148,8 +1375,9 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
         postprocessing.postprocessor->sparamToFile(_paths->simulationDir / _simulationName);
         postprocessing.postprocessor->probeToFile(_paths->simulationDir / _simulationName);
         _postprocessor = std::move(postprocessing.postprocessor);
+        _savedRenumbering.reset();
         saveCacheInputs(_paths->simulationDir / _simulationName / kResultsCacheInputsName,
-                        pipelineCacheInputs(*_paths));
+                        _cacheInputs);
         _lastEnsureStageWroteOutput.store(true);
     }
     return YES;
@@ -1201,7 +1429,8 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
         // Read once per preview build, not per eye: each is one small probe file per excited port.
         const std::map<std::int32_t, double> runDurations =
             _paths.has_value() ? kiems::ExcitationPostprocessor::loadRunDurations(
-                                     _paths->simulationDir / _simulationName, *_simConfig)
+                                     _paths->simulationDir / _simulationName, *_simConfig,
+                                     _savedRenumbering ? &*_savedRenumbering : nullptr)
                                : std::map<std::int32_t, double>{};
         _resultsPreviewCache =
             buildResultsPreview(*_postprocessor, *_simConfig, _scaledConfig->frequency(), runDurations);
@@ -1253,188 +1482,55 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
         _fieldSnapshotCache = refreshedCache;
     }
 
-    // Add one differential-mode entry per configured differential pair, combining that pair's own
-    // two already-built single-ended snapshots (both legs excited independently, at the pair's
-    // driven/near end -- positiveExcitation/negativeExcitation, the same two ports Postprocessor::
-    // getDiffPairSdd() reads its own mixed-mode S-parameters from) rather than opening anything
-    // new. A pair whose legs
-    // aren't both present yet (not excited, not configured, or field export still catching up)
-    // simply doesn't get an entry this call -- it'll appear once both are.
-    //
-    // _simConfig is null until -ensurePrepared: has actually run (eg a simulation whose results
-    // haven't been generated yet, selected before any job has queued/run for it) -- snapshots is
-    // then still empty too (nothing in _fieldFrameSeries yet), so there's nothing to combine.
-    // Differential-pair entries are listed ahead of every single-ended series (the field viewer's
-    // selector shows them in this order).
-    NSMutableArray<EMSFieldSnapshot*>* combinedSnapshots = [NSMutableArray array];
-    if (_simConfig != nullptr) {
-        NSMutableDictionary<NSString*, EMSFieldSnapshot*>* refreshedCombinedCache =
-            [NSMutableDictionary dictionaryWithCapacity:_simConfig->diffPairs().size()];
-        NSDictionary<NSString*, EMSFieldSnapshot*>* previousCombinedCache;
-        {
-            std::lock_guard lock(_fieldFrameSeriesMutex);
-            previousCombinedCache = [_combinedFieldSnapshotCache copy];
-        }
-        Cu::logDebug() << "fieldSnapshots: " << _simConfig->diffPairs().size() << " configured differential pair(s), "
-                       << snapshots.count << " single-ended snapshot(s) available";
-        for (const DifferentialPairConfig& pair : _simConfig->diffPairs()) {
-            const std::string pairLabel = pair.name().value_or("(unnamed differential pair)");
-            if (!pair.correct()) {
-                Cu::logDebug() << "fieldSnapshots: differential pair '" << pairLabel << "' not correct (unresolved "
-                               << "port reference), skipping";
-                continue;
-            }
-            if (!pair.positiveExcitation().resolvedIndex().has_value() ||
-                !pair.negativeExcitation().resolvedIndex().has_value()) {
-                Cu::logDebug() << "fieldSnapshots: differential pair '" << pairLabel
-                               << "' has no resolved positiveExcitation/negativeExcitation index, skipping";
-                continue;
-            }
-            const NSInteger sp = *pair.positiveExcitation().resolvedIndex();
-            const NSInteger sn = *pair.negativeExcitation().resolvedIndex();
-            EMSFieldSnapshot* legP = nil;
-            EMSFieldSnapshot* legN = nil;
-            for (EMSFieldSnapshot* snapshot in snapshots) {
-                if (snapshot.excitedPort == sp) legP = snapshot;
-                if (snapshot.excitedPort == sn) legN = snapshot;
-            }
-            if (legP == nil || legN == nil) {
-                Cu::logDebug() << "fieldSnapshots: differential pair '" << pairLabel << "' wants excited ports "
-                               << sp << " (P, " << (legP == nil ? "missing" : "present") << ") and " << sn
-                               << " (N, " << (legN == nil ? "missing" : "present")
-                               << ") -- neither has field export run for it yet, skipping";
-                continue;
-            }
-
-            NSString* pairKey = [NSString stringWithFormat:@"%ld|%ld", (long)sp, (long)sn];
-            const NSUInteger currentFrameCount = MIN(legP.frames.count, legN.frames.count);
-            EMSFieldSnapshot* combined = previousCombinedCache[pairKey];
-            if (combined == nil || combined.frames.count != currentFrameCount) {
-                const std::string displayName = pair.displayName();
-                NSString* name = @(displayName.c_str());
-                // Distinct from every real port index (always >= 0) and from every other pair's own
-                // key, so the field viewer's per-simulation "last selected series" persistence (keyed
-                // on excitedPort) treats this as its own stable series across refreshes.
-                const NSInteger excitedPort = -(sp * 100000 + sn + 1);
-                combined = buildCombinedFieldSnapshot(@[ legP, legN ], {0.5, -0.5}, name, excitedPort);
-            }
-            if (combined != nil) {
-                [combinedSnapshots addObject:combined];
-                refreshedCombinedCache[pairKey] = combined;
-            }
-        }
-        {
-            std::lock_guard lock(_fieldFrameSeriesMutex);
-            _combinedFieldSnapshotCache = refreshedCombinedCache;
-        }
-    }
-
-    [combinedSnapshots addObjectsFromArray:snapshots];
-    [self attachAdversarialVariantsTo:combinedSnapshots singleEnded:snapshots];
-    return [combinedSnapshots copy];
-}
-
-/// Sets each primary series' (or differential pair of primary series') withAdversarialSignals to
-/// that series with every adversarial excitation's run superposed onto it, weighted by the
-/// adversarial excitation's configured amplitude. Like the differential combination, this reuses the
-/// already-built single-ended snapshots' readers and is cached until a leg's frame count changes.
-- (void)attachAdversarialVariantsTo:(NSArray<EMSFieldSnapshot*>*)allSnapshots
-                        singleEnded:(NSArray<EMSFieldSnapshot*>*)singleEnded {
+    // _simConfig is null until -ensurePrepared: has actually run -- snapshots is then still empty
+    // too (nothing in _fieldFrameSeries yet), so there's nothing to combine.
     if (_simConfig == nullptr) {
-        return;
+        return [snapshots copy];
     }
-    std::set<NSInteger> primaryPorts;
-    std::map<NSInteger, double> adversarialAmplitudes;
-    for (const auto& excitation : _simConfig->excitations()) {
-        if (!excitation.drivenPortIndex().has_value()) {
-            continue;
-        }
-        const NSInteger port = *excitation.drivenPortIndex();
-        if (excitation.isMain()) {
-            primaryPorts.insert(port);
-        } else {
-            adversarialAmplitudes[port] += excitation.amplitude().value_or(1.0);
-        }
-    }
-    for (const NSInteger port : primaryPorts) {
-        adversarialAmplitudes.erase(port);
-    }
-
-    NSMutableArray<EMSFieldSnapshot*>* adversarialLegs = [NSMutableArray array];
-    std::vector<double> adversarialCoefficients;
-    for (EMSFieldSnapshot* snapshot in singleEnded) {
-        const auto found = adversarialAmplitudes.find(snapshot.excitedPort);
-        if (found != adversarialAmplitudes.end()) {
-            [adversarialLegs addObject:snapshot];
-            adversarialCoefficients.push_back(found->second);
-        }
-    }
-
-    NSDictionary<NSString*, EMSFieldSnapshot*>* previousCache;
+    const FieldSeriesLayout layout = [self fieldSeriesLayout];
+    FieldSnapshotCombinationCache combinationCache;
     {
         std::lock_guard lock(_fieldFrameSeriesMutex);
-        previousCache = [_adversarialFieldSnapshotCache copy];
+        combinationCache = {_combinedFieldSnapshotCache, _adversarialFieldSnapshotCache};
     }
-    NSMutableDictionary<NSString*, EMSFieldSnapshot*>* refreshedCache = [NSMutableDictionary dictionary];
-    for (EMSFieldSnapshot* snapshot in allSnapshots) {
-        snapshot.withAdversarialSignals = nil;
-        if (adversarialLegs.count == 0) {
+    NSArray<EMSFieldSnapshot*>* assembled = assembleFieldSnapshots(snapshots, layout, combinationCache);
+    {
+        std::lock_guard lock(_fieldFrameSeriesMutex);
+        _combinedFieldSnapshotCache = [combinationCache.differential mutableCopy];
+        _adversarialFieldSnapshotCache = [combinationCache.adversarial mutableCopy];
+    }
+    return assembled;
+}
+
+/// This simulation's series combinations, from its resolved config -- see FieldSeriesLayout.
+/// Requires _simConfig.
+- (FieldSeriesLayout)fieldSeriesLayout {
+    FieldSeriesLayout layout;
+    layout.simulationName = _simulationName;
+    for (std::size_t port = 0; port < _simConfig->ports().size(); ++port) {
+        layout.excitationNames[static_cast<std::int32_t>(port)] = _simConfig->ports()[port].name();
+    }
+    for (const DifferentialPairConfig& pair : _simConfig->diffPairs()) {
+        if (!pair.correct() || !pair.positiveExcitation().resolvedIndex().has_value() ||
+            !pair.negativeExcitation().resolvedIndex().has_value()) {
+            Cu::logDebug() << "fieldSnapshots: differential pair '"
+                           << pair.name().value_or("(unnamed differential pair)")
+                           << "' has an unresolved port reference, skipping";
             continue;
         }
-        // The primary's own legs: itself, or a differential pair's two primary legs.
-        NSArray<EMSFieldSnapshot*>* baseLegs = nil;
-        std::vector<double> coefficients;
-        if (primaryPorts.contains(snapshot.excitedPort)) {
-            baseLegs = @[ snapshot ];
-            coefficients = {1.0};
-        } else if (snapshot.excitedPort < 0) {
-            for (const DifferentialPairConfig& pair : _simConfig->diffPairs()) {
-                if (!pair.correct() || !pair.positiveExcitation().resolvedIndex().has_value() ||
-                    !pair.negativeExcitation().resolvedIndex().has_value()) {
-                    continue;
-                }
-                const NSInteger sp = *pair.positiveExcitation().resolvedIndex();
-                const NSInteger sn = *pair.negativeExcitation().resolvedIndex();
-                if (snapshot.excitedPort != -(sp * 100000 + sn + 1) || !primaryPorts.contains(sp) ||
-                    !primaryPorts.contains(sn)) {
-                    continue;
-                }
-                EMSFieldSnapshot* legP = nil;
-                EMSFieldSnapshot* legN = nil;
-                for (EMSFieldSnapshot* leg in singleEnded) {
-                    if (leg.excitedPort == sp) legP = leg;
-                    if (leg.excitedPort == sn) legN = leg;
-                }
-                if (legP != nil && legN != nil) {
-                    baseLegs = @[ legP, legN ];
-                    coefficients = {0.5, -0.5};
-                }
-                break;
-            }
-        }
-        if (baseLegs == nil) {
-            continue;
-        }
-
-        NSArray<EMSFieldSnapshot*>* legs = [baseLegs arrayByAddingObjectsFromArray:adversarialLegs];
-        coefficients.insert(coefficients.end(), adversarialCoefficients.begin(), adversarialCoefficients.end());
-        NSUInteger frameCount = NSUIntegerMax;
-        for (EMSFieldSnapshot* leg in legs) frameCount = MIN(frameCount, leg.frames.count);
-
-        NSString* key = [NSString stringWithFormat:@"%ld|%lu", (long)snapshot.excitedPort,
-                                                   (unsigned long)adversarialLegs.count];
-        EMSFieldSnapshot* variant = previousCache[key];
-        if (variant == nil || variant.frames.count != frameCount) {
-            NSString* name = [snapshot.excitationName stringByAppendingString:@" + adversarial"];
-            variant = buildCombinedFieldSnapshot(legs, coefficients, name, snapshot.excitedPort);
-        }
-        if (variant != nil) {
-            snapshot.withAdversarialSignals = variant;
-            refreshedCache[key] = variant;
+        layout.differentialPairs.push_back({pair.displayName(), *pair.positiveExcitation().resolvedIndex(),
+                                            *pair.negativeExcitation().resolvedIndex()});
+    }
+    for (const auto& excitation : _simConfig->excitations()) {
+        if (!excitation.drivenPortIndex().has_value()) continue;
+        const NSInteger port = *excitation.drivenPortIndex();
+        if (excitation.isMain()) {
+            layout.primaryPorts.insert(port);
+        } else {
+            layout.adversarialAmplitudes[port] += excitation.amplitude().value_or(1.0);
         }
     }
-    std::lock_guard lock(_fieldFrameSeriesMutex);
-    _adversarialFieldSnapshotCache = refreshedCache;
+    return layout;
 }
 
 - (void)invalidatePostprocessing {
@@ -1444,6 +1540,13 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
     }
     _postprocessor.reset();
     _resultsPreviewCache = nil;
+    if (_savedRenumbering && !_results.has_value()) {
+        // The raw FDTD port files are in the saved numbering, which a reload through
+        // generateResults() would misread; postprocess the renumbered saved results again instead.
+        _savedRenumbering.reset();
+        [self hydrateSavedStages];
+        return;
+    }
     _reloadResultsFromDisk = !_results.has_value();
 }
 
@@ -1469,6 +1572,11 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
                            removeError.message());
         }
     }
+    [self discardLoadedFromStage:stage];
+}
+
+// The in-memory half of -invalidateFromStage:, leaving the saved products on disk.
+- (void)discardLoadedFromStage:(EMSPipelineStage)stage {
     switch (stage) {
     case EMSPipelineStageGeometry:
         // Everything depends, directly or transitively, on the sliced board -- discard the whole
@@ -1476,6 +1584,7 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
         // might just as well have changed something scaledToSimulationUnits() would scale
         // differently, e.g. hull padding).
         _postprocessor.reset();
+        _savedRenumbering.reset();
         _resultsPreviewCache = nil;
         _results.reset();
         {
@@ -1492,12 +1601,14 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
         _configured.reset();
         _board.reset();
         _paths.reset();
+        _cacheInputs.reset();
         _simConfig = nullptr;
         _scaledConfig.reset();
         break;
     case EMSPipelineStageGrid:
         // Geometry stays valid -- only the grid lines (and anything built from them) get redone.
         _postprocessor.reset();
+        _savedRenumbering.reset();
         _resultsPreviewCache = nil;
         _results.reset();
         {
@@ -1515,6 +1626,7 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
         // Geometry (and the grid lines placed on it) stay valid -- only the FDTD run and its own
         // postprocessing get redone.
         _postprocessor.reset();
+        _savedRenumbering.reset();
         _resultsPreviewCache = nil;
         _results.reset();
         {
@@ -1526,6 +1638,12 @@ SavedFieldFrameSeries loadFieldFrameSeries(const std::filesystem::path& simulati
         }
         break;
     }
+}
+
+- (void)releaseLoadedStages {
+    std::lock_guard stageLock(_stageMutex);
+    _reloadResultsFromDisk = NO;
+    [self discardLoadedFromStage:EMSPipelineStageGeometry];
 }
 
 @end

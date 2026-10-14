@@ -329,6 +329,26 @@ final class SimulationListViewController: NSViewController {
         onStatusChanged?()
     }
 
+    /// The sidebar width that shows every row's label untruncated: each row's indentation plus its
+    /// cell's leading icon and label, plus the scroll view's insets and scroller. Expanded rows only.
+    func preferredSidebarWidth() -> CGFloat {
+        outlineView.layoutSubtreeIfNeeded()
+        var widest: CGFloat = 0
+        for row in 0..<outlineView.numberOfRows {
+            guard let cell = outlineView.view(atColumn: 0, row: row, makeIfNecessary: true) as? NSTableCellView,
+                  let textField = cell.textField else { continue }
+            let labelWidth = textField.cell?.cellSize.width ?? textField.intrinsicContentSize.width
+            let iconWidth: CGFloat = cell.imageView == nil ? 0 : 16 + 6
+            // Child rows keep their status glyph clear of the label.
+            let statusWidth: CGFloat = outlineView.level(forRow: row) > 0 ? 14 + 6 : 0
+            let x = outlineView.frameOfCell(atColumn: 0, row: row).minX
+            widest = max(widest, x + iconWidth + labelWidth + statusWidth)
+        }
+        let scrollerWidth = NSScroller.scrollerWidth(for: .regular, scrollerStyle: scrollView.scrollerStyle)
+        // 8pt scroll view inset each side (buildUI), plus a little breathing room after the label.
+        return ceil(widest + scrollerWidth + 8 * 2 + 8)
+    }
+
     /// Expansion is held by NSOutlineView against node identity, but a structural rebuild creates
     /// new nodes.  Capture stable branch identities before the rebuild and apply them afterward.
     private func expandedSimulationIdentities() -> Set<SimulationListExpansionIdentity> {
@@ -504,6 +524,10 @@ final class SimulationListViewController: NSViewController {
     /// not keep showing once the cache it was reporting on is gone.
     func setInvalid(forSimulationIndex index: Int, kind: JobKind) {
         setPhaseState(.invalid, forSimulationIndex: index, kind: kind)
+    }
+
+    func testsFailed(forSimulationIndex index: Int) -> Bool {
+        failedTests.contains(index)
     }
 
     /// Records whether `index`'s results fail their eye test -- see failedTests.

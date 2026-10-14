@@ -2385,3 +2385,388 @@ std::expected<EMSGeometryPreview*, std::string> buildWholeBoardPreview(const lib
     logInfo() << "Whole-board preview built in " << elapsedMs << " ms";
     return preview;
 }
+
+// MARK: - Archiving (`.kemsf` board.kemsg)
+//
+// A flat little-endian stream, LZFSE-compressed behind an uncompressed magic + version header.
+// Strings go through one table (index 0 = nil) since net names and footprint references repeat on
+// every triangle of a board. Bump kGeometryArchiveVersion on any layout change: an older archive
+// is then simply not readable (the frames still play, just without the board).
+
+namespace {
+
+constexpr char kGeometryArchiveMagic[8] = {'K', 'E', 'M', 'S', 'G', 'E', 'O', 'M'};
+constexpr std::uint32_t kGeometryArchiveVersion = 1;
+
+NSString* orEmpty(NSString* _Nullable string) { return string != nil ? string : @""; }
+
+class GeometryArchiveWriter {
+public:
+    void u8(std::uint8_t value) { _bytes.push_back(value); }
+    void u32(std::uint32_t value) { raw(&value, sizeof value); }
+    void u64(std::uint64_t value) { raw(&value, sizeof value); }
+    void f64(double value) { raw(&value, sizeof value); }
+    void point(CGPoint value) { f64(value.x); f64(value.y); }
+    void vec3(simd_double3 value) { f64(value.x); f64(value.y); f64(value.z); }
+    void vec4(simd_double4 value) { f64(value.x); f64(value.y); f64(value.z); f64(value.w); }
+    void string(NSString* _Nullable value) {
+        if (value == nil) { u32(0); return; }
+        auto [it, inserted] = _stringIndices.try_emplace(std::string(value.UTF8String), _strings.size() + 1);
+        if (inserted) _strings.push_back(it->first);
+        u32(it->second);
+    }
+    void data(NSData* _Nullable value) {
+        u64(value.length);
+        raw(value.bytes, value.length);
+    }
+    void numbers(NSArray<NSNumber*>* values) {
+        u64(values.count);
+        for (NSNumber* value in values) f64(value.doubleValue);
+    }
+    void raw(const void* bytes, std::size_t count) {
+        const auto* begin = static_cast<const std::uint8_t*>(bytes);
+        _bytes.insert(_bytes.end(), begin, begin + count);
+    }
+
+    /// The string table followed by the body, compressed.
+    NSData* _Nullable finish() {
+        GeometryArchiveWriter table;
+        table.u64(_strings.size());
+        for (const std::string& string : _strings) {
+            table.u64(string.size());
+            table.raw(string.data(), string.size());
+        }
+        table.raw(_bytes.data(), _bytes.size());
+        NSData* body = [NSData dataWithBytesNoCopy:table._bytes.data() length:table._bytes.size() freeWhenDone:NO];
+        NSData* compressed = [body compressedDataUsingAlgorithm:NSDataCompressionAlgorithmLZFSE error:nil];
+        if (compressed == nil) return nil;
+        NSMutableData* result = [NSMutableData dataWithBytes:kGeometryArchiveMagic length:sizeof kGeometryArchiveMagic];
+        [result appendBytes:&kGeometryArchiveVersion length:sizeof kGeometryArchiveVersion];
+        [result appendData:compressed];
+        return result;
+    }
+
+private:
+    std::vector<std::uint8_t> _bytes;
+    std::vector<std::string> _strings;
+    std::unordered_map<std::string, std::uint32_t> _stringIndices;
+};
+
+/// Reads what GeometryArchiveWriter wrote. Any overrun sets `failed` and yields zeros, so callers
+/// can read a whole record and check once.
+class GeometryArchiveReader {
+public:
+    explicit GeometryArchiveReader(NSData* body) : _body(body), _bytes(static_cast<const std::uint8_t*>(body.bytes)), _size(body.length) {}
+    bool failed = false;
+
+    std::uint8_t u8() { std::uint8_t v = 0; raw(&v, 1); return v; }
+    std::uint32_t u32() { std::uint32_t v = 0; raw(&v, sizeof v); return v; }
+    std::uint64_t u64() { std::uint64_t v = 0; raw(&v, sizeof v); return v; }
+    double f64() { double v = 0; raw(&v, sizeof v); return v; }
+    CGPoint point() { const double x = f64(); return CGPointMake(x, f64()); }
+    simd_double3 vec3() { const double x = f64(), y = f64(); return simd_make_double3(x, y, f64()); }
+    simd_double4 vec4() { const double x = f64(), y = f64(), z = f64(); return simd_make_double4(x, y, z, f64()); }
+    /// A count about to drive a loop, rejected if it can't possibly fit in what's left.
+    std::uint64_t count(std::size_t minimumBytesEach) {
+        const std::uint64_t n = u64();
+        if (minimumBytesEach > 0 && n > (_size - _offset) / minimumBytesEach) { failed = true; return 0; }
+        return n;
+    }
+    void readStringTable() {
+        const std::uint64_t n = count(8);
+        for (std::uint64_t i = 0; i < n && !failed; ++i) {
+            const std::uint64_t length = count(1);
+            if (failed || length > _size - _offset) { failed = true; return; }
+            NSString* string = [[NSString alloc] initWithBytes:_bytes + _offset length:length encoding:NSUTF8StringEncoding];
+            _offset += length;
+            _strings.push_back(orEmpty(string));
+        }
+    }
+    NSString* _Nullable string() {
+        const std::uint32_t index = u32();
+        if (index == 0) return nil;
+        if (index > _strings.size()) { failed = true; return nil; }
+        return _strings[index - 1];
+    }
+    NSData* data() {
+        const std::uint64_t length = count(1);
+        if (failed || length > _size - _offset) { failed = true; return [NSData data]; }
+        NSData* result = [_body subdataWithRange:NSMakeRange(_offset, length)];
+        _offset += length;
+        return result;
+    }
+    NSArray<NSNumber*>* numbers() {
+        const std::uint64_t n = count(8);
+        NSMutableArray<NSNumber*>* values = [NSMutableArray arrayWithCapacity:n];
+        for (std::uint64_t i = 0; i < n; ++i) [values addObject:@(f64())];
+        return values;
+    }
+
+private:
+    void raw(void* destination, std::size_t length) {
+        if (failed || length > _size - _offset) { failed = true; std::memset(destination, 0, length); return; }
+        std::memcpy(destination, _bytes + _offset, length);
+        _offset += length;
+    }
+    NSData* _body;
+    const std::uint8_t* _bytes;
+    std::size_t _size;
+    std::size_t _offset = 0;
+    std::vector<NSString*> _strings;
+};
+
+void writeLayer(GeometryArchiveWriter& out, EMSGeometryLayer* _Nullable layer) {
+    out.u8(layer != nil);
+    if (layer == nil) return;
+    out.string(layer.name);
+    out.string(layer.hexColor);
+    out.f64(layer.z);
+    out.u64(layer.triangles.count);
+    for (EMSGeometryTriangle* t in layer.triangles) {
+        out.point(t.a); out.point(t.b); out.point(t.c);
+        out.vec4(t.color);
+        out.f64(t.opacity);
+        out.u8(static_cast<std::uint8_t>(t.kind));
+        out.string(t.netName); out.string(t.footprintReference); out.string(t.padNumber);
+    }
+}
+
+EMSGeometryLayer* _Nullable readLayer(GeometryArchiveReader& in) {
+    if (in.u8() == 0) return nil;
+    NSString* name = orEmpty(in.string());
+    NSString* hexColor = in.string();
+    const double z = in.f64();
+    const std::uint64_t n = in.count(48 + 32 + 8 + 1 + 12);
+    NSMutableArray<EMSGeometryTriangle*>* triangles = [NSMutableArray arrayWithCapacity:n];
+    for (std::uint64_t i = 0; i < n && !in.failed; ++i) {
+        const CGPoint a = in.point(), b = in.point(), c = in.point();
+        const simd_double4 color = in.vec4();
+        const double opacity = in.f64();
+        const auto kind = static_cast<EMSGeometryTriangleKind>(in.u8());
+        NSString* netName = in.string();
+        NSString* footprintReference = in.string();
+        NSString* padNumber = in.string();
+        [triangles addObject:[[EMSGeometryTriangle alloc] initWithA:a b:b c:c color:color opacity:opacity kind:kind
+                                                            netName:netName footprintReference:footprintReference
+                                                          padNumber:padNumber]];
+    }
+    return [[EMSGeometryLayer alloc] initWithName:name triangles:triangles hexColor:hexColor z:z];
+}
+
+void writeComponentTriangles(GeometryArchiveWriter& out, NSArray<EMSGeometryComponentTriangle*>* triangles) {
+    out.u64(triangles.count);
+    for (EMSGeometryComponentTriangle* t in triangles) {
+        out.vec3(t.a); out.vec3(t.b); out.vec3(t.c);
+        out.vec4(t.color);
+        out.string(t.netName); out.string(t.footprintReference);
+    }
+}
+
+NSArray<EMSGeometryComponentTriangle*>* readComponentTriangles(GeometryArchiveReader& in) {
+    const std::uint64_t n = in.count(72 + 32 + 8);
+    NSMutableArray<EMSGeometryComponentTriangle*>* triangles = [NSMutableArray arrayWithCapacity:n];
+    for (std::uint64_t i = 0; i < n && !in.failed; ++i) {
+        const simd_double3 a = in.vec3(), b = in.vec3(), c = in.vec3();
+        const simd_double4 color = in.vec4();
+        NSString* netName = in.string();
+        NSString* footprintReference = in.string();
+        [triangles addObject:[[EMSGeometryComponentTriangle alloc] initWithA:a b:b c:c color:color netName:netName
+                                                           footprintReference:footprintReference]];
+    }
+    return triangles;
+}
+
+void writeGridPlane(GeometryArchiveWriter& out, EMSGeometryGridPlane* _Nullable plane) {
+    out.u8(plane != nil);
+    if (plane == nil) return;
+    out.data(plane.positions);
+    out.data(plane.colors);
+    out.u64(plane.vertexCount);
+}
+
+EMSGeometryGridPlane* _Nullable readGridPlane(GeometryArchiveReader& in) {
+    if (in.u8() == 0) return nil;
+    NSData* positions = in.data();
+    NSData* colors = in.data();
+    const std::uint64_t vertexCount = in.u64();
+    return [[EMSGeometryGridPlane alloc] initWithPositions:positions colors:colors vertexCount:vertexCount];
+}
+
+void writePoints(GeometryArchiveWriter& out, NSArray<NSValue*>* points) {
+    out.u64(points.count);
+    for (NSValue* value in points) out.point(value.pointValue);
+}
+
+NSArray<NSValue*>* readPoints(GeometryArchiveReader& in) {
+    const std::uint64_t n = in.count(16);
+    NSMutableArray<NSValue*>* points = [NSMutableArray arrayWithCapacity:n];
+    for (std::uint64_t i = 0; i < n; ++i) [points addObject:[NSValue valueWithPoint:in.point()]];
+    return points;
+}
+
+void writeStrings(GeometryArchiveWriter& out, id<NSFastEnumeration> strings, NSUInteger count) {
+    out.u64(count);
+    for (NSString* string in strings) out.string(string);
+}
+
+NSMutableArray<NSString*>* readStrings(GeometryArchiveReader& in) {
+    const std::uint64_t n = in.count(4);
+    NSMutableArray<NSString*>* strings = [NSMutableArray arrayWithCapacity:n];
+    for (std::uint64_t i = 0; i < n; ++i) [strings addObject:orEmpty(in.string())];
+    return strings;
+}
+
+} // namespace
+
+@implementation EMSGeometryPreview (Archiving)
+
+- (nullable NSData*)archivedData {
+    GeometryArchiveWriter out;
+    out.u8(self.wholeBoard);
+    out.u64(self.layers.count);
+    for (EMSGeometryLayer* layer in self.layers) writeLayer(out, layer);
+    writeLayer(out, self.topSolderMask);
+    writeLayer(out, self.bottomSolderMask);
+    writePoints(out, self.outline);
+    out.u64(self.vias.count);
+    for (EMSGeometryVia* via in self.vias) {
+        out.point(via.position); out.point(via.position2);
+        out.point(via.ringPosition); out.point(via.ringPosition2);
+        out.f64(via.diameter); out.f64(via.annularRingDiameter);
+        out.string(via.netName);
+        out.u8(via.filled); out.u8(via.capped);
+    }
+    out.u64(self.trackSegments.count);
+    for (EMSGeometryTrackSegment* segment in self.trackSegments) {
+        out.string(segment.netName); out.string(segment.layerName);
+        out.point(segment.start); out.point(segment.end);
+    }
+    writePoints(out, self.failedViaAttempts);
+    out.u64(self.ports.count);
+    for (EMSGeometryPort* port in self.ports) {
+        out.string(port.name); out.point(port.position);
+        out.f64(port.width); out.f64(port.length); out.u8(port.absorbSignal);
+    }
+    writeComponentTriangles(out, self.viaMeshTriangles);
+    writeComponentTriangles(out, self.componentMeshTriangles);
+    writeStrings(out, self.renderedComponentReferences, self.renderedComponentReferences.count);
+    writeStrings(out, self.backComponentReferences, self.backComponentReferences.count);
+    writeStrings(out, self.componentModelExportMessages, self.componentModelExportMessages.count);
+    out.numbers(self.gridLinesX); out.numbers(self.gridLinesY); out.numbers(self.gridLinesZ);
+    writeGridPlane(out, self.gridPlaneExcludingX);
+    writeGridPlane(out, self.gridPlaneExcludingY);
+    writeGridPlane(out, self.gridPlaneExcludingZ);
+    out.u64(self.gridMaterials.count);
+    for (EMSGeometryGridMaterial* material in self.gridMaterials) { out.string(material.name); out.vec4(material.color); }
+    out.u64(self.gridLayers.count);
+    for (EMSGeometryGridLayer* layer in self.gridLayers) { out.string(layer.name); out.f64(layer.z); out.data(layer.edgeColors); }
+    for (double value : {self.pmlInnerXMin, self.pmlInnerXMax, self.pmlInnerYMin, self.pmlInnerYMax, self.pmlInnerZMin,
+                         self.pmlInnerZMax, self.xMin, self.yMin, self.width, self.height}) {
+        out.f64(value);
+    }
+    return out.finish();
+}
+
++ (nullable instancetype)previewWithArchivedData:(NSData*)archive {
+    constexpr std::size_t headerLength = sizeof kGeometryArchiveMagic + sizeof kGeometryArchiveVersion;
+    if (archive.length < headerLength ||
+        std::memcmp(archive.bytes, kGeometryArchiveMagic, sizeof kGeometryArchiveMagic) != 0) {
+        return nil;
+    }
+    std::uint32_t version = 0;
+    std::memcpy(&version, static_cast<const std::uint8_t*>(archive.bytes) + sizeof kGeometryArchiveMagic, sizeof version);
+    if (version != kGeometryArchiveVersion) return nil;
+    NSData* body = [[archive subdataWithRange:NSMakeRange(headerLength, archive.length - headerLength)]
+        decompressedDataUsingAlgorithm:NSDataCompressionAlgorithmLZFSE error:nil];
+    if (body == nil) return nil;
+
+    GeometryArchiveReader in(body);
+    in.readStringTable();
+    const BOOL wholeBoard = in.u8() != 0;
+    const std::uint64_t layerCount = in.count(1);
+    NSMutableArray<EMSGeometryLayer*>* layers = [NSMutableArray arrayWithCapacity:layerCount];
+    for (std::uint64_t i = 0; i < layerCount && !in.failed; ++i) {
+        if (EMSGeometryLayer* layer = readLayer(in)) [layers addObject:layer];
+    }
+    EMSGeometryLayer* topSolderMask = readLayer(in);
+    EMSGeometryLayer* bottomSolderMask = readLayer(in);
+    NSArray<NSValue*>* outline = readPoints(in);
+    const std::uint64_t viaCount = in.count(64 + 16 + 4 + 2);
+    NSMutableArray<EMSGeometryVia*>* vias = [NSMutableArray arrayWithCapacity:viaCount];
+    for (std::uint64_t i = 0; i < viaCount && !in.failed; ++i) {
+        const CGPoint position = in.point(), position2 = in.point(), ringPosition = in.point(), ringPosition2 = in.point();
+        const double diameter = in.f64(), annularRingDiameter = in.f64();
+        NSString* netName = in.string();
+        const BOOL filled = in.u8() != 0;
+        const BOOL capped = in.u8() != 0;
+        [vias addObject:[[EMSGeometryVia alloc] initWithPosition:position position2:position2 ringPosition:ringPosition
+                                                    ringPosition2:ringPosition2 diameter:diameter
+                                              annularRingDiameter:annularRingDiameter netName:netName
+                                                           filled:filled capped:capped]];
+    }
+    const std::uint64_t segmentCount = in.count(8 + 32);
+    NSMutableArray<EMSGeometryTrackSegment*>* trackSegments = [NSMutableArray arrayWithCapacity:segmentCount];
+    for (std::uint64_t i = 0; i < segmentCount && !in.failed; ++i) {
+        NSString* netName = orEmpty(in.string());
+        NSString* layerName = orEmpty(in.string());
+        const CGPoint start = in.point();
+        const CGPoint end = in.point();
+        [trackSegments addObject:[[EMSGeometryTrackSegment alloc] initWithNetName:netName layerName:layerName
+                                                                            start:start end:end]];
+    }
+    NSArray<NSValue*>* failedViaAttempts = readPoints(in);
+    const std::uint64_t portCount = in.count(4 + 16 + 16 + 1);
+    NSMutableArray<EMSGeometryPort*>* ports = [NSMutableArray arrayWithCapacity:portCount];
+    for (std::uint64_t i = 0; i < portCount && !in.failed; ++i) {
+        NSString* name = orEmpty(in.string());
+        const CGPoint position = in.point();
+        const double width = in.f64(), length = in.f64();
+        const BOOL absorbSignal = in.u8() != 0;
+        [ports addObject:[[EMSGeometryPort alloc] initWithName:name position:position width:width length:length
+                                                  absorbSignal:absorbSignal]];
+    }
+    NSArray<EMSGeometryComponentTriangle*>* viaMeshTriangles = readComponentTriangles(in);
+    NSArray<EMSGeometryComponentTriangle*>* componentMeshTriangles = readComponentTriangles(in);
+    NSArray<NSString*>* renderedComponentReferences = readStrings(in);
+    NSSet<NSString*>* backComponentReferences = [NSSet setWithArray:readStrings(in)];
+    NSArray<NSString*>* componentModelExportMessages = readStrings(in);
+    NSArray<NSNumber*>* gridLinesX = in.numbers();
+    NSArray<NSNumber*>* gridLinesY = in.numbers();
+    NSArray<NSNumber*>* gridLinesZ = in.numbers();
+    EMSGeometryGridPlane* planeX = readGridPlane(in);
+    EMSGeometryGridPlane* planeY = readGridPlane(in);
+    EMSGeometryGridPlane* planeZ = readGridPlane(in);
+    const std::uint64_t materialCount = in.count(4 + 32);
+    NSMutableArray<EMSGeometryGridMaterial*>* materials = [NSMutableArray arrayWithCapacity:materialCount];
+    for (std::uint64_t i = 0; i < materialCount && !in.failed; ++i) {
+        NSString* name = orEmpty(in.string());
+        [materials addObject:[[EMSGeometryGridMaterial alloc] initWithName:name color:in.vec4()]];
+    }
+    const std::uint64_t gridLayerCount = in.count(4 + 8 + 8);
+    NSMutableArray<EMSGeometryGridLayer*>* gridLayers = [NSMutableArray arrayWithCapacity:gridLayerCount];
+    for (std::uint64_t i = 0; i < gridLayerCount && !in.failed; ++i) {
+        NSString* name = orEmpty(in.string());
+        const double z = in.f64();
+        [gridLayers addObject:[[EMSGeometryGridLayer alloc] initWithName:name z:z edgeColors:in.data()]];
+    }
+    double bounds[10];
+    for (double& value : bounds) value = in.f64();
+    if (in.failed) return nil;
+
+    return [[EMSGeometryPreview alloc] initWithLayers:layers wholeBoard:wholeBoard topSolderMask:topSolderMask
+                                     bottomSolderMask:bottomSolderMask outline:outline vias:vias
+                                        trackSegments:trackSegments failedViaAttempts:failedViaAttempts ports:ports
+                                     viaMeshTriangles:viaMeshTriangles componentMeshTriangles:componentMeshTriangles
+                          renderedComponentReferences:renderedComponentReferences
+                              backComponentReferences:backComponentReferences
+                         componentModelExportMessages:componentModelExportMessages
+                                           gridLinesX:gridLinesX gridLinesY:gridLinesY gridLinesZ:gridLinesZ
+                                  gridPlaneExcludingX:planeX gridPlaneExcludingY:planeY gridPlaneExcludingZ:planeZ
+                                        gridMaterials:materials gridLayers:gridLayers
+                                         pmlInnerXMin:bounds[0] pmlInnerXMax:bounds[1]
+                                         pmlInnerYMin:bounds[2] pmlInnerYMax:bounds[3]
+                                         pmlInnerZMin:bounds[4] pmlInnerZMax:bounds[5]
+                                                 xMin:bounds[6] yMin:bounds[7] width:bounds[8] height:bounds[9]];
+}
+
+@end
