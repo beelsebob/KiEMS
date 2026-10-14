@@ -86,13 +86,16 @@ ExcitationPostprocessor::ExcitationPostprocessor(const SimulationConfig& simConf
       _runDurations(std::move(runDurations)) {}
 
 std::map<std::int32_t, double> ExcitationPostprocessor::loadRunDurations(const std::filesystem::path& simulationDir,
-                                                                          const SimulationConfig& simConfig) {
+                                                                          const SimulationConfig& simConfig,
+                                                                          const PortRenumbering* renumbering) {
     std::map<std::int32_t, double> durations;
     for (std::size_t index = 0; index < simConfig.ports().size(); ++index) {
         if (!simConfig.ports()[index].excite()) {
             continue;
         }
-        const std::filesystem::path runDir = simulationDir / std::to_string(index);
+        const auto current = static_cast<std::int32_t>(index);
+        const std::filesystem::path runDir =
+            simulationDir / std::to_string(renumbering ? renumbering->saved(current) : current);
         std::error_code error;
         for (const auto& entry : std::filesystem::directory_iterator(runDir, error)) {
             // Every port's voltage probe ("<prefix>port_ut_<n>[suffix]", see Port::_label) spans the
@@ -144,6 +147,11 @@ void ExcitationPostprocessor::run() {
     _responses.assign(portCount, TimeWaveform{_dt, std::vector<double>(sampleCount, 0.0)});
 
     for (std::size_t outputPort = 0; outputPort < portCount; ++outputPort) {
+        // Absorb-only terminations aren't recorded, so there's no transfer to them to apply.
+        const PortConfig& output = _simConfig.ports()[outputPort];
+        if (!output.probe() && !output.excite() && output.absorbSignal()) {
+            continue;
+        }
         std::vector<TimeWaveform> contributions;
 
         for (const auto& excitation : _simConfig.excitations()) {

@@ -40,7 +40,8 @@ public:
     /// `simulationDir`/<port index>/, where Simulation::getPortParameters() also reads them. Ports
     /// with no readable probe file are simply absent.
     static std::map<std::int32_t, double> loadRunDurations(const std::filesystem::path& simulationDir,
-                                                            const SimulationConfig& simConfig);
+                                                            const SimulationConfig& simConfig,
+                                                            const PortRenumbering* renumbering = nullptr);
 
     /// Synthesizes+propagates+superposes every excitation's contribution to every port in
     /// simConfig.ports(). No-op if the simulation has no excitations configured.

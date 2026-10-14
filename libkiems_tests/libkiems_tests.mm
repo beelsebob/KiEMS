@@ -759,6 +759,18 @@ bool isSimNode(const libkicad::ComponentSimNode& node, libkicad::ComponentSimNod
     XCTAssertEqualWithAccuracy(nlohmann::json::object().get<kiems::BoardSetupConfig>().signalImpedance(), 45, 1e-12);
 }
 
+- (void)testSimulationSetExcitationDurationIsSavedOnlyOnceChosen {
+    kiems::SimulationSetConfig set;
+    set.id = "set";
+    // Unset leaves generated excitations their own durations, and existing documents unchanged.
+    XCTAssertFalse(nlohmann::json(set).contains("excitation_duration"));
+    XCTAssertFalse(nlohmann::json(set).get<kiems::SimulationSetConfig>().excitationDuration.has_value());
+
+    set.excitationDuration = 12.5e-9;
+    const kiems::SimulationSetConfig loaded = nlohmann::json(set).get<kiems::SimulationSetConfig>();
+    XCTAssertTrue(loaded == set);
+}
+
 - (void)testAdversarialRecordWindowFollowsPrimaryRunAndDecay {
     kiems::Frequency frequency;
     frequency.setStart(1e9);
@@ -1238,6 +1250,81 @@ static kiems::EyeAggressor eyeTestTone(const std::vector<double>& frequencies, d
     for (const auto& polygon : classified->hullContributions[1].copper) {
         XCTAssertTrue(polygon.footprintRef == "C1");
     }
+}
+
+- (void)testHullPlanningIndexesTheDocumentsOwnSimulationsPastASetTemplate {
+    const TemporaryDirectory dir{std::filesystem::temp_directory_path() /
+                                 ("kiems-hull-plan-template-" + std::to_string(arc4random()))};
+    std::filesystem::create_directories(dir.path);
+    std::ofstream(dir.path / "fixture.kicad_pro") << R"({"meta":{"filename":"fixture.kicad_pro","version":1}})";
+    std::ofstream pcb(dir.path / "fixture.kicad_pcb");
+    pcb << R"((kicad_pcb (version 20240108) (generator "libkiems_tests")
+  (general (thickness 1.6)) (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "") (net 1 "SIG1") (net 2 "SIG2") (net 3 "GND")
+)";
+    for (const auto& [reference, y, net, netName] : {std::tuple{"R1", 5, 1, "SIG1"}, std::tuple{"R2", 15, 2, "SIG2"}}) {
+        pcb << "(footprint \"fixture:R_0603\" (layer \"F.Cu\") (at 10 " << y << ")\n"
+            << "  (property \"Reference\" \"" << reference << "\" (at 0 -1.5 0) (layer \"F.SilkS\"))\n"
+            << "  (pad \"1\" smd rect (at -0.8 0) (size 0.8 0.9) (layers \"F.Cu\") (net " << net << " \"" << netName
+            << "\"))\n"
+            << "  (pad \"2\" smd rect (at 0.8 0) (size 0.8 0.9) (layers \"F.Cu\") (net 3 \"GND\")))\n";
+    }
+    pcb << R"((gr_rect (start 0 0) (end 20 20) (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts"))))";
+    pcb.close();
+    const libkicad::Board board(*_runtime, (dir.path / "fixture.kicad_pro").string(),
+                                (dir.path / "fixture.kicad_pcb").string());
+
+    const auto simulationOn = [](const std::string& net) {
+        kiems::SimulationConfig simulation;
+        simulation.setName(net);
+        kiems::InvolvedNetConfig entry;
+        entry.setKind(kiems::NetSelectorKind::Net);
+        entry.setNet(net);
+        entry.setHullPadding(500);
+        simulation.involvedNets().push_back(entry);
+        kiems::GroundNetConfig ground;
+        ground.setKind(kiems::GroundSelectorKind::Net);
+        ground.setNet(std::string("GND"));
+        simulation.groundNet() = ground;
+        return simulation;
+    };
+    const auto cutoutFor = [&](std::vector<kiems::SimulationConfig> simulations, std::size_t index) {
+        kiems::EMSConfig config;
+        XCTAssertTrue(kiems::importStackup(board, config).has_value());
+        config.simulations() = std::move(simulations);
+        auto plan = kiems::planHullCuts(config, index, board);
+        XCTAssertTrue(plan.has_value(), @"%s", plan ? "" : plan.error().c_str());
+        return plan ? plan->plan.cutoutLoops : std::vector<std::vector<kiems::Position>>{};
+    };
+    const auto same = [](const std::vector<std::vector<kiems::Position>>& a,
+                         const std::vector<std::vector<kiems::Position>>& b) {
+        if (a.size() != b.size()) return false;
+        for (std::size_t loop = 0; loop < a.size(); ++loop) {
+            if (a[loop].size() != b[loop].size()) return false;
+            for (std::size_t point = 0; point < a[loop].size(); ++point) {
+                if (std::abs(a[loop][point].x() - b[loop][point].x()) > 1e-6 ||
+                    std::abs(a[loop][point].y() - b[loop][point].y()) > 1e-6) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+
+    kiems::SimulationConfig set = simulationOn("SIG1");
+    kiems::SimulationSetConfig setup;
+    setup.id = "set";
+    set.simulationSet() = setup;
+    const auto sig1 = cutoutFor({simulationOn("SIG1")}, 0);
+    const auto sig2 = cutoutFor({simulationOn("SIG2")}, 0);
+    XCTAssertFalse(sig1.empty());
+    XCTAssertFalse(same(sig1, sig2));
+    // The template keeps its own hull, and the simulation after it (the last one, which used to
+    // index past the template-free scaled copy) keeps its own too.
+    XCTAssertTrue(same(cutoutFor({set, simulationOn("SIG2")}, 0), sig1));
+    XCTAssertTrue(same(cutoutFor({set, simulationOn("SIG2")}, 1), sig2));
 }
 
 - (void)testOnlyIncludedComponentsBecomeLumpedComponents {
@@ -3902,6 +3989,113 @@ libkicad::ComponentSimModel simModel(std::vector<std::tuple<char, std::string, s
                       std::string::npos);
     // A zero-ohm link straight between pins.
     XCTAssertNotEqual(reason(simModel({{'R', "R0", "1", "2", 0}})).find("shorts pin 1 to pin 2"), std::string::npos);
+}
+
+
+// An absorb-only termination keeps its resistor but isn't probed, so a run writes no
+// port_ut_N/port_it_N for it.
+- (void)testUnrecordedLumpedPortKeepsResistorWithoutProbes {
+    const auto count = [](ContinuousStructure& csx, CSProperties::PropertyType type) {
+        return csx.GetPropertyByType(type).size();
+    };
+    ContinuousStructure recordedCsx;
+    kiems::LumpedPort recorded(recordedCsx, 3, 50, {0, 0, 0}, {0, 0, 10}, "z");
+    XCTAssertTrue(recorded.recordsUI());
+    XCTAssertEqual(count(recordedCsx, CSProperties::PROBEBOX), 2u);
+
+    ContinuousStructure unrecordedCsx;
+    kiems::LumpedPort unrecorded(unrecordedCsx, 3, 50, {0, 0, 0}, {0, 0, 10}, "z", 0, 0, "", 0, false);
+    XCTAssertFalse(unrecorded.recordsUI());
+    XCTAssertEqual(count(unrecordedCsx, CSProperties::PROBEBOX), 0u);
+    XCTAssertEqual(count(unrecordedCsx, CSProperties::LUMPED_ELEMENT), 1u);
+}
+
+// Saved results only fit the ports they were simulated with: a port dropped by later resolution
+// renumbers everything after it, which the document's config alone doesn't show.
+- (void)testResolvedPortsMismatchCatchesRenumberedPorts {
+    const auto port = [](std::string name, std::string net, bool excite, bool probe) {
+        kiems::PortConfig p;
+        p.setName(std::move(name));
+        p.setNetName(std::move(net));
+        p.setAbsorbSignal(true);
+        p.setExcite(excite);
+        p.setProbe(probe);
+        return p;
+    };
+    kiems::SimulationConfig sim;
+    sim.ports() = {port("U1 pin A", "DQ0", true, true), port("U14 pin C1", "+1.2V", false, false),
+                   port("U14 pin G2", "DQ0", false, true)};
+    const auto portsTxt = std::filesystem::temp_directory_path() / "kiems_ports_mismatch_test.txt";
+    {
+        std::ofstream out(portsTxt);
+        out << "# header\n"
+            << "0\tU1 pin A\tnet=DQ0\texcited\tZ=60\tCload=0\n"
+            << "1\tU14 pin C1\tnet=+1.2V\tabsorbing,hidden\tZ=60\tCload=0\n"
+            << "2\tU14 pin G2\tnet=DQ0\tabsorbing\tZ=60\tCload=0\n";
+    }
+    XCTAssertFalse(kiems::resolvedPortsMismatch(sim, portsTxt).has_value());
+
+    sim.ports().erase(sim.ports().begin() + 1); // the via-sitting absorber is now dropped
+    const auto mismatch = kiems::resolvedPortsMismatch(sim, portsTxt);
+    XCTAssertTrue(mismatch.has_value());
+    XCTAssertNotEqual(mismatch->find("port 1"), std::string::npos);
+
+    XCTAssertFalse(kiems::resolvedPortsMismatch(sim, portsTxt.string() + ".missing").has_value());
+    std::filesystem::remove(portsTxt);
+}
+
+// A saved run whose hidden absorber has since been dropped loads renumbered: each S-parameter
+// lands on the current port it was measured at, and the dropped port's columns are discarded.
+- (void)testSavedResultsRenumberOntoCurrentPorts {
+    const auto port = [](std::string name, std::string net, bool excite, bool probe) {
+        kiems::PortConfig p;
+        p.setName(std::move(name));
+        p.setNetName(std::move(net));
+        p.setAbsorbSignal(true);
+        p.setExcite(excite);
+        p.setProbe(probe);
+        return p;
+    };
+    const auto dir = std::filesystem::temp_directory_path() / "kiems_renumber_test";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir / "1");
+    {
+        std::ofstream ports(dir / "1" / "ports.txt");
+        ports << "# header\n"
+              << "0\tU14 pin C1\tnet=+1.2V\tabsorbing,hidden\tZ=60\n"
+              << "1\tU1 pin A\tnet=DQ0\texcited\tZ=60\n"
+              << "2\tU14 pin G2\tnet=DQ0\tabsorbing\tZ=60\n";
+        std::ofstream sx(dir / "Sx1.csv");
+        sx << "Frequency [MHz], re(S0-1), re(S1-1), re(S2-1), im(S0-1), im(S1-1), im(S2-1)\n"
+           << "100, 0.9, 0.1, 0.5, 0, 0.2, 0.6\n"
+           << "200, 0.9, 0.3, 0.7, 0, 0.4, 0.8\n";
+    }
+    kiems::SimulationConfig sim;
+    sim.ports() = {port("U1 pin A", "DQ0", true, true), port("U14 pin G2", "DQ0", false, true)};
+
+    XCTAssertTrue(kiems::resolvedPortsMismatch(sim, dir / "1" / "ports.txt").has_value());
+    const auto renumbering = kiems::savedPortRenumbering(sim, dir / "1" / "ports.txt");
+    XCTAssertTrue(renumbering.has_value());
+    if (!renumbering) return;
+    XCTAssertEqual(renumbering->saved(0), 1);
+    XCTAssertEqual(renumbering->saved(1), 2);
+    XCTAssertEqual(renumbering->droppedPorts, std::vector<std::string>{"U14 pin C1"});
+
+    kiems::Postprocessor post({100e6, 200e6}, sim);
+    const auto loaded = post.loadSparams(dir, &*renumbering);
+    XCTAssertTrue(loaded.has_value());
+    const auto reflection = post.getSParam(0, 0);
+    const auto transmission = post.getSParam(1, 0);
+    XCTAssertTrue(reflection.has_value() && transmission.has_value());
+    if (reflection && transmission) {
+        XCTAssertEqual((*reflection)[1], std::complex<double>(0.3, 0.4));
+        XCTAssertEqual((*transmission)[0], std::complex<double>(0.5, 0.6));
+    }
+
+    // A saved port that wasn't just a hidden absorber can't be renumbered away.
+    sim.ports().pop_back();
+    XCTAssertFalse(kiems::savedPortRenumbering(sim, dir / "1" / "ports.txt").has_value());
+    std::filesystem::remove_all(dir);
 }
 
 @end

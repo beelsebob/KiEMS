@@ -844,6 +844,9 @@ void to_json(nlohmann::json& j, const SimulationSetConfig& p) {
     if (p.loadCapacitance) {
         j["load_capacitance"] = *p.loadCapacitance;
     }
+    if (p.excitationDuration) {
+        j["excitation_duration"] = *p.excitationDuration;
+    }
 }
 
 void from_json(const nlohmann::json& j, SimulationSetConfig& p) {
@@ -859,6 +862,8 @@ void from_json(const nlohmann::json& j, SimulationSetConfig& p) {
     p.phaseDegrees = j.value("phase", def.phaseDegrees);
     p.amplitude = j.value("amplitude", def.amplitude);
     p.driveImpedance = j.value("drive_impedance", def.driveImpedance);
+    p.excitationDuration = j.contains("excitation_duration")
+        ? std::optional(j.at("excitation_duration").get<double>()) : std::nullopt;
     p.probed = j.value("probed", def.probed);
     p.probeNetImpedance = j.value("probe_net_impedance", def.probeNetImpedance);
     p.absorbing = j.value("absorbing", def.absorbing);
@@ -1101,7 +1106,7 @@ EMSConfig EMSConfig::scaledToSimulationUnits() const {
     return scaled;
 }
 
-std::expected<void, std::string> EMSConfig::save(const std::filesystem::path& cfgPath) const {
+nlohmann::json EMSConfig::toJson() const {
     nlohmann::json out;
     out["format_version"] = _formatVersion.empty() ? std::string(constants::configFormatVersion) : _formatVersion;
     if (_kicadPcbPath.has_value()) {
@@ -1114,7 +1119,11 @@ std::expected<void, std::string> EMSConfig::save(const std::filesystem::path& cf
     out["grid"] = _grid;
     out["simulations"] = _simulations;
     out["board_setup"] = _boardSetup;
+    return out;
+}
 
+std::expected<void, std::string> EMSConfig::save(const std::filesystem::path& cfgPath) const {
+    const nlohmann::json out = toJson();
     std::ofstream file(cfgPath);
     if (!file) {
         return std::unexpected("Couldn't open " + cfgPath.string() + " for writing");

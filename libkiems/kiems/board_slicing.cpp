@@ -926,12 +926,16 @@ void restrictLumpedComponentsToCutout(SimulationConfig& simulation, const Sliced
         const PortConfig& port = ports[index];
         const bool pureAbsorber = !port.isTraceProbe() && port.absorbSignal() && !port.excite() && !port.probe();
         if (pureAbsorber && port.position().has_value() && !contains(*port.position())) continue;
+        // A pure absorber left without a return bridge on a via-in-pad would run its column down the
+        // via's own barrel. That is wrong physics, and the lumped element painted over the conformal
+        // barrel can make the run diverge (HorizonPC DQ13 at U14 C1), so it is better left out.
+        if (pureAbsorber && port.columnHitsVia() && !port.returnBridge().has_value()) continue;
         newIndex[index] = static_cast<std::int32_t>(kept.size());
         kept.push_back(port);
     }
     if (kept.size() != ports.size()) {
         logInfo("Simulation \"" + simulation.name() + "\": discarded " +
-                std::to_string(ports.size() - kept.size()) + " absorbing port(s) outside the sliced cutout");
+                std::to_string(ports.size() - kept.size()) + " absorbing port(s) outside the sliced cutout or on an unbridged via-in-pad");
         ports = std::move(kept);
         for (ExcitationConfig& excitation : simulation.excitations()) {
             if (excitation.drivenPortIndex().has_value()) {
@@ -946,8 +950,11 @@ std::expected<HullCutPlan, std::string> planHullCuts(const EMSConfig& fileConfig
     if (simulationIndex >= fileConfig.simulations().size()) {
         return std::unexpected("The selected simulation no longer exists");
     }
+    // scaledToSimulationUnits() drops Simulation Set templates, so its simulations() don't line up
+    // with `fileConfig`'s, and a template (whose hull the board view still shows) isn't among them.
     const EMSConfig config = fileConfig.scaledToSimulationUnits();
-    const SimulationConfig& simulation = config.simulations()[simulationIndex];
+    SimulationConfig simulation = fileConfig.simulations()[simulationIndex];
+    simulation.scaleToSimulationUnits(constants::unitMultiplier);
     auto geometry = board.boardGeometry();
     if (!geometry) return std::unexpected(std::move(geometry).error());
     auto copper = classifyCopperForSimulation(simulation, *geometry, board);

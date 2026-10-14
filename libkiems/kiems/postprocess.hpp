@@ -14,6 +14,7 @@
 #include <complex>
 #include <cstdint>
 #include <expected>
+#include <map>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -28,6 +29,26 @@ namespace kiems {
 /// branch cut. Shared by renderSParams's phase subplot and any caller (e.g. a GUI) that wants the
 /// same continuous phase curve without reimplementing the unwrapping.
 std::vector<double> unwrapPhaseDegrees(const std::vector<std::complex<double>>& values);
+
+/// How saved results' port numbers map onto the current resolved ports, when port resolution has
+/// since dropped some absorb-only terminations (see savedPortRenumbering()). Saved files and the
+/// indices inside them use the saved numbering; everything loaded into memory uses the current one.
+struct PortRenumbering {
+    /// The saved index of each current port, by current index.
+    std::vector<std::int32_t> savedFromCurrent;
+    /// The current index of each saved port that still exists.
+    std::map<std::int32_t, std::int32_t> currentFromSaved;
+    /// The names of saved ports that no longer exist.
+    std::vector<std::string> droppedPorts;
+
+    std::int32_t saved(std::int32_t current) const {
+        return savedFromCurrent[static_cast<std::size_t>(current)];
+    }
+    std::optional<std::int32_t> current(std::int32_t saved) const {
+        const auto it = currentFromSaved.find(saved);
+        return it == currentFromSaved.end() ? std::nullopt : std::optional(it->second);
+    }
+};
 
 /// Post-processes and displays simulation data.
 class Postprocessor {
@@ -126,11 +147,14 @@ public:
 
     void saveToFile(const std::filesystem::path& outputDir) const;
     void sparamToFile(const std::filesystem::path& simulationDir) const;
-    std::expected<void, std::string> loadSparams(const std::filesystem::path& inputDir);
+    /// `renumbering` reads results saved under an older port numbering -- see PortRenumbering.
+    std::expected<void, std::string> loadSparams(const std::filesystem::path& inputDir,
+                                                 const PortRenumbering* renumbering = nullptr);
     /// Persistence for addProbeData()'s data, mirroring sparamToFile()/loadSparams() but with a
     /// simpler, always-re/im CSV shape (no legacy format to sniff -- this is a new file kind).
     void probeToFile(const std::filesystem::path& simulationDir) const;
-    std::expected<void, std::string> loadProbes(const std::filesystem::path& inputDir);
+    std::expected<void, std::string> loadProbes(const std::filesystem::path& inputDir,
+                                                const PortRenumbering* renumbering = nullptr);
 
 private:
     void savePortToFile(std::int32_t portNumber, const std::filesystem::path& path) const;

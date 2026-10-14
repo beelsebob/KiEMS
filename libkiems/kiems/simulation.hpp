@@ -26,6 +26,7 @@
 #include "grid_gen.hpp"
 #include "importer.hpp"
 #include "paths_config.hpp"
+#include "postprocess.hpp"
 #include "ports.hpp"
 
 namespace kiems {
@@ -420,5 +421,19 @@ private:
 
     std::unique_ptr<GridGenerator> _gridGen;
 };
+
+/// Compares the ports a run was simulated with, as its ports.txt recorded them, with `simConfig`'s
+/// resolved ports: index, name, net and role. Saved results are only meaningful against the ports
+/// they were computed for -- a change to port resolution renumbers or drops ports without touching
+/// the document's config. Returns the first difference, or nullopt when they agree or the run
+/// predates ports.txt.
+std::optional<std::string> resolvedPortsMismatch(const SimulationConfig& simConfig,
+                                                 const std::filesystem::path& portsTxt);
+
+/// When resolvedPortsMismatch() finds a difference that is only absorb-only terminations
+/// (role "absorbing,hidden") since dropped, the renumbering that reads the saved results against
+/// the current ports, matching each by name, net and role. Otherwise the reason it can't.
+std::expected<PortRenumbering, std::string> savedPortRenumbering(const SimulationConfig& simConfig,
+                                                                 const std::filesystem::path& portsTxt);
 
 } // namespace kiems

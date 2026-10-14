@@ -146,6 +146,12 @@ public:
     const std::optional<PortReturnBridge>& returnBridge() const { return _returnBridge; }
     void setReturnBridge(std::optional<PortReturnBridge> value) { _returnBridge = std::move(value); }
 
+    /// Whether the pad's vertical column contains a via barrel (set by port_resolution.cpp alongside
+    /// returnBridge(), never serialized). Such a port with no return bridge falls back to a column
+    /// down the barrel; restrictLumpedComponentsToCutout() drops it when it is a pure absorber.
+    bool columnHitsVia() const { return _columnHitsVia; }
+    void setColumnHitsVia(bool value) { _columnHitsVia = value; }
+
     /// Scales width/length into simulation units (mirrors the `*= UNIT_MULTIPLIER` done in
     /// Config.load).
     void scaleToSimulationUnits(std::int32_t unitMultiplier);
@@ -169,6 +175,7 @@ private:
     bool _absorbSignal = true;
     bool _isTraceProbe = false;
     bool _probe = true;
+    bool _columnHitsVia = false;
 };
 
 /// Axis-aligned XY footprint used to reserve mesh density for a component-facing port. It must
@@ -1250,6 +1257,9 @@ struct SimulationSetConfig {
     double phaseDegrees = 0;
     double amplitude = 1;       // volts
     double driveImpedance = 45; // ohms
+    /// Every main excitation's ExcitationConfig::duration() in a generated simulation, in seconds.
+    /// Unset leaves each with the duration it was created with.
+    std::optional<double> excitationDuration;
     bool probed = false;
     bool probeNetImpedance = false;
     bool absorbing = false;
@@ -1424,8 +1434,8 @@ public:
     /// port's width/length (PortConfig::scaleToSimulationUnits), into simulation units. The other
     /// InvolvedNetConfig fields stay in file units: impedance/length/width are copied verbatim into
     /// a PortConfig by port_resolution.cpp and scaled with that port exactly once. Only ever called
-    /// by EMSConfig::scaledToSimulationUnits(), on a scratch copy -- never on the canonical,
-    /// edited/saved EMSConfig a caller holds.
+    /// on a scratch copy, by EMSConfig::scaledToSimulationUnits() or planHullCuts() -- never on the
+    /// canonical, edited/saved EMSConfig a caller holds.
     void scaleToSimulationUnits(std::int32_t unitMultiplier);
 
 private:
@@ -1594,6 +1604,8 @@ public:
     /// never scaled to simulation units in place (see scaledToSimulationUnits()), so there's no
     /// unscaling to do here; a save() is just to_json() on `self`, verbatim.
     std::expected<void, std::string> save(const std::filesystem::path& cfgPath) const;
+    /// The JSON save() writes.
+    nlohmann::json toJson() const;
 
     /// A copy of `self` with every spatial field (grid, via, and each involved net's hull padding/
     /// via edge distance/via spacing/resolved ports' width+length) scaled from file units into FDTD

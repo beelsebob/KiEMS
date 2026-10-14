@@ -897,13 +897,16 @@ std::string _trim(const std::string& s) {
 
 } // namespace
 
-std::expected<void, std::string> Postprocessor::loadSparams(const std::filesystem::path& inputDir) {
+std::expected<void, std::string> Postprocessor::loadSparams(const std::filesystem::path& inputDir,
+                                                             const PortRenumbering* renumbering) {
     for (std::size_t idx = 0; idx < _simConfig.ports().size(); ++idx) {
         const PortConfig& port = _simConfig.ports()[idx];
         if (!port.excite()) {
             continue;
         }
-        const std::filesystem::path fpath = inputDir / _sparamPath(static_cast<std::int32_t>(idx));
+        const auto currentIdx = static_cast<std::int32_t>(idx);
+        const std::filesystem::path fpath =
+            inputDir / _sparamPath(renumbering ? renumbering->saved(currentIdx) : currentIdx);
         if (!std::filesystem::exists(fpath)) {
             return std::unexpected("Input file with s-parameters (" + std::filesystem::absolute(fpath).string() +
                                     ") could not be found. Did you run simulation step?");
@@ -937,7 +940,13 @@ std::expected<void, std::string> Postprocessor::loadSparams(const std::filesyste
             if (!std::regex_search(lcell, match, sxxPattern)) {
                 continue;
             }
-            const std::pair<std::int32_t, std::int32_t> sxx = {std::stoi(match[1].str()), std::stoi(match[2].str())};
+            std::pair<std::int32_t, std::int32_t> sxx = {std::stoi(match[1].str()), std::stoi(match[2].str())};
+            if (renumbering) {
+                const auto output = renumbering->current(sxx.first);
+                const auto input = renumbering->current(sxx.second);
+                if (!output || !input) continue; // a port that no longer exists
+                sxx = {*output, *input};
+            }
             if (lcell.find("mag") != std::string::npos || lcell.find("abs") != std::string::npos ||
                 lcell.rfind('|', 0) == 0) {
                 sMap["mag"][sxx] = colNum;
@@ -1002,12 +1011,15 @@ std::expected<void, std::string> Postprocessor::loadSparams(const std::filesyste
     return {};
 }
 
-std::expected<void, std::string> Postprocessor::loadProbes(const std::filesystem::path& inputDir) {
+std::expected<void, std::string> Postprocessor::loadProbes(const std::filesystem::path& inputDir,
+                                                            const PortRenumbering* renumbering) {
     for (std::size_t idx = 0; idx < _simConfig.ports().size(); ++idx) {
         if (_simConfig.ports()[idx].absorbSignal()) {
             continue;
         }
-        const std::filesystem::path fpath = inputDir / _probePath(static_cast<std::int32_t>(idx));
+        const auto currentIdx = static_cast<std::int32_t>(idx);
+        const std::filesystem::path fpath =
+            inputDir / _probePath(renumbering ? renumbering->saved(currentIdx) : currentIdx);
         if (!std::filesystem::exists(fpath)) {
             continue; // this probe simply wasn't reached by any excited port's own run
         }
@@ -1026,7 +1038,12 @@ std::expected<void, std::string> Postprocessor::loadProbes(const std::filesystem
             if (!std::regex_search(lcell, match, viPattern)) {
                 continue;
             }
-            const std::pair<char, std::int32_t> key = {match[1].str()[0], std::stoi(match[2].str())};
+            std::pair<char, std::int32_t> key = {match[1].str()[0], std::stoi(match[2].str())};
+            if (renumbering) {
+                const auto excited = renumbering->current(key.second);
+                if (!excited) continue;
+                key.second = *excited;
+            }
             if (lcell.find("re(") != std::string::npos) {
                 reCol[key] = colNum;
             } else if (lcell.find("im(") != std::string::npos) {

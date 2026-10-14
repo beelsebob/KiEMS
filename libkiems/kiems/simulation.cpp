@@ -1062,7 +1062,8 @@ std::expected<void, std::string> Simulation::addReturnBridgePort(PortConfig& por
              _point3ToString(start) + " end: " + _point3ToString(stop));
     if (portConfig.absorbSignal()) {
         _ports.push_back(std::make_unique<LumpedPort>(*_csx, portNumber, portConfig.impedance(), start, stop,
-                                                        geometry->axis, portConfig.excite() ? 1.0 : 0.0, 100));
+                                                        geometry->axis, portConfig.excite() ? 1.0 : 0.0, 100, "", 0,
+                                                        portConfig.probe() || portConfig.excite()));
         return {};
     }
     _ports.push_back(std::make_unique<PassiveProbe>(*_csx, portNumber, start, stop, geometry->axis, 100));
@@ -1092,8 +1093,9 @@ std::expected<void, std::string> Simulation::addResistivePort(PortConfig& portCo
     const auto& [start, stop] = *column;
 
     logDebug("Adding resistive port at start: " + _point3ToString(start) + " end: " + _point3ToString(stop));
-    _ports.push_back(std::make_unique<LumpedPort>(*_csx, portNumber,
-                                                    portConfig.impedance(), start, stop, "z", excite ? 1.0 : 0.0, 100));
+    // An absorb-only termination (probe() false) is never shown, so it isn't recorded either.
+    _ports.push_back(std::make_unique<LumpedPort>(*_csx, portNumber, portConfig.impedance(), start, stop, "z",
+                                                    excite ? 1.0 : 0.0, 100, "", 0, portConfig.probe() || excite));
     return {};
 }
 
@@ -1791,6 +1793,103 @@ std::vector<std::string> Simulation::writeMetalShortReport(const MetalRegionAt& 
     return findings;
 }
 
+namespace {
+
+// One port's line in ports.txt up to its role -- the part resolvedPortsMismatch() compares.
+std::string portIdentity(std::size_t index, const PortConfig& port) {
+    std::string role = port.isTraceProbe() ? "trace-probe"
+                       : port.absorbSignal() ? (port.excite() ? "excited" : "absorbing")
+                                             : "passive-probe";
+    if (!port.probe() && !port.isTraceProbe()) role += ",hidden";
+    return std::to_string(index) + "\t" + port.name() + "\tnet=" + port.netName() + "\t" + role;
+}
+
+// ports.txt's port lines up to each one's role (see portIdentity()), in index order; nullopt when
+// the file can't be read.
+std::optional<std::vector<std::string>> savedPortIdentities(const std::filesystem::path& portsTxt) {
+    std::ifstream in(portsTxt);
+    if (!in.is_open()) {
+        return std::nullopt;
+    }
+    std::vector<std::string> saved;
+    for (std::string line; std::getline(in, line);) {
+        if (line.empty() || line[0] == '#') continue;
+        // index, name, net, role: everything before the fourth tab.
+        std::size_t end = 0;
+        for (int tab = 0; tab < 4 && end != std::string::npos; ++tab) {
+            end = line.find('\t', tab == 0 ? 0 : end + 1);
+        }
+        saved.push_back(line.substr(0, end));
+    }
+    return saved;
+}
+
+} // namespace
+
+std::optional<std::string> resolvedPortsMismatch(const SimulationConfig& simConfig,
+                                                 const std::filesystem::path& portsTxt) {
+    const auto savedLines = savedPortIdentities(portsTxt);
+    if (!savedLines) {
+        return std::nullopt;
+    }
+    const std::vector<std::string>& saved = *savedLines;
+    const auto& ports = simConfig.ports();
+    for (std::size_t index = 0; index < std::max(saved.size(), ports.size()); ++index) {
+        const std::string current = index < ports.size() ? portIdentity(index, ports[index]) : std::string();
+        const std::string previous = index < saved.size() ? saved[index] : std::string();
+        if (current != previous) {
+            const auto describe = [](const std::string& line) {
+                return line.empty() ? std::string("nothing") : "\"" + line + "\"";
+            };
+            return "the ports have changed since it ran (port " + std::to_string(index) + " was " +
+                   describe(previous) + ", now " + describe(current) + ")";
+        }
+    }
+    return std::nullopt;
+}
+
+std::expected<PortRenumbering, std::string> savedPortRenumbering(const SimulationConfig& simConfig,
+                                                                 const std::filesystem::path& portsTxt) {
+    const auto savedLines = savedPortIdentities(portsTxt);
+    if (!savedLines) {
+        return std::unexpected("its ports.txt can't be read");
+    }
+    // Everything after the index: name, net and role.
+    const auto withoutIndex = [](const std::string& line) {
+        const std::size_t tab = line.find('\t');
+        return tab == std::string::npos ? std::string() : line.substr(tab + 1);
+    };
+    std::map<std::string, std::int32_t> savedByIdentity;
+    for (std::size_t i = 0; i < savedLines->size(); ++i) {
+        if (!savedByIdentity.emplace(withoutIndex((*savedLines)[i]), static_cast<std::int32_t>(i)).second) {
+            return std::unexpected("two of its saved ports can't be told apart");
+        }
+    }
+    PortRenumbering renumbering;
+    const auto& ports = simConfig.ports();
+    for (std::size_t index = 0; index < ports.size(); ++index) {
+        const std::string identity = withoutIndex(portIdentity(index, ports[index]));
+        const auto it = savedByIdentity.find(identity);
+        if (it == savedByIdentity.end()) {
+            return std::unexpected("port \"" + ports[index].name() + "\" wasn't part of the saved run");
+        }
+        renumbering.savedFromCurrent.push_back(it->second);
+        renumbering.currentFromSaved[it->second] = static_cast<std::int32_t>(index);
+    }
+    for (std::size_t i = 0; i < savedLines->size(); ++i) {
+        const auto savedIndex = static_cast<std::int32_t>(i);
+        if (renumbering.currentFromSaved.contains(savedIndex)) continue;
+        const std::string identity = withoutIndex((*savedLines)[i]);
+        const std::size_t roleTab = identity.rfind('\t');
+        if (roleTab == std::string::npos || identity.substr(roleTab + 1) != "absorbing,hidden") {
+            return std::unexpected("saved port \"" + identity.substr(0, identity.find('\t')) +
+                                   "\" no longer exists, and it wasn't just an absorbing termination");
+        }
+        renumbering.droppedPorts.push_back(identity.substr(0, identity.find('\t')));
+    }
+    return renumbering;
+}
+
 void Simulation::writeRunDiagnostics(const std::filesystem::path& directory) const {
     // Simulation units (config microns * unitMultiplier) to millimetres, in the board-origin frame.
     const auto mm = [](double simUnits) { return simUnits * constants::baseUnit / constants::unitMultiplier * 1e3; };
@@ -1807,12 +1906,7 @@ void Simulation::writeRunDiagnostics(const std::filesystem::path& directory) con
     const auto& portConfigs = _simConfig.ports();
     for (std::size_t index = 0; index < portConfigs.size(); ++index) {
         const PortConfig& port = portConfigs[index];
-        std::string role = port.isTraceProbe() ? "trace-probe"
-                           : port.absorbSignal() ? (port.excite() ? "excited" : "absorbing")
-                                                 : "passive-probe";
-        if (!port.probe() && !port.isTraceProbe()) role += ",hidden";
-        ports << index << "\t" << port.name() << "\tnet=" << port.netName() << "\t" << role
-              << "\tZ=" << port.impedance() << "\tCload=" << port.loadCapacitance();
+        ports << portIdentity(index, port) << "\tZ=" << port.impedance() << "\tCload=" << port.loadCapacitance();
         if (port.position().has_value()) {
             ports << "\tat=(" << mm(port.position()->first) << ", " << mm(port.position()->second) << ")";
         }
@@ -1865,7 +1959,11 @@ std::expected<Simulation::PortParameters, std::string> Simulation::getPortParame
     PortParameters params;
     for (std::size_t index = 0; index < _ports.size(); ++index) {
         const bool absorbs = _simConfig.ports()[index].absorbSignal();
-        if (absorbs) {
+        if (absorbs && !_ports[index]->recordsUI()) {
+            // An unrecorded absorb-only termination: no S-parameters, like a port never reached.
+            params.incident.push_back(naNPlaceholder);
+            params.reflected.push_back(naNPlaceholder);
+        } else if (absorbs) {
             if (auto result = _ports[index]->calcPort(resultPath, frequencies); !result) {
                 return std::unexpected("Port data files do not exist. Did you run simulation step? (" +
                                         result.error() + ")");

@@ -62,6 +62,8 @@ public:
     virtual ~Port() = default;
 
     std::int32_t number() const { return _number; }
+    /// Whether this port has U/I probes, and so writes port_ut_N/port_it_N for calcPort() to read.
+    bool recordsUI() const { return !_uFilenames.empty(); }
 
     virtual std::expected<void, std::string> readUiData(const std::filesystem::path& simPath,
                                                           const std::vector<double>& freq,
@@ -120,7 +122,7 @@ class LumpedPort : public Port {
 public:
     LumpedPort(ContinuousStructure& csx, std::int32_t portNr, double resistance, Point3 start, Point3 stop,
                const std::string& excDir, double excite = 0, std::int32_t priority = 0,
-               std::string portNamePrefix = "", double delay = 0);
+               std::string portNamePrefix = "", double delay = 0, bool recordUI = true);
 
     std::expected<void, std::string> calcPort(const std::filesystem::path& simPath, const std::vector<double>& freq,
                                                std::optional<double> refImpedance = std::nullopt,

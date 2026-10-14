@@ -881,6 +881,7 @@ void _assignReturnBridges(const EMSConfig& config, SimulationConfig& sim, const 
                 }
                 request.returnPads.push_back(_bridgePad(candidate, origin));
             }
+            sim.ports()[index].setColumnHitsVia(true);
             portIndices.push_back(index);
             requests.push_back(std::move(request));
         }
@@ -895,7 +896,10 @@ void _assignReturnBridges(const EMSConfig& config, SimulationConfig& sim, const 
                            " sits on a via, so a pad-to-plane port would replace the via's barrel, but no ground "
                            "pad on " + port.footprintRef() + " within " +
                            std::to_string(static_cast<int>(kMaxReturnBridgeDistanceMm)) +
-                           " mm has a clear route -- its readings and loading will be wrong");
+                           " mm has a clear route -- " +
+                           (port.excite() || port.probe() || port.isTraceProbe()
+                                ? std::string("its readings and loading will be wrong")
+                                : std::string("dropping it")));
                 continue;
             }
             ++bridged;
@@ -1632,23 +1636,43 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                 continue;
             }
 
-            std::optional<std::pair<std::int32_t, std::int32_t>> destination;
-            for (std::size_t pi = 0; pi < sim.ports().size() && !destination.has_value(); ++pi) {
-                const PortConfig& p = sim.ports()[pi];
-                if (p.excite() || !p.absorbSignal() || !positiveNets.contains(p.netName()) || p.isTraceProbe()) continue;
-                for (std::size_t ni = 0; ni < sim.ports().size(); ++ni) {
-                    const PortConfig& n = sim.ports()[ni];
-                    if (!n.excite() && n.absorbSignal() && negativeNets.contains(n.netName()) && !n.isTraceProbe() &&
-                        n.footprintRef() == p.footprintRef()) {
-                        destination = {static_cast<std::int32_t>(pi), static_cast<std::int32_t>(ni)};
-                        break;
+            // Every receiving component gets its own pair: the positive pin there is paired with the
+            // negative pin opposite it on the same component (the nearest such pad, should a
+            // footprint carry more than one). High-impedance receivers count -- a DQS strobe lands on
+            // unterminated DRAM balls, and with two DRAMs on the bus there are four probed pins, not
+            // two. Absorbing destinations sort first so a terminated far end stays the primary pair.
+            const auto padDistance = [&](const PortConfig& a, const PortConfig& b) {
+                if (!a.position().has_value() || !b.position().has_value()) return 0.0;
+                return std::hypot(a.position()->first - b.position()->first,
+                                  a.position()->second - b.position()->second);
+            };
+            std::vector<std::pair<std::int32_t, std::int32_t>> destinations;
+            std::set<std::size_t> usedNegatives;
+            for (const bool absorbing : {true, false}) {
+                for (std::size_t pi = 0; pi < sim.ports().size(); ++pi) {
+                    const PortConfig& p = sim.ports()[pi];
+                    if (p.excite() || p.absorbSignal() != absorbing || !positiveNets.contains(p.netName()) ||
+                        p.isTraceProbe() || p.footprintRef().empty()) {
+                        continue;
                     }
+                    std::optional<std::size_t> best;
+                    for (std::size_t ni = 0; ni < sim.ports().size(); ++ni) {
+                        const PortConfig& n = sim.ports()[ni];
+                        if (n.excite() || n.absorbSignal() != absorbing || !negativeNets.contains(n.netName()) ||
+                            n.isTraceProbe() || n.footprintRef() != p.footprintRef() || usedNegatives.contains(ni)) {
+                            continue;
+                        }
+                        if (!best.has_value() || padDistance(p, n) < padDistance(p, sim.ports()[*best])) best = ni;
+                    }
+                    if (!best.has_value()) continue;
+                    usedNegatives.insert(*best);
+                    destinations.emplace_back(static_cast<std::int32_t>(pi), static_cast<std::int32_t>(*best));
                 }
             }
-            if (!destination.has_value()) {
+            if (destinations.empty()) {
                 logWarning("Simulation \"" + sim.name() + "\": differential pair " +
                            *positiveNets.begin() + " / " + *negativeNets.begin() +
-                           " has no matching pair of absorbing destination pins; skipping mixed-mode analysis");
+                           " has no matching pair of destination pins on one component; skipping mixed-mode analysis");
                 continue;
             }
 
@@ -1663,18 +1687,23 @@ std::expected<void, std::string> resolveSimulationPorts(EMSConfig& config, const
                 member.setNet(netName);
                 nets.push_back(std::move(member));
             };
-            DifferentialPairConfig pair;
-            setRef(pair.positiveExcitation(), source->first);
-            setRef(pair.negativeExcitation(), source->second);
-            setRef(pair.positiveProbe(), destination->first);
-            setRef(pair.negativeProbe(), destination->second);
-            for (const std::string& net : positiveNets) setNet(pair.positiveNets(), net);
-            for (const std::string& net : negativeNets) setNet(pair.negativeNets(), net);
             const PortConfig& sourceP = sim.ports()[static_cast<std::size_t>(source->first)];
             const PortConfig& sourceN = sim.ports()[static_cast<std::size_t>(source->second)];
-            pair.setName(differentialPairBaseName(sourceP.netName(), sourceN.netName()));
-            pair.setAutomatic(true);
-            sim.diffPairs().push_back(std::move(pair));
+            const std::string baseName = differentialPairBaseName(sourceP.netName(), sourceN.netName());
+            for (const auto& destination : destinations) {
+                DifferentialPairConfig pair;
+                setRef(pair.positiveExcitation(), source->first);
+                setRef(pair.negativeExcitation(), source->second);
+                setRef(pair.positiveProbe(), destination.first);
+                setRef(pair.negativeProbe(), destination.second);
+                for (const std::string& net : positiveNets) setNet(pair.positiveNets(), net);
+                for (const std::string& net : negativeNets) setNet(pair.negativeNets(), net);
+                // One receiver keeps the bare pair name; several are told apart by component.
+                const PortConfig& probeP = sim.ports()[static_cast<std::size_t>(destination.first)];
+                pair.setName(destinations.size() == 1 ? baseName : baseName + " \u2192 " + probeP.footprintRef());
+                pair.setAutomatic(true);
+                sim.diffPairs().push_back(std::move(pair));
+            }
         }
 
         for (SingleEndedConfig& trace : sim.traces()) {

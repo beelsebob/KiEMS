@@ -315,7 +315,7 @@ std::expected<void, std::string> Port::calcPort(const std::filesystem::path& sim
 
 LumpedPort::LumpedPort(ContinuousStructure& csx, std::int32_t portNr, double resistance, Point3 start, Point3 stop,
                         const std::string& excDir, double excite, std::int32_t priority, std::string portNamePrefix,
-                        double delay)
+                        double delay, bool recordUI)
     : Port(csx, portNr, start, stop, excite, priority, std::move(portNamePrefix), delay),
       _resistance(resistance),
       _excNy(axisIndex(excDir)) {
@@ -343,6 +343,11 @@ LumpedPort::LumpedPort(ContinuousStructure& csx, std::int32_t portNr, double res
         addBox(*exc, _start, _stop, _priority);
     }
 
+    // A pure termination nobody reads back still absorbs through its resistor; probing it would
+    // only cost a sample per step and a pair of time series on disk.
+    if (!recordUI) {
+        return;
+    }
     _uFilenames = {_label("ut")};
     Point3 uStart = {0.5 * (_start[0] + _stop[0]), 0.5 * (_start[1] + _stop[1]), 0.5 * (_start[2] + _stop[2])};
     Point3 uStop = uStart;
