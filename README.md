@@ -9,26 +9,11 @@ The repository contains three main pieces:
 
 - **KiEMS.app** — the native desktop application for configuring, running, and
   inspecting simulations. It is **macOS-only**.
-- **`kiems`** — a command-line interface for the same workflow.
-- **`libkiems`** — the C++ simulation library used by both interfaces.
+- **`kiems`** — a cross-platform command-line interface for the same workflow.
+- **`libkiems`** — the cross-platform C++ simulation library used by both
+  interfaces.
 
-`libkiems` and `kiems` are intended to be cross-platform. The macOS app remains
-macOS-only, but the C++ library and command-line tools have CMake build support
-for macOS and Linux.
-
-## What it does
-
-KiEMS works from KiCad PCB data and a `simulation.json` configuration:
-
-1. imports and preserves the board/project data needed for a run;
-2. builds simulation geometry and a grid;
-3. simulates each configured excitation; and
-4. post-processes the output into data files and plots.
-
-The command-line tool supports running those stages independently or together,
-so geometry, simulation, and post-processing can be resumed separately.
-
-## In the app
+## KiEMS application
 
 ### Configure the board and simulations
 
@@ -62,98 +47,13 @@ provides timeline controls for inspecting the simulation.
 
 ![KiEMS field viewer](docs/images/field-viewer.png)
 
-## Current platform support
+### Produce reports
 
-| Component | Status |
-| --- | --- |
-| KiEMS.app | macOS only |
-| `libkiems` | macOS and Linux through CMake |
-| `kiems` CLI | macOS and Linux through CMake |
+<!-- TODO: describe PDF results reports and add an example page image. -->
 
-The current project is an Apple Silicon Xcode project. It has a macOS deployment
-target of 26.5.
+![KiEMS PDF results report](docs/images/report.png)
 
-## Requirements for the current macOS build
-
-- macOS on Apple Silicon
-- Xcode and its command-line tools
-- Homebrew
-- Git, including submodule support
-
-The dependency checker installs or verifies the Homebrew formulas required by
-KiEMS and its submodules. KiEMS itself requires GEOS, Matplot++, gnuplot, and
-nlohmann-json; the checker also collects requirements declared by the bundled
-submodules.
-
-## Build and run on macOS
-
-Clone with submodules, then run the dependency checker from the repository root:
-
-```sh
-git clone --recurse-submodules <repository-url>
-cd kiems
-Scripts/check_dependencies.py
-```
-
-The checker asks before installing missing dependencies. Use `--yes` for an
-unattended setup.
-
-Open `kiems.xcodeproj` in Xcode and select one of these schemes:
-
-- **KiEMS** to build and run the desktop app;
-- **kiems CLI** to build the command-line executable; or
-- **libkiems_tests** to run the library test suite.
-
-To run the tests without opening Xcode:
-
-```sh
-Scripts/run_libkiems_tests.sh
-```
-
-## Build on Linux
-
-The Linux dependency checker initializes all Git submodules, builds the pinned
-KiCad libraries needed by `libkicad` when they are missing or stale, detects
-APT, DNF, Pacman, and Zypper, then validates the result by configuring CMake.
-It prints the command required for the current distribution and never installs
-packages unless `--install` is supplied.
-
-```sh
-Scripts/check_dependencies_linux.py
-# Review the command, then optionally install and validate:
-Scripts/check_dependencies_linux.py --install
-```
-
-Nix users can enter the fully declared development environment instead of
-installing packages system-wide:
-
-```sh
-nix develop
-cmake --preset linux-debug
-```
-
-The package mappings are maintained in
-[`Dependencies/linux-packages.json`](Dependencies/linux-packages.json). They
-are hints for each distribution; CMake's `find_package()` checks are the
-authoritative validation. For a partial setup, select one or more components:
-
-```sh
-Scripts/check_dependencies_linux.py --component build --component copper
-```
-
-After dependencies and KiCad's matching source build are present, configure
-and build the command-line tools:
-
-```sh
-cmake --preset linux-release
-cmake --build --preset linux-release --target kiems-cli kiems_fdtd_worker copper_fdtd_worker
-```
-
-`libkiems_tests` currently uses Apple's XCTest framework, so it is built and
-run through CTest on macOS only. The Linux target reports that limitation
-instead of silently omitting the test suite.
-
-## Command-line workflow
+## kiems command line tool
 
 The command-line product is named `kiems`. Its default configuration is
 `./simulation.json`, and paths relative to that file are resolved from the
@@ -198,33 +98,99 @@ path/to/
 Each configured simulation is kept in its own subdirectory, so multiple runs
 do not overwrite one another.
 
-## Repository layout
+## libkiems
 
-```text
-KiEMS/                 macOS application
-kiems-cli/             command-line entry point
-libkiems/              shared C++ simulation library
-kiems_fdtd_worker/     CPU FDTD helper executable
-copper_fdtd_worker/    Copper GPU FDTD helper executable
-libkiems_tests/        library tests
-Scripts/               macOS dependency and test helpers
-docs/                  technical notes
-submodules/            Copper, libkicad, and RememberRemember dependencies
+`libkiems` is the C++ library that both the app and the command-line tool are
+built on. See the [libkiems documentation](docs/libkiems.md) for its API.
+
+## Building
+
+### Getting the source
+
+The source is hosted at <https://github.com/beelsebob/KiEMS>. KiEMS depends on
+the Copper, libkicad, and RememberRemember submodules, so clone recursively:
+
+```sh
+git clone --recurse-submodules https://github.com/beelsebob/KiEMS.git
+cd KiEMS
 ```
 
-## Geometry backend
+For an existing clone, fetch the submodules with:
 
-Geometry operations use the stable GEOS C API (`geos_c`) and require GEOS 3.10
-or newer. The current setup expects a Homebrew-style installation; see
-[the geometry backend notes](docs/geometry_backend.md) for details, including
-GEOS licensing considerations for distributed builds.
+```sh
+git submodule update --init --recursive
+```
 
-## Development notes
+### Dependencies
 
-`PathsConfig` keeps filesystem locations explicit, allowing applications and
-tools to supply their own working layout rather than depending on a shared
-process working directory. This is part of the intended portability of
-`libkiems` and the CLI.
+The dependency checker installs or verifies everything KiEMS and its submodules
+need.
 
-The macOS app embeds its helper tools and provides the native UI. It is the only
-component whose purpose is specifically tied to macOS.
+```sh
+Scripts/check_dependencies.py
+```
+
+It checks out the submodules, checks each component's packages (Homebrew on
+macOS; APT, DNF, Pacman, or Zypper on Linux), prints the command that installs
+anything missing, then sets up and validates the build:
+
+| Option | Effect |
+| --- | --- |
+| `--component NAME` | Check only `build`, `kiems`, `copper`, or `libkicad` (repeatable) |
+| `--install` | Install missing packages, after asking |
+| `--yes` | Don't ask before installing; requires `--install` |
+| `--no-configure` | Skip the setup and validation steps |
+| `--ssh` | macOS only: fetch GitHub submodules over ssh |
+
+On Linux the setup builds the pinned KiCad libraries needed by `libkicad` when
+they are missing or stale, and validates the result by configuring CMake. Nix
+users can use `nix develop` instead.
+
+If you would rather install dependencies yourself, you need:
+
+- **Build tools:** a C++ compiler, CMake, Ninja, pkg-config, and Git (on macOS,
+  Xcode and its command-line tools, plus Homebrew)
+- **KiEMS:** GEOS 3.10 or newer, Matplot++, gnuplot, and nlohmann-json
+- **Copper and CSXCAD:** HDF5, Blosc2, CGAL, Boost, GMP, MPFR, and VTK
+- **libkicad:** a source build of KiCad matching the pinned version, with its
+  dependencies (wxWidgets, GTK 3, GLM, Cairo, Pixman, FreeType, HarfBuzz,
+  OpenCASCADE, ngspice, libspnav, libgit2, NNG, zstd, Protobuf, Fontconfig,
+  GLU, and unixODBC)
+
+Per-distribution package names are listed in
+[`Dependencies/linux-packages.json`](Dependencies/linux-packages.json).
+
+### Building
+
+#### macOS
+
+Open `kiems.xcodeproj` in Xcode and select one of these schemes:
+
+- **KiEMS** to build and run the desktop app;
+- **kiems CLI** to build the command-line executable; or
+- **libkiems_tests** to run the library test suite.
+
+To run the tests without opening Xcode:
+
+```sh
+Scripts/run_libkiems_tests.sh
+```
+
+The command-line tools can also be built with CMake:
+
+```sh
+cmake --preset macos-release
+cmake --build --preset macos-release --target kiems-cli kiems_fdtd_worker copper_fdtd_worker
+```
+
+#### Linux
+
+Once the dependencies are installed, configure and build with CMake:
+
+```sh
+cmake --preset linux-release
+cmake --build --preset linux-release --target kiems-cli kiems_fdtd_worker copper_fdtd_worker
+```
+
+`libkiems_tests` uses Apple's XCTest framework, so the test suite only runs on
+macOS.

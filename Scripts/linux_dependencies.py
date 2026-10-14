@@ -1,18 +1,14 @@
-#!/usr/bin/env python3
-"""Print, optionally install, and validate Linux packages required by KiEMS.
+"""Linux half of Scripts/check_dependencies.py: print, optionally install, and validate the Linux
+packages required by KiEMS.
 
 This script deliberately does not treat a package manager as the dependency source of truth.
 Dependencies are declared in Dependencies/linux-packages.json as logical component groups, while
 the final check is CMake's own configure step.  That way an unfamiliar distro can still use the
 generic dependency names from the manifest and receive an accurate CMake diagnostic.
 
-Usage:
-  Scripts/check_dependencies_linux.py [--component NAME]... [--install [--yes]] [--no-configure]
-
 By default it initializes the repository's Git submodules, prints the commands for the detected
-distribution, and runs CMake configuration. It never installs system packages unless --install is
-supplied. Nix users should enter the development shell with `nix develop` instead.  --component
-may be build, kiems, copper, or libkicad; omit it to select all components.
+distribution, builds KiCad and runs CMake configuration. It never installs system packages unless
+--install is supplied. Nix users should enter the development shell with `nix develop` instead.
 """
 from __future__ import annotations
 
@@ -77,7 +73,7 @@ def configure() -> int:
         print("\nCMake is required to validate this build, but it is not installed or not on PATH.",
               file=sys.stderr)
         print("Install the build component first, then rerun this checker:", file=sys.stderr)
-        print("  Scripts/check_dependencies_linux.py --component build --install", file=sys.stderr)
+        print("  Scripts/check_dependencies.py --component build --install", file=sys.stderr)
         return 2
 
     build_directory = ROOT / "build" / "cmake" / "linux-dependency-check"
@@ -134,7 +130,7 @@ def build_kicad() -> int:
     if not shutil.which("cmake"):
         print("\nCMake is required to build KiCad, but it is not installed or not on PATH.", file=sys.stderr)
         print("Install the build component first, then rerun this checker:", file=sys.stderr)
-        print("  Scripts/check_dependencies_linux.py --component build --install", file=sys.stderr)
+        print("  Scripts/check_dependencies.py --component build --install", file=sys.stderr)
         return 2
 
     script = ROOT / "submodules" / "libkicad" / "Scripts" / "build_kicad.sh"
@@ -146,17 +142,9 @@ def build_kicad() -> int:
     return subprocess.run([str(script)]).returncode
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--component", action="append", choices=["build", "kiems", "copper", "libkicad"])
-    parser.add_argument("--install", action="store_true", help="install packages after confirmation")
-    parser.add_argument("--yes", action="store_true", help="answer yes to the install prompt; requires --install")
-    parser.add_argument("--no-configure", action="store_true", help="skip the final CMake validation")
-    args = parser.parse_args()
-    if args.yes and not args.install:
-        parser.error("--yes requires --install")
-    if sys.platform != "linux":
-        parser.error("this checker is for Linux; use Scripts/check_dependencies.py on macOS")
+def main(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    if args.ssh:
+        parser.error("--ssh only applies on macOS")
 
     release = os_release()
     if release.get("ID") == "nixos" and not os.environ.get("IN_NIX_SHELL"):
@@ -210,7 +198,3 @@ def main() -> int:
         return 1
 
     return 0 if args.no_configure else configure()
-
-
-if __name__ == "__main__":
-    sys.exit(main())
