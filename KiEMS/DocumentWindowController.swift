@@ -1160,13 +1160,17 @@ final class DocumentWindowController: NSWindowController {
         guard !pipelines.isEmpty else { return completion() }
         let config = ownerDocument.config
         let kicadCliPath = AppPaths.resolveKicadCli()
-        let progressSheet = showingProgress ? ReportProgressSheet(total: pipelines.count) : nil
+        // The report covers every simulation, so count those already loaded as done.
+        let reportable = ownerDocument.config.simulations.filter { $0.simulationSet == nil }.count
+        let alreadyLoaded = max(0, reportable - pipelines.count)
+        let progressSheet = showingProgress
+            ? ReportProgressSheet(total: alreadyLoaded + pipelines.count, alreadyCompleted: alreadyLoaded) : nil
         if let progressSheet {
             window?.beginSheet(progressSheet.window)
         }
         restoreQueue.async {
             for (index, (name, pipeline)) in pipelines.enumerated() {
-                DispatchQueue.main.async { progressSheet?.show(completed: index) }
+                DispatchQueue.main.async { progressSheet?.show(completed: alreadyLoaded + index) }
                 // A failure (no board, an export error) leaves that simulation without results; the
                 // report says why rather than calling it not run.
                 var restoreError: String?
@@ -1191,10 +1195,12 @@ final class DocumentWindowController: NSWindowController {
                 }
             }
             DispatchQueue.main.async { [weak self] in
+                progressSheet?.show(completed: alreadyLoaded + pipelines.count)
+                // Writing happens in completion, so the sheet stays up until it's done.
+                completion()
                 if let progressSheet {
                     self?.window?.endSheet(progressSheet.window)
                 }
-                completion()
             }
         }
     }
@@ -1547,7 +1553,7 @@ extension DocumentWindowController: NSWindowDelegate {
     }
 }
 
-/// Save Report's sheet while saved results load -- see DocumentWindowController.restoreSavedResults.
+/// Save Report's sheet while saved results load and the report is written -- see DocumentWindowController.restoreSavedResults.
 private final class ReportProgressSheet {
     let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 90),
                           styleMask: [.titled], backing: .buffered, defer: true)
@@ -1555,8 +1561,10 @@ private final class ReportProgressSheet {
     private let bar = NSProgressIndicator()
     private let total: Int
 
-    init(total: Int) {
+    init(total: Int, alreadyCompleted: Int = 0) {
         self.total = total
+        bar.style = .bar
+        bar.controlSize = .regular
         bar.isIndeterminate = false
         bar.minValue = 0
         bar.maxValue = Double(total)
@@ -1567,11 +1575,11 @@ private final class ReportProgressSheet {
         stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
         bar.widthAnchor.constraint(equalToConstant: 320).isActive = true
         window.contentView = stack
-        show(completed: 0)
+        show(completed: alreadyCompleted)
     }
 
     func show(completed: Int) {
-        label.stringValue = "Loading saved results (\(min(completed + 1, total)) of \(total))…"
+        label.stringValue = "Writing Simulation Report (\(min(completed + 1, total)) of \(total))…"
         bar.doubleValue = Double(completed)
     }
 }
